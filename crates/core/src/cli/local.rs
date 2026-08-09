@@ -82,17 +82,9 @@ fn slack_routing(cfg: &ProjectConfig, flag: Option<String>) -> Option<Routing> {
     (!routing.is_empty()).then_some(routing)
 }
 
-/// The page a person authorizes a connection on, if this deployment has one a
-/// browser can reach.
-///
-/// Authorizing is consent, so it is a person in a browser and the dashboard
-/// owns it. The API's own `/authorize` takes a POST and answers with a URL to
-/// redirect to, which is not something to put in a message.
-///
-/// Absent for a local engine, whose `subs mcp login` lands on a callback on
-/// this machine that nobody else can open. Absent too for a deployment on an
-/// unknown origin: only the hosted cloud's browser address follows from its
-/// API's, which is the same rule `subs apply` prints its project link under.
+/// The dashboard page a person authorizes a connection on. The API's own
+/// `/authorize` takes a POST, so it is not a link. Absent for a local engine,
+/// and where only the API's address is known.
 fn authorize_page(cfg: &ProjectConfig) -> Option<String> {
     let project = cfg.project()?;
     let api_url = credentials::resolve_api_url(cfg.remote_url());

@@ -30,8 +30,7 @@ pub enum OauthError {
     Registration(String),
     #[error("{0}")]
     Token(String),
-    /// The authorization server refused, in the shape RFC 6749 defines. The
-    /// code says whether another attempt can be successful.
+    /// The authorization server refused, in the shape RFC 6749 defines.
     #[error("{code}{}", .description.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
     Refused {
         code: String,
@@ -49,10 +48,8 @@ pub enum OauthError {
 
 impl OauthError {
     /// Whether what we hold is gone, and thus a person must authorize again.
-    ///
-    /// Only the server saying so counts. A network fault or an unwell token
-    /// endpoint says nothing about the grant, and to report those as spent
-    /// asks a person to correct something that is not broken.
+    /// Only the server saying so counts. A network fault says nothing about the
+    /// grant.
     pub fn is_spent(&self) -> bool {
         match self {
             Self::Unrenewable(_) => true,
@@ -656,8 +653,6 @@ async fn post_token(
         .await
         .map_err(|e| OauthError::Token(format!("reading token response: {e}")))?;
     if !status.is_success() {
-        // The code tells a spent grant from a server that is unwell, so parse
-        // it before falling back to the status.
         return Err(match serde_json::from_str::<ErrorResponse>(&body) {
             Ok(refusal) => OauthError::Refused {
                 code: refusal.error,

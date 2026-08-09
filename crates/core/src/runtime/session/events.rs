@@ -219,15 +219,12 @@ pub struct ConnectorSyncErrored {
     pub error: ErrorInfo,
     #[serde(default)]
     pub retryable: bool,
-    /// The connection has no usable credential. A retry cannot be successful
-    /// before a person supplies one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthNeed>,
 }
 
-/// A tool call found that the credential is not valid. The fetch that offered
-/// the tools could not know this. The call settles separately with its own
-/// error.
+/// A tool call found that the credential is not valid. The call settles
+/// separately with its own error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorAuthFailed {
     pub id: String,

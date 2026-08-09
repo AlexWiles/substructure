@@ -123,16 +123,11 @@ impl EffectTracking {
         self.status = next;
     }
 
-    /// Start a settled effect over, with its retry budget whole again.
+    /// Start a settled effect over, with its retry budget whole again. Not a
+    /// retry: the cause of every failed attempt has been corrected.
     ///
-    /// The only way back out of `Failed`, and it is not a retry: a retry
-    /// continues an attempt sequence that the policy already bounded, whereas
-    /// this says the thing that made every attempt fail has been corrected.
-    ///
-    /// `Completed` is a legal start too, and it is the usual one: a fetch that
-    /// succeeded proves only that the credential was good then, and the call
-    /// that finds out otherwise comes later. Only a connector fetch can take
-    /// this transition, and only a person authorizing the connection asks for it.
+    /// `Completed` is the usual start. A fetch that succeeded proves only that
+    /// the credential was good then. Only a connector fetch takes this.
     pub fn restart(&mut self, now: DateTime<Utc>) {
         self.move_to(
             EffectStatus::Pending,
@@ -491,8 +486,6 @@ pub struct ConnectorSyncState {
     /// terminally failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// What a person must do before this connection operates again. A refused
-    /// fetch or a refused call sets this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthNeed>,
 }
@@ -1347,7 +1340,7 @@ impl SessionState {
                 }
                 // A retry re-arms the same entry rather than starting a new one:
                 // one connection, one fetch, however many attempts. A settled
-                // failure starts over instead, because its attempts are spent.
+                // effect starts over, because its attempts are spent.
                 if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
                     match e.tracking.status() {
                         EffectStatus::Failed | EffectStatus::Completed => e.tracking.restart(now),

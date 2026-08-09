@@ -19,9 +19,7 @@ use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
 pub struct SlackProposer {
-    /// The page a person authorizes a connection on. A deployment without one
-    /// a browser can reach leaves this absent, and the prompt names the command
-    /// instead.
+    /// Absent leaves the prompt naming the command instead.
     authorize_page: Option<String>,
 }
 
@@ -31,14 +29,12 @@ impl SlackProposer {
     }
 }
 
-/// The interrupt one connection's authorization gets. Derived from the
-/// connection, so a redelivery proposes the same id and the engine keeps one
-/// prompt however many times this runs.
+/// Derived from the connection, so a redelivery proposes the same id and the
+/// engine keeps one prompt.
 fn auth_interrupt_id(connection: &str) -> String {
     format!("mcp-auth:{connection}")
 }
 
-/// The connection this interrupt asks about, if it asks about one.
 fn auth_connection(interrupt_id: &str) -> Option<&str> {
     interrupt_id.strip_prefix("mcp-auth:")
 }
@@ -64,9 +60,7 @@ impl ChannelProposer for SlackProposer {
         if !slack_owned(state) {
             return proposed;
         }
-        // Before anything else: a connection with no usable credential stops
-        // the session. What the proposal would have authored runs against tools
-        // the agent does not have.
+        // First: the proposal below would run against tools the agent has lost.
         if let Some(prompt) = self.authorize_prompt(state) {
             return prompt;
         }
@@ -102,12 +96,8 @@ impl ChannelProposer for SlackProposer {
 }
 
 impl SlackProposer {
-    /// The prompt for the first connection that needs a person, if one does.
-    ///
-    /// Replaces the proposal rather than riding with it: the session stops
-    /// here, and the continuation would be authored against tools that are not
-    /// there. A connection already asked about is skipped, so a redelivery
-    /// proposes the prompt that is already open and the engine keeps one.
+    /// The prompt for the first connection that needs a person. It replaces
+    /// the proposal, because the session stops here.
     fn authorize_prompt(&self, state: &SessionState) -> Option<DecisionResponse> {
         let config = state.resolve_agent_for(state.head_id.as_deref())?;
         let (connection, need) = config.mcp.iter().find_map(|server| {
@@ -138,8 +128,6 @@ impl SlackProposer {
         })
     }
 
-    /// What the prompt says: why the connection cannot be used, and where to
-    /// correct it.
     fn ask(&self, connection: &str, need: AuthNeed) -> String {
         let why = match need {
             AuthNeed::NeverAuthorized => {
@@ -157,8 +145,7 @@ impl SlackProposer {
         };
         match &self.authorize_page {
             Some(page) => format!("{why}\n\n<{page}|Authorize it in the dashboard>"),
-            // Nobody else can open a browser flow that lands on the machine the
-            // engine runs on, so the operator runs the command there.
+            // Nobody else can open a browser flow that lands on this machine.
             None => format!("{why}\n\nRun `subs mcp login {connection}` to authorize it."),
         }
     }
@@ -301,8 +288,7 @@ fn click_proposal(state: &SessionState, args: &Value) -> Option<DecisionResponse
             label: Some(option.label),
         }),
     };
-    // An authorization prompt asks for the fetch as well: the credential a
-    // person replaced only reaches the agent when its tools are read again.
+    // The replaced credential reaches the agent only through a new fetch.
     let resync = auth_connection(&interrupt_id).map(|connection| DecisionAction::SyncConnector {
         id: connection.to_string(),
     });
@@ -400,8 +386,6 @@ mod tests {
         }
     }
 
-    /// A Slack session whose `sentry` connection has been marked, with the pair
-    /// configured as `policy`.
     fn state_needing_auth(need: AuthNeed, policy: AuthFailure) -> SessionState {
         let mut s = state();
         s.apply(
@@ -524,9 +508,6 @@ mod tests {
         ]
     }
 
-    /// A connection with a dead credential stops the session and says so. The
-    /// continuation is dropped: it would be authored against tools the agent
-    /// does not have.
     #[test]
     fn a_connection_that_needs_authorizing_proposes_a_prompt_instead_of_the_turn() {
         let p = propose(
@@ -574,8 +555,6 @@ mod tests {
         }
     }
 
-    /// The id is derived from the connection, so the prompt already open is the
-    /// one this would propose. Proposing it again would ask twice.
     #[test]
     fn a_connection_already_asked_about_is_not_asked_about_again() {
         let mut state = state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt);
@@ -607,7 +586,6 @@ mod tests {
         );
     }
 
-    /// An agent told to go without the connection is not stopped.
     #[test]
     fn a_connection_configured_to_degrade_never_stops_the_session() {
         let p = propose(
@@ -631,8 +609,6 @@ mod tests {
         );
     }
 
-    /// A static token has no consent flow. Only an operator replaces it, so the
-    /// prompt says that rather than offering a link nobody can use.
     #[test]
     fn a_rejected_token_names_the_command_an_operator_runs() {
         let p = propose(
@@ -661,8 +637,6 @@ mod tests {
         );
     }
 
-    /// Resolving is not enough. The credential a person replaced reaches the
-    /// agent only when the connection's tools are read again.
     #[test]
     fn clicking_an_authorization_prompt_also_asks_for_the_tools_again() {
         let mut state = state();
@@ -695,7 +669,6 @@ mod tests {
         }
     }
 
-    /// A prompt that is not about a connection resolves alone.
     #[test]
     fn clicking_an_ordinary_prompt_asks_for_no_fetch() {
         let p = propose(

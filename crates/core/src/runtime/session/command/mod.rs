@@ -832,9 +832,7 @@ impl Working {
                         &system,
                     )
                 }
-                // Only a connection the config in force names, and only one
-                // whose fetch is settled: a fetch already in flight is the
-                // answer this asks for.
+                // A fetch in flight is already the answer this asks for.
                 Action::SyncConnector { id } => {
                     let named = self
                         .resolve_agent_for(self.head_id.as_deref())

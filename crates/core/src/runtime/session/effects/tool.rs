@@ -88,7 +88,7 @@ impl KindSpec for ToolSpec {
     /// sees it as the tool's answer and decides what to do.
     ///
     /// A refused credential goes to the connection. The fetch that offered this
-    /// tool was successful, thus only the connection can hold this condition.
+    /// tool was successful, thus only the connection can hold it.
     fn terminal(&self, state: &SessionState, id: &str, e: &SettleError) -> Vec<EventPayload> {
         let mut events = vec![decision_queued(Trigger::ToolFinished {
             id: id.to_string(),
@@ -155,7 +155,6 @@ fn name_of(state: &SessionState, id: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The connection that received this call, if a connection received it.
 fn connector_target(state: &SessionState, id: &str) -> Option<String> {
     state
         .tool_call(id)

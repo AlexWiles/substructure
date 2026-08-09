@@ -49,8 +49,7 @@ struct SessionState {
 }
 
 impl McpClient {
-    /// `auth` supplies the credential headers for this connection. The client
-    /// asks it once per request and never reads a token from anywhere else.
+    /// The client reads a token from nowhere else.
     pub fn new(
         http: reqwest::Client,
         endpoint: impl Into<String>,
@@ -212,7 +211,7 @@ impl McpClient {
             });
         }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            // The registry knows which credential went out. It corrects this.
+            // The registry knows which credential went out, and corrects this.
             return Err(ConnectorError::unauthorized(
                 AuthNeed::Reauthorize,
                 format!("connection rejected the credential ({status})"),
@@ -625,7 +624,6 @@ mod tests {
         }
     }
 
-    /// Headers that never change.
     struct Fixed(HeaderMap);
 
     #[async_trait::async_trait]

@@ -52,20 +52,16 @@ pub struct ToolOutcome {
     pub is_error: bool,
 }
 
-/// The credential headers for one connection, read at the moment they go out.
-///
-/// Resolved per request, not frozen when the client is built. A refresh or a
-/// `subs mcp login` in another process replaces the credential in the store.
-/// That credential thus reaches the next request, and the connector session
-/// stays.
+/// The credential headers for one connection, read for each request. A
+/// credential replaced in the store thus reaches the next request, and the
+/// connector session stays.
 #[async_trait::async_trait]
 pub trait CredentialSource: Send + Sync {
     async fn headers(&self) -> Result<reqwest::header::HeaderMap, ConnectorError>;
 }
 
-/// What a person must do before a connection operates again. This includes only
-/// the conditions that a person can correct. The refresh path corrects a lapsed
-/// client registration.
+/// What a person must do before a connection operates again. The refresh path
+/// corrects everything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthNeed {
@@ -81,8 +77,7 @@ pub struct ConnectorError {
     /// Whether another attempt could plausibly succeed. Transport faults and 5xx
     /// are retryable; a rejected credential or an unknown tool is not.
     pub retryable: bool,
-    /// Set if the connection refused the credential. The caller then asks for
-    /// authorization. It does not settle the call as a usual failure.
+    /// Set if the connection refused the credential.
     pub auth: Option<AuthNeed>,
 }
 
@@ -103,8 +98,6 @@ impl ConnectorError {
         }
     }
 
-    /// A credential is refused or missing. Each caller gives the correction,
-    /// because each caller has the facts.
     pub fn unauthorized(need: AuthNeed, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),

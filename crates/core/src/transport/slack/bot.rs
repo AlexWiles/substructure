@@ -683,20 +683,14 @@ impl SlackBot {
         }
     }
 
-    /// What to say to a person whose message was refused because a prompt is
-    /// open. The prompt's own words, so a question that carries a link carries
-    /// it again. `None` where there is nothing to repeat.
+    /// The prompt's own words, so a link in it comes back too.
     fn still_waiting(payload: &Value) -> Option<String> {
         let display = display_of(payload)?;
         Some(format!("Still waiting on this:\n\n{}", display.message))
     }
 
-    /// Say what the session is waiting for, after refusing a message because it
-    /// is waiting.
-    ///
-    /// The prompt's own words are what goes back, so a question that carries a
-    /// link carries it again. The buttons stay on the message that has them:
-    /// two sets for one prompt would be two ways to answer it.
+    /// The buttons stay on the message that has them, because two sets are two
+    /// ways to answer one prompt.
     async fn remind_of_prompt(
         &self,
         ws: &Workspace,
@@ -811,14 +805,11 @@ impl SlackBot {
             .await;
         match submitted {
             Ok(_) => {}
-            // A true redelivery of a message already taken. The first copy is
-            // queued or running, so there is nothing to say.
+            // A redelivery. The first copy is queued or running.
             Err(RuntimeError::Session(
                 SessionError::TurnAlreadyActive { .. } | SessionError::TurnAlreadyCompleted { .. },
             )) => {}
-            // A message while a prompt is open. The prompt owes an answer
-            // first, and the message was refused, so saying nothing leaves a
-            // person waiting on a bot that will not reply.
+            // The message was refused, so silence leaves a person waiting.
             Err(RuntimeError::Session(SessionError::SessionInterrupted)) => {
                 self.remind_of_prompt(ws, &thread, &session_id, turn_id)
                     .await;
@@ -2193,10 +2184,6 @@ mod tests {
         }
     }
 
-    /// A message while a prompt is open is refused by the engine. Saying
-    /// nothing leaves a person waiting on a bot that will not answer, so the
-    /// prompt is repeated. Its link comes with it, which is what a person who
-    /// came back an hour later needs.
     #[test]
     fn a_refused_message_gets_the_open_prompt_back() {
         let text = SlackBot::still_waiting(&serde_json::json!({
@@ -2209,8 +2196,6 @@ mod tests {
         assert!(text.contains("https://app.test/x"), "got {text}");
     }
 
-    /// An interrupt a worker raised with no message has nothing to repeat, and
-    /// a bot saying "still waiting" over an empty question helps nobody.
     #[test]
     fn an_interrupt_with_nothing_to_say_is_not_repeated() {
         assert!(SlackBot::still_waiting(&serde_json::json!({ "metadata": {} })).is_none());

@@ -214,8 +214,7 @@ pub trait CredentialResolver: Send + Sync {
     ) -> Result<HeaderMap, ConnectorError>;
 
     /// Replace the credential this connection dials with, after the server
-    /// refused it. `Ok(false)` if nothing can be replaced without a person,
-    /// which tells the caller not to try the same credential again.
+    /// refused it. `Ok(false)` if nothing can be replaced without a person.
     async fn refresh(
         &self,
         _tenant_id: &str,
@@ -226,9 +225,6 @@ pub trait CredentialResolver: Send + Sync {
     }
 }
 
-/// One connection's credential, asked of the resolver whenever a request needs
-/// it. Bound to the connection rather than to the connector session, so a
-/// credential replaced in the store reaches the next request.
 struct Resolved {
     credentials: Arc<dyn CredentialResolver>,
     tenant_id: String,
@@ -310,16 +306,11 @@ impl Connections {
         .await
     }
 
-    /// Run one operation against the connection, and once more with a fresh
-    /// credential if the first attempt was refused.
+    /// Run one operation, and once more with a fresh credential if the first
+    /// attempt was refused. Without this a refused token that has not expired
+    /// goes out again on every attempt, and the connection never recovers.
     ///
-    /// The server is the authority on its own tokens. It can revoke one before
-    /// the expiry we recorded, thus a refusal is the signal to refresh, and the
-    /// expiry is only an optimization. Without this a refused-but-unexpired
-    /// token is sent again on every attempt and the connection never recovers.
-    ///
-    /// The connector session is kept across the retry. Only the credential was
-    /// refused, and the client reads that again for each request.
+    /// The connector session is kept: only the credential was refused.
     async fn attempt<T, F, Fut>(
         &self,
         tenant_id: &str,
@@ -338,8 +329,6 @@ impl Connections {
         if err.auth.is_none() {
             return Err(err);
         }
-        // A refresh that fails reports why: it knows whether the grant is spent
-        // or the server is merely unwell, which the refusal does not say.
         if self.credentials.refresh(tenant_id, id, spec).await? {
             let retried = op(self.client(tenant_id, id, spec).await?).await;
             if !matches!(&retried, Err(again) if again.auth.is_some()) {
@@ -378,7 +367,6 @@ impl Connections {
         Ok(clients.entry(key).or_insert(client).clone())
     }
 
-    /// What a refusal that a refresh did not correct means.
     ///
     /// A refusal is also the answer to how the connection authenticates, where
     /// the file did not say — so this is where a declaration-free connection
@@ -447,7 +435,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A server that accepts one credential and refuses every other one.
     async fn serve_accepting(accepted: &'static str) -> String {
         use axum::response::IntoResponse;
         use axum::routing::post;
@@ -489,7 +476,6 @@ mod tests {
         format!("http://{addr}/mcp")
     }
 
-    /// Holds one token and replaces it on refresh, counting how often.
     struct Rotating {
         current: Mutex<String>,
         next: Option<&'static str>,
@@ -551,9 +537,6 @@ mod tests {
         )
     }
 
-    /// A server can revoke a token before the expiry we recorded, so the
-    /// refusal is the signal to refresh. Without the retry the same unexpired
-    /// token goes out on every attempt and the connection never recovers.
     #[tokio::test]
     async fn a_refused_credential_is_refreshed_and_the_call_tried_again() {
         let url = serve_accepting("fresh").await;
@@ -568,9 +551,6 @@ mod tests {
         assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
     }
 
-    /// `subs mcp login` writes to the store from another process. The engine
-    /// holds a connector session built before that, and the next request must
-    /// carry the new credential without the session being discarded.
     #[tokio::test]
     async fn a_credential_replaced_in_the_store_reaches_the_next_request() {
         let url = serve_accepting("fresh").await;
@@ -598,8 +578,6 @@ mod tests {
         );
     }
 
-    /// One retry, not a loop: a credential the server refuses twice needs a
-    /// person, and asking again only makes the wait longer.
     #[tokio::test]
     async fn a_credential_refused_after_refresh_asks_for_authorization() {
         let url = serve_accepting("never-issued").await;
@@ -614,7 +592,6 @@ mod tests {
         assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
     }
 
-    /// Nothing to refresh means nothing to retry.
     #[tokio::test]
     async fn a_credential_that_cannot_be_refreshed_is_not_retried() {
         let url = serve_accepting("never-issued").await;

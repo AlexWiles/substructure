@@ -6525,9 +6525,6 @@ fn declaring_a_connector_fetches_it_and_parks_the_turn() {
     );
 }
 
-/// A person authorized the connection, so the attempts that failed against the
-/// old credential no longer say anything. The fetch starts over with its budget
-/// whole, and the tools come back into a session that never restarted.
 #[test]
 fn syncing_a_connection_again_revives_its_settled_failure() {
     let mut agg = create_session_with_config(
@@ -6590,9 +6587,6 @@ fn syncing_a_connection_again_revives_its_settled_failure() {
     );
 }
 
-/// The usual case, and the one a fetch cannot reach on its own: the fetch
-/// succeeded and a later call found the credential dead. Syncing again is what
-/// clears that, and the tools it returns replace the ones already held.
 #[test]
 fn syncing_a_connection_again_clears_an_auth_failure_a_call_found() {
     let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
@@ -6631,7 +6625,6 @@ fn syncing_a_connection_again_clears_an_auth_failure_a_call_found() {
         "the fetch is still Completed; only the credential died"
     );
 
-    // The decision the failed call opens is where the sync is authored.
     let d = decision_with(&failed, |t| matches!(t, Trigger::ToolFinished { .. }))
         .expect("a failed call opens tool.finished");
     dispatch(
@@ -6655,8 +6648,6 @@ fn syncing_a_connection_again_clears_an_auth_failure_a_call_found() {
     assert_eq!(sync.tools.len(), 2, "and its offer replaces the old one");
 }
 
-/// Only what the config in force names. A worker cannot reach a connection this
-/// agent was never given.
 #[test]
 fn syncing_a_connection_the_config_does_not_name_is_refused() {
     let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
@@ -6680,8 +6671,6 @@ fn syncing_a_connection_the_config_does_not_name_is_refused() {
     assert!(!agg.state.has_effect(EffectKind::ConnectorSync, "linear"));
 }
 
-/// A fetch shows that the credential was valid at that time. A subsequent call
-/// must report a credential that is no longer valid.
 #[test]
 fn a_call_refused_for_its_credential_marks_the_connection_not_just_the_call() {
     let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);

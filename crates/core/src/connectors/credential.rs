@@ -55,9 +55,8 @@ pub trait CredentialStore: Send + Sync {
     ) -> Result<(), String>;
 }
 
-/// What the slot holds, as the two callers below need to tell it apart. An
-/// empty slot and a slot holding the other kind are a failure to one of them
-/// and not to the other, so neither is an error here.
+/// What the slot holds. An empty slot is a failure to one caller below and not
+/// to the other.
 enum Held {
     Grant(Tokens),
     Empty,
@@ -88,9 +87,6 @@ impl StoredCredentials {
         }
     }
 
-    /// A live access token for one OAuth connection, renewed if it is close to
-    /// expiry. Read for every request, so the expiry is acted on before a call
-    /// spends a round trip finding out.
     async fn access_token(
         &self,
         tenant_id: &str,
@@ -115,21 +111,17 @@ impl StoredCredentials {
             .map(Some)
     }
 
-    /// Renew the stored grant whether or not it looks expired, because the
-    /// server refused what we sent. The server is the authority on its own
-    /// tokens: it can revoke one early, and the clocks at the two ends can
-    /// disagree, thus a refusal is a better signal than the expiry we recorded.
+    /// Renew the grant whether or not it looks expired, because the server
+    /// refused what we sent. A server can revoke a token early, thus a refusal
+    /// is a better signal than the expiry we recorded.
     ///
-    /// `Ok(false)` if there is nothing to renew, which tells the caller that
-    /// another attempt sends the same credential.
+    /// `Ok(false)` if there is nothing to renew.
     async fn refresh_now(
         &self,
         tenant_id: &str,
         connection_id: &str,
         url: &str,
     ) -> Result<bool, OauthError> {
-        // Only a person replaces a static token or fills an empty slot, and
-        // neither is a failure of this call.
         let Held::Grant(tokens) = self.grant(tenant_id, connection_id, url).await? else {
             return Ok(false);
         };
@@ -140,10 +132,9 @@ impl StoredCredentials {
         Ok(true)
     }
 
-    /// What the slot holds for this connection, checked against where the
-    /// connection now points. The id is the key, so an edited `url` would
-    /// otherwise send one server's token to another. `discover` binds the two
-    /// at login, which makes this the same check read back.
+    /// What the slot holds, checked against where the connection now points.
+    /// The id is the key, so an edited `url` would otherwise send one server's
+    /// token to another.
     async fn grant(
         &self,
         tenant_id: &str,
@@ -184,9 +175,8 @@ impl StoredCredentials {
         };
         let _guard = gate.lock().await;
 
-        // Another caller may have landed one while we waited for the gate.
-        // Adopt it rather than spend the refresh token again, which would
-        // retire the one they just wrote.
+        // Adopt a token another caller landed. To refresh again would retire
+        // the one they just wrote.
         if let Some(Credential::Oauth(current)) = self.store.get(tenant_id, connection_id).await {
             if current.access_token != held.access_token && !current.stale() {
                 return Ok(current.access_token);
@@ -295,11 +285,8 @@ impl CredentialResolver for StoredCredentials {
     }
 }
 
-/// A refresh that failed, as either a spent grant or a passing fault.
-///
-/// `subs mcp login` corrects every spent case: it discovers the server again,
-/// registers this client again, and gets a new grant. Thus it repairs a retired
-/// refresh token and a forgotten registration both.
+/// A refresh that failed, as either a spent grant or a passing fault. Logging
+/// in corrects every spent case.
 fn refresh_failed(id: &str, e: &OauthError) -> ConnectorError {
     if !e.is_spent() {
         return ConnectorError::retryable(format!("connection `{id}`: token refresh failed ({e})"));
@@ -438,9 +425,6 @@ mod tests {
         );
     }
 
-    /// Only the server saying the grant is gone asks a person to act. A token
-    /// endpoint that is unreachable or unwell says nothing about the grant, and
-    /// to report it as unauthorized asks a person to correct what is not broken.
     #[test]
     fn a_passing_fault_at_the_token_endpoint_is_not_a_dead_grant() {
         let transient = refresh_failed("sentry", &OauthError::Token("connection reset".into()));
@@ -459,8 +443,6 @@ mod tests {
         assert!(dead.to_string().contains("retired its refresh token"));
     }
 
-    /// A forgotten registration is repaired by the same command as a spent
-    /// grant, because logging in registers this client again.
     #[test]
     fn a_forgotten_client_registration_asks_for_the_same_correction() {
         let err = refresh_failed(
