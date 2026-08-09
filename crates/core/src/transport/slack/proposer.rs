@@ -8,16 +8,40 @@ use serde_json::Value;
 use super::activity::TurnActivity;
 use super::render::{self, StepStatus, StepView};
 use super::{display_of, with_footer, ButtonValue};
+use crate::connectors::AuthNeed;
 use crate::protocol::{
-    DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution, InterruptResponder,
-    Message, ResumeStatus,
+    AuthFailure, DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution,
+    InterruptResponder, Message, ResumeStatus,
 };
 use crate::runtime::session::state::SessionState;
 use crate::runtime::worker::ChannelProposer;
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
-pub struct SlackProposer;
+pub struct SlackProposer {
+    /// The page a person authorizes a connection on. A deployment without one
+    /// a browser can reach leaves this absent, and the prompt names the command
+    /// instead.
+    authorize_page: Option<String>,
+}
+
+impl SlackProposer {
+    pub fn new(authorize_page: Option<String>) -> Self {
+        Self { authorize_page }
+    }
+}
+
+/// The interrupt one connection's authorization gets. Derived from the
+/// connection, so a redelivery proposes the same id and the engine keeps one
+/// prompt however many times this runs.
+fn auth_interrupt_id(connection: &str) -> String {
+    format!("mcp-auth:{connection}")
+}
+
+/// The connection this interrupt asks about, if it asks about one.
+fn auth_connection(interrupt_id: &str) -> Option<&str> {
+    interrupt_id.strip_prefix("mcp-auth:")
+}
 
 /// Whether Slack owns this session: its owner records a Slack channel.
 fn slack_owned(state: &SessionState) -> bool {
@@ -39,6 +63,12 @@ impl ChannelProposer for SlackProposer {
     ) -> DecisionResponse {
         if !slack_owned(state) {
             return proposed;
+        }
+        // Before anything else: a connection with no usable credential stops
+        // the session. What the proposal would have authored runs against tools
+        // the agent does not have.
+        if let Some(prompt) = self.authorize_prompt(state) {
+            return prompt;
         }
         match trigger {
             DecisionTrigger::ClientAction {
@@ -67,6 +97,72 @@ impl ChannelProposer for SlackProposer {
                 with_view(proposed, Some(view))
             }
             _ => proposed,
+        }
+    }
+}
+
+impl SlackProposer {
+    /// The prompt for the first connection that needs a person, if one does.
+    ///
+    /// Replaces the proposal rather than riding with it: the session stops
+    /// here, and the continuation would be authored against tools that are not
+    /// there. A connection already asked about is skipped, so a redelivery
+    /// proposes the prompt that is already open and the engine keeps one.
+    fn authorize_prompt(&self, state: &SessionState) -> Option<DecisionResponse> {
+        let config = state.resolve_agent_for(state.head_id.as_deref())?;
+        let (connection, need) = config.mcp.iter().find_map(|server| {
+            if server.auth_failure == AuthFailure::Degrade {
+                return None;
+            }
+            let need = state.connector_sync(&server.id)?.auth?;
+            let id = auth_interrupt_id(&server.id);
+            state
+                .open_interrupt(&id)
+                .is_none()
+                .then_some((&server.id, need))
+        })?;
+
+        Some(DecisionResponse {
+            actions: vec![DecisionAction::Interrupt {
+                interrupt_id: Some(auth_interrupt_id(connection)),
+                reason: format!("connection `{connection}` needs authorizing"),
+                payload: serde_json::json!({
+                    "message": self.ask(connection, need),
+                    "metadata": { "options": [{
+                        "label": "Retry",
+                        "value": { "connection": connection },
+                    }] },
+                }),
+            }],
+            ..Default::default()
+        })
+    }
+
+    /// What the prompt says. It names the account a person connects, because a
+    /// team credential is what they authorize, not their own access.
+    fn ask(&self, connection: &str, need: AuthNeed) -> String {
+        let why = match need {
+            AuthNeed::NeverAuthorized => {
+                format!("*{connection}* is not authorized yet, so I cannot use it.")
+            }
+            AuthNeed::Reauthorize => {
+                format!("*{connection}* needs to be authorized again. Its access expired.")
+            }
+            AuthNeed::TokenRejected => {
+                return format!(
+                    "*{connection}* rejected its token. An operator must set a new one \
+                     with `subs mcp set-token {connection}`."
+                )
+            }
+        };
+        match &self.authorize_page {
+            Some(page) => format!(
+                "{why}\n\n<{page}|Authorize it in the dashboard>\n\
+                 This connects *your* account as the team's credential.",
+            ),
+            // Nobody else can open a browser flow that lands on the machine the
+            // engine runs on, so the operator runs the command there.
+            None => format!("{why}\n\nRun `subs mcp login {connection}` to authorize it."),
         }
     }
 }
@@ -208,11 +304,18 @@ fn click_proposal(state: &SessionState, args: &Value) -> Option<DecisionResponse
             label: Some(option.label),
         }),
     };
+    // An authorization prompt asks for the fetch as well: the credential a
+    // person replaced only reaches the agent when its tools are read again.
+    let resync = auth_connection(&interrupt_id).map(|connection| DecisionAction::SyncConnector {
+        id: connection.to_string(),
+    });
     Some(DecisionResponse {
-        actions: vec![DecisionAction::ResolveInterrupt {
+        actions: std::iter::once(DecisionAction::ResolveInterrupt {
             interrupt_id,
             payload: serde_json::to_value(resolution).unwrap_or_default(),
-        }],
+        })
+        .chain(resync)
+        .collect(),
         ..Default::default()
     })
 }
@@ -242,9 +345,11 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{InterruptOrigin, RetryPolicy};
+    use crate::protocol::{AgentConfig, InterruptOrigin, McpServer, RetryPolicy};
     use crate::runtime::session::state::OpenInterrupt;
+    use crate::session::events::{AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested};
     use crate::session::events::{ToolCallCompleted, ToolCallRequested, TurnStarted};
+    use crate::session::state::ApplyContext;
     use crate::session::state::EventMeta;
 
     const SESSION: &str = "slack:C1:1.0";
@@ -256,7 +361,10 @@ mod tests {
         events: &[SessionEvent],
         proposed: DecisionResponse,
     ) -> DecisionResponse {
-        SlackProposer.propose(session_id, trigger, state, events, &[], proposed)
+        SlackProposer::new(Some(
+            "https://app.subs.test/projects/proj_1/overview".to_string(),
+        ))
+        .propose(session_id, trigger, state, events, &[], proposed)
     }
 
     fn action(value: &str) -> DecisionTrigger {
@@ -285,6 +393,57 @@ mod tests {
                 ("slack_thread_ts".to_string(), "1.0".to_string()),
             ]),
         });
+        s
+    }
+
+    fn ctx() -> ApplyContext {
+        ApplyContext {
+            occurred_at: chrono::Utc::now(),
+            sequence: 1,
+        }
+    }
+
+    /// A Slack session whose `sentry` connection has been marked, with the pair
+    /// configured as `policy`.
+    fn state_needing_auth(need: AuthNeed, policy: AuthFailure) -> SessionState {
+        let mut s = state();
+        s.apply(
+            &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                config: AgentConfig {
+                    mcp: vec![McpServer {
+                        id: "sentry".to_string(),
+                        tools: None,
+                        auth_failure: policy,
+                    }],
+                    ..AgentConfig {
+                        llm: None,
+                        model: "m1".to_string(),
+                        system: None,
+                        retry: None,
+                        tools: vec![],
+                        sub_agents: vec![],
+                        mcp: vec![],
+                    }
+                },
+                anchor: None,
+            }),
+            &ctx(),
+        );
+        s.apply(
+            &EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
+                id: "sentry".to_string(),
+                attempt: 0,
+                retry: RetryPolicy::no_retry(),
+            }),
+            &ctx(),
+        );
+        s.apply(
+            &EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
+                id: "sentry".to_string(),
+                auth: need,
+            }),
+            &ctx(),
+        );
         s
     }
 
@@ -366,6 +525,190 @@ mod tests {
                 }),
             ),
         ]
+    }
+
+    /// A connection with a dead credential stops the session and says so. The
+    /// continuation is dropped: it would be authored against tools the agent
+    /// does not have.
+    #[test]
+    fn a_connection_that_needs_authorizing_proposes_a_prompt_instead_of_the_turn() {
+        let p = propose(
+            SESSION,
+            &DecisionTrigger::ToolFinished {
+                id: "tc1".to_string(),
+                ok: false,
+                name: "sentry__search_issues".to_string(),
+                result: None,
+                error: None,
+            },
+            &state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt),
+            &[],
+            DecisionResponse {
+                actions: vec![DecisionAction::CallLlm {
+                    id: None,
+                    llm: None,
+                    model: None,
+                    messages: None,
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                    stream: None,
+                    retry: None,
+                }],
+                ..Default::default()
+            },
+        );
+        match &p.actions[..] {
+            [DecisionAction::Interrupt {
+                interrupt_id,
+                payload,
+                ..
+            }] => {
+                assert_eq!(interrupt_id.as_deref(), Some("mcp-auth:sentry"));
+                let message = payload["message"].as_str().unwrap();
+                assert!(message.contains("authorized again"), "got {message}");
+                assert!(
+                    message.contains("https://app.subs.test/projects/proj_1/overview"),
+                    "got {message}"
+                );
+            }
+            other => panic!("expected one interrupt; got {other:?}"),
+        }
+    }
+
+    /// The id is derived from the connection, so the prompt already open is the
+    /// one this would propose. Proposing it again would ask twice.
+    #[test]
+    fn a_connection_already_asked_about_is_not_asked_about_again() {
+        let mut state = state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt);
+        state.open_interrupts.push(OpenInterrupt {
+            interrupt_id: "mcp-auth:sentry".to_string(),
+            origin: InterruptOrigin::Frontend,
+            reason: "hold".to_string(),
+            payload: Value::Null,
+            anchor: None,
+        });
+        let p = propose(
+            SESSION,
+            &DecisionTrigger::TurnFinished {
+                turn_id: "turn-1".to_string(),
+                data: serde_json::json!("done"),
+                cost: Default::default(),
+                usage: Default::default(),
+            },
+            &state,
+            &[],
+            DecisionResponse::default(),
+        );
+        assert!(
+            !p.actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::Interrupt { .. })),
+            "got {:?}",
+            p.actions
+        );
+    }
+
+    /// An agent told to go without the connection is not stopped.
+    #[test]
+    fn a_connection_configured_to_degrade_never_stops_the_session() {
+        let p = propose(
+            SESSION,
+            &DecisionTrigger::TurnFinished {
+                turn_id: "turn-1".to_string(),
+                data: serde_json::json!("done"),
+                cost: Default::default(),
+                usage: Default::default(),
+            },
+            &state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Degrade),
+            &[],
+            DecisionResponse::default(),
+        );
+        assert!(
+            !p.actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::Interrupt { .. })),
+            "got {:?}",
+            p.actions
+        );
+    }
+
+    /// A static token has no consent flow. Only an operator replaces it, so the
+    /// prompt says that rather than offering a link nobody can use.
+    #[test]
+    fn a_rejected_token_names_the_command_an_operator_runs() {
+        let p = propose(
+            SESSION,
+            &DecisionTrigger::TurnFinished {
+                turn_id: "turn-1".to_string(),
+                data: Value::Null,
+                cost: Default::default(),
+                usage: Default::default(),
+            },
+            &state_needing_auth(AuthNeed::TokenRejected, AuthFailure::Interrupt),
+            &[],
+            DecisionResponse::default(),
+        );
+        let DecisionAction::Interrupt { payload, .. } = &p.actions[0] else {
+            panic!("expected an interrupt; got {:?}", p.actions);
+        };
+        let message = payload["message"].as_str().unwrap();
+        assert!(
+            message.contains("subs mcp set-token sentry"),
+            "got {message}"
+        );
+        assert!(
+            !message.contains("authorize"),
+            "no link to click; got {message}"
+        );
+    }
+
+    /// Resolving is not enough. The credential a person replaced reaches the
+    /// agent only when the connection's tools are read again.
+    #[test]
+    fn clicking_an_authorization_prompt_also_asks_for_the_tools_again() {
+        let mut state = state();
+        state.open_interrupts.push(OpenInterrupt {
+            interrupt_id: "mcp-auth:sentry".to_string(),
+            origin: InterruptOrigin::Frontend,
+            reason: "hold".to_string(),
+            payload: serde_json::json!({
+                "message": "authorize it",
+                "metadata": { "options": [
+                    { "label": "Retry", "value": { "connection": "sentry" } },
+                ]},
+            }),
+            anchor: None,
+        });
+        let p = propose(
+            SESSION,
+            &action(r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:sentry","option":0}"#),
+            &state,
+            &[],
+            DecisionResponse::default(),
+        );
+        match &p.actions[..] {
+            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { id }] =>
+            {
+                assert_eq!(interrupt_id, "mcp-auth:sentry");
+                assert_eq!(id, "sentry");
+            }
+            other => panic!("expected resolve then sync; got {other:?}"),
+        }
+    }
+
+    /// A prompt that is not about a connection resolves alone.
+    #[test]
+    fn clicking_an_ordinary_prompt_asks_for_no_fetch() {
+        let p = propose(
+            SESSION,
+            &action(r#"{"type":"interrupt.option","interrupt_id":"int-1","option":1}"#),
+            &state_with_prompt(),
+            &[],
+            DecisionResponse::default(),
+        );
+        assert_eq!(p.actions.len(), 1, "got {:?}", p.actions);
     }
 
     #[test]

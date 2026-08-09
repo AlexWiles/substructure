@@ -389,6 +389,9 @@ pub enum Action {
         #[serde(default)]
         payload: serde_json::Value,
     },
+    /// Fetch a connection's tools again.
+    #[serde(rename = "connector.sync")]
+    SyncConnector { id: String },
     #[serde(rename = "done")]
     Done {
         #[serde(default)]

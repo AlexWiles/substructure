@@ -105,6 +105,22 @@
       "title": "AudioData",
       "type": "object"
     },
+    "AuthFailure": {
+      "description": "What a session does when a connection needs a person to authorize it.\n\nBelongs to the pair, not to the connection: one credential serves an agent\nthat must stop and ask, and an agent that runs without a person to ask.",
+      "oneOf": [
+        {
+          "const": "interrupt",
+          "description": "Stop and ask. A channel that cannot show the question degrades instead.",
+          "type": "string"
+        },
+        {
+          "const": "degrade",
+          "description": "Go on without this connection's tools.",
+          "type": "string"
+        }
+      ],
+      "title": "AuthFailure"
+    },
     "ClientContext": {
       "additionalProperties": false,
       "description": "Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/\n`forwardedProps`), forwarded to the worker on the `client.messages` decision.\n`tools` are the browser's frontend tools, normalized to client-handled\n[`AgentTool`]s; the engine layers them onto the proposed config by default, and\nthe worker may override (e.g. whitelist) by returning its own `agent`.",
@@ -949,6 +965,24 @@
           "required": [
             "type",
             "interrupt_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Fetch a connection's tools again, after its credential was replaced.\n\nThe only way back for a connection whose fetch failed: those attempts\nwere spent against a credential that a person has since corrected.",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "connector.sync",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
           ],
           "type": "object"
         },
@@ -2020,6 +2054,10 @@
       "additionalProperties": false,
       "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
       "properties": {
+        "auth_failure": {
+          "$ref": "#/$defs/AuthFailure",
+          "description": "What the session does when this connection has no usable credential."
+        },
         "id": {
           "type": "string"
         },

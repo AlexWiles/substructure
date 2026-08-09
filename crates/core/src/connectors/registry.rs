@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use super::mcp::McpClient;
 use super::oauth::Probed;
-use super::{AuthNeed, ConnectorError, RemoteTool, ToolOutcome};
+use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, ToolOutcome};
 use crate::protocol::ConnectorProtocol;
 
 /// A connection as configured: where it is and how to authenticate.
@@ -226,6 +226,25 @@ pub trait CredentialResolver: Send + Sync {
     }
 }
 
+/// One connection's credential, asked of the resolver whenever a request needs
+/// it. Bound to the connection rather than to the connector session, so a
+/// credential replaced in the store reaches the next request.
+struct Resolved {
+    credentials: Arc<dyn CredentialResolver>,
+    tenant_id: String,
+    id: String,
+    spec: ConnectionSpec,
+}
+
+#[async_trait]
+impl CredentialSource for Resolved {
+    async fn headers(&self) -> Result<HeaderMap, ConnectorError> {
+        self.credentials
+            .resolve(&self.tenant_id, &self.id, &self.spec)
+            .await
+    }
+}
+
 /// One connection's tool list as fetched, with the prefix it expands under.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Offer {
@@ -298,6 +317,9 @@ impl Connections {
     /// the expiry we recorded, thus a refusal is the signal to refresh, and the
     /// expiry is only an optimization. Without this a refused-but-unexpired
     /// token is sent again on every attempt and the connection never recovers.
+    ///
+    /// The connector session is kept across the retry. Only the credential was
+    /// refused, and the client reads that again for each request.
     async fn attempt<T, F, Fut>(
         &self,
         tenant_id: &str,
@@ -316,26 +338,15 @@ impl Connections {
         if err.auth.is_none() {
             return Err(err);
         }
-        self.drop_client(tenant_id, id).await;
         // A refresh that fails reports why: it knows whether the grant is spent
         // or the server is merely unwell, which the refusal does not say.
         if self.credentials.refresh(tenant_id, id, spec).await? {
             let retried = op(self.client(tenant_id, id, spec).await?).await;
-            match retried {
-                Err(again) if again.auth.is_some() => {
-                    self.drop_client(tenant_id, id).await;
-                }
-                other => return other,
+            if !matches!(&retried, Err(again) if again.auth.is_some()) {
+                return retried;
             }
         }
         Err(self.explain_refusal(id, spec, err).await)
-    }
-
-    async fn drop_client(&self, tenant_id: &str, id: &str) {
-        self.clients
-            .lock()
-            .await
-            .remove(&(tenant_id.to_string(), id.to_string()));
     }
 
     async fn client(
@@ -349,10 +360,15 @@ impl Connections {
             return Ok(client.clone());
         }
 
-        let headers = self.credentials.resolve(tenant_id, id, spec).await?;
+        let source = Arc::new(Resolved {
+            credentials: self.credentials.clone(),
+            tenant_id: tenant_id.to_string(),
+            id: id.to_string(),
+            spec: spec.clone(),
+        });
         let client = match spec.protocol {
             ConnectorProtocol::Mcp => {
-                Arc::new(McpClient::new(self.http.clone(), spec.url.clone(), headers))
+                Arc::new(McpClient::new(self.http.clone(), spec.url.clone(), source))
             }
         };
 
@@ -550,6 +566,36 @@ mod tests {
 
         assert_eq!(offer.tools[0].name, "search");
         assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    /// `subs mcp login` writes to the store from another process. The engine
+    /// holds a connector session built before that, and the next request must
+    /// carry the new credential without the session being discarded.
+    #[tokio::test]
+    async fn a_credential_replaced_in_the_store_reaches_the_next_request() {
+        let url = serve_accepting("fresh").await;
+        let credentials = Arc::new(Rotating::new("stale", None));
+        let connections = connections(url, credentials.clone()).await;
+
+        connections
+            .list_tools("t", "sentry")
+            .await
+            .expect_err("the stored credential is refused and cannot be refreshed");
+
+        // What `subs mcp login` does, from another process.
+        *credentials.current.lock().await = "fresh".to_string();
+
+        let offer = connections
+            .list_tools("t", "sentry")
+            .await
+            .expect("the credential written elsewhere goes out on the next request");
+
+        assert_eq!(offer.tools[0].name, "search");
+        assert_eq!(
+            credentials.refreshes.load(Ordering::SeqCst),
+            1,
+            "the first refusal asked once; the new credential needed no refresh"
+        );
     }
 
     /// One retry, not a loop: a credential the server refuses twice needs a

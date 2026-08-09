@@ -52,6 +52,17 @@ pub struct ToolOutcome {
     pub is_error: bool,
 }
 
+/// The credential headers for one connection, read at the moment they go out.
+///
+/// Resolved per request, not frozen when the client is built. A refresh or a
+/// `subs mcp login` in another process replaces the credential in the store.
+/// That credential thus reaches the next request, and the connector session
+/// stays.
+#[async_trait::async_trait]
+pub trait CredentialSource: Send + Sync {
+    async fn headers(&self) -> Result<reqwest::header::HeaderMap, ConnectorError>;
+}
+
 /// What a person must do before a connection operates again. This includes only
 /// the conditions that a person can correct. The refresh path corrects a lapsed
 /// client registration.

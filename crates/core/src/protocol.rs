@@ -400,6 +400,30 @@ pub struct McpServer {
     /// Narrows what the model sees. Absent ⇒ every tool the connection grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
+    /// What the session does when this connection has no usable credential.
+    #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
+    pub auth_failure: AuthFailure,
+}
+
+/// What a session does when a connection needs a person to authorize it.
+///
+/// Belongs to the pair, not to the connection: one credential serves an agent
+/// that must stop and ask, and an agent that runs without a person to ask.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "AuthFailure")]
+pub enum AuthFailure {
+    /// Stop and ask. A channel that cannot show the question degrades instead.
+    #[default]
+    Interrupt,
+    /// Go on without this connection's tools.
+    Degrade,
+}
+
+impl AuthFailure {
+    fn is_default(&self) -> bool {
+        *self == Self::Interrupt
+    }
 }
 
 /// An MCP server's tool filter. Applied in order — capability predicates, then
@@ -1336,6 +1360,12 @@ pub enum DecisionAction {
         #[serde(default)]
         payload: Value,
     },
+    /// Fetch a connection's tools again, after its credential was replaced.
+    ///
+    /// The only way back for a connection whose fetch failed: those attempts
+    /// were spent against a credential that a person has since corrected.
+    #[serde(rename = "connector.sync")]
+    SyncConnector { id: String },
     #[serde(rename = "done")]
     Done {
         #[serde(default)]

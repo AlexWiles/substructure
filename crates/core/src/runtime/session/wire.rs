@@ -522,6 +522,7 @@ fn lower_actions(
                     interrupt_id,
                     payload,
                 },
+                DecisionAction::SyncConnector { id } => Action::SyncConnector { id },
                 DecisionAction::Done { data } => Action::Done { data },
             })
         })

@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
 use crate::protocol::{
-    AgentConfig, AgentTool, ConnectorProtocol, Handler, LlmFormat, McpServer, McpTools,
-    RetryConfig, SubAgent,
+    AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, Handler, LlmFormat, McpServer,
+    McpTools, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -330,6 +330,8 @@ pub struct McpEntry {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_failure: Option<AuthFailure>,
 }
 
 impl McpRef {
@@ -340,17 +342,19 @@ impl McpRef {
         }
     }
 
-    /// The wire form. The two spellings differ only in whether a filter rides
-    /// along, so this is where they stop differing.
+    /// The wire form. The two spellings differ only in what rides along, so
+    /// this is where they stop differing.
     fn to_server(&self) -> McpServer {
         match self {
             Self::All(id) => McpServer {
                 id: id.clone(),
                 tools: None,
+                auth_failure: AuthFailure::default(),
             },
             Self::Filtered(entry) => McpServer {
                 id: entry.id.clone(),
                 tools: entry.tools.clone(),
+                auth_failure: entry.auth_failure.unwrap_or_default(),
             },
         }
     }

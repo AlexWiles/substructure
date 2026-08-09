@@ -283,6 +283,7 @@ impl Action {
             Action::SendMessage { .. }
             | Action::Interrupt { .. }
             | Action::ResolveInterrupt { .. }
+            | Action::SyncConnector { .. }
             | Action::Done { .. } => None,
         }
     }
@@ -830,6 +831,39 @@ impl Working {
                         },
                         &system,
                     )
+                }
+                // Only a connection the config in force names, and only one
+                // whose fetch is settled: a fetch already in flight is the
+                // answer this asks for.
+                Action::SyncConnector { id } => {
+                    let named = self
+                        .resolve_agent_for(self.head_id.as_deref())
+                        .is_some_and(|c| c.mcp.iter().any(|m| m.id == id));
+                    let settled = self
+                        .tracking(EffectKind::ConnectorSync, &id)
+                        .is_some_and(|t| !t.is_in_flight());
+                    if !named || !settled {
+                        tracing::warn!(
+                            connection = %id,
+                            named,
+                            settled,
+                            "connector.sync refused"
+                        );
+                        continue;
+                    }
+                    let config = self.state.retry_config();
+                    self.emit(EventPayload::ConnectorSyncRequested(
+                        ConnectorSyncRequested {
+                            id,
+                            attempt: 0,
+                            retry: RetryPolicy::resolve(
+                                None,
+                                config.as_ref(),
+                                RetryTarget::ConnectorSync,
+                            ),
+                        },
+                    ));
+                    Ok(())
                 }
                 // A `done` while finalizing completes the turn; otherwise it
                 // ends the agent's turn and starts finalization.

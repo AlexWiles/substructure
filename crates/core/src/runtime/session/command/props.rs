@@ -396,6 +396,7 @@ impl World {
             mcp: vec![McpServer {
                 id: "conn-1".to_string(),
                 tools: None,
+                auth_failure: Default::default(),
             }],
         }
     }

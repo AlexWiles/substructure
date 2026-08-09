@@ -164,6 +164,7 @@ fn config_with_mcp(connection: &str) -> AgentConfig {
         mcp: vec![McpServer {
             id: connection.to_string(),
             tools: None,
+            auth_failure: Default::default(),
         }],
         ..config()
     }

@@ -5,6 +5,7 @@ use tokio::net::TcpListener;
 
 use crate::cli::auth::AuthWiring;
 use crate::cli::cloud::project_config::{self, ProjectConfig};
+use crate::cli::cloud::{credentials, print};
 use crate::cli::env::{EnvVars, ProviderEnv, ProviderKind};
 use crate::cli::DEFAULT_TENANT;
 use crate::connectors::credential::StoredCredentials;
@@ -79,6 +80,24 @@ fn slack_routing(cfg: &ProjectConfig, flag: Option<String>) -> Option<Routing> {
         routing = routing.channel(id, channel.agent().map(str::to_string));
     }
     (!routing.is_empty()).then_some(routing)
+}
+
+/// The page a person authorizes a connection on, if this deployment has one a
+/// browser can reach.
+///
+/// Authorizing is consent, so it is a person in a browser and the dashboard
+/// owns it. The API's own `/authorize` takes a POST and answers with a URL to
+/// redirect to, which is not something to put in a message.
+///
+/// Absent for a local engine, whose `subs mcp login` lands on a callback on
+/// this machine that nobody else can open. Absent too for a deployment on an
+/// unknown origin: only the hosted cloud's browser address follows from its
+/// API's, which is the same rule `subs apply` prints its project link under.
+fn authorize_page(cfg: &ProjectConfig) -> Option<String> {
+    let project = cfg.project()?;
+    let api_url = credentials::resolve_api_url(cfg.remote_url());
+    let hosted = api_url.trim_end_matches('/') == credentials::DEFAULT_API_URL;
+    hosted.then(|| format!("{}/overview", print::admin_url(&api_url, project)))
 }
 
 pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
@@ -282,7 +301,9 @@ pub(crate) async fn start_engine(
             connections,
             connector_task_queue,
             worker_queue,
-            channel_proposers: vec![Arc::new(crate::transport::slack::SlackProposer)],
+            channel_proposers: vec![Arc::new(crate::transport::slack::SlackProposer::new(
+                authorize_page(cfg),
+            ))],
             session_index_store,
             cursor_store,
             wake_store,

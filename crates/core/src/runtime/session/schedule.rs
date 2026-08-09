@@ -538,6 +538,7 @@ mod tests {
             mcp: vec![McpServer {
                 id: connection.to_string(),
                 tools: None,
+                auth_failure: Default::default(),
             }],
         }
     }

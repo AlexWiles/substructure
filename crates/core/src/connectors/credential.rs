@@ -55,11 +55,13 @@ pub trait CredentialStore: Send + Sync {
     ) -> Result<(), String>;
 }
 
-/// Whether a caller accepts the stored access token or requires a new one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Freshness {
-    AsStored,
-    Force,
+/// What the slot holds, as the two callers below need to tell it apart. An
+/// empty slot and a slot holding the other kind are a failure to one of them
+/// and not to the other, so neither is an error here.
+enum Held {
+    Grant(Tokens),
+    Empty,
+    Wrong(&'static str),
 }
 
 /// Resolves a connection's stored credential to headers.
@@ -86,100 +88,112 @@ impl StoredCredentials {
         }
     }
 
-    /// A live access token for one OAuth connection, refreshed if it is close
-    /// to expiry. `url` is where the connection currently points, which the
-    /// stored credential has to have been issued for.
-    pub async fn access_token(
+    /// A live access token for one OAuth connection, renewed if it is close to
+    /// expiry. Read for every request, so the expiry is acted on before a call
+    /// spends a round trip finding out.
+    async fn access_token(
         &self,
         tenant_id: &str,
         connection_id: &str,
         url: &str,
     ) -> Result<Option<String>, OauthError> {
-        self.token(tenant_id, connection_id, url, Freshness::AsStored)
+        let tokens = match self.grant(tenant_id, connection_id, url).await? {
+            Held::Grant(tokens) => tokens,
+            Held::Empty => return Ok(None),
+            Held::Wrong(why) => return Err(OauthError::Unrenewable(why.into())),
+        };
+        if !tokens.stale() {
+            return Ok(Some(tokens.access_token));
+        }
+        if !tokens.refreshable() {
+            return Err(OauthError::Unrenewable(
+                "the access token expired and the server issued no refresh token".into(),
+            ));
+        }
+        self.renew(tenant_id, connection_id, &tokens)
             .await
+            .map(Some)
     }
 
-    /// Refresh whatever is stored, whether or not it looks expired. The server
-    /// is the authority on its own tokens: it can revoke one early, and the
-    /// clocks at the two ends can disagree. A 401 is thus a better signal than
-    /// the expiry we recorded.
+    /// Renew the stored grant whether or not it looks expired, because the
+    /// server refused what we sent. The server is the authority on its own
+    /// tokens: it can revoke one early, and the clocks at the two ends can
+    /// disagree, thus a refusal is a better signal than the expiry we recorded.
     ///
-    /// `Ok(false)` if there is nothing to refresh, which tells the caller that
+    /// `Ok(false)` if there is nothing to renew, which tells the caller that
     /// another attempt sends the same credential.
-    pub async fn refresh_now(
+    async fn refresh_now(
         &self,
         tenant_id: &str,
         connection_id: &str,
         url: &str,
     ) -> Result<bool, OauthError> {
-        self.token(tenant_id, connection_id, url, Freshness::Force)
-            .await
-            .map(|token| token.is_some())
+        // Only a person replaces a static token or fills an empty slot, and
+        // neither is a failure of this call.
+        let Held::Grant(tokens) = self.grant(tenant_id, connection_id, url).await? else {
+            return Ok(false);
+        };
+        if !tokens.refreshable() {
+            return Ok(false);
+        }
+        self.renew(tenant_id, connection_id, &tokens).await?;
+        Ok(true)
     }
 
-    async fn token(
+    /// What the slot holds for this connection, checked against where the
+    /// connection now points. The id is the key, so an edited `url` would
+    /// otherwise send one server's token to another. `discover` binds the two
+    /// at login, which makes this the same check read back.
+    async fn grant(
         &self,
         tenant_id: &str,
         connection_id: &str,
         url: &str,
-        want: Freshness,
-    ) -> Result<Option<String>, OauthError> {
+    ) -> Result<Held, OauthError> {
         let tokens = match self.store.get(tenant_id, connection_id).await {
             Some(Credential::Oauth(tokens)) => *tokens,
-            Some(Credential::Static { .. }) => match want {
-                // A static token cannot be refreshed. Only a person replaces it.
-                Freshness::Force => return Ok(None),
-                Freshness::AsStored => {
-                    return Err(OauthError::Unrenewable(
-                        "a static token is stored for this connection, not an OAuth grant".into(),
-                    ))
-                }
-            },
-            None => return Ok(None),
+            Some(Credential::Static { .. }) => {
+                return Ok(Held::Wrong(
+                    "a static token is stored for this connection, not an OAuth grant",
+                ))
+            }
+            None => return Ok(Held::Empty),
         };
-        // The id is the key, so an edited `url` would otherwise send one
-        // server's token to another. `discover` binds the two at login, which
-        // makes this the same check read back.
         if !same_origin(&tokens.resource, url) {
             return Err(OauthError::Unrenewable(format!(
                 "the stored credential was issued for `{}`, not `{url}`",
                 tokens.resource
             )));
         }
-        if want == Freshness::AsStored && !tokens.stale() {
-            return Ok(Some(tokens.access_token));
-        }
-        if !tokens.refreshable() {
-            return match want {
-                Freshness::Force => Ok(None),
-                Freshness::AsStored => Err(OauthError::Unrenewable(
-                    "the access token expired and the server issued no refresh token".into(),
-                )),
-            };
-        }
+        Ok(Held::Grant(tokens))
+    }
 
+    /// Exchange `held` for a new access token, one caller at a time.
+    async fn renew(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        held: &Tokens,
+    ) -> Result<String, OauthError> {
         let gate = {
-            let mut held = self.refreshing.lock().await;
-            held.entry(format!("{tenant_id}\u{0}{connection_id}"))
+            let mut gates = self.refreshing.lock().await;
+            gates
+                .entry(format!("{tenant_id}\u{0}{connection_id}"))
                 .or_default()
                 .clone()
         };
         let _guard = gate.lock().await;
 
-        // Another caller may have refreshed while we waited for the gate. A
-        // forced refresh adopts that token too: it is newer than the one that
-        // was refused.
+        // Another caller may have landed one while we waited for the gate.
+        // Adopt it rather than spend the refresh token again, which would
+        // retire the one they just wrote.
         if let Some(Credential::Oauth(current)) = self.store.get(tenant_id, connection_id).await {
-            let landed = match want {
-                Freshness::Force => current.access_token != tokens.access_token,
-                Freshness::AsStored => !current.stale(),
-            };
-            if landed {
-                return Ok(Some(current.access_token));
+            if current.access_token != held.access_token && !current.stale() {
+                return Ok(current.access_token);
             }
         }
 
-        let next = refresh(&self.http, &tokens).await?;
+        let next = refresh(&self.http, held).await?;
         self.store
             .put(
                 tenant_id,
@@ -188,7 +202,7 @@ impl StoredCredentials {
             )
             .await
             .map_err(OauthError::Token)?;
-        Ok(Some(next.access_token))
+        Ok(next.access_token)
     }
 
     /// The grant a connection holds, as headers, or nothing where the slot is
