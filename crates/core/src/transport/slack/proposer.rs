@@ -138,8 +138,8 @@ impl SlackProposer {
         })
     }
 
-    /// What the prompt says. It names the account a person connects, because a
-    /// team credential is what they authorize, not their own access.
+    /// What the prompt says: why the connection cannot be used, and where to
+    /// correct it.
     fn ask(&self, connection: &str, need: AuthNeed) -> String {
         let why = match need {
             AuthNeed::NeverAuthorized => {
@@ -156,10 +156,7 @@ impl SlackProposer {
             }
         };
         match &self.authorize_page {
-            Some(page) => format!(
-                "{why}\n\n<{page}|Authorize it in the dashboard>\n\
-                 This connects *your* account as the team's credential.",
-            ),
+            Some(page) => format!("{why}\n\n<{page}|Authorize it in the dashboard>"),
             // Nobody else can open a browser flow that lands on the machine the
             // engine runs on, so the operator runs the command there.
             None => format!("{why}\n\nRun `subs mcp login {connection}` to authorize it."),
