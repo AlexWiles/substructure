@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
-use crate::connectors::{filter, RemoteTool};
+use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{ConnectorTool, Handler};
 use rust_decimal::Decimal;
 
@@ -471,8 +471,10 @@ pub struct ConnectorSyncState {
     /// terminally failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default)]
-    pub needs_reauth: bool,
+    /// What a person must do before this connection operates again. A refused
+    /// fetch or a refused call sets this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthNeed>,
 }
 
 /// One anchored document write. Both typed channels — worker state and agent
@@ -1319,7 +1321,7 @@ impl SessionState {
                             tools: Vec::new(),
                             prefix: None,
                             error: None,
-                            needs_reauth: false,
+                            auth: None,
                         }),
                     );
                 }
@@ -1336,7 +1338,7 @@ impl SessionState {
                         sync.tools = p.tools.clone();
                         sync.prefix = p.prefix.clone();
                         sync.error = None;
-                        sync.needs_reauth = false;
+                        sync.auth = None;
                     }
                 }
             }
@@ -1345,8 +1347,17 @@ impl SessionState {
                     e.tracking.record_error(p.retryable, now);
                     if let Some(sync) = e.connector_mut() {
                         sync.error = Some(p.error.message.clone());
-                        sync.needs_reauth = p.needs_reauth;
+                        sync.auth = p.auth;
                     }
+                }
+            }
+            // The fetch does not change. Only the credential is not valid.
+            EventPayload::ConnectorAuthFailed(p) => {
+                if let Some(sync) = self
+                    .effect_mut(EffectKind::ConnectorSync, &p.id)
+                    .and_then(EffectState::connector_mut)
+                {
+                    sync.auth = Some(p.auth);
                 }
             }
             // Append-only, like the tree: `resolve_on_path` scans newest-first,

@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use super::{ConnectorError, RemoteTool, ToolAnnotations, ToolOutcome};
+use super::{AuthNeed, ConnectorError, RemoteTool, ToolAnnotations, ToolOutcome};
 
 /// The revision we negotiate. The 2026-07-28 revision drops the handshake and
 /// the session id entirely, so moving to it deletes `SessionState` rather than
@@ -207,9 +207,11 @@ impl McpClient {
             });
         }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(ConnectorError::unauthorized(format!(
-                "connection rejected the credential ({status})"
-            ))
+            // The registry knows which credential went out. It corrects this.
+            return Err(ConnectorError::unauthorized(
+                AuthNeed::Reauthorize,
+                format!("connection rejected the credential ({status})"),
+            )
             .into());
         }
         // A notification is answered with 202 and no body.
@@ -756,9 +758,11 @@ mod tests {
         });
         let client = client_for(mock).await;
         let err = client.list_tools().await.unwrap_err();
-        assert!(
-            err.needs_reauth,
-            "401 is a re-auth signal, not a plain failure"
+        assert_eq!(
+            err.auth,
+            Some(AuthNeed::Reauthorize),
+            "401 is a re-auth signal, not a plain failure; the registry refines it \
+             against what the file declares"
         );
         assert!(
             !err.retryable,

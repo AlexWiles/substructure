@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::mcp::auth_headers;
 use super::oauth::{refresh, require_secure, same_origin, OauthError, Tokens};
 use super::registry::{AuthKind, ConnectionSpec, CredentialResolver};
-use super::ConnectorError;
+use super::{AuthNeed, ConnectorError};
 
 /// What the store holds for one connection.
 ///
@@ -161,9 +161,12 @@ impl StoredCredentials {
             // A grant that cannot be renewed is reported even where the file
             // declared nothing: the connection was authorized once, so falling
             // back to sending nothing would lose that.
-            Err(e) => Err(ConnectorError::unauthorized(format!(
-                "connection `{id}` needs authorizing again: run `subs mcp login {id}` ({e})"
-            ))),
+            Err(e) => Err(ConnectorError::unauthorized(
+                AuthNeed::Reauthorize,
+                format!(
+                    "connection `{id}` needs authorizing again: run `subs mcp login {id}` ({e})"
+                ),
+            )),
         }
     }
 
@@ -181,9 +184,10 @@ impl StoredCredentials {
                 auth_headers(spec.header.as_deref(), &token)
             }
             Some(Credential::Oauth(_)) => Err(mismatch(id, AuthKind::Token)),
-            None => Err(ConnectorError::unauthorized(format!(
-                "connection `{id}` has no token: run `subs mcp set-token {id}`"
-            ))),
+            None => Err(ConnectorError::unauthorized(
+                AuthNeed::NeverAuthorized,
+                format!("connection `{id}` has no token: run `subs mcp set-token {id}`"),
+            )),
         }
     }
 }
@@ -205,9 +209,10 @@ impl CredentialResolver for StoredCredentials {
             Some(AuthKind::Token) => self.static_headers(tenant_id, id, spec).await,
             Some(AuthKind::Oauth) => match self.oauth_headers(tenant_id, id, spec).await? {
                 Some(headers) => Ok(headers),
-                None => Err(ConnectorError::unauthorized(format!(
-                    "connection `{id}` is not authorized: run `subs mcp login {id}`"
-                ))),
+                None => Err(ConnectorError::unauthorized(
+                    AuthNeed::NeverAuthorized,
+                    format!("connection `{id}` is not authorized: run `subs mcp login {id}`"),
+                )),
             },
             None => Ok(self
                 .oauth_headers(tenant_id, id, spec)
@@ -226,10 +231,13 @@ fn mismatch(id: &str, declared: AuthKind) -> ConnectorError {
         AuthKind::Token => ("an OAuth grant", format!("subs mcp set-token {id}")),
         _ => ("a static token", format!("subs mcp login {id}")),
     };
-    ConnectorError::unauthorized(format!(
-        "connection `{id}` declares `auth = \"{}\"` but holds {holds}: run `{fix}`",
-        declared.as_str()
-    ))
+    ConnectorError::unauthorized(
+        AuthNeed::NeverAuthorized,
+        format!(
+            "connection `{id}` declares `auth = \"{}\"` but holds {holds}: run `{fix}`",
+            declared.as_str()
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -315,9 +323,10 @@ mod tests {
             .resolve("t", "github", &spec(Some(AuthKind::Token), None))
             .await
             .unwrap_err();
-        assert!(
-            err.needs_reauth,
-            "an unset credential takes the re-auth path"
+        assert_eq!(
+            err.auth,
+            Some(AuthNeed::NeverAuthorized),
+            "an empty slot was never authorized; nothing is spent and nothing needs replacing"
         );
         assert!(err.to_string().contains("subs mcp set-token github"));
     }

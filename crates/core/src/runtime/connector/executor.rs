@@ -74,7 +74,7 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
                         ErrorInfo::new(ErrorCode::HandlerError, err.message.clone()),
                         err.retryable,
                     )
-                    .reauth(err.needs_reauth),
+                    .auth(err.auth),
                 ),
             };
             submit(
@@ -119,7 +119,7 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
 /// A connection can fail a call two ways, and they settle differently: a tool
 /// that ran and reported failure is a terminal `tool.error` the model should
 /// read, while a transport fault is the engine's problem and retries under the
-/// call's policy.
+/// call's policy. A refused credential is different. It goes in `auth`.
 fn settle_call(
     tool_call_id: String,
     attempt: u32,
@@ -143,6 +143,7 @@ fn settle_call(
             ErrorInfo::new(ErrorCode::HandlerError, err.message),
             err.retryable,
         )
+        .auth(err.auth)
         .into(),
     };
     CommandPayload::settle(EffectKind::ToolCall, tool_call_id, Some(attempt), outcome)

@@ -20,7 +20,7 @@ use super::super::aggregate::{CommitContext, SessionAggregate};
 use super::super::decision::Trigger;
 use super::super::events::EventPayload;
 use super::*;
-use crate::connectors::RemoteTool;
+use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
     AgentConfig, AgentTool, ClientMessage, ClientPayload, Content, DraftMessage, Handler,
     McpServer, Role, ToolCall, ToolCallFunction,
@@ -625,7 +625,8 @@ fn flow_connector_failure_releases_the_gate() -> Trace {
             EffectKind::ConnectorSync,
             "conn-1".to_string(),
             Some(0),
-            SettleError::new(ErrorInfo::internal("unreachable"), false).reauth(true),
+            SettleError::new(ErrorInfo::internal("unreachable"), false)
+                .auth(Some(AuthNeed::Reauthorize)),
         ),
         &system(),
     );

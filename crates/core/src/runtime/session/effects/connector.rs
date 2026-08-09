@@ -18,7 +18,7 @@
 //! costs nothing.
 
 use super::{fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::connectors::{filter, RemoteTool};
+use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{AgentConfig, RetryPolicy};
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::session::events::*;
@@ -56,7 +56,7 @@ impl KindSpec for ConnectorSpec {
             report_failure(
                 id,
                 &e.error.message,
-                e.needs_reauth,
+                e.auth,
                 t.is_terminal_failure(e.retryable),
                 t.retry.attempts,
             );
@@ -65,7 +65,7 @@ impl KindSpec for ConnectorSpec {
             id: id.to_string(),
             error: e.error.clone(),
             retryable: e.retryable,
-            needs_reauth: e.needs_reauth,
+            auth: e.auth,
         }))
     }
 
@@ -153,7 +153,7 @@ pub(in crate::runtime::session) fn sync(
 fn report_failure(
     connection_id: &str,
     error: &str,
-    needs_reauth: bool,
+    auth: Option<AuthNeed>,
     terminal: bool,
     attempt: u32,
 ) {
@@ -161,7 +161,7 @@ fn report_failure(
         tracing::error!(
             connection = %connection_id,
             error = %error,
-            needs_reauth,
+            auth = ?auth,
             "connector unreachable; its tools are not offered to the model"
         );
     } else {

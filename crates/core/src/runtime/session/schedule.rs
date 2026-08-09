@@ -589,7 +589,7 @@ mod tests {
                 tools: vec![],
                 prefix: None,
                 error: None,
-                needs_reauth: false,
+                auth: None,
             }),
         ));
         add_llm(&mut s, "call-1", EffectStatus::Queued);

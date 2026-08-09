@@ -7,7 +7,7 @@ use chrono::Utc;
 use super::super::aggregate::{CommitContext, SessionAggregate};
 use super::super::state::{AgentVersion, Logged};
 use super::*;
-use crate::connectors::RemoteTool;
+use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
     AgentTool, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig, RetryOverride,
 };
@@ -6524,6 +6524,98 @@ fn declaring_a_connector_fetches_it_and_parks_the_turn() {
     );
 }
 
+/// A fetch shows that the credential was valid at that time. A subsequent call
+/// must report a credential that is no longer valid.
+#[test]
+fn a_call_refused_for_its_credential_marks_the_connection_not_just_the_call() {
+    let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
+    let d = open_decision(&mut agg, "hi");
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![node_msg("u1", Role::User, "hi")],
+            actions: vec![Action::CallTool {
+                id: "tc-1".to_string(),
+                name: "sentry__search_issues".to_string(),
+                arguments: "{}".to_string(),
+                retry: None,
+            }],
+            state: None,
+            agent: None,
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+    assert!(
+        agg.state
+            .connector_sync("sentry")
+            .is_some_and(|c| c.auth.is_none()),
+        "the connection starts clean: its fetch succeeded"
+    );
+
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::ToolCall,
+            "tc-1".to_string(),
+            None,
+            SettleError::new(
+                ErrorInfo::internal("connection rejected the credential (401)".to_string()),
+                false,
+            )
+            .auth(Some(AuthNeed::Reauthorize)),
+        ),
+        &system(),
+    );
+
+    assert_eq!(
+        agg.state.connector_sync("sentry").and_then(|c| c.auth),
+        Some(AuthNeed::Reauthorize),
+        "the connection now needs authorizing, however the call settled"
+    );
+}
+
+#[test]
+fn a_plain_call_failure_leaves_the_connection_authorized() {
+    let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
+    let d = open_decision(&mut agg, "hi");
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![node_msg("u1", Role::User, "hi")],
+            actions: vec![Action::CallTool {
+                id: "tc-1".to_string(),
+                name: "sentry__search_issues".to_string(),
+                arguments: "{}".to_string(),
+                retry: None,
+            }],
+            state: None,
+            agent: None,
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::ToolCall,
+            "tc-1".to_string(),
+            None,
+            SettleError::new(ErrorInfo::internal("no such issue".to_string()), false).auth(None),
+        ),
+        &system(),
+    );
+
+    assert!(
+        agg.state
+            .connector_sync("sentry")
+            .is_some_and(|c| c.auth.is_none()),
+        "a tool saying no is not the credential being refused"
+    );
+}
+
 #[test]
 fn work_started_beside_a_new_connector_queues_its_decision_rather_than_running_it() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -6686,7 +6778,7 @@ fn a_terminally_failed_fetch_releases_the_turn_rather_than_parking_it() {
             "sentry".to_string(),
             None,
             SettleError::new(ErrorInfo::internal("connection refused".to_string()), false)
-                .reauth(false),
+                .auth(None),
         ),
         &system(),
     );
@@ -6723,7 +6815,7 @@ fn a_retryable_failure_keeps_parking_until_it_is_exhausted() {
             EffectKind::ConnectorSync,
             "sentry".to_string(),
             None,
-            SettleError::new(ErrorInfo::internal("503".to_string()), true).reauth(false),
+            SettleError::new(ErrorInfo::internal("503".to_string()), true).auth(None),
         ),
         &system(),
     );
@@ -6939,7 +7031,7 @@ fn a_dead_connection_dispatches_the_call_without_its_tools() {
             EffectKind::ConnectorSync,
             "sentry".to_string(),
             None,
-            SettleError::new(ErrorInfo::internal("unreachable".to_string()), false).reauth(false),
+            SettleError::new(ErrorInfo::internal("unreachable".to_string()), false).auth(None),
         ),
         &system(),
     );

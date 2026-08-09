@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use super::mcp::McpClient;
 use super::oauth::Probed;
-use super::{ConnectorError, RemoteTool, ToolOutcome};
+use super::{AuthNeed, ConnectorError, RemoteTool, ToolOutcome};
 use crate::protocol::ConnectorProtocol;
 
 /// A connection as configured: where it is and how to authenticate.
@@ -320,7 +320,7 @@ impl Connections {
         let Err(err) = result else {
             return result;
         };
-        if !err.needs_reauth {
+        if err.auth.is_none() {
             return Err(err);
         }
         self.clients
@@ -330,9 +330,12 @@ impl Connections {
         Err(match spec.auth {
             // The file already said how. A refusal means the credential is
             // wrong or spent, and the command that replaces it is the answer.
-            Some(AuthKind::Token) => ConnectorError::unauthorized(format!(
-                "connection `{id}` rejected its token: run `subs mcp set-token {id}` ({err})"
-            )),
+            Some(AuthKind::Token) => ConnectorError::unauthorized(
+                AuthNeed::TokenRejected,
+                format!(
+                    "connection `{id}` rejected its token: run `subs mcp set-token {id}` ({err})"
+                ),
+            ),
             Some(_) => err,
             None => self.explain(id, spec).await.unwrap_or(err),
         })
@@ -360,14 +363,18 @@ impl Connections {
             }
         };
         match probed {
-            Probed::Oauth => Some(ConnectorError::unauthorized(format!(
-                "connection `{id}` is not authorized: run `subs mcp login {id}`"
-            ))),
-            Probed::Protected => Some(ConnectorError::unauthorized(format!(
-                "connection `{id}` wants a credential and publishes no way to obtain one. \
-                 If it accepts a static token, declare `auth = \"token\"` on [mcp.{id}] \
-                 and run `subs mcp set-token {id}`"
-            ))),
+            Probed::Oauth => Some(ConnectorError::unauthorized(
+                AuthNeed::NeverAuthorized,
+                format!("connection `{id}` is not authorized: run `subs mcp login {id}`"),
+            )),
+            Probed::Protected => Some(ConnectorError::unauthorized(
+                AuthNeed::NeverAuthorized,
+                format!(
+                    "connection `{id}` wants a credential and publishes no way to obtain one. \
+                     If it accepts a static token, declare `auth = \"token\"` on [mcp.{id}] \
+                     and run `subs mcp set-token {id}`"
+                ),
+            )),
             Probed::NoChallenge => None,
         }
     }
