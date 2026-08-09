@@ -98,7 +98,7 @@ See [Workers](./50-workers.md#verify-the-signature).
 
 | Where the engine runs | Where the secret comes from |
 | --- | --- |
-| The cloud | The deployment creates one per agent. Read it with `subs agents show <id>`. |
+| The cloud | The deployment creates one per agent. Read it with `subs agents secret <id>`. |
 | Your own machine | `signing_secret_env` on the agent names the variable. |
 
 An agent that names no variable on a local engine gets unsigned requests.

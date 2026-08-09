@@ -91,7 +91,8 @@ pub enum Command {
         #[command(subcommand)]
         command: cloud::projects::ProjectsCommand,
     },
-    /// Inspect the agents a project declares, and rotate their signing secrets.
+    /// Inspect the agents a project declares, and read or rotate their signing
+    /// secrets.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Agents {
         #[command(subcommand)]
@@ -234,6 +235,7 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Agents { command } => match command {
             AgentsCommand::List { .. } => "agents list",
             AgentsCommand::Show { .. } => "agents show",
+            AgentsCommand::Secret { .. } => "agents secret",
             AgentsCommand::RotateSecret { .. } => "agents rotate-secret",
         },
         Command::Llm { command } => match command {

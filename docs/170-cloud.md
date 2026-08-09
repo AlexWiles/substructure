@@ -80,17 +80,21 @@ carries one.
 
 | Secret | Purpose | Where it comes from |
 | --- | --- | --- |
-| Signing secret | Your worker verifies the engine's decision requests with it. | The deployment creates one per agent, on the first apply that gives it a `worker`. Read it with `subs agents show <id>`. |
+| Signing secret | Your worker verifies the engine's decision requests with it. | The deployment creates one per agent, on the first apply that gives it a `worker`. Read it with `subs agents secret <id>`. |
 | Client API key | The bearer token your clients send. | `subs keys create --label <label>`. Printed once. |
 | Provider key | Authenticates to Anthropic, OpenAI, or OpenRouter. | `subs llm set-key <block>`. |
 | Slack bot token | The bot reads and posts as your app. | `subs slack connect`. The token stays in the deployment. |
 
 The signing secret belongs to the deployment. It is never written in the file.
+Any member of the organization can read or rotate it: whoever can deploy the
+project can run its worker.
+
+Printing one is its own command, so no other output carries it.
 
 ```sh
 subs agents list
-subs agents show triage          # includes the signing secret
-subs agents rotate-secret triage # owner only
+subs agents secret triage        # the secret, on stdout
+subs agents rotate-secret triage # the old secret stops working at once
 ```
 
 ## Send a message from your backend

@@ -258,7 +258,7 @@ fn report(result: &Applied, path: &std::path::Path, globals: &CloudGlobals) {
         if !minted.is_empty() {
             println!("Signing secrets minted:");
             for id in minted {
-                println!("  {id} — `subs agents show {id}`");
+                println!("  {id}: `subs agents secret {id}`");
             }
         }
     }
