@@ -987,6 +987,7 @@ mod tests {
                 description: String::new(),
             }],
             mcp: Vec::new(),
+            tool_discovery: None,
         }
     }
 

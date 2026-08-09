@@ -97,8 +97,12 @@ pub fn resolve(connector: &McpServer, offered: &[RemoteTool], prefix: Option<&st
 ///
 /// `oversized` clears under `Search`: `call_tool` carries a name as an
 /// argument, where no name limit applies.
-pub fn discover(connector: &McpServer, resolution: Resolution) -> Resolution {
-    match discovery(connector) {
+pub fn discover(
+    connector: &McpServer,
+    resolution: Resolution,
+    default: Option<ToolDiscovery>,
+) -> Resolution {
+    match discovery(connector, default) {
         ToolDiscovery::All => resolution,
         ToolDiscovery::Search => Resolution {
             tools: Vec::new(),
@@ -108,11 +112,13 @@ pub fn discover(connector: &McpServer, resolution: Resolution) -> Resolution {
     }
 }
 
-pub fn discovery(connector: &McpServer) -> ToolDiscovery {
+/// The connection's own setting, else the agent's, else `All`.
+pub fn discovery(connector: &McpServer, default: Option<ToolDiscovery>) -> ToolDiscovery {
     connector
         .tools
         .as_ref()
         .and_then(|t| t.discovery)
+        .or(default)
         .unwrap_or_default()
 }
 
@@ -374,8 +380,11 @@ pub fn find_answer(searchable: &[Source], query: &str) -> String {
         "call_with": CALL_TOOL,
     });
     if matched.is_empty() {
+        // A search covers the connections, and nothing else. Said plainly, so
+        // an empty answer does not read as "this agent can do nothing".
         answer["note"] = serde_json::json!(format!(
-            "Nothing matched. Call {LIST_TOOLS} to see every tool."
+            "Nothing matched in the connections. Call {LIST_TOOLS} for every tool of every \
+             connection. Tools that are not from a connection are already in your tool list."
         ));
     } else if matched.len() > tools.len() {
         answer["note"] = serde_json::json!(format!(
@@ -611,7 +620,7 @@ mod tests {
 
     /// The two steps, as every caller runs them.
     fn offer(connector: &McpServer, offered: &[RemoteTool], prefix: Option<&str>) -> Resolution {
-        discover(connector, resolve(connector, offered, prefix))
+        discover(connector, resolve(connector, offered, prefix), None)
     }
 
     #[test]

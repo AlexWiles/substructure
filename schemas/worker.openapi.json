@@ -46,6 +46,17 @@
               "null"
             ]
           },
+          "tool_discovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolDiscovery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How this agent's connections reach the model, unless one of them says\notherwise in its own `tools.discovery`. Absent ⇒ [`ToolDiscovery::All`].\n\nDeclared on the agent because an agent can hold this opinion before it\nnames a connection: an agent that says `search` gets the search tools\nfrom its first turn, so a connection added later costs no cache."
+          },
           "tools": {
             "description": "Worker- or client-executed tools the model can call.",
             "items": {
@@ -1544,7 +1555,7 @@
                 "type": "null"
               }
             ],
-            "description": "How the surviving tools reach the model. Absent ⇒ [`ToolDiscovery::All`]."
+            "description": "How the surviving tools reach the model. Absent ⇒ the agent's\n`tool_discovery`, and [`ToolDiscovery::All`] if it declares none."
           },
           "exclude": {
             "items": {

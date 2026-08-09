@@ -1768,16 +1768,20 @@ impl SessionState {
                 let sync = effect.connector()?;
                 effect.tracking.is_ready().then(|| {
                     let resolved = filter::resolve(connector, &sync.tools, sync.prefix.as_deref());
-                    filter::discover(connector, resolved)
+                    filter::discover(connector, resolved, config.tool_discovery)
                 })
             })
             .collect();
         // From the config alone. A fetch that has not settled must not decide
         // whether a tool definition exists.
-        let declares_search = config
-            .mcp
-            .iter()
-            .any(|c| filter::discovery(c) == ToolDiscovery::Search);
+        // From the config alone, and true for an agent that says `search` with
+        // no connection yet: the tools exist from its first turn, so one added
+        // later moves nothing.
+        let declares_search = config.tool_discovery == Some(ToolDiscovery::Search)
+            || config
+                .mcp
+                .iter()
+                .any(|c| filter::discovery(c, config.tool_discovery) == ToolDiscovery::Search);
         if declares_search {
             resolutions.push(filter::Resolution {
                 tools: filter::search_tools(),
@@ -2450,6 +2454,7 @@ mod agent_version_tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: Vec::new(),
+            tool_discovery: None,
         }
     }
 

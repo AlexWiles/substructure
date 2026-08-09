@@ -158,6 +158,7 @@ mod tests {
             tools,
             sub_agents,
             mcp: Vec::new(),
+            tool_discovery: None,
         }
     }
 

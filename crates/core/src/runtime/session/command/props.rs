@@ -398,6 +398,7 @@ impl World {
                 tools: None,
                 auth_failure: Default::default(),
             }],
+            tool_discovery: None,
         }
     }
 

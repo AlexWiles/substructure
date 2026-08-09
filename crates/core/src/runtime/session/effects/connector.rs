@@ -194,7 +194,7 @@ impl SessionState {
             return;
         };
         let r = filter::resolve(&connector, offered, prefix);
-        let discovery = filter::discovery(&connector);
+        let discovery = filter::discovery(&connector, config.tool_discovery);
         tracing::info!(
             connection = %connection_id,
             offered = r.offered,

@@ -226,6 +226,10 @@ pub struct AgentSection {
     pub sub_agents: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpRef>,
+    /// The default for each connection of this agent. A connection overrides it
+    /// in its own `tools.discovery`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_discovery: Option<ToolDiscovery>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
     /// Environment variable holding the secret an engine here signs this
@@ -263,6 +267,7 @@ impl AgentSection {
             tools: self.tools.clone(),
             sub_agents: self.to_sub_agents(manifest),
             mcp: self.mcp.iter().map(McpRef::to_server).collect(),
+            tool_discovery: self.tool_discovery,
         })
     }
 

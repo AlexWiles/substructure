@@ -6385,6 +6385,7 @@ fn agent_config(model: &str) -> AgentConfig {
         tools: Vec::new(),
         sub_agents: Vec::new(),
         mcp: Vec::new(),
+        tool_discovery: None,
     }
 }
 
@@ -7546,6 +7547,95 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
         agg.state.tool_handler_for("call_tool"),
         ToolHandler::Server,
         "and the engine still runs the executor the worker did not replace"
+    );
+}
+
+/// The agent holds the opinion, so the tools exist before any connection does.
+/// A worker can then add a connection at any turn, and the tool list is the
+/// same as it was on turn one.
+#[test]
+fn an_agent_can_declare_search_before_it_names_a_connection() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            tool_discovery: Some(ToolDiscovery::Search),
+            mcp: vec![],
+            ..agent_config("m1")
+        }),
+    );
+    let before = agg.state.connector_tools(None).tools;
+    assert_eq!(
+        before.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["list_tools", "tool_search", "call_tool"],
+        "an agent with no connection still gets them"
+    );
+
+    let d = open_decision(&mut agg, "connect sentry");
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![node_msg("u2", Role::User, "connect sentry")],
+            actions: vec![],
+            state: None,
+            agent: Some(AgentConfig {
+                tool_discovery: Some(ToolDiscovery::Search),
+                mcp: vec![McpServer {
+                    id: "sentry".to_string(),
+                    tools: None,
+                    auth_failure: Default::default(),
+                }],
+                ..agent_config("m1")
+            }),
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+
+    assert_eq!(
+        agg.state.connector_tools(None).tools,
+        before,
+        "the first connection of the session costs no cache at all"
+    );
+}
+
+#[test]
+fn a_connection_overrides_the_agents_default() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            tool_discovery: Some(ToolDiscovery::Search),
+            mcp: vec![McpServer {
+                id: "sentry".to_string(),
+                tools: Some(McpTools {
+                    discovery: Some(ToolDiscovery::All),
+                    ..Default::default()
+                }),
+                auth_failure: Default::default(),
+            }],
+            ..agent_config("m1")
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+    assert_eq!(
+        agg.state
+            .connector_tools(None)
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "sentry__search_issues",
+            "list_tools",
+            "tool_search",
+            "call_tool"
+        ],
+        "the connection lists its own tools; the agent still gets the search"
     );
 }
 

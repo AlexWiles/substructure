@@ -182,6 +182,21 @@ list of them.
 mcp = [{ id = "aws", tools = { discovery = "search" } }]
 ```
 
+Set it for each connection of an agent with `tool_discovery`. A connection
+overrides it.
+
+```toml title="substructure.toml"
+[agent.support]
+tool_discovery = "search"
+mcp = [
+  "aws",                                             # search, from the agent
+  { id = "sentry", tools = { discovery = "all" } },  # this one is listed
+]
+```
+
+An agent that says `search` gets the three tools from its first turn, before it
+names a connection. A connection added later then costs no cache.
+
 | `discovery` | The model sees |
 | --- | --- |
 | `"all"` (the default) | Each tool the filter kept. |

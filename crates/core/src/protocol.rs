@@ -333,6 +333,14 @@ pub struct AgentConfig {
     /// MCP servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
+    /// How this agent's connections reach the model, unless one of them says
+    /// otherwise in its own `tools.discovery`. Absent ⇒ [`ToolDiscovery::All`].
+    ///
+    /// Declared on the agent because an agent can hold this opinion before it
+    /// names a connection: an agent that says `search` gets the search tools
+    /// from its first turn, so a connection added later costs no cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_discovery: Option<ToolDiscovery>,
 }
 
 /// A function tool the agent offers. The model-facing contract is
@@ -476,7 +484,8 @@ pub struct McpTools {
     pub non_destructive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotent: Option<bool>,
-    /// How the surviving tools reach the model. Absent ⇒ [`ToolDiscovery::All`].
+    /// How the surviving tools reach the model. Absent ⇒ the agent's
+    /// `tool_discovery`, and [`ToolDiscovery::All`] if it declares none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<ToolDiscovery>,
 }

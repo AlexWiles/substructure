@@ -389,6 +389,7 @@ type AgentConfig = {
     tools?: AgentTool[]
     sub_agents?: SubAgent[]
     mcp?: McpServer[]
+    tool_discovery?: "all" | "search"   // the default for each connection
 }
 
 type AgentTool = {
