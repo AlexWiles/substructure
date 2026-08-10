@@ -453,6 +453,7 @@ mod tests {
             id,
             tracking(status),
             EffectPayload::LlmCall(LlmCallState {
+                defer_tools_strategy: Default::default(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],
@@ -541,6 +542,7 @@ mod tests {
                 auth_failure: Default::default(),
             }],
             defer_tools: false,
+            defer_tools_strategy: Default::default(),
         }
     }
 

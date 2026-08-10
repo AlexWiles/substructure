@@ -77,6 +77,7 @@ impl EventProcessor for LlmDispatchProjection {
             attempt: dispatched.attempt,
             llm: call.llm.clone(),
             request: call.spec.to_request(call.prompt.clone()),
+            defer_tools_strategy: call.defer_tools_strategy,
             stream: call.stream,
             owner,
             ancestry,

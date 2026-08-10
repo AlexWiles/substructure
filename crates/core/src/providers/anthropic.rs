@@ -18,8 +18,8 @@ use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    Content, ContentPart, ErrorCode, LlmRequest, LlmResponse, ReasoningEffort, Role, SessionOwner,
-    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
+    Content, ContentPart, DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, ReasoningEffort,
+    Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -71,6 +71,11 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    /// Never sent: a strategy the engine answers drops each deferred tool
+    /// before this point. The field is what a strategy the provider answers
+    /// serializes as its own flag.
+    #[serde(skip)]
+    defer: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
 }
@@ -224,6 +229,7 @@ fn push_turn(turns: &mut Vec<AnthropicMessage>, role: &'static str, blocks: Vec<
 fn build_body(
     request: &LlmRequest,
     default_max_tokens: u64,
+    search: DeferToolsStrategy,
     stream: Option<bool>,
 ) -> AnthropicBody {
     let mut system_parts: Vec<String> = Vec::new();
@@ -299,17 +305,20 @@ fn build_body(
         }]
     });
 
-    let tools = request.offered_tools().map(|ts| {
+    let tools = request.offered_tools(search).map(|ts| {
         let mut ts: Vec<AnthropicTool> = ts
             .into_iter()
             .map(|t| AnthropicTool {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 input_schema: t.input_schema(),
+                defer: t.defer,
                 cache_control: None,
             })
             .collect();
-        if let Some(last) = ts.last_mut() {
+        // The last tool the provider reads for itself. A deferred one cannot
+        // carry a breakpoint, so the mark goes on the last that is not.
+        if let Some(last) = ts.iter_mut().rev().find(|t| !t.defer) {
             last.cache_control = Some(CacheControl::EPHEMERAL);
         }
         ts
@@ -415,8 +424,11 @@ impl MessagesResponse {
 // ── Worker-format seam ───────────────────────────────────────────────────
 
 /// The Messages API body for `request`, `stream` omitted.
-pub(crate) fn request_to_wire(request: &LlmRequest) -> serde_json::Value {
-    serde_json::to_value(build_body(request, DEFAULT_MAX_TOKENS, None)).unwrap_or_default()
+pub(crate) fn request_to_wire(
+    request: &LlmRequest,
+    search: DeferToolsStrategy,
+) -> serde_json::Value {
+    serde_json::to_value(build_body(request, DEFAULT_MAX_TOKENS, search, None)).unwrap_or_default()
 }
 
 /// A raw Messages API response → the neutral `LlmResponse`.
@@ -731,9 +743,10 @@ impl AnthropicClient {
     async fn post_messages(
         &self,
         request: &LlmRequest,
+        search: DeferToolsStrategy,
         stream: bool,
     ) -> Result<reqwest::Response, LlmCallError> {
-        let body = build_body(request, self.default_max_tokens, Some(stream));
+        let body = build_body(request, self.default_max_tokens, search, Some(stream));
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
         self.http
@@ -785,9 +798,11 @@ impl LlmCallable for AnthropicClient {
     async fn call(
         &self,
         request: &LlmRequest,
-        _ctx: &CallContext<'_>,
+        ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let resp = self.post_messages(request, false).await?;
+        let resp = self
+            .post_messages(request, ctx.defer_tools_strategy, false)
+            .await?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| {
             LlmCallError::new(ErrorCode::ProviderError, format!("read body: {e}"), true)
@@ -807,10 +822,12 @@ impl LlmCallable for AnthropicClient {
     async fn call_streaming(
         &self,
         request: &LlmRequest,
-        _ctx: &CallContext<'_>,
+        ctx: &CallContext<'_>,
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let resp = self.post_messages(request, true).await?;
+        let resp = self
+            .post_messages(request, ctx.defer_tools_strategy, true)
+            .await?;
         let status = resp.status();
 
         if !status.is_success() {
@@ -925,6 +942,7 @@ mod tests {
                 msg(Role::User, Some("hi")),
             ]),
             4096,
+            DeferToolsStrategy::Full,
             Some(false),
         );
         let v = serde_json::to_value(&body).unwrap();
@@ -956,6 +974,7 @@ mod tests {
                 result_2,
             ]),
             4096,
+            DeferToolsStrategy::Full,
             Some(false),
         );
         let v = serde_json::to_value(&body).unwrap();
@@ -997,7 +1016,7 @@ mod tests {
                 defer: false,
             },
         ]);
-        let v = request_to_wire(&r);
+        let v = request_to_wire(&r, DeferToolsStrategy::Full);
         let mark = serde_json::json!({ "type": "ephemeral" });
 
         assert_eq!(v["tools"][1]["cache_control"], mark, "after the tools");
@@ -1018,7 +1037,7 @@ mod tests {
     #[test]
     fn a_request_with_no_tools_and_no_system_still_caches_the_transcript() {
         let r = req(vec![msg(Role::User, Some("hello"))]);
-        let v = request_to_wire(&r);
+        let v = request_to_wire(&r, DeferToolsStrategy::Full);
         assert!(v.get("system").is_none());
         assert!(v.get("tools").is_none());
         let block = v["messages"][0]["content"][0].clone();
@@ -1054,7 +1073,8 @@ mod tests {
             exclude: None,
             enabled: None,
         });
-        let v = serde_json::to_value(build_body(&r, 4096, Some(true))).unwrap();
+        let v = serde_json::to_value(build_body(&r, 4096, DeferToolsStrategy::Full, Some(true)))
+            .unwrap();
         assert_eq!(v["max_tokens"], 1000);
         assert_eq!(v["tools"][0]["name"], "f");
         assert_eq!(v["tools"][0]["input_schema"]["type"], "object");

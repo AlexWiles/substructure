@@ -2,16 +2,20 @@
 //! and a provider's native wire format, for agents that declare `format`.
 //! Reuses the server-side adapters' translation code.
 
-use crate::protocol::{LlmFormat, LlmRequest, LlmResponse, StreamDelta};
+use crate::protocol::{DeferToolsStrategy, LlmFormat, LlmRequest, LlmResponse, StreamDelta};
 
 use super::{anthropic, openai};
 
 impl LlmFormat {
     /// The provider-native request body for an `llm.execute` trigger.
-    pub fn request_to_wire(&self, request: &LlmRequest) -> serde_json::Value {
+    pub fn request_to_wire(
+        &self,
+        request: &LlmRequest,
+        search: DeferToolsStrategy,
+    ) -> serde_json::Value {
         match self {
-            LlmFormat::Openai => openai::request_to_wire(request),
-            LlmFormat::Anthropic => anthropic::request_to_wire(request),
+            LlmFormat::Openai => openai::request_to_wire(request, search),
+            LlmFormat::Anthropic => anthropic::request_to_wire(request, search),
         }
     }
 
@@ -87,7 +91,7 @@ mod tests {
 
     #[test]
     fn anthropic_round_trip_omits_stream_and_maps_both_directions() {
-        let body = LlmFormat::Anthropic.request_to_wire(&request());
+        let body = LlmFormat::Anthropic.request_to_wire(&request(), DeferToolsStrategy::Full);
         assert_eq!(body["system"][0]["text"], "be nice");
         assert_eq!(body["max_tokens"], 64);
         assert!(body.get("stream").is_none(), "stream is the trigger's flag");
@@ -106,7 +110,7 @@ mod tests {
 
     #[test]
     fn openai_round_trip_omits_stream_and_maps_both_directions() {
-        let body = LlmFormat::Openai.request_to_wire(&request());
+        let body = LlmFormat::Openai.request_to_wire(&request(), DeferToolsStrategy::Full);
         assert_eq!(body["model"], "m");
         assert_eq!(body["messages"][0]["role"], "system");
         assert!(body.get("stream").is_none());

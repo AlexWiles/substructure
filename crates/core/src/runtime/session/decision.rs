@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::protocol::{
-    ClientContext, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest, LlmResponse,
-    RetryOverride, RetryPolicy,
+    ClientContext, DeferToolsStrategy, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest,
+    LlmResponse, RetryOverride, RetryPolicy,
 };
 use crate::runtime::retry::RetryTarget;
 
@@ -164,6 +164,8 @@ pub enum Trigger {
         request: LlmRequest,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<LlmFormat>,
+        #[serde(default)]
+        defer_tools_strategy: DeferToolsStrategy,
         #[serde(default)]
         stream: bool,
         attempt: u32,

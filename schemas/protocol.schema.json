@@ -8,6 +8,10 @@
           "description": "Defer every tool this agent offers, from any source, unless the tool or\nthe connection says otherwise.\n\nDeclared on the agent because an agent can hold this opinion before it\nnames a connection: one that sets it gets the search tools from its\nfirst turn, so a connection added later costs no cache.",
           "type": "boolean"
         },
+        "defer_tools_strategy": {
+          "$ref": "#/$defs/DeferToolsStrategy",
+          "description": "Which tools this agent gets to reach the ones it defers. Read only when\nsomething defers."
+        },
         "llm": {
           "description": "The `[llm.*]` block this agent's calls run on.",
           "type": [
@@ -1514,6 +1518,22 @@
         }
       ],
       "title": "DecisionTrigger"
+    },
+    "DeferToolsStrategy": {
+      "description": "How the tools an agent defers reach the model.\n\nThe engine holds every deferred definition whatever this says, and answers\nits own tools whatever this says. This chooses two things: which of those\ntools the request advertises, and whether the request carries the deferred\ndefinitions.\n\nDeclared on the agent, beside `defer_tools`: which tools an agent gets is\nthe agent's business, the same way as whether it defers at all.",
+      "oneOf": [
+        {
+          "const": "full",
+          "description": "`list_tools`, `defer_tools_strategy`, and `call_tool`.",
+          "type": "string"
+        },
+        {
+          "const": "search",
+          "description": "`defer_tools_strategy` and `call_tool`. For an agent whose catalog is too long to\nbe worth reading.",
+          "type": "string"
+        }
+      ],
+      "title": "DeferToolsStrategy"
     },
     "DraftMessage": {
       "additionalProperties": false,

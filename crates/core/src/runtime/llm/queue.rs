@@ -1,3 +1,4 @@
+use crate::protocol::DeferToolsStrategy;
 use crate::protocol::{LlmRequest, SessionOwner};
 use crate::runtime::span::SpanContext;
 
@@ -11,6 +12,8 @@ pub struct LlmTask {
     /// The `[llm.*]` block the call names; the registry key for its client.
     pub llm: String,
     pub request: LlmRequest,
+    /// How a deferred tool lowers, frozen onto the call at request time.
+    pub defer_tools_strategy: DeferToolsStrategy,
     pub stream: bool,
     pub owner: SessionOwner,
     /// Parent chain, root-first. Empty for top-level sessions.

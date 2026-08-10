@@ -9,8 +9,8 @@ use super::super::state::{AgentVersion, LocalAnswer, Logged};
 use super::*;
 use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
-    AgentTool, ConnectorToolKind, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig,
-    RetryOverride,
+    AgentTool, ConnectorToolKind, DeferToolsStrategy, Handler, LlmTool, McpServer, McpTools,
+    Message, RetryConfig, RetryOverride,
 };
 use crate::protocol::{Content, LlmResponse};
 use crate::runtime::retry::RetryTarget;
@@ -6389,6 +6389,7 @@ fn agent_config(model: &str) -> AgentConfig {
         sub_agents: Vec::new(),
         mcp: Vec::new(),
         defer_tools: false,
+        defer_tools_strategy: Default::default(),
     }
 }
 
@@ -7585,6 +7586,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
         "user-1",
         Some(AgentConfig {
             defer_tools: true,
+            defer_tools_strategy: Default::default(),
             mcp: vec![],
             ..agent_config("m1")
         }),
@@ -7606,6 +7608,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
             state: None,
             agent: Some(AgentConfig {
                 defer_tools: true,
+                defer_tools_strategy: Default::default(),
                 mcp: vec![McpServer {
                     id: "sentry".to_string(),
                     tools: None,
@@ -7634,6 +7637,7 @@ fn a_connection_overrides_the_agents_default() {
         "user-1",
         Some(AgentConfig {
             defer_tools: true,
+            defer_tools_strategy: Default::default(),
             mcp: vec![McpServer {
                 id: "sentry".to_string(),
                 tools: Some(McpTools {
@@ -7723,6 +7727,43 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
             .remote_name
             .is_empty(),
         "the provider held no schema for the inner tool, so the engine stops the call"
+    );
+}
+
+/// The set of engine tools is a strategy the agent picks. A different
+/// combination is a different `defer_tools_strategy`.
+#[test]
+fn tool_search_picks_which_engine_tools_the_agent_gets() {
+    let agent = |search: DeferToolsStrategy| AgentConfig {
+        defer_tools: true,
+        defer_tools_strategy: search,
+        tools: vec![AgentTool {
+            name: "run_payroll".to_string(),
+            description: "Run payroll.".to_string(),
+            input: None,
+            output: None,
+            handler: None,
+            defer: None,
+        }],
+        mcp: vec![],
+        ..agent_config("m1")
+    };
+    let offered = |search: DeferToolsStrategy| -> Vec<String> {
+        let agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(agent(search)));
+        super::super::state::SessionState::connector_tools(&agg.state, None)
+            .tools
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    };
+    assert_eq!(
+        offered(DeferToolsStrategy::Full),
+        ["list_tools", "tool_search", "call_tool"]
+    );
+    assert_eq!(
+        offered(DeferToolsStrategy::Search),
+        ["tool_search", "call_tool"],
+        "a catalog too long to read is one the agent can leave out"
     );
 }
 
@@ -9812,6 +9853,7 @@ fn interrupt_voiding_is_scoped_to_the_parked_path() {
     };
     let llm = |id: &str| {
         EventPayload::LlmCallRequested(LlmCallRequested {
+            defer_tools_strategy: Default::default(),
             llm: "claude".to_string(),
             format: None,
             id: id.to_string(),

@@ -123,6 +123,7 @@ fn config(llm: &str) -> AgentConfig {
         sub_agents: Vec::new(),
         mcp: Vec::new(),
         defer_tools: false,
+        defer_tools_strategy: Default::default(),
     }
 }
 

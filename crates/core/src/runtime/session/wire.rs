@@ -611,13 +611,14 @@ pub fn to_wire_trigger(
             id,
             request,
             format,
+            defer_tools_strategy,
             stream,
             attempt,
             deadline,
         } => DecisionTrigger::LlmExecute {
             id,
             request: match format {
-                Some(f) => f.request_to_wire(&request),
+                Some(f) => f.request_to_wire(&request, defer_tools_strategy),
                 None => serde_json::to_value(&request).unwrap_or_default(),
             },
             format,
@@ -982,6 +983,7 @@ mod tests {
         };
         let wire = to_wire_trigger(
             Trigger::LlmExecute {
+                defer_tools_strategy: Default::default(),
                 id: "llm-1".to_string(),
                 request: request.clone(),
                 format: Some(LlmFormat::Anthropic),
@@ -1011,6 +1013,7 @@ mod tests {
         // No format ⇒ the neutral LlmRequest JSON, verbatim.
         let wire = to_wire_trigger(
             Trigger::LlmExecute {
+                defer_tools_strategy: Default::default(),
                 format: None,
                 id: "llm-1".to_string(),
                 request: request.clone(),
@@ -1111,6 +1114,7 @@ mod tests {
             sub_agents: Vec::new(),
             mcp: Vec::new(),
             defer_tools: false,
+            defer_tools_strategy: Default::default(),
         }
     }
 
@@ -1518,6 +1522,7 @@ mod tests {
             "call-1",
             EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
+                defer_tools_strategy: Default::default(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],

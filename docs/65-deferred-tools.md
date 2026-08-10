@@ -84,6 +84,25 @@ its own `defer` overrides it. See
 An agent can mix. A tool that does not defer stays in the request, beside the
 three.
 
+## Which tools find them
+
+`tool_search` on the agent picks the set.
+
+| `tool_search` | The agent gets |
+| --- | --- |
+| `"full"` (the default) | `list_tools`, `tool_search`, `call_tool` |
+| `"search"` | `tool_search`, `call_tool` |
+
+```toml title="substructure.toml"
+[agent.support]
+defer_tools = true
+tool_search = "search"
+```
+
+Use `search` when the agent has more tools than a catalog is worth reading. The
+engine still answers a `list_tools` that reaches it; the request does not offer
+one.
+
 ## What does not change
 
 The wrapper stops at the engine. A `call_tool` becomes the call it names, with

@@ -341,6 +341,10 @@ pub struct AgentConfig {
     /// first turn, so a connection added later costs no cache.
     #[serde(default, skip_serializing_if = "is_false")]
     pub defer_tools: bool,
+    /// Which tools this agent gets to reach the ones it defers. Read only when
+    /// something defers.
+    #[serde(default, skip_serializing_if = "DeferToolsStrategy::is_default")]
+    pub defer_tools_strategy: DeferToolsStrategy,
 }
 
 /// A function tool the agent offers. The model-facing contract is
@@ -579,16 +583,51 @@ pub struct LlmRequest {
 }
 
 impl LlmRequest {
-    /// The definitions the request carries. A deferred tool is left out: the
-    /// engine still records it, still routes to it, and still finds it in a
-    /// search, but the model does not read it and the cached prefix does not
-    /// hold it.
+    /// The definitions this request carries under `search`.
     ///
     /// `None` when the request declares no tool at all, which is not the same
-    /// as one whose tools are all deferred — that one still offers the search.
-    pub fn offered_tools(&self) -> Option<Vec<&LlmTool>> {
-        let tools = self.tools.as_ref()?;
-        Some(tools.iter().filter(|t| !t.defer).collect())
+    /// as one whose tools all defer — that one still offers the search.
+    pub fn offered_tools(&self, search: DeferToolsStrategy) -> Option<Vec<&LlmTool>> {
+        Some(search.offered(self.tools.as_ref()?))
+    }
+}
+
+/// How the tools an agent defers reach the model.
+///
+/// The engine holds every deferred definition whatever this says, and answers
+/// its own tools whatever this says. This chooses two things: which of those
+/// tools the request advertises, and whether the request carries the deferred
+/// definitions.
+///
+/// Declared on the agent, beside `defer_tools`: which tools an agent gets is
+/// the agent's business, the same way as whether it defers at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "DeferToolsStrategy")]
+pub enum DeferToolsStrategy {
+    /// `list_tools`, `defer_tools_strategy`, and `call_tool`.
+    #[default]
+    Full,
+    /// `defer_tools_strategy` and `call_tool`. For an agent whose catalog is too long to
+    /// be worth reading.
+    Search,
+}
+
+impl DeferToolsStrategy {
+    /// The definitions the request carries.
+    ///
+    /// A strategy the engine answers leaves each deferred tool out: the engine
+    /// finds it and routes to it from state, and the model never reads it. A
+    /// strategy the provider answers keeps them, and the serializer marks each
+    /// one with the provider's own flag.
+    pub fn offered(self, tools: &[LlmTool]) -> Vec<&LlmTool> {
+        match self {
+            Self::Full | Self::Search => tools.iter().filter(|t| !t.defer).collect(),
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 

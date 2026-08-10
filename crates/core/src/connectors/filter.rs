@@ -15,7 +15,8 @@
 
 use crate::connectors::RemoteTool;
 use crate::protocol::{
-    ConnectorProtocol, ConnectorTool, ConnectorToolKind, LlmTool, McpServer, McpTools,
+    ConnectorProtocol, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, LlmTool, McpServer,
+    McpTools,
 };
 
 /// Separates the connector id from the tool's own name. Doubled because both
@@ -133,7 +134,7 @@ pub const LIST_TOOLS: &str = "list_tools";
 pub const TOOL_SEARCH: &str = "tool_search";
 pub const CALL_TOOL: &str = "call_tool";
 
-/// The three tools the engine answers for an agent that searches.
+/// The tools the engine answers for an agent that defers.
 ///
 /// One set, not one for each connection: a model that does not know which
 /// connection holds a tool would otherwise search each one in turn.
@@ -144,71 +145,89 @@ pub const CALL_TOOL: &str = "call_tool";
 /// Every definition is constant. Nothing about which connections exist reaches
 /// them, so a connection added during a session does not rewrite the tool list,
 /// and the provider's cache holds. The catalog rides in the answer instead.
-pub fn search_tools() -> Vec<ConnectorTool> {
-    let engine_tool =
-        |name: &str, description: String, input: serde_json::Value, kind| ConnectorTool {
-            name: name.to_string(),
-            description,
-            input: Some(input),
-            output: None,
-            connector: String::new(),
-            via: ConnectorProtocol::Mcp,
-            remote_name: String::new(),
-            kind,
-            defer: false,
-        };
-    vec![
-        engine_tool(
-            LIST_TOOLS,
-            "List every tool of every connection this agent can reach, by name. Their tools are \
-             not listed up front. Start here when you do not know what is available."
-                .to_string(),
-            serde_json::json!({ "type": "object", "properties": {} }),
-            ConnectorToolKind::List,
+///
+/// A new combination is a new arm here and a new [`DeferToolsStrategy`] value.
+pub fn search_tools(search: DeferToolsStrategy) -> Vec<ConnectorTool> {
+    match search {
+        DeferToolsStrategy::Full => vec![list_tool(), find_tool(), call_tool()],
+        DeferToolsStrategy::Search => vec![find_tool(), call_tool()],
+    }
+}
+
+fn engine_tool(
+    name: &str,
+    description: String,
+    input: serde_json::Value,
+    kind: ConnectorToolKind,
+) -> ConnectorTool {
+    ConnectorTool {
+        name: name.to_string(),
+        description,
+        input: Some(input),
+        output: None,
+        connector: String::new(),
+        via: ConnectorProtocol::Mcp,
+        remote_name: String::new(),
+        kind,
+        defer: false,
+    }
+}
+
+fn list_tool() -> ConnectorTool {
+    engine_tool(
+        LIST_TOOLS,
+        "List every tool this agent can reach, by name. They are not listed up front. Start here \
+         when you do not know what is available."
+            .to_string(),
+        serde_json::json!({ "type": "object", "properties": {} }),
+        ConnectorToolKind::List,
+    )
+}
+
+fn find_tool() -> ConnectorTool {
+    engine_tool(
+        TOOL_SEARCH,
+        format!(
+            "Search the tools this agent can reach. Answers with the name, the description, and \
+             the input schema of each match. Use `{LIST_TOOLS}` if a search finds nothing."
         ),
-        engine_tool(
-            TOOL_SEARCH,
-            format!(
-                "Search the tools of the connections this agent can reach. Answers with the \
-                 name, the description, and the input schema of each match. Use `{LIST_TOOLS}` \
-                 if a search finds nothing."
-            ),
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Words to match against tool names and descriptions."
-                    }
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to match against tool names and descriptions."
+                }
+            },
+            "required": ["query"]
+        }),
+        ConnectorToolKind::Find,
+    )
+}
+
+fn call_tool() -> ConnectorTool {
+    engine_tool(
+        CALL_TOOL,
+        format!(
+            "Run one tool this agent can reach. Take `name` from `{LIST_TOOLS}` or \
+             `{TOOL_SEARCH}` exactly as it was given, and pass that tool's own arguments."
+        ),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The tool's name, exactly as a list or a search gave it."
                 },
-                "required": ["query"]
-            }),
-            ConnectorToolKind::Find,
-        ),
-        engine_tool(
-            CALL_TOOL,
-            format!(
-                "Run one tool of a connection this agent can reach. Take `name` from \
-                 `{LIST_TOOLS}` or `{TOOL_SEARCH}` exactly as it was given, and pass that tool's \
-                 own arguments."
-            ),
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The tool's name, exactly as a list or a search gave it."
-                    },
-                    "arguments": {
-                        "type": "object",
-                        "description": "The arguments that tool's own input schema declares."
-                    }
-                },
-                "required": ["name"]
-            }),
-            ConnectorToolKind::Call,
-        ),
-    ]
+                "arguments": {
+                    "type": "object",
+                    "description": "The arguments that tool's own input schema declares."
+                }
+            },
+            "required": ["name"]
+        }),
+        ConnectorToolKind::Call,
+    )
 }
 
 /// More than this is longer than the tool list a search replaced.
@@ -312,7 +331,7 @@ pub fn list_answer(tools: &[LlmTool], connections: Vec<serde_json::Value>) -> St
     answer.to_string()
 }
 
-/// The result of a `tool_search` call. A match is a tool definition, in the
+/// The result of a `defer_tools_strategy` call. A match is a tool definition, in the
 /// shape of the tool list, so one search is the full distance to a call.
 ///
 /// A match of nothing says so, and names the tool that lists.
@@ -933,7 +952,7 @@ mod tests {
 
     #[test]
     fn one_set_of_tools_serves_the_whole_agent() {
-        let tools = search_tools();
+        let tools = search_tools(DeferToolsStrategy::Full);
         assert_eq!(
             tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
             vec![LIST_TOOLS, TOOL_SEARCH, CALL_TOOL]
@@ -947,7 +966,7 @@ mod tests {
 
     #[test]
     fn a_search_answer_and_a_call_use_one_word_for_one_thing() {
-        let call = &search_tools()[2];
+        let call = &search_tools(DeferToolsStrategy::Full)[2];
         let properties = call.input.as_ref().unwrap()["properties"].clone();
         assert_eq!(
             call.input.as_ref().unwrap()["required"],
@@ -1103,7 +1122,7 @@ mod tests {
 
     #[test]
     fn a_declared_tool_still_wins_its_name_against_a_search_tool() {
-        let r = Resolution::of(search_tools());
+        let r = Resolution::of(search_tools(DeferToolsStrategy::Full));
         let merged = merge([r], [TOOL_SEARCH]);
         assert_eq!(
             merged

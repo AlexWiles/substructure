@@ -499,6 +499,7 @@ mod tests {
             call_id,
             EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
+                defer_tools_strategy: Default::default(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt,
@@ -990,6 +991,7 @@ mod tests {
             }],
             mcp: Vec::new(),
             defer_tools: false,
+            defer_tools_strategy: Default::default(),
         }
     }
 

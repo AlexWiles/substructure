@@ -170,6 +170,7 @@ mod tests {
             sub_agents,
             mcp: Vec::new(),
             defer_tools: false,
+            defer_tools_strategy: Default::default(),
         }
     }
 

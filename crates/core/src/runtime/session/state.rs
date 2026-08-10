@@ -31,7 +31,7 @@ use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{AgentTool, ConnectorTool, ConnectorToolKind, McpServer};
+use crate::protocol::{AgentTool, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, McpServer};
 
 /// One connection as the engine's own tools see it: what the agent declared,
 /// what the connection offered, and what it said it is for.
@@ -434,6 +434,10 @@ pub struct LlmCallState {
     pub handler: LlmHandler,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<LlmFormat>,
+    /// How a deferred tool reaches the model, frozen from the block at request
+    /// time so a replay lowers the same way.
+    #[serde(default)]
+    pub defer_tools_strategy: DeferToolsStrategy,
 }
 
 /// An `LlmRequest` without its message list; the prompt is stored alongside.
@@ -1071,6 +1075,7 @@ impl SessionState {
                 call.stream = payload.stream;
                 call.handler = payload.handler;
                 call.format = payload.format;
+                call.defer_tools_strategy = payload.defer_tools_strategy;
             }
         } else {
             self.insert_effect(
@@ -1083,6 +1088,7 @@ impl SessionState {
                     stream: payload.stream,
                     handler: payload.handler,
                     format: payload.format,
+                    defer_tools_strategy: payload.defer_tools_strategy,
                 }),
             );
         }
@@ -1798,7 +1804,9 @@ impl SessionState {
             || config.tools.iter().any(|t| t.defer == Some(true))
             || config.mcp.iter().any(|c| filter::defers(c, false));
         if defers {
-            resolutions.push(filter::Resolution::of(filter::search_tools()));
+            resolutions.push(filter::Resolution::of(filter::search_tools(
+                config.defer_tools_strategy,
+            )));
         }
         let taken: Vec<&str> = config
             .tools
@@ -2244,6 +2252,7 @@ mod open_llm_calls_tests {
             call_id,
             EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
+                defer_tools_strategy: Default::default(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],
@@ -2481,6 +2490,7 @@ mod agent_version_tests {
             sub_agents: Vec::new(),
             mcp: Vec::new(),
             defer_tools: false,
+            defer_tools_strategy: Default::default(),
         }
     }
 

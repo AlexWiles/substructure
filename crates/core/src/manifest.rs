@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
 use crate::protocol::{
-    AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, Handler, LlmFormat, McpServer,
-    McpTools, RetryConfig, SubAgent,
+    AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, DeferToolsStrategy, Handler, LlmFormat,
+    McpServer, McpTools, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -230,6 +230,9 @@ pub struct AgentSection {
     /// overrides it with its own `defer`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub defer_tools: Option<bool>,
+    /// Which tools this agent gets to reach the ones it defers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_tools_strategy: Option<DeferToolsStrategy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
     /// Environment variable holding the secret an engine here signs this
@@ -268,6 +271,7 @@ impl AgentSection {
             sub_agents: self.to_sub_agents(manifest),
             mcp: self.mcp.iter().map(McpRef::to_server).collect(),
             defer_tools: self.defer_tools.unwrap_or_default(),
+            defer_tools_strategy: self.defer_tools_strategy.unwrap_or_default(),
         })
     }
 
@@ -941,6 +945,45 @@ mod tests {
             .to_string();
         assert!(err.contains("tool"), "{err}");
         assert!(err.contains("unknown field"), "names the field: {err}");
+    }
+
+    #[test]
+    fn tool_search_is_read_from_the_agent() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+defer_tools = true
+defer_tools_strategy = "search"
+"#,
+        )
+        .unwrap();
+        m.validate().unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert!(config.defer_tools);
+        assert_eq!(config.defer_tools_strategy, DeferToolsStrategy::Search);
+    }
+
+    #[test]
+    fn an_unknown_tool_search_value_is_an_error() {
+        let err = toml::from_str::<Manifest>(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+defer_tools_strategy = "sometimes"
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("sometimes"), "names the value: {err}");
     }
 
     #[test]

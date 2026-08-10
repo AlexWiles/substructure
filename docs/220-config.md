@@ -133,6 +133,7 @@ tool = { max_attempts = 3 }
 | `description` | string | What this agent does, shown to a parent that calls it. |
 | `mcp` | list | Connections. An id, or a table to take fewer tools, to put them behind a search, or to go on without one that needs authorizing: `{ id, tools, auth_failure }`. `tools` sets the filter and `defer`; see [Deferring a connection](./40-connectors.md#deferring-a-connection). `auth_failure` is `interrupt` (the default) or `degrade`; see [Connectors](./40-connectors.md#when-a-credential-stops-working). |
 | `defer_tools` | bool | `false` by default. Keeps every tool of this agent out of the request, whatever its source. A tool or a connection overrides it with its own `defer`. See [Deferred tools](./65-deferred-tools.md). |
+| `tool_search` | string | Which tools find the deferred ones: `full` (the default) or `search`. |
 | `sub_agents` | list of ids | Agents this one can call. |
 | `tools` | list | Browser tools. Each needs `handler = "client"`. |
 | `worker` | url | Where decisions go. Leave it off and the engine decides. |

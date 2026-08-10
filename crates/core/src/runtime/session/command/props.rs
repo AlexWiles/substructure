@@ -399,6 +399,7 @@ impl World {
                 auth_failure: Default::default(),
             }],
             defer_tools: false,
+            defer_tools_strategy: Default::default(),
         }
     }
 

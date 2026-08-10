@@ -91,6 +91,7 @@ impl KindSpec for LlmSpec {
             id: id.to_string(),
             request: call.spec.to_request(call.prompt.clone()),
             format: call.format,
+            defer_tools_strategy: call.defer_tools_strategy,
             stream: call.stream,
             attempt: effect.tracking.retry.attempts,
             deadline: effect.tracking.deadline,
@@ -124,6 +125,7 @@ impl KindSpec for LlmSpec {
             retry: t.retry_policy.clone(),
             handler: call.handler,
             format: call.format,
+            defer_tools_strategy: call.defer_tools_strategy,
         })]
     }
 }
@@ -197,6 +199,13 @@ pub(in crate::runtime::session) fn request(
             .collect(),
         ..request
     };
+    // Frozen from the config in force, not read again at execution: the
+    // request and the tools merged into it must lower the same way, and a
+    // replay must lower the way the original did.
+    let defer_tools_strategy = state
+        .resolve_agent_for(state.head_id.as_deref())
+        .map(|c| c.defer_tools_strategy)
+        .unwrap_or_default();
     Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
         id: call_id,
         attempt: 0,
@@ -206,6 +215,7 @@ pub(in crate::runtime::session) fn request(
         retry,
         handler,
         format,
+        defer_tools_strategy,
     })])
 }
 

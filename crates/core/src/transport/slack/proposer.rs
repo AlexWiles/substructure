@@ -405,6 +405,7 @@ mod tests {
                         sub_agents: vec![],
                         mcp: vec![],
                         defer_tools: false,
+                        defer_tools_strategy: Default::default(),
                     }
                 },
                 anchor: None,
