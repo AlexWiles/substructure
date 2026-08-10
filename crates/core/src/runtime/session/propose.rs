@@ -973,7 +973,7 @@ mod tests {
             input: None,
             output: None,
             handler,
-            defer: false,
+            defer: None,
         };
         AgentConfig {
             llm: Some("claude".to_string()),
@@ -989,7 +989,7 @@ mod tests {
                 description: String::new(),
             }],
             mcp: Vec::new(),
-            tool_discovery: None,
+            defer_tools: false,
         }
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
                 input: None,
                 output: None,
                 handler: Some(Handler::Client),
-                defer: false,
+                defer: None,
             }],
             ..Default::default()
         };

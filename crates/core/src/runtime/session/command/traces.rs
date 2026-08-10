@@ -143,7 +143,7 @@ fn config() -> AgentConfig {
         tools: Vec::new(),
         sub_agents: Vec::new(),
         mcp: Vec::new(),
-        tool_discovery: None,
+        defer_tools: false,
     }
 }
 
@@ -155,7 +155,7 @@ fn config_with_client_tool(tool: &str) -> AgentConfig {
             input: None,
             output: None,
             handler: Some(Handler::Client),
-            defer: false,
+            defer: None,
         }],
         ..config()
     }

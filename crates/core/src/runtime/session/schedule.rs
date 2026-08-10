@@ -540,7 +540,7 @@ mod tests {
                 tools: None,
                 auth_failure: Default::default(),
             }],
-            tool_discovery: None,
+            defer_tools: false,
         }
     }
 

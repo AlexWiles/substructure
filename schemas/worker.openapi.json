@@ -5,6 +5,10 @@
         "additionalProperties": false,
         "description": "A declared agent identity — the same shape whether it is written in an\n`[agent.<id>]` section or returned by a worker.\n\n`llm` names the `[llm.*]` block every proposed call runs on, and so decides\nboth the venue (the engine with a vendor key, or the agent's own worker) and\nthe wire shape of a worker-run call. It is effectively required: a config\nthat names none fails when the engine resolves a call against it.",
         "properties": {
+          "defer_tools": {
+            "description": "Defer every tool this agent offers, from any source, unless the tool or\nthe connection says otherwise.\n\nDeclared on the agent because an agent can hold this opinion before it\nnames a connection: one that sets it gets the search tools from its\nfirst turn, so a connection added later costs no cache.",
+            "type": "boolean"
+          },
           "llm": {
             "description": "The `[llm.*]` block this agent's calls run on.",
             "type": [
@@ -46,17 +50,6 @@
               "null"
             ]
           },
-          "tool_discovery": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ToolDiscovery"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "How this agent's connections reach the model, unless one of them says\notherwise in its own `tools.discovery`. Absent ⇒ [`ToolDiscovery::All`].\n\nDeclared on the agent because an agent can hold this opinion before it\nnames a connection: an agent that says `search` gets the search tools\nfrom its first turn, so a connection added later costs no cache."
-          },
           "tools": {
             "description": "Worker- or client-executed tools the model can call.",
             "items": {
@@ -76,8 +69,11 @@
         "description": "A function tool the agent offers. The model-facing contract is\n`name`/`description`/`input`/`output`; `handler` selects where a call runs —\n`Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).\n`server` is invalid for tools: engine-executed tools come from a connector,\nwhich a worker declares by id rather than by tool.",
         "properties": {
           "defer": {
-            "description": "Keep this tool out of the request. See [`LlmTool::defer`].",
-            "type": "boolean"
+            "description": "Keep this tool out of the request. See [`LlmTool::defer`]. Absent ⇒\nthe agent's `defer_tools`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "description": {
             "type": "string"
@@ -1499,7 +1495,7 @@
         "description": "A tool's declared contract: flat on the wire. Providers that need\nOpenAI-style `{\"type\": \"function\", \"function\": {…}}` nesting re-wrap at\ntheir own boundary.",
         "properties": {
           "defer": {
-            "description": "Keep this definition out of the request.\n\nThe engine still records it, still routes a call to it, and still finds\nit in a search. Only the request omits it, which is what keeps a large\ntool set out of the model's context and out of the cached prefix.\n\nAny source can set it: a worker tool, a connection under\n`discovery = \"search\"`, or whatever comes next. Deferral is a property\nof a tool, not of where it came from.",
+            "description": "Keep this definition out of the request.\n\nThe engine still records it, still routes a call to it, and still finds\nit in a search. Only the request omits it, which is what keeps a large\ntool set out of the model's context and out of the cached prefix.\n\nAny source can set it: a tool the config declares, a connection, or\nwhatever comes next. Deferral is a property of a tool, not of where it\ncame from.",
             "type": "boolean"
           },
           "description": {
@@ -1552,18 +1548,14 @@
       },
       "McpTools": {
         "additionalProperties": false,
-        "description": "What the model sees of one connection, for one agent: which tools, and how\nthey reach the model.\n\nThe filter is applied in order — capability predicates, then `include`, then\n`exclude` — and only ever narrowing, so a filter can never widen what the\nconnection grants. `discovery` runs after it and removes nothing.\n\n`include`/`exclude` are globs matched against the tool's name on the\nconnection, the name its own documentation uses, not the prefixed name the\nmodel sees. Capability predicates read the MCP annotations; a tool that\ncarries none fails the predicate, so an unannotated server yields nothing\nunder `read_only` rather than silently passing everything through.",
+        "description": "What the model sees of one connection, for one agent: which tools, and how\nthey reach the model.\n\nThe filter is applied in order — capability predicates, then `include`, then\n`exclude` — and only ever narrowing, so a filter can never widen what the\nconnection grants. `defer` runs after it and removes nothing.\n\n`include`/`exclude` are globs matched against the tool's name on the\nconnection, the name its own documentation uses, not the prefixed name the\nmodel sees. Capability predicates read the MCP annotations; a tool that\ncarries none fails the predicate, so an unannotated server yields nothing\nunder `read_only` rather than silently passing everything through.",
         "properties": {
-          "discovery": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ToolDiscovery"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "How the surviving tools reach the model. Absent ⇒ the agent's\n`tool_discovery`, and [`ToolDiscovery::All`] if it declares none."
+          "defer": {
+            "description": "Keep every surviving tool out of the request. See [`LlmTool::defer`].\nAbsent ⇒ the agent's `defer_tools`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "exclude": {
             "items": {
@@ -1900,22 +1892,6 @@
         ],
         "title": "ToolCallFunction",
         "type": "object"
-      },
-      "ToolDiscovery": {
-        "description": "How a connection's tools reach the model.",
-        "oneOf": [
-          {
-            "const": "all",
-            "description": "One definition for each tool the filter kept.",
-            "type": "string"
-          },
-          {
-            "const": "search",
-            "description": "Two definitions for the whole connection: `<id>__find_tools` and\n`<id>__call_tool`. The pair is fixed for the session, and the provider\nkeys its cache on the front of the request, so the cache survives a find\nat turn thirty.",
-            "type": "string"
-          }
-        ],
-        "title": "ToolDiscovery"
       },
       "ToolInput": {
         "description": "The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",

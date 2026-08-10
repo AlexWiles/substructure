@@ -389,7 +389,7 @@ type AgentConfig = {
     tools?: AgentTool[]
     sub_agents?: SubAgent[]
     mcp?: McpServer[]
-    tool_discovery?: "all" | "search"   // the default for each connection
+    defer_tools?: boolean       // the default for every tool of this agent
 }
 
 type AgentTool = {
@@ -398,7 +398,8 @@ type AgentTool = {
     input?: unknown             // JSON Schema for the arguments
     output?: unknown            // JSON Schema the result must match
     handler?: "worker" | "client"  // default worker
-    defer?: boolean             // keep it out of the request; a search still finds it
+    defer?: boolean             // keep it out of the request; a search still finds it.
+                                // omitted: the agent's defer_tools
 }
 
 type SubAgent = {
@@ -417,7 +418,7 @@ type McpTools = {
     read_only?: boolean         // these read the MCP annotations
     non_destructive?: boolean
     idempotent?: boolean
-    discovery?: "all" | "search" // omitted: "all". search offers list_tools, find_tools, and call_tool
+    defer?: boolean             // omitted: the agent's defer_tools
 }
 ```
 

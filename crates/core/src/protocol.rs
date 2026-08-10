@@ -333,14 +333,14 @@ pub struct AgentConfig {
     /// MCP servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
-    /// How this agent's connections reach the model, unless one of them says
-    /// otherwise in its own `tools.discovery`. Absent ⇒ [`ToolDiscovery::All`].
+    /// Defer every tool this agent offers, from any source, unless the tool or
+    /// the connection says otherwise.
     ///
     /// Declared on the agent because an agent can hold this opinion before it
-    /// names a connection: an agent that says `search` gets the search tools
-    /// from its first turn, so a connection added later costs no cache.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_discovery: Option<ToolDiscovery>,
+    /// names a connection: one that sets it gets the search tools from its
+    /// first turn, so a connection added later costs no cache.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub defer_tools: bool,
 }
 
 /// A function tool the agent offers. The model-facing contract is
@@ -360,9 +360,10 @@ pub struct AgentTool {
     pub output: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handler: Option<Handler>,
-    /// Keep this tool out of the request. See [`LlmTool::defer`].
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub defer: bool,
+    /// Keep this tool out of the request. See [`LlmTool::defer`]. Absent ⇒
+    /// the agent's `defer_tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer: Option<bool>,
 }
 
 /// One tool the engine resolved from a connector and will execute itself.
@@ -390,8 +391,8 @@ pub struct ConnectorTool {
     pub remote_name: String,
     #[serde(default, skip_serializing_if = "ConnectorToolKind::is_remote")]
     pub kind: ConnectorToolKind,
-    /// Keep this tool out of the request. See [`LlmTool::defer`]. Set from the
-    /// connection's `discovery`.
+    /// Keep this tool out of the request. See [`LlmTool::defer`]. Resolved
+    /// from the connection's `defer` and the agent's `defer_tools`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub defer: bool,
 }
@@ -471,7 +472,7 @@ impl AuthFailure {
 ///
 /// The filter is applied in order — capability predicates, then `include`, then
 /// `exclude` — and only ever narrowing, so a filter can never widen what the
-/// connection grants. `discovery` runs after it and removes nothing.
+/// connection grants. `defer` runs after it and removes nothing.
 ///
 /// `include`/`exclude` are globs matched against the tool's name on the
 /// connection, the name its own documentation uses, not the prefixed name the
@@ -491,25 +492,10 @@ pub struct McpTools {
     pub non_destructive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotent: Option<bool>,
-    /// How the surviving tools reach the model. Absent ⇒ the agent's
-    /// `tool_discovery`, and [`ToolDiscovery::All`] if it declares none.
+    /// Keep every surviving tool out of the request. See [`LlmTool::defer`].
+    /// Absent ⇒ the agent's `defer_tools`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery: Option<ToolDiscovery>,
-}
-
-/// How a connection's tools reach the model.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(title = "ToolDiscovery")]
-pub enum ToolDiscovery {
-    /// One definition for each tool the filter kept.
-    #[default]
-    All,
-    /// Two definitions for the whole connection: `<id>__find_tools` and
-    /// `<id>__call_tool`. The pair is fixed for the session, and the provider
-    /// keys its cache on the front of the request, so the cache survives a find
-    /// at turn thirty.
-    Search,
+    pub defer: Option<bool>,
 }
 
 /// A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,
@@ -566,9 +552,9 @@ pub struct LlmTool {
     /// it in a search. Only the request omits it, which is what keeps a large
     /// tool set out of the model's context and out of the cached prefix.
     ///
-    /// Any source can set it: a worker tool, a connection under
-    /// `discovery = "search"`, or whatever comes next. Deferral is a property
-    /// of a tool, not of where it came from.
+    /// Any source can set it: a tool the config declares, a connection, or
+    /// whatever comes next. Deferral is a property of a tool, not of where it
+    /// came from.
     #[serde(default, skip_serializing_if = "is_false")]
     pub defer: bool,
 }

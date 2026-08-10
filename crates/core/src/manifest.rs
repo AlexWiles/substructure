@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
 use crate::protocol::{
     AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, Handler, LlmFormat, McpServer,
-    McpTools, RetryConfig, SubAgent, ToolDiscovery,
+    McpTools, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -226,10 +226,10 @@ pub struct AgentSection {
     pub sub_agents: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpRef>,
-    /// The default for each connection of this agent. A connection overrides it
-    /// in its own `tools.discovery`.
+    /// The default for every tool of this agent. A tool or a connection
+    /// overrides it with its own `defer`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_discovery: Option<ToolDiscovery>,
+    pub defer_tools: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
     /// Environment variable holding the secret an engine here signs this
@@ -267,7 +267,7 @@ impl AgentSection {
             tools: self.tools.clone(),
             sub_agents: self.to_sub_agents(manifest),
             mcp: self.mcp.iter().map(McpRef::to_server).collect(),
-            tool_discovery: self.tool_discovery,
+            defer_tools: self.defer_tools.unwrap_or_default(),
         })
     }
 
@@ -340,7 +340,7 @@ pub struct McpEntry {
 }
 
 /// The file's spelling of [`McpTools`], mirrored for the one reason
-/// [`McpEntry`] is: `deny_unknown_fields`. A misspelled `discovery` would
+/// [`McpEntry`] is: `deny_unknown_fields`. A misspelled `defer` would
 /// otherwise read as no setting. [`McpTools`] documents the fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -356,7 +356,7 @@ pub struct McpToolsEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotent: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery: Option<ToolDiscovery>,
+    pub defer: Option<bool>,
 }
 
 impl McpToolsEntry {
@@ -367,7 +367,7 @@ impl McpToolsEntry {
             read_only: self.read_only,
             non_destructive: self.non_destructive,
             idempotent: self.idempotent,
-            discovery: self.discovery,
+            defer: self.defer,
         }
     }
 }
@@ -944,41 +944,38 @@ mod tests {
     }
 
     #[test]
-    fn discovery_is_read_from_the_tools_table() {
-        let m = connected(r#"[{ id = "sentry", tools = { discovery = "search" } }]"#).unwrap();
+    fn defer_is_read_from_the_tools_table() {
+        let m = connected(r#"[{ id = "sentry", tools = { defer = true } }]"#).unwrap();
         m.validate().unwrap();
         let agents = m.agents();
         let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
-        assert_eq!(
-            mcp[0].tools.as_ref().expect("a table").discovery,
-            Some(ToolDiscovery::Search)
-        );
+        assert_eq!(mcp[0].tools.as_ref().expect("a table").defer, Some(true));
 
         let m = connected(r#"[{ id = "sentry", tools = { read_only = true } }]"#).unwrap();
         let agents = m.agents();
         let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
         assert!(
-            mcp[0].tools.as_ref().expect("a table").discovery.is_none(),
-            "unset ⇒ every tool, the behaviour that predates the key"
+            mcp[0].tools.as_ref().expect("a table").defer.is_none(),
+            "unset ⇒ the agent decides"
         );
     }
 
     /// The same fault as a misspelled `tools`, one level down.
     #[test]
     fn a_misspelled_key_inside_the_tools_table_is_an_error() {
-        let err = connected(r#"[{ id = "sentry", tools = { discovry = "search" } }]"#)
+        let err = connected(r#"[{ id = "sentry", tools = { defr = true } }]"#)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("discovry"), "names the field: {err}");
+        assert!(err.contains("defr"), "names the field: {err}");
         assert!(err.contains("unknown field"), "{err}");
     }
 
     #[test]
-    fn an_unknown_discovery_value_is_an_error() {
-        let err = connected(r#"[{ id = "sentry", tools = { discovery = "lazy" } }]"#)
+    fn a_defer_that_is_not_a_boolean_is_an_error() {
+        let err = connected(r#"[{ id = "sentry", tools = { defer = "search" } }]"#)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("lazy"), "names the value: {err}");
+        assert!(err.contains("boolean"), "says what it wanted: {err}");
     }
 
     #[test]

@@ -11,14 +11,15 @@ use crate::protocol::{
 };
 
 impl AgentTool {
-    /// The model-facing contract, with routing stripped.
-    pub fn to_llm_tool(&self) -> LlmTool {
+    /// The model-facing contract, with routing stripped. `default` is the
+    /// agent's `defer_tools`, which a tool that states its own overrides.
+    pub fn to_llm_tool(&self, default: bool) -> LlmTool {
         LlmTool {
             name: self.name.clone(),
             description: self.description.clone(),
             input: self.input.clone(),
             output: self.output.clone(),
-            defer: self.defer,
+            defer: self.defer.unwrap_or(default),
         }
     }
 }
@@ -72,7 +73,11 @@ impl AgentConfig {
         if self.tools.is_empty() && self.sub_agents.is_empty() {
             None
         } else {
-            let mut tools: Vec<LlmTool> = self.tools.iter().map(AgentTool::to_llm_tool).collect();
+            let mut tools: Vec<LlmTool> = self
+                .tools
+                .iter()
+                .map(|t| t.to_llm_tool(self.defer_tools))
+                .collect();
             tools.extend(self.sub_agents.iter().map(SubAgent::to_llm_tool));
             Some(tools)
         }
@@ -151,7 +156,7 @@ mod tests {
             input: None,
             output: None,
             handler,
-            defer: false,
+            defer: None,
         }
     }
 
@@ -164,7 +169,7 @@ mod tests {
             tools,
             sub_agents,
             mcp: Vec::new(),
-            tool_discovery: None,
+            defer_tools: false,
         }
     }
 

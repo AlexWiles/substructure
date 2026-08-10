@@ -37,9 +37,7 @@ struct CacheControl {
 }
 
 impl CacheControl {
-    fn ephemeral() -> Option<Self> {
-        Some(Self { kind: "ephemeral" })
-    }
+    const EPHEMERAL: Self = Self { kind: "ephemeral" };
 }
 
 #[derive(Serialize)]
@@ -118,7 +116,7 @@ impl RequestBlock {
             | RequestBlock::Image { cache_control, .. }
             | RequestBlock::ToolUse { cache_control, .. }
             | RequestBlock::ToolResult { cache_control, .. } => {
-                *cache_control = CacheControl::ephemeral()
+                *cache_control = Some(CacheControl::EPHEMERAL)
             }
         }
     }
@@ -297,23 +295,22 @@ fn build_body(
         vec![SystemBlock {
             kind: "text",
             text: system_parts.join("\n\n"),
-            cache_control: CacheControl::ephemeral(),
+            cache_control: Some(CacheControl::EPHEMERAL),
         }]
     });
 
-    let tools: Option<Vec<AnthropicTool>> = request.offered_tools().map(|ts| {
-        ts.into_iter()
+    let tools = request.offered_tools().map(|ts| {
+        let mut ts: Vec<AnthropicTool> = ts
+            .into_iter()
             .map(|t| AnthropicTool {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 input_schema: t.input_schema(),
                 cache_control: None,
             })
-            .collect()
-    });
-    let tools = tools.map(|mut ts| {
+            .collect();
         if let Some(last) = ts.last_mut() {
-            last.cache_control = CacheControl::ephemeral();
+            last.cache_control = Some(CacheControl::EPHEMERAL);
         }
         ts
     });

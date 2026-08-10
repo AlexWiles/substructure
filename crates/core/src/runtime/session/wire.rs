@@ -796,7 +796,7 @@ mod tests {
             input: None,
             output: None,
             handler: Some(Handler::Server),
-            defer: false,
+            defer: None,
         });
         let err = resolve_response(
             DecisionResponse {
@@ -1110,7 +1110,7 @@ mod tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: Vec::new(),
-            tool_discovery: None,
+            defer_tools: false,
         }
     }
 

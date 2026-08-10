@@ -31,9 +31,7 @@ use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{
-    AgentTool, ConnectorTool, ConnectorToolKind, Handler, McpServer, ToolDiscovery,
-};
+use crate::protocol::{AgentTool, ConnectorTool, ConnectorToolKind, McpServer};
 
 /// One connection as the engine's own tools see it: what the agent declared,
 /// what the connection offered, and what it said it is for.
@@ -59,24 +57,17 @@ impl CallTarget {
             CallTarget::Declared(t) => t.input.clone(),
         }
     }
-
-    pub fn name(&self) -> &str {
-        match self {
-            CallTarget::Connector(t) => &t.name,
-            CallTarget::Declared(t) => &t.name,
-        }
-    }
 }
 
 /// The tool's own arguments, out of the `call_tool` wrapper.
 ///
 /// A model that sent them as a JSON string meant the object, and we hold the
 /// schema that says so. Refusing it would teach the model nothing.
-fn inner_arguments(raw: &serde_json::Value) -> String {
+pub(in crate::runtime::session) fn inner_arguments(raw: &serde_json::Value) -> String {
     match raw.get("arguments") {
         Some(serde_json::Value::String(text)) => text.clone(),
         Some(value) => value.to_string(),
-        None => String::new(),
+        None => "{}".to_string(),
     }
 }
 
@@ -1750,10 +1741,7 @@ impl SessionState {
     pub fn tool_handler_for(&self, name: &str) -> ToolHandler {
         let config = self.resolve_agent_for(self.head_id.as_deref());
         match config.as_ref().and_then(|c| c.tool(name)) {
-            Some(t) => match t.handler {
-                Some(Handler::Client) => ToolHandler::Client,
-                _ => ToolHandler::Worker,
-            },
+            Some(t) => ToolHandler::declared(t.handler),
             None if self.connector_tool_for(name).is_some() => ToolHandler::Server,
             None => ToolHandler::Worker,
         }
@@ -1797,7 +1785,7 @@ impl SessionState {
                         connector,
                         &sync.tools,
                         sync.prefix.as_deref(),
-                        filter::defers(connector, config.tool_discovery),
+                        filter::defers(connector, config.defer_tools),
                     )
                 })
             })
@@ -1806,20 +1794,11 @@ impl SessionState {
         // whether a tool definition exists. An agent that says `search` thus
         // gets these from its first turn, and a connection added later moves
         // no definition.
-        let defers = config.tool_discovery == Some(ToolDiscovery::Search)
-            || config.tools.iter().any(|t| t.defer)
-            || config
-                .mcp
-                .iter()
-                .any(|c| filter::defers(c, config.tool_discovery));
+        let defers = config.defer_tools
+            || config.tools.iter().any(|t| t.defer == Some(true))
+            || config.mcp.iter().any(|c| filter::defers(c, false));
         if defers {
-            resolutions.push(filter::Resolution {
-                tools: filter::search_tools(),
-                offered: 0,
-                unannotated: 0,
-                unmatched_include: Vec::new(),
-                oversized: Vec::new(),
-            });
+            resolutions.push(filter::Resolution::of(filter::search_tools()));
         }
         let taken: Vec<&str> = config
             .tools
@@ -1911,7 +1890,10 @@ impl SessionState {
         let Some(config) = self.resolve_agent_for(self.head_id.as_deref()) else {
             return Vec::new();
         };
-        let declared = config.tools.iter().map(AgentTool::to_llm_tool);
+        let declared = config
+            .tools
+            .iter()
+            .map(|t| t.to_llm_tool(config.defer_tools));
         let connector = self
             .connector_tools_for_config(&config)
             .tools
@@ -1980,23 +1962,6 @@ impl SessionState {
         classify_arguments(&inner_arguments(&raw), target.input().as_ref())
             .error()
             .map(|e| format!("`{named}`: {e}"))
-    }
-
-    /// The `output` contract of the tool a `call_tool` ran. The model was
-    /// offered the wrapper, which declares none, so the connection's own
-    /// contract would otherwise go unchecked.
-    pub(in crate::runtime::session) fn connector_output_schema(
-        &self,
-        tool_call_id: &str,
-    ) -> Option<serde_json::Value> {
-        let target = self.tool_call(tool_call_id)?.target.clone()?;
-        if target.kind != ConnectorToolKind::Call || target.remote_name.is_empty() {
-            return None;
-        }
-        let source = self.connector_source(&target.connector)?;
-        filter::kept(&source.server, &source.offered, &target.remote_name)?
-            .output
-            .clone()
     }
 
     /// Connections the config in force on `leaf` names but has never fetched.
@@ -2515,7 +2480,7 @@ mod agent_version_tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: Vec::new(),
-            tool_discovery: None,
+            defer_tools: false,
         }
     }
 

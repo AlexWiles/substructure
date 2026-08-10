@@ -74,11 +74,12 @@ Deferral is a property of a tool. Each source sets the flag its own way.
 | Source | How |
 | --- | --- |
 | A tool your worker declares | `defer: true` on the definition |
-| One connection | `tools = { discovery = "search" }` on the entry |
-| Each connection of an agent | `tool_discovery = "search"` |
+| One connection | `tools = { defer = true }` on the entry |
+| Every tool of an agent | `defer_tools = true` |
 
-See [Connectors](./40-connectors.md#tool-discovery) for the two connection
-forms.
+`defer_tools` is the agent's default, and a tool or a connection that states
+its own `defer` overrides it. See
+[Connectors](./40-connectors.md#deferring-a-connection).
 
 An agent can mix. A tool that does not defer stays in the request, beside the
 three.
@@ -116,8 +117,8 @@ changes.
 | A tool that does not defer is added | It enters the request, and the cache behind it is lost. |
 
 The engine decides from the config alone, and not from what a fetch has
-answered. An agent that says `tool_discovery = "search"` thus carries the three
-tools from its first turn, before it names one connection. A connection added in
+answered. An agent that sets `defer_tools` thus carries the three tools from
+its first turn, before it names one connection. A connection added in
 turn 50 moves no definition.
 
 The answers are where everything variable lives: which connections exist, how

@@ -17,12 +17,12 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo, Handler};
+use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo};
 use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{ToolHandler, Trigger};
 use crate::runtime::session::events::*;
-use crate::runtime::session::state::{CallTarget, EffectKind, SessionState};
+use crate::runtime::session::state::{inner_arguments, CallTarget, EffectKind, SessionState};
 use crate::runtime::session::tool_contract::{declared_tool, output_violation, DeclaredTool};
 use crate::runtime::Caller;
 
@@ -253,9 +253,21 @@ fn unwrap_call(
         .is_none()
         .then(|| state.call_tool_target(&named))
         .flatten();
-    let inner = inner_arguments(&arguments);
+    let Some(target) = target else {
+        return (
+            name,
+            arguments,
+            ToolHandler::Server,
+            Some(ConnectorTarget {
+                connector: String::new(),
+                remote_name: String::new(),
+                kind: ConnectorToolKind::Call,
+            }),
+        );
+    };
+    let inner = inner_arguments(&serde_json::from_str(&arguments).unwrap_or_default());
     match target {
-        Some(CallTarget::Connector(tool)) => (
+        CallTarget::Connector(tool) => (
             tool.name.clone(),
             inner,
             ToolHandler::Server,
@@ -265,36 +277,7 @@ fn unwrap_call(
                 kind: ConnectorToolKind::Remote,
             }),
         ),
-        Some(CallTarget::Declared(tool)) => (
-            tool.name,
-            inner,
-            match tool.handler {
-                Some(Handler::Client) => ToolHandler::Client,
-                _ => ToolHandler::Worker,
-            },
-            None,
-        ),
-        None => (
-            name,
-            arguments,
-            ToolHandler::Server,
-            Some(ConnectorTarget {
-                connector: String::new(),
-                remote_name: String::new(),
-                kind: ConnectorToolKind::Call,
-            }),
-        ),
-    }
-}
-
-/// The tool's own arguments, out of the wrapper. A model that sent them as a
-/// JSON string meant the object.
-fn inner_arguments(arguments: &str) -> String {
-    let raw: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
-    match raw.get("arguments") {
-        Some(serde_json::Value::String(text)) => text.clone(),
-        Some(value) => value.to_string(),
-        None => "{}".to_string(),
+        CallTarget::Declared(tool) => (tool.name, inner, ToolHandler::declared(tool.handler), None),
     }
 }
 
@@ -309,12 +292,11 @@ fn argument(arguments: &str, key: &str) -> Option<String> {
 impl SessionState {
     /// The `output` schema the settling tool was declared with, resolved by
     /// lineage on the active path. `None` when the tool declared no output
-    /// contract or the call has no resolvable spec. A `call_tool` is asked of
-    /// the connection instead.
+    /// contract or the call has no resolvable spec.
+    ///
+    /// A `call_tool` was rewritten into the tool it named before it was
+    /// recorded, so the name reaching here is one the spec carries.
     fn declared_output_schema(&self, tool_call_id: &str, name: &str) -> Option<serde_json::Value> {
-        if let Some(schema) = self.connector_output_schema(tool_call_id) {
-            return Some(schema);
-        }
         let tree = self.message_tree();
         let path = tree.path_to(tree.head_id.as_deref()?);
         match declared_tool(tool_call_id, name, &path, |id| self.llm_call(id)) {

@@ -10,7 +10,7 @@ use super::*;
 use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
     AgentTool, ConnectorToolKind, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig,
-    RetryOverride, ToolDiscovery,
+    RetryOverride,
 };
 use crate::protocol::{Content, LlmResponse};
 use crate::runtime::retry::RetryTarget;
@@ -2978,7 +2978,7 @@ fn declare_client_tool(agg: &mut SessionAggregate, name: &str) {
         input: None,
         output: None,
         handler: Some(Handler::Client),
-        defer: false,
+        defer: None,
     });
     agg.state.agent_versions.push(Logged {
         seq: agg.state.agent_versions.last().map_or(0, |v| v.seq),
@@ -3426,7 +3426,7 @@ fn tool_named(name: &str, handler: Option<Handler>) -> AgentTool {
         input: None,
         output: None,
         handler,
-        defer: false,
+        defer: None,
     }
 }
 
@@ -6388,7 +6388,7 @@ fn agent_config(model: &str) -> AgentConfig {
         tools: Vec::new(),
         sub_agents: Vec::new(),
         mcp: Vec::new(),
-        tool_discovery: None,
+        defer_tools: false,
     }
 }
 
@@ -6873,7 +6873,7 @@ fn a_fetch_is_keyed_on_the_connection_not_the_agent_version() {
         input: None,
         output: None,
         handler: None,
-        defer: false,
+        defer: None,
     });
     let d = open_decision(&mut agg, "hi");
     let events = submit_agent(
@@ -7097,7 +7097,7 @@ fn connector_tools_reach_the_model_and_route_to_the_engine() {
     );
 }
 
-// ── Tool discovery ───────────────────────────────────────────────────
+// ── Deferred tools ───────────────────────────────────────────────────
 
 fn searching_connector_config(ids: &[&str]) -> AgentConfig {
     AgentConfig {
@@ -7106,7 +7106,7 @@ fn searching_connector_config(ids: &[&str]) -> AgentConfig {
             .map(|id| McpServer {
                 id: id.to_string(),
                 tools: Some(McpTools {
-                    discovery: Some(ToolDiscovery::Search),
+                    defer: Some(true),
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
@@ -7315,7 +7315,7 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
                 id: "sentry".to_string(),
                 tools: Some(McpTools {
                     exclude: vec!["resolve_*".to_string()],
-                    discovery: Some(ToolDiscovery::Search),
+                    defer: Some(true),
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
@@ -7463,7 +7463,7 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
                 McpServer {
                     id: "aws".to_string(),
                     tools: Some(McpTools {
-                        discovery: Some(ToolDiscovery::Search),
+                        defer: Some(true),
                         ..Default::default()
                     }),
                     auth_failure: Default::default(),
@@ -7532,16 +7532,16 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
         Some(AgentConfig {
             tools: vec![AgentTool {
                 name: "tool_search".to_string(),
-                description: "the worker's own discovery".to_string(),
+                description: "the worker's own search".to_string(),
                 input: None,
                 output: None,
                 handler: None,
-                defer: false,
+                defer: None,
             }],
             mcp: vec![McpServer {
                 id: "sentry".to_string(),
                 tools: Some(McpTools {
-                    discovery: Some(ToolDiscovery::Search),
+                    defer: Some(true),
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
@@ -7584,7 +7584,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
         "tenant-a",
         "user-1",
         Some(AgentConfig {
-            tool_discovery: Some(ToolDiscovery::Search),
+            defer_tools: true,
             mcp: vec![],
             ..agent_config("m1")
         }),
@@ -7605,7 +7605,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
             actions: vec![],
             state: None,
             agent: Some(AgentConfig {
-                tool_discovery: Some(ToolDiscovery::Search),
+                defer_tools: true,
                 mcp: vec![McpServer {
                     id: "sentry".to_string(),
                     tools: None,
@@ -7633,11 +7633,11 @@ fn a_connection_overrides_the_agents_default() {
         "tenant-a",
         "user-1",
         Some(AgentConfig {
-            tool_discovery: Some(ToolDiscovery::Search),
+            defer_tools: true,
             mcp: vec![McpServer {
                 id: "sentry".to_string(),
                 tools: Some(McpTools {
-                    discovery: Some(ToolDiscovery::All),
+                    defer: Some(false),
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
@@ -7726,6 +7726,52 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
     );
 }
 
+/// The agent-wide default reaches every source, not only the connections, and
+/// a tool that states its own overrides it.
+#[test]
+fn defer_tools_defers_every_source_and_a_tool_can_opt_out() {
+    let agent = |defer_tools: bool| AgentConfig {
+        defer_tools,
+        tools: vec![
+            AgentTool {
+                name: "run_payroll".to_string(),
+                description: "Run payroll.".to_string(),
+                input: None,
+                output: None,
+                handler: None,
+                defer: None,
+            },
+            AgentTool {
+                name: "get_time".to_string(),
+                description: "The time.".to_string(),
+                input: None,
+                output: None,
+                handler: None,
+                defer: Some(false),
+            },
+        ],
+        ..agent_config("m1")
+    };
+    let deferred = |config: AgentConfig| -> Vec<String> {
+        config
+            .tools_as_llm()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.defer)
+            .map(|t| t.name)
+            .collect()
+    };
+    assert!(
+        deferred(agent(false)).is_empty(),
+        "nothing defers without the agent saying so"
+    );
+    assert_eq!(
+        deferred(agent(true)),
+        ["run_payroll"],
+        "the agent's default reaches a tool it declares, and `defer: false` opts out"
+    );
+}
+
 /// Deferral belongs to a tool, not to MCP. A worker tool that sets it is left
 /// out of the request, found by a search, and run by the worker.
 #[test]
@@ -7746,7 +7792,7 @@ fn a_worker_tool_can_defer_and_the_search_finds_it() {
                     })),
                     output: None,
                     handler: None,
-                    defer: true,
+                    defer: Some(true),
                 },
                 AgentTool {
                     name: "get_time".to_string(),
@@ -7754,7 +7800,7 @@ fn a_worker_tool_can_defer_and_the_search_finds_it() {
                     input: None,
                     output: None,
                     handler: None,
-                    defer: false,
+                    defer: None,
                 },
             ],
             mcp: vec![],
@@ -7815,7 +7861,7 @@ fn a_deferred_worker_tool_still_checks_its_arguments() {
                 })),
                 output: None,
                 handler: None,
-                defer: true,
+                defer: Some(true),
             }],
             mcp: vec![],
             ..agent_config("m1")
@@ -7860,6 +7906,46 @@ fn call_tool_refuses_a_connection_this_agent_does_not_have() {
         message.contains("github") && message.contains("sentry"),
         "the message names what was asked for and what is there: {message}"
     );
+}
+
+/// The connection's own `output` contract rides on the tool the engine holds,
+/// so the ordinary check finds it. There is no separate path for a `call_tool`:
+/// the wrapper is rewritten into this tool before anything settles.
+#[test]
+fn a_deferred_connector_tool_carries_its_output_contract() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(searching_connector_config(&["sentry"])),
+    );
+    let schema = serde_json::json!({ "type": "object", "required": ["url"] });
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::ConnectorSync,
+            "sentry".to_string(),
+            None,
+            Outcome::Connector {
+                prefix: Some("sentry".to_string()),
+                tools: vec![RemoteTool {
+                    output: Some(schema.clone()),
+                    ..remote_tool("search_issues")
+                }],
+                instructions: None,
+            },
+        ),
+        &system(),
+    );
+    let tool = agg
+        .state
+        .connector_tools(None)
+        .tools
+        .into_iter()
+        .find(|t| t.name == "sentry__search_issues")
+        .expect("the engine holds it");
+    assert!(tool.defer, "and the request leaves it out");
+    assert_eq!(tool.to_llm_tool().output, Some(schema));
 }
 
 /// A deferred tool is left out of the request, and nothing else about it
@@ -8135,7 +8221,7 @@ fn a_declared_tool_keeps_its_name_and_its_handler_against_a_connector() {
         input: None,
         output: None,
         handler: None,
-        defer: false,
+        defer: None,
     });
     let mut agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(config));
     settle_sync(&mut agg, "sentry", &["search_issues"]);

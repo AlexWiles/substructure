@@ -19,7 +19,7 @@
 
 use super::{fail, mismatched, void_events, KindSpec, Outcome, SettleError};
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{AgentConfig, RetryPolicy, ToolDiscovery};
+use crate::protocol::{AgentConfig, RetryPolicy};
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::session::events::*;
 use crate::runtime::session::schedule::Dep;
@@ -193,18 +193,13 @@ impl SessionState {
         let Some(connector) = config.mcp.iter().find(|c| c.id == connection_id).cloned() else {
             return;
         };
-        let discovery = filter::discovery(&connector, config.tool_discovery);
-        let r = filter::resolve(
-            &connector,
-            offered,
-            prefix,
-            filter::defers(&connector, config.tool_discovery),
-        );
+        let defers = filter::defers(&connector, config.defer_tools);
+        let r = filter::resolve(&connector, offered, prefix, defers);
         tracing::info!(
             connection = %connection_id,
             offered = r.offered,
             resolved = r.tools.len(),
-            discovery = ?discovery,
+            defer = defers,
             "fetched connector tools"
         );
         if !r.unmatched_include.is_empty() {
@@ -215,32 +210,38 @@ impl SessionState {
             );
         }
         // A search carries a name as an argument, so no name is too long.
-        if !r.oversized.is_empty() && discovery == ToolDiscovery::All {
+        if !r.oversized.is_empty() && !defers {
             tracing::warn!(
                 connection = %connection_id,
                 tools = ?r.oversized,
                 "connector tool names too long to offer; shorten the connection id or turn off prefixing"
             );
         }
-        // A name the model will not see. The engine's own pair is called out:
-        // a worker that took one of those names on purpose is overriding the
-        // engine, and one that took it by accident has quietly turned off a
-        // connection the operator configured.
-        let merged = self.connector_tools_for_config(&config);
-        for name in &merged.collisions {
-            if name == filter::TOOL_SEARCH
-                || name == filter::CALL_TOOL
-                || name == filter::LIST_TOOLS
-            {
+        // Names this fetch lost. Scoped to this connection, because every other
+        // connection reports its own when it settles.
+        let collisions = self.connector_tools_for_config(&config).collisions;
+        for name in collisions
+            .iter()
+            .filter(|name| r.tools.iter().any(|t| &&t.name == name))
+        {
+            tracing::warn!(
+                connection = %connection_id,
+                tool = %name,
+                "tool name claimed twice; it is offered to the model by neither connector"
+            );
+        }
+        // A worker that took one of the engine's names on purpose is overriding
+        // the engine. One that took it by accident has quietly turned off the
+        // search this connection depends on.
+        if defers {
+            for name in collisions.iter().filter(|n| {
+                [filter::LIST_TOOLS, filter::TOOL_SEARCH, filter::CALL_TOOL].contains(&n.as_str())
+            }) {
                 tracing::warn!(
+                    connection = %connection_id,
                     tool = %name,
                     "the config declares `{name}`, so the engine's own is not offered; \
-                     searched connections lose that part of the set"
-                );
-            } else {
-                tracing::warn!(
-                    tool = %name,
-                    "tool name claimed twice; it is offered to the model by neither connector"
+                     this connection's tools cannot be found"
                 );
             }
         }

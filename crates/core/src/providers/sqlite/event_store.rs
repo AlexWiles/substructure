@@ -617,7 +617,7 @@ mod tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: Vec::new(),
-            tool_discovery: None,
+            defer_tools: false,
         }
     }
 

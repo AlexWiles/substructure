@@ -34,6 +34,15 @@ pub enum ToolHandler {
 }
 
 impl ToolHandler {
+    /// Where a tool the config declares runs. `Server` is the engine's alone,
+    /// so a declaration can only choose between the other two.
+    pub fn declared(handler: Option<Handler>) -> Self {
+        match handler {
+            Some(Handler::Client) => Self::Client,
+            _ => Self::Worker,
+        }
+    }
+
     /// Which default bounds a call routed here. The three differ: a worker tool
     /// is bounded but never repeated, a client tool waits indefinitely because a
     /// human may be answering it, and a connector call is the engine's own.

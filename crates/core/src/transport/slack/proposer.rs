@@ -404,7 +404,7 @@ mod tests {
                         tools: vec![],
                         sub_agents: vec![],
                         mcp: vec![],
-                        tool_discovery: None,
+                        defer_tools: false,
                     }
                 },
                 anchor: None,

@@ -16,7 +16,6 @@
 use crate::connectors::RemoteTool;
 use crate::protocol::{
     ConnectorProtocol, ConnectorTool, ConnectorToolKind, LlmTool, McpServer, McpTools,
-    ToolDiscovery,
 };
 
 /// Separates the connector id from the tool's own name. Doubled because both
@@ -43,6 +42,19 @@ pub struct Resolution {
     pub unmatched_include: Vec<String>,
     /// Remote names whose prefixed form would exceed what a provider accepts.
     pub oversized: Vec<String>,
+}
+
+impl Resolution {
+    /// Tools that came from no connection, so nothing was dropped reaching them.
+    pub fn of(tools: Vec<ConnectorTool>) -> Self {
+        Self {
+            tools,
+            offered: 0,
+            unannotated: 0,
+            unmatched_include: Vec::new(),
+            oversized: Vec::new(),
+        }
+    }
 }
 
 /// Expand one connector's offered tools into model-facing tools.
@@ -98,31 +110,14 @@ pub fn resolve(
     }
 }
 
-/// The connection's own setting, else the agent's, else `All`.
-pub fn discovery(connector: &McpServer, default: Option<ToolDiscovery>) -> ToolDiscovery {
+/// Whether a connection's tools are kept out of the request: its own setting,
+/// else the agent's.
+pub fn defers(connector: &McpServer, default: bool) -> bool {
     connector
         .tools
         .as_ref()
-        .and_then(|t| t.discovery)
-        .or(default)
-        .unwrap_or_default()
-}
-
-/// Whether a connection's tools are kept out of the request.
-pub fn defers(connector: &McpServer, default: Option<ToolDiscovery>) -> bool {
-    discovery(connector, default) == ToolDiscovery::Search
-}
-
-/// The tool a connection knows as `remote_name`, if the filter kept it.
-pub fn kept<'a>(
-    connector: &McpServer,
-    offered: &'a [RemoteTool],
-    remote_name: &str,
-) -> Option<&'a RemoteTool> {
-    let filter = connector.tools.clone().unwrap_or_default();
-    offered
-        .iter()
-        .find(|tool| tool.name == remote_name && passes(&filter, tool))
+        .and_then(|t| t.defer)
+        .unwrap_or(default)
 }
 
 /// Every tool the agent may reach, in offer order.
@@ -137,12 +132,6 @@ pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a
 pub const LIST_TOOLS: &str = "list_tools";
 pub const TOOL_SEARCH: &str = "tool_search";
 pub const CALL_TOOL: &str = "call_tool";
-
-/// The name a tool is addressed by, whatever the connection's own prefixing.
-/// `call_tool` takes this, and a search answers with it.
-pub fn qualified_name(connector_id: &str, remote_name: &str) -> String {
-    format!("{}{SEPARATOR}{remote_name}", name_prefix(connector_id))
-}
 
 /// The three tools the engine answers for an agent that searches.
 ///
@@ -887,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn no_discovery_setting_offers_every_tool_as_before() {
+    fn no_defer_setting_offers_every_tool_as_before() {
         let offered = [read_only("search"), writer("delete")];
         let r = resolve(&connector("sentry", None), &offered, Some("sentry"), false);
         assert_eq!(names(&r), vec!["sentry__search", "sentry__delete"]);
@@ -929,20 +918,17 @@ mod tests {
     #[test]
     fn the_agent_default_applies_where_a_connection_says_nothing() {
         let bare = connector("sentry", None);
-        assert!(!defers(&bare, None));
-        assert!(defers(&bare, Some(ToolDiscovery::Search)));
+        assert!(!defers(&bare, false));
+        assert!(defers(&bare, true));
 
         let listed = connector(
             "sentry",
             Some(McpTools {
-                discovery: Some(ToolDiscovery::All),
+                defer: Some(false),
                 ..Default::default()
             }),
         );
-        assert!(
-            !defers(&listed, Some(ToolDiscovery::Search)),
-            "the connection overrides the agent"
-        );
+        assert!(!defers(&listed, true), "the connection overrides the agent");
     }
 
     #[test]
@@ -1103,7 +1089,7 @@ mod tests {
             "sentry",
             Some(McpTools {
                 exclude: vec!["*_secrets".to_string()],
-                discovery: Some(ToolDiscovery::Search),
+                defer: Some(true),
                 ..Default::default()
             }),
         );
@@ -1113,18 +1099,11 @@ mod tests {
             vec!["sentry__search_issues"],
             "deferral re-presents what the filter kept; it never reaches past it"
         );
-        assert!(kept(&c, &offered, "search_secrets").is_none());
     }
 
     #[test]
     fn a_declared_tool_still_wins_its_name_against_a_search_tool() {
-        let r = Resolution {
-            tools: search_tools(),
-            offered: 0,
-            unannotated: 0,
-            unmatched_include: Vec::new(),
-            oversized: Vec::new(),
-        };
+        let r = Resolution::of(search_tools());
         let merged = merge([r], [TOOL_SEARCH]);
         assert_eq!(
             merged

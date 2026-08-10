@@ -69,7 +69,7 @@ type AgentTool = {
     input?: unknown             // JSON Schema for the arguments
     output?: unknown            // JSON Schema the result must match
     handler?: "worker" | "client"  // where it runs. default worker
-    defer?: boolean             // keep it out of the request. default false
+    defer?: boolean             // keep it out of the request. default: the agent's defer_tools
 }
 ```
 

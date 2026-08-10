@@ -9,7 +9,7 @@ use crate::runtime::processor::{
     ProcessorError,
 };
 use crate::runtime::session::decision::ToolHandler;
-use crate::runtime::session::events::{ConnectorTarget, EventPayload};
+use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::SessionEvent;
 
 use super::ConnectorTask;
@@ -61,16 +61,7 @@ impl EventProcessor for ConnectorDispatchProjection {
                         tc.name
                     )));
                 };
-                if answered_locally(target) {
-                    ConnectorTask::Answer {
-                        source_event_id: event.id,
-                        session_id: event.session_id.clone(),
-                        tenant_id: event.tenant_id.clone(),
-                        tool_call_id: d.id.clone(),
-                        attempt: d.attempt,
-                        span: event.span,
-                    }
-                } else {
+                if target.kind.is_remote() {
                     ConnectorTask::CallTool {
                         source_event_id: event.id,
                         session_id: event.session_id.clone(),
@@ -84,6 +75,15 @@ impl EventProcessor for ConnectorDispatchProjection {
                         // recorded.
                         arguments: serde_json::from_str(&tc.arguments)
                             .unwrap_or_else(|_| serde_json::json!({})),
+                        span: event.span,
+                    }
+                } else {
+                    ConnectorTask::Answer {
+                        source_event_id: event.id,
+                        session_id: event.session_id.clone(),
+                        tenant_id: event.tenant_id.clone(),
+                        tool_call_id: d.id.clone(),
+                        attempt: d.attempt,
                         span: event.span,
                     }
                 }
@@ -105,12 +105,6 @@ impl EventProcessor for ConnectorDispatchProjection {
     }
 }
 
-/// Whether the engine answers this call itself. A refused `call_tool` has no
-/// remote name, and must not reach the connection.
-fn answered_locally(target: &ConnectorTarget) -> bool {
-    !target.kind.is_remote() && target.remote_name.is_empty()
-}
-
 pub fn spawn_connector_dispatch_processor(
     store: Arc<dyn EventStore>,
     cursor_store: Arc<dyn ProcessorCursorStore>,
@@ -130,39 +124,19 @@ pub fn spawn_connector_dispatch_processor(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::protocol::ConnectorToolKind;
 
-    fn target(kind: ConnectorToolKind, remote_name: &str) -> ConnectorTarget {
-        ConnectorTarget {
-            connector: "sentry".to_string(),
-            remote_name: remote_name.to_string(),
-            kind,
+    /// Only a `Remote` carries a name to dial. Every other kind is one of the
+    /// engine's own tools, answered from the session.
+    #[test]
+    fn only_a_remote_tool_reaches_the_connection() {
+        assert!(ConnectorToolKind::Remote.is_remote());
+        for kind in [
+            ConnectorToolKind::List,
+            ConnectorToolKind::Find,
+            ConnectorToolKind::Call,
+        ] {
+            assert!(!kind.is_remote(), "{kind:?} is answered by the engine");
         }
-    }
-
-    #[test]
-    fn a_tool_the_connection_offers_goes_to_the_connection() {
-        assert!(!answered_locally(&target(
-            ConnectorToolKind::Remote,
-            "search_issues"
-        )));
-    }
-
-    #[test]
-    fn a_find_never_goes_to_the_connection() {
-        assert!(answered_locally(&target(ConnectorToolKind::Find, "")));
-    }
-
-    #[test]
-    fn a_call_goes_to_the_connection_only_once_it_resolved() {
-        assert!(
-            answered_locally(&target(ConnectorToolKind::Call, "")),
-            "the filter refused the name, so nothing may be dialled"
-        );
-        assert!(
-            !answered_locally(&target(ConnectorToolKind::Call, "search_issues")),
-            "a resolved name is an ordinary remote call"
-        );
     }
 }

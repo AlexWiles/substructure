@@ -154,12 +154,12 @@ type McpTools = {
     read_only?: boolean
     non_destructive?: boolean
     idempotent?: boolean
-    discovery?: "all" | "search"
+    defer?: boolean
 }
 ```
 
-The first five keys say which tools the agent may reach. `discovery` says how
-they reach the model, and it is the next section.
+The first five keys say which tools the agent may reach. `defer` says how they
+reach the model, and it is the next section.
 
 The engine applies the capability keys, then `include`, then `exclude`. Each one
 can only remove tools.
@@ -171,37 +171,35 @@ The capability keys read the connection's MCP annotations. A tool with no
 annotation fails them. Annotations are hints from the server. Use them to take
 fewer tools, not as a security boundary.
 
-## Tool discovery
+## Deferring a connection
 
-Filtering is one answer to a large connection. Search is the other. Set
-`discovery = "search"` and the model searches for a tool instead of reading a
-list of them.
+Filtering is one answer to a large connection. Search is the other. Set `defer`
+and the model searches for a tool instead of reading a list of them.
 
 ```toml title="substructure.toml"
 [agent.support]
-mcp = [{ id = "aws", tools = { discovery = "search" } }]
+mcp = [{ id = "aws", tools = { defer = true } }]
 ```
 
-Set it for each connection of an agent with `tool_discovery`. A connection
-overrides it.
+`defer_tools` sets it for every tool of an agent. A connection overrides it.
 
 ```toml title="substructure.toml"
 [agent.support]
-tool_discovery = "search"
+defer_tools = true
 mcp = [
-  "aws",                                             # search, from the agent
-  { id = "sentry", tools = { discovery = "all" } },  # this one is listed
+  "aws",                                         # deferred, from the agent
+  { id = "sentry", tools = { defer = false } },  # this one is listed
 ]
 ```
 
-| `discovery` | The request carries |
+| `defer` | The request carries |
 | --- | --- |
-| `"all"` (the default) | Each tool the filter kept. |
-| `"search"` | None of them. |
+| `false` (the default) | Each tool the filter kept. |
+| `true` | None of them. |
 
-`discovery` sets the `defer` flag on each tool the filter kept. The agent then
-gets `list_tools`, `tool_search`, and `call_tool`. A list and a search give each
-tool the same name the model calls directly, such as `aws__s3_list`.
+`defer` sets the flag on each tool the filter kept. The agent then gets
+`list_tools`, `tool_search`, and `call_tool`. A list and a search give each tool
+the same name the model calls directly, such as `aws__s3_list`.
 
 The engine answers a list and a search from the tools it read when it opened
 each connection. Neither reaches the network.
@@ -209,9 +207,9 @@ each connection. Neither reaches the network.
 An answer also gives the connections of the agent: the number of tools of each
 one, and what the server said it is for.
 
-An agent can mix. A connection with `discovery = "all"` puts its own tools in
-the list, beside the three. The filter still applies to a searched connection: a
-search does not show a tool the filter removed, and `call_tool` refuses one.
+An agent can mix. A connection that does not defer puts its own tools in the
+list, beside the three. The filter still applies to one that does: a search does
+not show a tool the filter removed, and `call_tool` refuses one.
 
 Use search when a connection has more tools than an agent needs at one time.
 Keep the default when the agent uses most of the tools each session.
@@ -294,6 +292,6 @@ what the `Retry` button proposes. See [Protocol](./230-protocol.md#actions).
 ## Next
 
 - [Tool calls](./60-tools.md): tools your worker runs.
-- [Deferred tools](./65-deferred-tools.md): what `discovery = "search"` turns on.
+- [Deferred tools](./65-deferred-tools.md): what `defer` turns on.
 - [Agents](./30-agents.md): the section that names a connection.
 - [Sub-agents](./80-sub-agents.md): put a large connector behind a child agent.
