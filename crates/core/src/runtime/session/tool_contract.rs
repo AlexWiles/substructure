@@ -289,6 +289,7 @@ mod tests {
             description: "d".to_string(),
             input: Some(city_schema()),
             output: None,
+            defer: false,
         }
     }
 

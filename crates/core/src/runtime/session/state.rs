@@ -31,7 +31,9 @@ use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{ConnectorTool, ConnectorToolKind, Handler, McpServer, ToolDiscovery};
+use crate::protocol::{
+    AgentTool, ConnectorTool, ConnectorToolKind, Handler, McpServer, ToolDiscovery,
+};
 
 /// One connection as the engine's own tools see it: what the agent declared,
 /// what the connection offered, and what it said it is for.
@@ -40,6 +42,30 @@ pub struct Source {
     pub server: McpServer,
     pub offered: Vec<RemoteTool>,
     pub instructions: Option<String>,
+}
+
+/// What a `call_tool` addresses. Any source, because deferral is a property of
+/// a tool and not of where it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallTarget {
+    Connector(ConnectorTool),
+    Declared(AgentTool),
+}
+
+impl CallTarget {
+    pub fn input(&self) -> Option<serde_json::Value> {
+        match self {
+            CallTarget::Connector(t) => t.input.clone(),
+            CallTarget::Declared(t) => t.input.clone(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            CallTarget::Connector(t) => &t.name,
+            CallTarget::Declared(t) => &t.name,
+        }
+    }
 }
 
 /// The tool's own arguments, out of the `call_tool` wrapper.
@@ -1767,22 +1793,26 @@ impl SessionState {
                 let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
                 let sync = effect.connector()?;
                 effect.tracking.is_ready().then(|| {
-                    let resolved = filter::resolve(connector, &sync.tools, sync.prefix.as_deref());
-                    filter::discover(connector, resolved, config.tool_discovery)
+                    filter::resolve(
+                        connector,
+                        &sync.tools,
+                        sync.prefix.as_deref(),
+                        filter::defers(connector, config.tool_discovery),
+                    )
                 })
             })
             .collect();
-        // From the config alone. A fetch that has not settled must not decide
-        // whether a tool definition exists.
-        // From the config alone, and true for an agent that says `search` with
-        // no connection yet: the tools exist from its first turn, so one added
-        // later moves nothing.
-        let declares_search = config.tool_discovery == Some(ToolDiscovery::Search)
+        // From the config alone: a fetch that has not settled must not decide
+        // whether a tool definition exists. An agent that says `search` thus
+        // gets these from its first turn, and a connection added later moves
+        // no definition.
+        let defers = config.tool_discovery == Some(ToolDiscovery::Search)
+            || config.tools.iter().any(|t| t.defer)
             || config
                 .mcp
                 .iter()
-                .any(|c| filter::discovery(c, config.tool_discovery) == ToolDiscovery::Search);
-        if declares_search {
+                .any(|c| filter::defers(c, config.tool_discovery));
+        if defers {
             resolutions.push(filter::Resolution {
                 tools: filter::search_tools(),
                 offered: 0,
@@ -1854,10 +1884,12 @@ impl SessionState {
         match target.kind {
             ConnectorToolKind::Remote => None,
             ConnectorToolKind::List => Some(LocalAnswer::Result(filter::list_answer(
-                &self.searchable_connectors(),
+                &self.searchable_tools(),
+                self.connection_summaries(),
             ))),
             ConnectorToolKind::Find => Some(LocalAnswer::Result(filter::find_answer(
-                &self.searchable_connectors(),
+                &self.searchable_tools(),
+                self.connection_summaries(),
                 &argument("query"),
             ))),
             ConnectorToolKind::Call => Some(LocalAnswer::Error(
@@ -1867,8 +1899,59 @@ impl SessionState {
         }
     }
 
-    /// Why a `call_tool` cannot be placed, if it cannot: an unknown connection,
-    /// a tool the filter refused, or arguments that break that tool's schema.
+    /// Every tool the agent can reach, deferred or not, as the model would see
+    /// it. What a list and a search answer over.
+    ///
+    /// Each source, not only the connections: deferral is a property of a tool,
+    /// so a search that skipped one source would report an absence that is not
+    /// real. The engine's own three are left out — they are how you search, not
+    /// something to find — and so are the sub-agents, which a `call_tool`
+    /// cannot place.
+    pub fn searchable_tools(&self) -> Vec<LlmTool> {
+        let Some(config) = self.resolve_agent_for(self.head_id.as_deref()) else {
+            return Vec::new();
+        };
+        let declared = config.tools.iter().map(AgentTool::to_llm_tool);
+        let connector = self
+            .connector_tools_for_config(&config)
+            .tools
+            .into_iter()
+            .filter(|t| t.kind.is_remote())
+            .map(|t| t.to_llm_tool())
+            .collect::<Vec<_>>();
+        declared.chain(connector).collect()
+    }
+
+    /// What each connection is, for an answer: its size, and its own words.
+    pub fn connection_summaries(&self) -> Vec<serde_json::Value> {
+        self.searchable_connectors()
+            .iter()
+            .map(|source| {
+                let mut entry = serde_json::json!({
+                    "connector": source.server.id,
+                    "tools": filter::callable(&source.server, &source.offered).len(),
+                });
+                if let Some(instructions) = &source.instructions {
+                    entry["about"] = serde_json::json!(instructions);
+                }
+                entry
+            })
+            .collect()
+    }
+
+    /// The tool a `call_tool` names, and where a call to it runs.
+    pub fn call_tool_target(&self, named: &str) -> Option<CallTarget> {
+        let config = self.resolve_agent_for(self.head_id.as_deref())?;
+        if let Some(declared) = config.tool(named) {
+            return Some(CallTarget::Declared(declared.clone()));
+        }
+        self.connector_tool_for(named)
+            .filter(|t| t.kind.is_remote())
+            .map(CallTarget::Connector)
+    }
+
+    /// Why a `call_tool` cannot be placed, if it cannot: an unknown name, or
+    /// arguments that break that tool's schema.
     ///
     /// One function for two callers. The route freezes an empty remote name
     /// when this answers `Some`, and the answer reads the same fault again to
@@ -1881,44 +1964,22 @@ impl SessionState {
             .unwrap_or_default()
             .to_string();
 
-        let Some((_, remote)) = self.reachable_tool(&named) else {
-            let reachable: Vec<String> = self.reachable_names();
+        let Some(target) = self.call_tool_target(&named) else {
+            let names: Vec<String> = self
+                .searchable_tools()
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
             return Some(format!(
                 "no tool `{named}` for this agent. It has: {}",
-                reachable.join(", ")
+                names.join(", ")
             ));
         };
-        // The provider checked the wrapper, and holds no schema for what is
-        // inside it. The engine holds one, so the engine checks it.
-        classify_arguments(&inner_arguments(&raw), remote.input.as_ref())
+        // The provider never received this tool's schema, so it checked
+        // nothing. The engine holds one, so the engine checks it.
+        classify_arguments(&inner_arguments(&raw), target.input().as_ref())
             .error()
             .map(|e| format!("`{named}`: {e}"))
-    }
-
-    /// The connection and the tool one qualified name addresses, if the filter
-    /// kept it.
-    ///
-    /// Matched, never parsed: a connection id may hold the separator, so
-    /// splitting the name would address the wrong connection.
-    pub fn reachable_tool(&self, named: &str) -> Option<(String, RemoteTool)> {
-        self.searchable_connectors().into_iter().find_map(|source| {
-            filter::callable(&source.server, &source.offered)
-                .into_iter()
-                .find(|tool| filter::qualified_name(&source.server.id, &tool.name) == named)
-                .map(|tool| (source.server.id.clone(), tool.clone()))
-        })
-    }
-
-    fn reachable_names(&self) -> Vec<String> {
-        self.searchable_connectors()
-            .iter()
-            .flat_map(|source| {
-                filter::callable(&source.server, &source.offered)
-                    .into_iter()
-                    .map(|tool| filter::qualified_name(&source.server.id, &tool.name))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
     }
 
     /// The `output` contract of the tool a `call_tool` ran. The model was

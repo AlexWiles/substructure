@@ -14,7 +14,7 @@ pub struct RetryState {
 
 /// What a policy is being resolved for. Finer than `EffectKind` because a tool
 /// call's default follows where it runs: a worker tool must be bounded, and a
-/// client tool must not be — a deferred call waits for a human.
+/// client tool must not be — an async call waits for a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryTarget {
     Llm,
@@ -49,9 +49,9 @@ impl RetryPolicy {
             // Bounded but never repeated: the engine cannot vouch for a tool's
             // idempotency, so a retry is the author's call, not ours.
             RetryTarget::WorkerTool => (Some(120), Some(600), 1, 0, 0),
-            // Deferred by design — a client tool waits for a human, so a
+            // Async by design — a client tool waits for a human, so a
             // deadline would settle it as failed while it is still legitimately
-            // open. See `docs/130-deferred-tools.md`.
+            // open. See `docs/110-async-tools.md`.
             RetryTarget::ClientTool => (None, None, 1, 0, 0),
             // The engine places this call itself, so a transport failure is its
             // own to absorb. Still shallow: the turn waits behind it.
@@ -348,7 +348,7 @@ mod tests {
         );
         assert_eq!(
             resolved.attempt_timeout_secs, None,
-            "a deferred call stays open unless the override says otherwise"
+            "an async call stays open unless the override says otherwise"
         );
         assert_eq!(resolved.total_timeout_secs, None);
     }
@@ -392,10 +392,7 @@ mod tests {
             assert!(p.total_timeout_secs.is_some(), "{target:?} total bound");
         }
         let client = RetryPolicy::default_for(RetryTarget::ClientTool);
-        assert_eq!(
-            client.attempt_timeout_secs, None,
-            "deferred calls stay open"
-        );
+        assert_eq!(client.attempt_timeout_secs, None, "async calls stay open");
         assert_eq!(client.total_timeout_secs, None);
     }
 

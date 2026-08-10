@@ -805,6 +805,7 @@ mod tests {
             description: "d".to_string(),
             input: None,
             output: None,
+            defer: false,
         }]);
         let llm_calls = HashMap::from([("call-1".to_string(), call)]);
         let trigger = DecisionTrigger::ToolExecute {
@@ -972,6 +973,7 @@ mod tests {
             input: None,
             output: None,
             handler,
+            defer: false,
         };
         AgentConfig {
             llm: Some("claude".to_string()),
@@ -1101,6 +1103,7 @@ mod tests {
                 input: None,
                 output: None,
                 handler: Some(Handler::Client),
+                defer: false,
             }],
             ..Default::default()
         };

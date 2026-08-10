@@ -193,8 +193,13 @@ impl SessionState {
         let Some(connector) = config.mcp.iter().find(|c| c.id == connection_id).cloned() else {
             return;
         };
-        let r = filter::resolve(&connector, offered, prefix);
         let discovery = filter::discovery(&connector, config.tool_discovery);
+        let r = filter::resolve(
+            &connector,
+            offered,
+            prefix,
+            filter::defers(&connector, config.tool_discovery),
+        );
         tracing::info!(
             connection = %connection_id,
             offered = r.offered,

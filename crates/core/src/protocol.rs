@@ -360,6 +360,9 @@ pub struct AgentTool {
     pub output: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handler: Option<Handler>,
+    /// Keep this tool out of the request. See [`LlmTool::defer`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub defer: bool,
 }
 
 /// One tool the engine resolved from a connector and will execute itself.
@@ -387,6 +390,10 @@ pub struct ConnectorTool {
     pub remote_name: String,
     #[serde(default, skip_serializing_if = "ConnectorToolKind::is_remote")]
     pub kind: ConnectorToolKind,
+    /// Keep this tool out of the request. See [`LlmTool::defer`]. Set from the
+    /// connection's `discovery`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub defer: bool,
 }
 
 /// What the engine does with a call. Every value but `Remote` is one of the
@@ -553,6 +560,21 @@ pub struct LlmTool {
     /// A violating result settles as a terminal tool error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
+    /// Keep this definition out of the request.
+    ///
+    /// The engine still records it, still routes a call to it, and still finds
+    /// it in a search. Only the request omits it, which is what keeps a large
+    /// tool set out of the model's context and out of the cached prefix.
+    ///
+    /// Any source can set it: a worker tool, a connection under
+    /// `discovery = "search"`, or whatever comes next. Deferral is a property
+    /// of a tool, not of where it came from.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub defer: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -568,6 +590,20 @@ pub struct LlmRequest {
     pub max_completion_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
+}
+
+impl LlmRequest {
+    /// The definitions the request carries. A deferred tool is left out: the
+    /// engine still records it, still routes to it, and still finds it in a
+    /// search, but the model does not read it and the cached prefix does not
+    /// hold it.
+    ///
+    /// `None` when the request declares no tool at all, which is not the same
+    /// as one whose tools are all deferred — that one still offers the search.
+    pub fn offered_tools(&self) -> Option<Vec<&LlmTool>> {
+        let tools = self.tools.as_ref()?;
+        Some(tools.iter().filter(|t| !t.defer).collect())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

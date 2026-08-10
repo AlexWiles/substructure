@@ -155,6 +155,7 @@ fn config_with_client_tool(tool: &str) -> AgentConfig {
             input: None,
             output: None,
             handler: Some(Handler::Client),
+            defer: false,
         }],
         ..config()
     }

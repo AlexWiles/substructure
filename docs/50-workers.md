@@ -177,7 +177,7 @@ return { actions: [{ type: "done" }] };
 ```
 
 **Answer a tool later.** Return an empty decision and report the result when the
-work finishes. See [Deferred tools](./110-deferred-tools.md).
+work finishes. See [Async tools](./110-async-tools.md).
 
 ```javascript
 if (trigger.type === "tool.execute") {

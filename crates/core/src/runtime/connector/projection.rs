@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::ConnectorToolKind;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
@@ -80,7 +79,11 @@ impl EventProcessor for ConnectorDispatchProjection {
                         attempt: d.attempt,
                         connection_id: target.connector.clone(),
                         remote_name: target.remote_name.clone(),
-                        arguments: call_arguments(&tc.arguments, target.kind),
+                        // The recorded arguments are the tool's own: a `call_tool`
+                        // was unwrapped into the real call before it was
+                        // recorded.
+                        arguments: serde_json::from_str(&tc.arguments)
+                            .unwrap_or_else(|_| serde_json::json!({})),
                         span: event.span,
                     }
                 }
@@ -108,26 +111,6 @@ fn answered_locally(target: &ConnectorTarget) -> bool {
     !target.kind.is_remote() && target.remote_name.is_empty()
 }
 
-/// What goes on the wire: the model's arguments, or the `arguments` object
-/// inside a `call_tool`.
-fn call_arguments(recorded: &str, kind: ConnectorToolKind) -> serde_json::Value {
-    let value: serde_json::Value =
-        serde_json::from_str(recorded).unwrap_or_else(|_| serde_json::json!({}));
-    if kind != ConnectorToolKind::Call {
-        return value;
-    }
-    // A model that sent the object as a JSON string meant the object.
-    let inner = match value.get("arguments") {
-        Some(serde_json::Value::String(text)) => serde_json::from_str(text).unwrap_or_default(),
-        Some(other) => other.clone(),
-        None => serde_json::Value::Null,
-    };
-    match inner {
-        object @ serde_json::Value::Object(_) => object,
-        _ => serde_json::json!({}),
-    }
-}
-
 pub fn spawn_connector_dispatch_processor(
     store: Arc<dyn EventStore>,
     cursor_store: Arc<dyn ProcessorCursorStore>,
@@ -148,6 +131,7 @@ pub fn spawn_connector_dispatch_processor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ConnectorToolKind;
 
     fn target(kind: ConnectorToolKind, remote_name: &str) -> ConnectorTarget {
         ConnectorTarget {
@@ -180,53 +164,5 @@ mod tests {
             !answered_locally(&target(ConnectorToolKind::Call, "search_issues")),
             "a resolved name is an ordinary remote call"
         );
-    }
-
-    #[test]
-    fn a_remote_call_sends_the_arguments_as_the_model_wrote_them() {
-        assert_eq!(
-            call_arguments(r#"{"q":"boom"}"#, ConnectorToolKind::Remote),
-            serde_json::json!({ "q": "boom" })
-        );
-    }
-
-    #[test]
-    fn a_call_tool_sends_the_inner_arguments_without_the_wrapper() {
-        assert_eq!(
-            call_arguments(
-                r#"{"name":"sentry__search_issues","arguments":{"q":"boom"}}"#,
-                ConnectorToolKind::Call
-            ),
-            serde_json::json!({ "q": "boom" }),
-            "the connection never sees the engine's wrapper"
-        );
-    }
-
-    #[test]
-    fn a_call_tool_accepts_the_arguments_as_a_json_string() {
-        assert_eq!(
-            call_arguments(
-                r#"{"name":"sentry__search_issues","arguments":"{\"q\":\"boom\"}"}"#,
-                ConnectorToolKind::Call
-            ),
-            serde_json::json!({ "q": "boom" }),
-            "a model that stringified the object meant the object"
-        );
-    }
-
-    #[test]
-    fn a_call_tool_with_no_arguments_sends_an_empty_object() {
-        for recorded in [
-            r#"{"name":"sentry__list_projects"}"#,
-            r#"{"name":"sentry__list_projects","arguments":null}"#,
-            r#"{"name":"sentry__list_projects","arguments":"nonsense"}"#,
-            "not json at all",
-        ] {
-            assert_eq!(
-                call_arguments(recorded, ConnectorToolKind::Call),
-                serde_json::json!({}),
-                "the connection's own schema rejects it better than we could: {recorded}"
-            );
-        }
     }
 }

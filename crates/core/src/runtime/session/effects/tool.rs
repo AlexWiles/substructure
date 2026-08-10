@@ -17,12 +17,12 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::{ConnectorTool, ConnectorToolKind, ErrorCode, ErrorInfo};
+use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo, Handler};
 use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{ToolHandler, Trigger};
 use crate::runtime::session::events::*;
-use crate::runtime::session::state::{EffectKind, SessionState};
+use crate::runtime::session::state::{CallTarget, EffectKind, SessionState};
 use crate::runtime::session::tool_contract::{declared_tool, output_violation, DeclaredTool};
 use crate::runtime::Caller;
 
@@ -198,12 +198,23 @@ pub(in crate::runtime::session) fn request(
     caller: &Caller,
 ) -> Result<Vec<EventPayload>, SessionError> {
     SessionState::ensure_internal(caller)?;
-    let handler = state.tool_handler_for(&name);
-    let target = state
-        .connector_tool_for(&name)
-        .map(|t| route_connector(state, &t, &arguments));
+    let engine_tool = state.connector_tool_for(&name);
+    let (name, arguments, handler, target) = match engine_tool {
+        Some(tool) if tool.kind == ConnectorToolKind::Call => unwrap_call(state, name, arguments),
+        Some(tool) => (
+            name,
+            arguments,
+            ToolHandler::Server,
+            Some(ConnectorTarget {
+                connector: tool.connector,
+                remote_name: tool.remote_name,
+                kind: tool.kind,
+            }),
+        ),
+        None => (name.clone(), arguments, state.tool_handler_for(&name), None),
+    };
     // Resolved here, not at the seam: the default follows the handler, and a
-    // client tool must stay unbounded — a deferred call waits for a human.
+    // client tool must stay unbounded — an async call waits for a human.
     let config = state.retry_config();
     let retry = RetryPolicy::resolve(retry.as_ref(), config.as_ref(), handler.retry_target());
     if state.has_effect(EffectKind::ToolCall, &tool_call_id) {
@@ -222,37 +233,68 @@ pub(in crate::runtime::session) fn request(
     })])
 }
 
-/// Where a call goes, frozen onto it. A `call_tool` names its connection and
-/// its tool in the arguments, so both are put through the filter here — the
-/// boundary an offered tool passed at resolve time. A refused pair leaves
-/// `remote_name` empty.
-fn route_connector(state: &SessionState, tool: &ConnectorTool, arguments: &str) -> ConnectorTarget {
-    match tool.kind {
-        ConnectorToolKind::Remote => ConnectorTarget {
-            connector: tool.connector.clone(),
-            remote_name: tool.remote_name.clone(),
-            kind: tool.kind,
-        },
-        ConnectorToolKind::List | ConnectorToolKind::Find => ConnectorTarget {
-            connector: String::new(),
-            remote_name: String::new(),
-            kind: tool.kind,
-        },
-        ConnectorToolKind::Call => {
-            let reached = state
-                .call_tool_fault(arguments)
-                .is_none()
-                .then(|| argument(arguments, "name").and_then(|n| state.reachable_tool(&n)))
-                .flatten();
-            ConnectorTarget {
-                connector: reached
-                    .as_ref()
-                    .map(|(id, _)| id.clone())
-                    .unwrap_or_default(),
-                remote_name: reached.map(|(_, t)| t.name).unwrap_or_default(),
-                kind: tool.kind,
-            }
-        }
+/// A `call_tool` becomes the call it names: the same name, the same arguments,
+/// and the same route as a direct call to that tool. The wrapper is the
+/// engine's, so it stops at the engine.
+///
+/// The tool may come from any source. A connection runs on the engine, and a
+/// tool the config declares runs where its own handler says.
+///
+/// A name the agent cannot reach keeps the wrapper, with an empty target. The
+/// engine answers it with the fault, and nothing is dialled.
+fn unwrap_call(
+    state: &SessionState,
+    name: String,
+    arguments: String,
+) -> (String, String, ToolHandler, Option<ConnectorTarget>) {
+    let named = argument(&arguments, "name").unwrap_or_default();
+    let target = state
+        .call_tool_fault(&arguments)
+        .is_none()
+        .then(|| state.call_tool_target(&named))
+        .flatten();
+    let inner = inner_arguments(&arguments);
+    match target {
+        Some(CallTarget::Connector(tool)) => (
+            tool.name.clone(),
+            inner,
+            ToolHandler::Server,
+            Some(ConnectorTarget {
+                connector: tool.connector,
+                remote_name: tool.remote_name,
+                kind: ConnectorToolKind::Remote,
+            }),
+        ),
+        Some(CallTarget::Declared(tool)) => (
+            tool.name,
+            inner,
+            match tool.handler {
+                Some(Handler::Client) => ToolHandler::Client,
+                _ => ToolHandler::Worker,
+            },
+            None,
+        ),
+        None => (
+            name,
+            arguments,
+            ToolHandler::Server,
+            Some(ConnectorTarget {
+                connector: String::new(),
+                remote_name: String::new(),
+                kind: ConnectorToolKind::Call,
+            }),
+        ),
+    }
+}
+
+/// The tool's own arguments, out of the wrapper. A model that sent them as a
+/// JSON string meant the object.
+fn inner_arguments(arguments: &str) -> String {
+    let raw: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    match raw.get("arguments") {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(value) => value.to_string(),
+        None => "{}".to_string(),
     }
 }
 

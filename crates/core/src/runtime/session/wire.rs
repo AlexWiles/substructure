@@ -796,6 +796,7 @@ mod tests {
             input: None,
             output: None,
             handler: Some(Handler::Server),
+            defer: false,
         });
         let err = resolve_response(
             DecisionResponse {
@@ -1527,6 +1528,7 @@ mod tests {
                         description: "d".to_string(),
                         input: Some(schema),
                         output: None,
+                        defer: false,
                     }]),
                     temperature: None,
                     max_completion_tokens: None,

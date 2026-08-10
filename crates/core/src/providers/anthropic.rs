@@ -301,8 +301,8 @@ fn build_body(
         }]
     });
 
-    let tools: Option<Vec<AnthropicTool>> = request.tools.as_ref().map(|ts| {
-        ts.iter()
+    let tools: Option<Vec<AnthropicTool>> = request.offered_tools().map(|ts| {
+        ts.into_iter()
             .map(|t| AnthropicTool {
                 name: t.name.clone(),
                 description: t.description.clone(),
@@ -990,12 +990,14 @@ mod tests {
                 description: String::new(),
                 input: None,
                 output: None,
+                defer: false,
             },
             LlmTool {
                 name: "b".into(),
                 description: String::new(),
                 input: None,
                 output: None,
+                defer: false,
             },
         ]);
         let v = request_to_wire(&r);
@@ -1038,12 +1040,14 @@ mod tests {
                 description: "d".to_string(),
                 input: Some(json!({"type": "object"})),
                 output: None,
+                defer: false,
             },
             LlmTool {
                 name: "no_args".to_string(),
                 description: "d".to_string(),
                 input: None,
                 output: None,
+                defer: false,
             },
         ]);
         r.max_completion_tokens = Some(1000);

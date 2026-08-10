@@ -18,6 +18,7 @@ impl AgentTool {
             description: self.description.clone(),
             input: self.input.clone(),
             output: self.output.clone(),
+            defer: self.defer,
         }
     }
 }
@@ -31,6 +32,7 @@ impl ConnectorTool {
             description: self.description.clone(),
             input: self.input.clone(),
             output: self.output.clone(),
+            defer: self.defer,
         }
     }
 }
@@ -55,6 +57,9 @@ impl SubAgent {
                 "required": ["message"]
             })),
             output: None,
+            // A sub-agent is one tool. Nothing is saved by hiding it, and a
+            // delegation is not a call the search tools can place.
+            defer: false,
         }
     }
 }
@@ -146,6 +151,7 @@ mod tests {
             input: None,
             output: None,
             handler,
+            defer: false,
         }
     }
 

@@ -24,8 +24,8 @@ It stops when the attempts run out or when a failure cannot be retried.
 A worker tool has timeouts, and the engine never repeats it. The engine cannot
 know whether your tool is safe to run twice. You decide when to retry.
 
-A client tool has no limit, because a deferred call can wait for a person. See
-[Deferred tools](./110-deferred-tools.md).
+A client tool has no limit, because an async call can wait for a person. See
+[Async tools](./110-async-tools.md).
 
 The engine does retry a sub-agent start. A second attempt cannot create a second
 child.
@@ -134,5 +134,5 @@ type ErrorCode = "provider_error" | "rate_limited" | "refused" | "budget_exceede
 ## Next
 
 - [Tool calls](./60-tools.md): the `tool.error` a retry acts on.
-- [Deferred tools](./110-deferred-tools.md): put a limit on a long wait.
+- [Async tools](./110-async-tools.md): put a limit on a long wait.
 - [Durability](./200-durability.md): why a retry does not repeat finished work.

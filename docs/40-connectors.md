@@ -194,61 +194,31 @@ mcp = [
 ]
 ```
 
-An agent that says `search` gets the three tools from its first turn, before it
-names a connection. A connection added later then costs no cache.
-
-| `discovery` | The model sees |
+| `discovery` | The request carries |
 | --- | --- |
 | `"all"` (the default) | Each tool the filter kept. |
-| `"search"` | Nothing of its own. |
+| `"search"` | None of them. |
 
-An agent with one or more searched connections gets three tools. It gets one
-set, whatever the number of connections.
+`discovery` sets the `defer` flag on each tool the filter kept. The agent then
+gets `list_tools`, `tool_search`, and `call_tool`. A list and a search give each
+tool the same name the model calls directly, such as `aws__s3_list`.
 
-```jsonc
-// list_tools — every tool, by name, with no schema
-{ }
-// tool_search — the tools that match, with their schemas
-{ "query": "open issues" }
-// call_tool
-{ "name": "aws__s3_list", "arguments": { "bucket": "logs" } }
-```
-
-Each tool does one thing. A model that does not know what is available calls
-`list_tools`. A model that knows what it wants calls `tool_search`. A search
-that matches nothing says so, and names `list_tools`.
-
-A list and a search give each tool one name, such as `aws__s3_list`. `call_tool`
-takes that name back, exactly as it was given. It is the same name the model
-calls directly when a connection lists its own tools.
+The engine answers a list and a search from the tools it read when it opened
+each connection. Neither reaches the network.
 
 An answer also gives the connections of the agent: the number of tools of each
 one, and what the server said it is for.
 
-The three tools do not change during a session. Their names and their text say
-nothing about which connections exist, so a connection that an agent adds later
-does not change the request that the provider cached. The model reads the new
-connection in the next answer.
-
-The engine answers `list_tools` and `tool_search` from the list it read when it
-opened each connection. Neither reaches the network. Before it runs a
-`call_tool`, the engine compares the arguments to the tool's own schema, because
-the provider has no schema for a tool it did not receive.
-
 An agent can mix. A connection with `discovery = "all"` puts its own tools in
-the list, beside the three.
-
-A search covers each connection of the agent, and not only the searched ones. A
-connection on `all` is listed up front and it is findable. Therefore one search
-covers the agent, and an answer of nothing means that the agent has nothing.
-
-The filter still applies. A search does not show a tool the filter removed, and
-`call_tool` refuses one. The error names the tools the agent can reach.
+the list, beside the three. The filter still applies to a searched connection: a
+search does not show a tool the filter removed, and `call_tool` refuses one.
 
 Use search when a connection has more tools than an agent needs at one time.
-Above about forty, a model chooses badly.
-
 Keep the default when the agent uses most of the tools each session.
+
+Deferral is a property of a tool, and not of MCP: a tool your worker declares
+sets `defer` on its own definition, and the same three tools find it and run it.
+See [Deferred tools](./65-deferred-tools.md).
 
 A third answer is [Sub-agents](./80-sub-agents.md): give the connection to a
 child agent, and the parent pays one tool.
@@ -324,5 +294,6 @@ what the `Retry` button proposes. See [Protocol](./230-protocol.md#actions).
 ## Next
 
 - [Tool calls](./60-tools.md): tools your worker runs.
+- [Deferred tools](./65-deferred-tools.md): what `discovery = "search"` turns on.
 - [Agents](./30-agents.md): the section that names a connection.
 - [Sub-agents](./80-sub-agents.md): put a large connector behind a child agent.

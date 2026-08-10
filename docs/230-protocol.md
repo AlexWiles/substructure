@@ -158,7 +158,7 @@ type DecisionResponse = {
 | `channels` | How a frontend shows this decision, keyed by kind. The engine passes it through. See [Slack](./130-slack.md#customizing-what-the-bot-shows). |
 
 An empty response `{}` writes nothing. Use it to leave a tool call open. See
-[Deferred tools](./110-deferred-tools.md).
+[Async tools](./110-async-tools.md).
 
 ## Triggers
 
@@ -398,6 +398,7 @@ type AgentTool = {
     input?: unknown             // JSON Schema for the arguments
     output?: unknown            // JSON Schema the result must match
     handler?: "worker" | "client"  // default worker
+    defer?: boolean             // keep it out of the request; a search still finds it
 }
 
 type SubAgent = {

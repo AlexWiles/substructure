@@ -1,5 +1,5 @@
 ---
-title: Deferred tools
+title: Async tools
 group: Building agents
 ---
 
@@ -50,14 +50,14 @@ When the render finishes, end the call by its `id`.
 Send it to the engine's client API. See
 [REST API](./250-api.md#post-apimachinesessionssession_idcallssettle).
 
-## Deferring
+## Going async
 
 Answer a `tool.execute` with no `tool.result` and no `tool.error` and the call
 stays open.
 
-This is the same state a client-side tool is in while the browser works. A
-deferred tool is the worker's version of that. Declare it as an ordinary tool
-and run it on your own schedule.
+This is the same state a client-side tool is in while the browser works. An
+async tool is the worker's version of that. Declare it as an ordinary tool and
+run it on your own schedule.
 
 ## Waiting
 

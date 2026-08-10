@@ -101,9 +101,8 @@ impl<'a> WireBody<'a> {
             model: &request.model,
             messages: &request.messages,
             tools: request
-                .tools
-                .as_ref()
-                .map(|ts| ts.iter().map(WireTool::from).collect()),
+                .offered_tools()
+                .map(|ts| ts.into_iter().map(WireTool::from).collect()),
             temperature,
             max_completion_tokens: request.max_completion_tokens,
             reasoning_effort,
