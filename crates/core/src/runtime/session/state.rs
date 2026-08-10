@@ -1833,14 +1833,9 @@ impl SessionState {
         filter::merge(resolutions, taken)
     }
 
-    /// The connection as the config in force names it, with the offer this
+    /// The connection as the config at `leaf` names it, with the offer this
     /// session recorded.
-    pub fn connector_source(&self, connector_id: &str) -> Option<Source> {
-        self.connector_source_at(connector_id, self.head_id.as_deref())
-    }
-
-    /// The same, read at one place in the tree. See [`Self::searchable_connectors_at`].
-    fn connector_source_at(&self, connector_id: &str, leaf: Option<&str>) -> Option<Source> {
+    fn connector_source(&self, connector_id: &str, leaf: Option<&str>) -> Option<Source> {
         let config = self.resolve_agent_for(leaf)?;
         let server = config.mcp.into_iter().find(|c| c.id == connector_id)?;
         let sync = self.connector_sync(connector_id)?;
@@ -1860,16 +1855,7 @@ impl SessionState {
     ///
     /// Readiness belongs here and not in the tool list: a connection that
     /// arrives during a session joins the next answer, and no definition moves.
-    pub fn searchable_connectors(&self) -> Vec<Source> {
-        self.searchable_connectors_at(self.head_id.as_deref())
-    }
-
-    /// The same, read at one place in the tree.
-    ///
-    /// Work already in flight reads its own anchor: a call was built for one
-    /// place, and an answer that described another agent would disagree with
-    /// the request it belongs to. The head is for choosing what to do next.
-    fn searchable_connectors_at(&self, leaf: Option<&str>) -> Vec<Source> {
+    fn searchable_connectors(&self, leaf: Option<&str>) -> Vec<Source> {
         let Some(config) = self.resolve_agent_for(leaf) else {
             return Vec::new();
         };
@@ -1880,7 +1866,7 @@ impl SessionState {
                 self.effect(EffectKind::ConnectorSync, &c.id)
                     .is_some_and(|e| e.tracking.is_ready())
             })
-            .filter_map(|c| self.connector_source_at(&c.id, leaf))
+            .filter_map(|c| self.connector_source(&c.id, leaf))
             .collect()
     }
 
@@ -1948,7 +1934,7 @@ impl SessionState {
     /// claims a server the engine cannot yet reach.
     pub fn connection_summary(&self, id: &str, leaf: Option<&str>) -> Option<String> {
         let source = self
-            .searchable_connectors_at(leaf)
+            .searchable_connectors(leaf)
             .into_iter()
             .find(|source| source.server.id == id)?;
         let mut entry = serde_json::json!({
