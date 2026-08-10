@@ -393,6 +393,7 @@ type AgentConfig = {
         strategy?: "search"     //   presence is the switch. omitted: no opinion
         max_matches?: number    //   matches per search, >= 1. omitted: 10
     }
+    announce_mcp?: "auto" | "never"  // tell the model a connection exists. omitted: "auto"
 }
 
 type AgentTool = {

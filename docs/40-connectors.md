@@ -142,6 +142,51 @@ The model now sees `sentry__search_issues` beside your own tools. When it calls
 one, the engine runs it. Your worker still sees the call: `tool.finished`
 arrives with the result.
 
+## Announcing a connection
+
+The model cannot see a connection. It sees tools, and a deferred tool is not
+even that. So the engine tells it: once per connection, on the first request
+that can carry the notice.
+
+```json
+{ "mcp_server": "sentry", "tools": 12, "about": "…" }
+```
+
+`about` is what the server said it is for. A server that says nothing is
+announced without it.
+
+The engine takes the first place it can use:
+
+| Place | When |
+| --- | --- |
+| The system prompt | While no request of this branch has been sent. It is free there, because no cache exists yet. |
+| The last user message | After that. An earlier system prompt must not change, because a change to it drops the cache. |
+| A message of its own | When the turn ends on anything but a user message. |
+
+The order is fixed, so it is not a setting. `announce_mcp` on the agent chooses
+whether the engine announces at all.
+
+```toml title="substructure.toml"
+[agent.support]
+mcp = ["sentry"]
+announce_mcp = "never"
+```
+
+| Value | The engine |
+| --- | --- |
+| `auto` (the default) | Announces each connection once |
+| `never` | Says nothing |
+
+Use `never` for a server whose own words help nobody.
+
+A connection is announced after it is authorized, and never before. A request
+waits for each connection it names to answer, so a notice cannot claim a server
+the engine has not reached. A connection that fails is not announced, and is
+announced later if it recovers.
+
+A branch announces on its own. A fork that never held a connection announces it
+when it gets one.
+
 ## Filtering
 
 A connection can offer a hundred tools. Above about forty, a model chooses

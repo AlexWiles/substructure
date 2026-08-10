@@ -60,14 +60,12 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
         .map(|server| (server, format!("mcp:{}", server.id)))
         .filter(|(_, id)| !said.contains(id))
         .filter_map(|(server, id)| {
-            let summary = state.connection_summary(&server.id, leaf)?;
             Some(PromptContext {
                 id,
                 placement: Placement::System,
-                content: format!(
-                    "An MCP server is available to this agent. Its tools are not listed up \
-                     front; search for them.\n{summary}"
-                ),
+                // The `mcp_server` key is the label, so there is no prose here
+                // to go stale or to need configuring.
+                content: state.connection_summary(&server.id, leaf)?,
             })
         })
         .collect()
