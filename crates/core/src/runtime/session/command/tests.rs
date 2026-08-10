@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::protocol::{ClientAppend, ClientMessage, ClientMessages, NewMessage};
+use crate::protocol::{
+    Announce, ClientAppend, ClientMessage, ClientMessages, DeferTools, NewMessage,
+};
 use crate::runtime::session::reconcile::plan_reconcile;
 use chrono::Utc;
 
@@ -6388,8 +6390,8 @@ fn agent_config(model: &str) -> AgentConfig {
         tools: Vec::new(),
         sub_agents: Vec::new(),
         mcp: Vec::new(),
-        defer_tools: false,
-        defer_tools_strategy: Default::default(),
+        defer_tools: None,
+        announce_mcp: Default::default(),
     }
 }
 
@@ -7162,6 +7164,134 @@ fn call(agg: &mut SessionAggregate, id: &str, name: &str, arguments: &str) -> Ve
     )
 }
 
+/// A search answers from the place the call was made, and not from the head.
+///
+/// The model was shown the tools of one config. It searched against those.
+/// An answer resolved at a head that has since dropped the connection would
+/// describe a different agent from the request the model was answering.
+#[test]
+fn a_search_answers_at_the_anchor_of_the_call() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
+    call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
+
+    // The head moves on, and the config there no longer names the connection.
+    let ctx = CommitContext {
+        span: SpanContext::root(),
+        occurred_at: Utc::now(),
+    };
+    agg.commit(
+        vec![EventPayload::NewMessage(NewMessage {
+            message: node_msg("u9", Role::User, "later").record(),
+            parent_id: agg.state.head_id.clone(),
+        })],
+        &ctx,
+    );
+    agg.commit(
+        vec![EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+            config: AgentConfig {
+                mcp: vec![],
+                ..searching_connector_config(&["sentry"])
+            },
+            anchor: agg.state.head_id.clone(),
+        })],
+        &ctx,
+    );
+    assert!(
+        agg.state
+            .searchable_tools(agg.state.head_id.as_deref())
+            .is_empty(),
+        "the head has dropped the connection, so a new call would find nothing"
+    );
+
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        answer["tools"][0]["name"], "sentry__search_issues",
+        "the call is anchored where the connection existed, and answers from there"
+    );
+}
+
+/// The engine tells the model that a server exists. The worker did not write
+/// this, and could not: it does not know what the connection answered.
+#[test]
+fn a_connection_is_announced_once_in_the_system_prefix() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
+    let call = |agg: &mut SessionAggregate, id: &str| {
+        dispatch(
+            agg,
+            CommandPayload::RequestLlmCall {
+                llm: "claude".to_string(),
+                call_id: id.to_string(),
+                request: request_with(vec![]),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            },
+            &system(),
+        );
+        agg.state.llm_call(id).unwrap().prompt.clone()
+    };
+
+    let first = call(&mut agg, "call-1");
+    let notice = first.first().expect("the prompt carries the notice");
+    assert_eq!(
+        notice.role,
+        Role::System,
+        "no request has committed the prefix yet, so the free place is still open"
+    );
+    let text = match notice.content.as_ref().expect("content") {
+        Content::Text(t) => t.clone(),
+        _ => panic!("a notice is text"),
+    };
+    assert!(text.contains("sentry"), "it names the server: {text}");
+    assert!(text.contains("\"tools\":1"), "and how many it has: {text}");
+
+    let second = call(&mut agg, "call-2");
+    assert!(
+        second.is_empty(),
+        "a server is announced once, and the record is on the earlier call: {second:?}"
+    );
+}
+
+/// `never` is the remedy for a server whose own words help nobody.
+#[test]
+fn announce_never_says_nothing() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            announce_mcp: Announce::Never,
+            ..searching_connector_config(&["sentry"])
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+    dispatch(
+        &mut agg,
+        CommandPayload::RequestLlmCall {
+            llm: "claude".to_string(),
+            call_id: "call-1".to_string(),
+            request: request_with(vec![]),
+            stream: false,
+            retry: RetryPolicy::no_retry(),
+            handler: LlmHandler::Server,
+            format: None,
+        },
+        &system(),
+    );
+    assert!(
+        agg.state.llm_call("call-1").unwrap().prompt.is_empty(),
+        "the engine adds nothing"
+    );
+}
+
 #[test]
 fn a_searched_connector_offers_two_tools_however_many_it_has() {
     let mut agg =
@@ -7203,12 +7333,12 @@ fn a_searched_connector_offers_two_tools_however_many_it_has() {
         .collect();
     assert_eq!(
         carried,
-        ["list_tools", "tool_search", "call_tool"],
-        "three tools cost the request three definitions, and thirty would cost the same three"
+        ["tool_search", "call_tool"],
+        "four tools cost the request two definitions, and thirty would cost the same two"
     );
     assert_eq!(
         spec.tools.as_ref().unwrap().len(),
-        6,
+        5,
         "the engine still holds each one; only the request leaves them out"
     );
     assert_eq!(
@@ -7373,8 +7503,8 @@ fn two_searched_connections_share_one_pair_and_one_search() {
 
     assert_eq!(
         offered(&agg),
-        ["list_tools", "tool_search", "call_tool"],
-        "two connections cost the same three definitions as one"
+        ["tool_search", "call_tool"],
+        "two connections cost the same two definitions as one"
     );
 
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
@@ -7390,14 +7520,9 @@ fn two_searched_connections_share_one_pair_and_one_search() {
         answer["tools"][0]["name"], "linear__search_issues",
         "one search reaches both connections, and the name says which holds the tool"
     );
-    assert_eq!(answer["searched"], 2, "both connections were searched");
     assert_eq!(
-        answer["connections"],
-        serde_json::json!([
-            { "connector": "sentry", "tools": 1 },
-            { "connector": "linear", "tools": 1 }
-        ]),
-        "the catalog rides in the answer, where growth costs nothing"
+        answer["searched"], 2,
+        "one search covers both connections, so neither needs its own"
     );
 }
 
@@ -7407,7 +7532,7 @@ fn two_searched_connections_share_one_pair_and_one_search() {
 fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
     let mut agg = session_with_searched_connector("sentry", &["list_projects"]);
     let before = offered(&agg);
-    assert_eq!(before, ["list_tools", "tool_search", "call_tool"]);
+    assert_eq!(before, ["tool_search", "call_tool"]);
 
     // The worker writes a config that names a second searched connection.
     let d = open_decision(&mut agg, "and now linear");
@@ -7478,13 +7603,8 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
 
     assert_eq!(
         offered(&agg),
-        [
-            "sentry__search_issues",
-            "list_tools",
-            "tool_search",
-            "call_tool"
-        ],
-        "the listed connection keeps its own tools, beside the three"
+        ["sentry__search_issues", "tool_search", "call_tool"],
+        "the listed connection keeps its own tools, beside the two"
     );
     assert!(
         held(&agg).contains(&"aws__s3_list".to_string()),
@@ -7505,9 +7625,8 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
         "a search that skipped the listed connection would report an absence that is not real"
     );
     assert_eq!(
-        answer["connections"].as_array().unwrap().len(),
-        2,
-        "the catalog covers the agent, not the searched half of it"
+        answer["searched"], 2,
+        "a search covers the agent, and not the deferred half of it"
     );
 
     call(
@@ -7555,7 +7674,7 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
     let merged = agg.state.connector_tools(None);
     assert_eq!(
         offered(&agg),
-        ["list_tools", "call_tool"],
+        ["call_tool"],
         "the worker keeps the name it declared, and the engine keeps the rest"
     );
     assert_eq!(
@@ -7585,8 +7704,8 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
         "tenant-a",
         "user-1",
         Some(AgentConfig {
-            defer_tools: true,
-            defer_tools_strategy: Default::default(),
+            defer_tools: Some(DeferTools::default()),
+            announce_mcp: Default::default(),
             mcp: vec![],
             ..agent_config("m1")
         }),
@@ -7594,7 +7713,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
     let before = offered(&agg);
     assert_eq!(
         before,
-        ["list_tools", "tool_search", "call_tool"],
+        ["tool_search", "call_tool"],
         "an agent with no connection still gets them"
     );
 
@@ -7607,8 +7726,8 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
             actions: vec![],
             state: None,
             agent: Some(AgentConfig {
-                defer_tools: true,
-                defer_tools_strategy: Default::default(),
+                defer_tools: Some(DeferTools::default()),
+                announce_mcp: Default::default(),
                 mcp: vec![McpServer {
                     id: "sentry".to_string(),
                     tools: None,
@@ -7636,8 +7755,8 @@ fn a_connection_overrides_the_agents_default() {
         "tenant-a",
         "user-1",
         Some(AgentConfig {
-            defer_tools: true,
-            defer_tools_strategy: Default::default(),
+            defer_tools: Some(DeferTools::default()),
+            announce_mcp: Default::default(),
             mcp: vec![McpServer {
                 id: "sentry".to_string(),
                 tools: Some(McpTools {
@@ -7657,12 +7776,7 @@ fn a_connection_overrides_the_agents_default() {
             .iter()
             .map(|t| t.name.as_str())
             .collect::<Vec<_>>(),
-        [
-            "sentry__search_issues",
-            "list_tools",
-            "tool_search",
-            "call_tool"
-        ],
+        ["sentry__search_issues", "tool_search", "call_tool"],
         "the connection lists its own tools; the agent still gets the search"
     );
 }
@@ -7734,9 +7848,11 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
 /// combination is a different `defer_tools_strategy`.
 #[test]
 fn tool_search_picks_which_engine_tools_the_agent_gets() {
-    let agent = |search: DeferToolsStrategy| AgentConfig {
-        defer_tools: true,
-        defer_tools_strategy: search,
+    let agent = |strategy: DeferToolsStrategy| AgentConfig {
+        defer_tools: Some(DeferTools {
+            strategy,
+            ..DeferTools::default()
+        }),
         tools: vec![AgentTool {
             name: "run_payroll".to_string(),
             description: "Run payroll.".to_string(),
@@ -7757,8 +7873,8 @@ fn tool_search_picks_which_engine_tools_the_agent_gets() {
             .collect()
     };
     assert_eq!(
-        offered(DeferToolsStrategy::Full),
-        ["list_tools", "tool_search", "call_tool"]
+        offered(DeferToolsStrategy::Search),
+        ["tool_search", "call_tool"]
     );
     assert_eq!(
         offered(DeferToolsStrategy::Search),
@@ -7771,8 +7887,8 @@ fn tool_search_picks_which_engine_tools_the_agent_gets() {
 /// a tool that states its own overrides it.
 #[test]
 fn defer_tools_defers_every_source_and_a_tool_can_opt_out() {
-    let agent = |defer_tools: bool| AgentConfig {
-        defer_tools,
+    let agent = |defers: bool| AgentConfig {
+        defer_tools: defers.then(DeferTools::default),
         tools: vec![
             AgentTool {
                 name: "run_payroll".to_string(),
@@ -7851,7 +7967,7 @@ fn a_worker_tool_can_defer_and_the_search_finds_it() {
 
     assert_eq!(
         offered(&agg),
-        ["list_tools", "tool_search", "call_tool"],
+        ["tool_search", "call_tool"],
         "no connection anywhere, and the agent still gets the search"
     );
 
@@ -7925,6 +8041,18 @@ fn a_deferred_worker_tool_still_checks_its_arguments() {
         message.contains("to"),
         "the provider never saw this schema, so the engine checks it: {message}"
     );
+    let schema: serde_json::Value = serde_json::from_str(
+        message
+            .split_once("input schema is: ")
+            .expect("the schema")
+            .1,
+    )
+    .expect("the schema is json the model can read");
+    assert_eq!(
+        schema["properties"]["to"]["type"], "string",
+        "the engine holds the schema, so a fault hands it back rather than \
+         leaving the model to guess: {message}"
+    );
 }
 
 #[test]
@@ -7944,8 +8072,17 @@ fn call_tool_refuses_a_connection_this_agent_does_not_have() {
         panic!("an unknown connection is an error");
     };
     assert!(
-        message.contains("github") && message.contains("sentry"),
-        "the message names what was asked for and what is there: {message}"
+        message.contains("github__search_issues"),
+        "the message names what was asked for: {message}"
+    );
+    assert!(
+        message.contains("sentry__search_issues"),
+        "a wrong name is usually a near miss, so the same search ranks the \
+         neighbours: {message}"
+    );
+    assert!(
+        message.contains("tool_search"),
+        "and the message names the way to get a schema: {message}"
     );
 }
 

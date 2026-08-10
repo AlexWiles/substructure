@@ -13,6 +13,8 @@
 //! `include` that matches nothing are both reported, because both usually mean
 //! the far side changed under us.
 
+use std::num::NonZeroUsize;
+
 use crate::connectors::RemoteTool;
 use crate::protocol::{
     ConnectorProtocol, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, LlmTool, McpServer,
@@ -130,7 +132,6 @@ pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a
         .collect()
 }
 
-pub const LIST_TOOLS: &str = "list_tools";
 pub const TOOL_SEARCH: &str = "tool_search";
 pub const CALL_TOOL: &str = "call_tool";
 
@@ -147,9 +148,10 @@ pub const CALL_TOOL: &str = "call_tool";
 /// and the provider's cache holds. The catalog rides in the answer instead.
 ///
 /// A new combination is a new arm here and a new [`DeferToolsStrategy`] value.
+/// The arm chooses which tools exist. It does not reword them: each definition
+/// reads the same whichever arm produced it.
 pub fn search_tools(search: DeferToolsStrategy) -> Vec<ConnectorTool> {
     match search {
-        DeferToolsStrategy::Full => vec![list_tool(), find_tool(), call_tool()],
         DeferToolsStrategy::Search => vec![find_tool(), call_tool()],
     }
 }
@@ -173,24 +175,15 @@ fn engine_tool(
     }
 }
 
-fn list_tool() -> ConnectorTool {
-    engine_tool(
-        LIST_TOOLS,
-        "List every tool this agent can reach, by name. They are not listed up front. Start here \
-         when you do not know what is available."
-            .to_string(),
-        serde_json::json!({ "type": "object", "properties": {} }),
-        ConnectorToolKind::List,
-    )
-}
-
 fn find_tool() -> ConnectorTool {
     engine_tool(
         TOOL_SEARCH,
-        format!(
-            "Search the tools this agent can reach. Answers with the name, the description, and \
-             the input schema of each match. Use `{LIST_TOOLS}` if a search finds nothing."
-        ),
+        "Search the tools this agent can reach. They are not listed up front. Answers with the \
+         name, the description, and the input schema of each match, best match first. Any word \
+         can match, so a plain description of the task searches well. A connector's name is a \
+         word in every one of its tools, so adding it keeps the search to that connection. An \
+         empty query matches every tool: start there when you do not know what is available."
+            .to_string(),
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -209,15 +202,15 @@ fn call_tool() -> ConnectorTool {
     engine_tool(
         CALL_TOOL,
         format!(
-            "Run one tool this agent can reach. Take `name` from `{LIST_TOOLS}` or \
-             `{TOOL_SEARCH}` exactly as it was given, and pass that tool's own arguments."
+            "Run one tool this agent can reach. Take `name` from `{TOOL_SEARCH}` exactly as it \
+             was given, and pass that tool's own arguments."
         ),
         serde_json::json!({
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The tool's name, exactly as a list or a search gave it."
+                    "description": "The tool's name, exactly as a search gave it."
                 },
                 "arguments": {
                     "type": "object",
@@ -229,12 +222,6 @@ fn call_tool() -> ConnectorTool {
         ConnectorToolKind::Call,
     )
 }
-
-/// More than this is longer than the tool list a search replaced.
-const MAX_MATCHES: usize = 10;
-
-/// A listing gives no schema, so it holds many more than a match does.
-const MAX_CATALOG: usize = 200;
 
 /// The usual BM25 defaults.
 const K1: f64 = 1.2;
@@ -301,77 +288,49 @@ fn frequency(doc: &[String], term: &str) -> f64 {
     doc.iter().filter(|word| word.starts_with(term)).count() as f64
 }
 
-/// The result of a `list_tools` call: each tool by name and one line, and no
-/// schema. Cheap enough to hold a whole connection, and enough for the model to
-/// choose a name and search or call it.
-pub fn list_answer(tools: &[LlmTool], connections: Vec<serde_json::Value>) -> String {
-    let catalog: Vec<serde_json::Value> = tools
-        .iter()
-        .take(MAX_CATALOG)
-        .map(|tool| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": first_line(&tool.description),
-            })
-        })
-        .collect();
-    let mut answer = serde_json::json!({
-        "connections": connections,
-        "catalog": catalog,
-        "tools": tools.len(),
-        "call_with": CALL_TOOL,
-    });
-    if tools.len() > catalog.len() {
-        answer["note"] = serde_json::json!(format!(
-            "{} of {} tools listed. Use {TOOL_SEARCH} to reach the rest.",
-            catalog.len(),
-            tools.len()
-        ));
-    }
-    answer.to_string()
-}
-
-/// The result of a `defer_tools_strategy` call. A match is a tool definition, in the
+/// The result of a `tool_search` call. A match is a tool definition, in the
 /// shape of the tool list, so one search is the full distance to a call.
 ///
-/// A match of nothing says so, and names the tool that lists.
-pub fn find_answer(tools: &[LlmTool], connections: Vec<serde_json::Value>, query: &str) -> String {
+/// The connections are not here. Each name carries its connector, and the
+/// announcement gives each server once, so a roster in every answer would be a
+/// second copy of a fact that does not change.
+///
+/// A match of nothing says so, and sends the model back to the search with an
+/// empty query, which is the one thing that always answers.
+pub fn find_answer(tools: &[LlmTool], query: &str, max_matches: NonZeroUsize) -> String {
     let matched = find(tools, query);
     let shown: Vec<serde_json::Value> = matched
         .iter()
-        .take(MAX_MATCHES)
+        .take(max_matches.get())
+        // `output` is the engine's contract with the result, not the model's
+        // with the call. [`LlmTool::output`] says it never reaches the model,
+        // and a match is not the exception.
         .map(|tool| {
             serde_json::json!({
                 "name": tool.name,
                 "description": tool.description,
                 "input": tool.input,
-                "output": tool.output,
             })
         })
         .collect();
     let mut answer = serde_json::json!({
-        "connections": connections,
         "tools": shown,
         "matched": matched.len(),
         "searched": tools.len(),
         "call_with": CALL_TOOL,
     });
     if matched.is_empty() {
-        answer["note"] = serde_json::json!(format!(
-            "Nothing matched. Call {LIST_TOOLS} for every tool."
-        ));
+        answer["note"] =
+            serde_json::json!("Nothing matched. Search again with an empty query for every tool.");
     } else if matched.len() > shown.len() {
         answer["note"] = serde_json::json!(format!(
-            "{} of {} matches shown. Narrow the query to see the rest.",
+            "{} of {} matches shown. Narrow the query to see the rest: a connector's name is a \
+             word in every one of its tools, so adding it keeps the search to that connection.",
             shown.len(),
             matched.len()
         ));
     }
     answer.to_string()
-}
-
-fn first_line(description: &str) -> &str {
-    description.lines().next().unwrap_or_default()
 }
 
 fn passes(filter: &McpTools, tool: &RemoteTool) -> bool {
@@ -952,10 +911,10 @@ mod tests {
 
     #[test]
     fn one_set_of_tools_serves_the_whole_agent() {
-        let tools = search_tools(DeferToolsStrategy::Full);
+        let tools = search_tools(DeferToolsStrategy::Search);
         assert_eq!(
             tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-            vec![LIST_TOOLS, TOOL_SEARCH, CALL_TOOL]
+            vec![TOOL_SEARCH, CALL_TOOL]
         );
         assert!(
             !tools[0].description.contains("sentry"),
@@ -966,7 +925,7 @@ mod tests {
 
     #[test]
     fn a_search_answer_and_a_call_use_one_word_for_one_thing() {
-        let call = &search_tools(DeferToolsStrategy::Full)[2];
+        let call = &search_tools(DeferToolsStrategy::Search)[1];
         let properties = call.input.as_ref().unwrap()["properties"].clone();
         assert_eq!(
             call.input.as_ref().unwrap()["required"],
@@ -1039,43 +998,35 @@ mod tests {
         );
     }
 
+    /// The default cap, so a test reads the same as an agent that says nothing.
+    fn cap() -> NonZeroUsize {
+        crate::protocol::DeferTools::default().max_matches
+    }
+
     #[test]
-    fn a_list_gives_every_tool_by_name_and_no_schema() {
-        let tools = [llm("sentry__search_issues", "Search the issues.")];
+    fn an_empty_query_answers_with_every_tool() {
+        let tools = [
+            llm("sentry__search_issues", "Search the issues."),
+            llm("github__create_pr", "Open a pull request."),
+        ];
         let answer: serde_json::Value =
-            serde_json::from_str(&list_answer(&tools, Vec::new())).expect("json");
-        let catalog = answer["catalog"].as_array().expect("a catalog");
-        assert_eq!(catalog[0]["name"], "sentry__search_issues");
-        assert!(
-            catalog[0].get("input").is_none(),
-            "a listing carries no schema, which is what makes it cheap"
+            serde_json::from_str(&find_answer(&tools, "", cap())).expect("json");
+        assert_eq!(answer["matched"], 2, "no query is not no match");
+        assert_eq!(
+            answer["tools"][0]["input"]["type"], "object",
+            "the only door carries the schema, or a name is a dead end"
         );
     }
 
     #[test]
-    fn a_listing_says_how_many_it_left_out() {
-        let tools: Vec<LlmTool> = (0..MAX_CATALOG + 5)
-            .map(|i| llm(&format!("tool_{i}"), ""))
-            .collect();
-        let answer: serde_json::Value =
-            serde_json::from_str(&list_answer(&tools, Vec::new())).expect("json");
-        assert_eq!(answer["catalog"].as_array().unwrap().len(), MAX_CATALOG);
-        assert!(
-            answer["note"].is_string(),
-            "silence would read as the whole list"
-        );
-    }
-
-    #[test]
-    fn a_search_that_matches_nothing_names_the_tool_that_lists() {
+    fn a_search_that_matches_nothing_gives_the_next_move() {
         let tools = [llm("search_issues", "")];
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&tools, Vec::new(), "kubernetes helm"))
-                .expect("json");
+            serde_json::from_str(&find_answer(&tools, "kubernetes helm", cap())).expect("json");
         assert_eq!(answer["matched"], 0);
         assert!(
-            answer["note"].as_str().unwrap().contains(LIST_TOOLS),
-            "an empty answer must give the model its next move"
+            answer["note"].as_str().unwrap().contains("empty query"),
+            "an empty answer must give the model a move it can make"
         );
     }
 
@@ -1085,8 +1036,8 @@ mod tests {
             .map(|i| llm(&format!("issue_tool_{i}"), ""))
             .collect();
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&tools, Vec::new(), "issue")).expect("json");
-        assert_eq!(answer["tools"].as_array().unwrap().len(), MAX_MATCHES);
+            serde_json::from_str(&find_answer(&tools, "issue", cap())).expect("json");
+        assert_eq!(answer["tools"].as_array().unwrap().len(), cap().get());
         assert_eq!(answer["matched"], 15, "the count is of every match");
         assert!(answer["note"].is_string());
     }
@@ -1095,7 +1046,7 @@ mod tests {
     fn a_match_reads_as_a_tool_definition() {
         let tools = [llm("sentry__search_issues", "Search the issues.")];
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&tools, Vec::new(), "issues")).expect("json");
+            serde_json::from_str(&find_answer(&tools, "issues", cap())).expect("json");
         assert_eq!(answer["tools"][0]["name"], "sentry__search_issues");
         assert_eq!(answer["tools"][0]["input"]["type"], "object");
         assert_eq!(answer["call_with"], CALL_TOOL);
@@ -1122,7 +1073,7 @@ mod tests {
 
     #[test]
     fn a_declared_tool_still_wins_its_name_against_a_search_tool() {
-        let r = Resolution::of(search_tools(DeferToolsStrategy::Full));
+        let r = Resolution::of(search_tools(DeferToolsStrategy::Search));
         let merged = merge([r], [TOOL_SEARCH]);
         assert_eq!(
             merged
@@ -1130,7 +1081,7 @@ mod tests {
                 .iter()
                 .map(|t| t.name.as_str())
                 .collect::<Vec<_>>(),
-            vec![LIST_TOOLS, CALL_TOOL],
+            vec![CALL_TOOL],
             "the config's own name wins, the same as against any connector tool"
         );
         assert_eq!(merged.collisions, vec![TOOL_SEARCH.to_string()]);

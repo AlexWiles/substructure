@@ -76,7 +76,7 @@ impl AgentConfig {
             let mut tools: Vec<LlmTool> = self
                 .tools
                 .iter()
-                .map(|t| t.to_llm_tool(self.defer_tools))
+                .map(|t| t.to_llm_tool(self.defers_tools()))
                 .collect();
             tools.extend(self.sub_agents.iter().map(SubAgent::to_llm_tool));
             Some(tools)
@@ -169,8 +169,8 @@ mod tests {
             tools,
             sub_agents,
             mcp: Vec::new(),
-            defer_tools: false,
-            defer_tools_strategy: Default::default(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 

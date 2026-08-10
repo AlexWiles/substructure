@@ -398,8 +398,8 @@ impl World {
                 tools: None,
                 auth_failure: Default::default(),
             }],
-            defer_tools: false,
-            defer_tools_strategy: Default::default(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 

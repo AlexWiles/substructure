@@ -143,8 +143,8 @@ fn config() -> AgentConfig {
         tools: Vec::new(),
         sub_agents: Vec::new(),
         mcp: Vec::new(),
-        defer_tools: false,
-        defer_tools_strategy: Default::default(),
+        defer_tools: None,
+        announce_mcp: Default::default(),
     }
 }
 

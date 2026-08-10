@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn anthropic_round_trip_omits_stream_and_maps_both_directions() {
-        let body = LlmFormat::Anthropic.request_to_wire(&request(), DeferToolsStrategy::Full);
+        let body = LlmFormat::Anthropic.request_to_wire(&request(), DeferToolsStrategy::Search);
         assert_eq!(body["system"][0]["text"], "be nice");
         assert_eq!(body["max_tokens"], 64);
         assert!(body.get("stream").is_none(), "stream is the trigger's flag");
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn openai_round_trip_omits_stream_and_maps_both_directions() {
-        let body = LlmFormat::Openai.request_to_wire(&request(), DeferToolsStrategy::Full);
+        let body = LlmFormat::Openai.request_to_wire(&request(), DeferToolsStrategy::Search);
         assert_eq!(body["model"], "m");
         assert_eq!(body["messages"][0]["role"], "system");
         assert!(body.get("stream").is_none());

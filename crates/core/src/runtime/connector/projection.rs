@@ -131,11 +131,7 @@ mod tests {
     #[test]
     fn only_a_remote_tool_reaches_the_connection() {
         assert!(ConnectorToolKind::Remote.is_remote());
-        for kind in [
-            ConnectorToolKind::List,
-            ConnectorToolKind::Find,
-            ConnectorToolKind::Call,
-        ] {
+        for kind in [ConnectorToolKind::Find, ConnectorToolKind::Call] {
             assert!(!kind.is_remote(), "{kind:?} is answered by the engine");
         }
     }

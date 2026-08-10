@@ -193,7 +193,7 @@ impl SessionState {
         let Some(connector) = config.mcp.iter().find(|c| c.id == connection_id).cloned() else {
             return;
         };
-        let defers = filter::defers(&connector, config.defer_tools);
+        let defers = filter::defers(&connector, config.defers_tools());
         let r = filter::resolve(&connector, offered, prefix, defers);
         tracing::info!(
             connection = %connection_id,
@@ -234,9 +234,10 @@ impl SessionState {
         // the engine. One that took it by accident has quietly turned off the
         // search this connection depends on.
         if defers {
-            for name in collisions.iter().filter(|n| {
-                [filter::LIST_TOOLS, filter::TOOL_SEARCH, filter::CALL_TOOL].contains(&n.as_str())
-            }) {
+            for name in collisions
+                .iter()
+                .filter(|n| [filter::TOOL_SEARCH, filter::CALL_TOOL].contains(&n.as_str()))
+            {
                 tracing::warn!(
                     connection = %connection_id,
                     tool = %name,

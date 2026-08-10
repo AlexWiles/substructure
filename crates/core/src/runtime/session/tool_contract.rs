@@ -264,6 +264,7 @@ mod tests {
             EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
                 defer_tools_strategy: Default::default(),
+                context_ids: Vec::new(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],

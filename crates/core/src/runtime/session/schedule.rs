@@ -454,6 +454,7 @@ mod tests {
             tracking(status),
             EffectPayload::LlmCall(LlmCallState {
                 defer_tools_strategy: Default::default(),
+                context_ids: Vec::new(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],
@@ -541,8 +542,8 @@ mod tests {
                 tools: None,
                 auth_failure: Default::default(),
             }],
-            defer_tools: false,
-            defer_tools_strategy: Default::default(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 

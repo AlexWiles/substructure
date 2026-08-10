@@ -586,7 +586,7 @@ mod tests {
             exclude: None,
             enabled: None,
         });
-        let v = serde_json::to_value(WireBody::build(&r, DeferToolsStrategy::Full, Some(false)))
+        let v = serde_json::to_value(WireBody::build(&r, DeferToolsStrategy::Search, Some(false)))
             .unwrap();
         assert_eq!(v["reasoning_effort"], "high");
         assert!(v.get("temperature").is_none());
@@ -598,7 +598,7 @@ mod tests {
     fn reasoning_model_without_explicit_effort_still_strips_temperature() {
         let v = serde_json::to_value(WireBody::build(
             &req("gpt-5.4-mini"),
-            DeferToolsStrategy::Full,
+            DeferToolsStrategy::Search,
             Some(false),
         ))
         .unwrap();
@@ -610,7 +610,7 @@ mod tests {
     fn non_reasoning_model_keeps_temperature() {
         let v = serde_json::to_value(WireBody::build(
             &req("gpt-4o"),
-            DeferToolsStrategy::Full,
+            DeferToolsStrategy::Search,
             Some(false),
         ))
         .unwrap();

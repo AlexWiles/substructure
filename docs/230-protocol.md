@@ -389,8 +389,10 @@ type AgentConfig = {
     tools?: AgentTool[]
     sub_agents?: SubAgent[]
     mcp?: McpServer[]
-    defer_tools?: boolean       // the default for every tool of this agent
-    tool_search?: "full" | "search"  // which tools find them. omitted: "full"
+    defer_tools?: boolean | {   // the default for every tool of this agent.
+        strategy?: "search"     //   presence is the switch. omitted: no opinion
+        max_matches?: number    //   matches per search, >= 1. omitted: 10
+    }
 }
 
 type AgentTool = {

@@ -4,6 +4,7 @@
 //! derives [`JsonSchema`]; the schemas under `schemas/` are generated from them.
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroUsize;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -334,17 +335,130 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
     /// Defer every tool this agent offers, from any source, unless the tool or
-    /// the connection says otherwise.
+    /// the connection says otherwise. Absent ⇒ the agent defers nothing of its
+    /// own; a connection may still defer on its own account.
     ///
-    /// Declared on the agent because an agent can hold this opinion before it
-    /// names a connection: one that sets it gets the search tools from its
-    /// first turn, so a connection added later costs no cache.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub defer_tools: bool,
-    /// Which tools this agent gets to reach the ones it defers. Read only when
-    /// something defers.
+    /// Presence is the switch, so an agent cannot carry settings that do
+    /// nothing. Declared on the agent because an agent can hold this opinion
+    /// before it names a connection: one that sets it gets the search tools
+    /// from its first turn, so a connection added later costs no cache.
+    #[serde(
+        default,
+        deserialize_with = "de_defer_tools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<DeferToolsWire>")]
+    pub defer_tools: Option<DeferTools>,
+    /// Where the engine tells the model that an MCP server is available, and
+    /// what that server says it is for.
+    ///
+    /// Separate from `defer_tools`: a server exists whether or not its tools
+    /// are deferred, and where a notice lands is a fact about this agent's
+    /// prompt rather than about any server.
+    #[serde(default, skip_serializing_if = "Announce::is_default")]
+    pub announce_mcp: Announce,
+}
+
+/// Where an MCP announcement lands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "Announce")]
+pub enum Announce {
+    /// The system prompt while no call has dispatched; then a block on the
+    /// last user message; then a message of its own. The engine takes the
+    /// first place it can use, so the order is not a setting.
+    #[default]
+    Auto,
+    /// Nowhere. For a server whose own words help nobody.
+    Never,
+}
+
+impl Announce {
+    fn is_default(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
+impl AgentConfig {
+    /// Whether this agent defers its own tools. A connection's own `defer`
+    /// still overrides this either way.
+    pub fn defers_tools(&self) -> bool {
+        self.defer_tools.is_some()
+    }
+
+    /// The settings for the tools this agent defers. An agent that holds no
+    /// opinion still needs them, because a connection can defer on its own
+    /// account.
+    pub fn defer_settings(&self) -> DeferTools {
+        self.defer_tools.unwrap_or_default()
+    }
+
+    /// Which tools the agent gets to reach the ones it defers.
+    pub fn defer_strategy(&self) -> DeferToolsStrategy {
+        self.defer_settings().strategy
+    }
+}
+
+/// How many tools one search answers with, when the agent does not say.
+///
+/// A match carries a whole definition, so an answer of many is the tool list
+/// the search replaced. The engine reports what it left out, so a model that
+/// wanted more can narrow the query and ask again.
+pub const DEFAULT_MAX_MATCHES: usize = 10;
+
+fn default_max_matches() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_MAX_MATCHES).expect("the default is not zero")
+}
+
+fn is_default_max_matches(n: &NonZeroUsize) -> bool {
+    *n == default_max_matches()
+}
+
+/// How an agent's deferred tools reach the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(title = "DeferTools")]
+pub struct DeferTools {
+    /// Which tools the agent gets to reach the ones it defers.
     #[serde(default, skip_serializing_if = "DeferToolsStrategy::is_default")]
-    pub defer_tools_strategy: DeferToolsStrategy,
+    pub strategy: DeferToolsStrategy,
+    /// The most matches one search answers with. Never zero: a search that can
+    /// answer with nothing is a search the model cannot use.
+    #[serde(
+        default = "default_max_matches",
+        skip_serializing_if = "is_default_max_matches"
+    )]
+    pub max_matches: NonZeroUsize,
+}
+
+impl Default for DeferTools {
+    fn default() -> Self {
+        Self {
+            strategy: DeferToolsStrategy::default(),
+            max_matches: default_max_matches(),
+        }
+    }
+}
+
+/// The two forms `defer_tools` accepts: `true` for the defaults, or a table.
+/// `false` reads the same as absent, so a config can turn off what it inherits.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(title = "DeferToolsWire")]
+pub enum DeferToolsWire {
+    Flag(bool),
+    Config(DeferTools),
+}
+
+pub(crate) fn de_defer_tools<'de, D>(d: D) -> Result<Option<DeferTools>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<DeferToolsWire>::deserialize(d)? {
+        None | Some(DeferToolsWire::Flag(false)) => None,
+        Some(DeferToolsWire::Flag(true)) => Some(DeferTools::default()),
+        Some(DeferToolsWire::Config(c)) => Some(c),
+    })
 }
 
 /// A function tool the agent offers. The model-facing contract is
@@ -410,8 +524,6 @@ pub enum ConnectorToolKind {
     /// Call `remote_name` on the connection.
     #[default]
     Remote,
-    /// Give each tool by name, from the recorded offer. This reaches nothing.
-    List,
     /// Search the recorded offer. This reaches nothing.
     Find,
     /// Run the tool the arguments name.
@@ -605,11 +717,10 @@ impl LlmRequest {
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "DeferToolsStrategy")]
 pub enum DeferToolsStrategy {
-    /// `list_tools`, `defer_tools_strategy`, and `call_tool`.
+    /// `tool_search` and `call_tool`. A search answers with the schema, so one
+    /// search is the whole distance to a call, and nothing hands the model a
+    /// name it cannot then reach.
     #[default]
-    Full,
-    /// `defer_tools_strategy` and `call_tool`. For an agent whose catalog is too long to
-    /// be worth reading.
     Search,
 }
 
@@ -622,7 +733,7 @@ impl DeferToolsStrategy {
     /// one with the provider's own flag.
     pub fn offered(self, tools: &[LlmTool]) -> Vec<&LlmTool> {
         match self {
-            Self::Full | Self::Search => tools.iter().filter(|t| !t.defer).collect(),
+            Self::Search => tools.iter().filter(|t| !t.defer).collect(),
         }
     }
 

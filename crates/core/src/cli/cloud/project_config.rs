@@ -1182,6 +1182,32 @@ mod tests {
         assert!(resolve(Some(&missing)).is_err());
     }
 
+    /// Every example's config parses and validates. One that does not load is
+    /// worse than no example: it is the first file a reader copies.
+    #[test]
+    fn every_example_config_parses_and_validates() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .canonicalize()
+            .expect("examples directory");
+        let mut checked = 0;
+        for entry in fs::read_dir(&root).expect("read examples") {
+            let path = entry.expect("entry").path().join(FILENAME);
+            if !path.exists() {
+                continue;
+            }
+            let found = load_explicit(&path)
+                .unwrap_or_else(|e| panic!("{} does not parse: {e:#}", path.display()));
+            found
+                .config
+                .manifest()
+                .validate()
+                .unwrap_or_else(|e| panic!("{} does not validate: {e}", path.display()));
+            checked += 1;
+        }
+        assert!(checked > 10, "found only {checked} example configs");
+    }
+
     #[test]
     fn load_without_a_file_is_the_defaults() {
         let root = tmpdir().join("isolated");

@@ -21,17 +21,17 @@ importers:
   packages/cli:
     optionalDependencies:
       '@substructure.ai/cli-darwin-arm64':
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.3.1
+        version: 0.3.1
       '@substructure.ai/cli-darwin-x64':
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.3.1
+        version: 0.3.1
       '@substructure.ai/cli-linux-arm64':
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.3.1
+        version: 0.3.1
       '@substructure.ai/cli-linux-x64':
-        specifier: 0.3.0
-        version: 0.3.0
+        specifier: 0.3.1
+        version: 0.3.1
 
 packages:
 
@@ -92,24 +92,24 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@substructure.ai/cli-darwin-arm64@0.3.0':
-    resolution: {integrity: sha512-vZPAg3v7aOVZFMs6BWttgEzRsCgCJXsfNDtsanBKDK22MmzX24XljU2irjPy2Kd6KKZpMJzEZGVBZx1AGoTAOg==}
+  '@substructure.ai/cli-darwin-arm64@0.3.1':
+    resolution: {integrity: sha512-6uyVSgsdJz6p7z5GuG/3eH1dCjmXYAkYHm4J3qfFbGo1Eol0/qUcSn4z9zEblQi1d3FFDE+pssJ3gfkHPHHX+A==}
     cpu: [arm64]
     os: [darwin]
 
-  '@substructure.ai/cli-darwin-x64@0.3.0':
-    resolution: {integrity: sha512-Twfg5Bk/LWVSV3FpKnAXdk5LpcAgdmrdZWnFAP4G9mjGpdtVh+AV6NdahBTTOgLYrHdbtEvBVcRwRBKWXE4VIA==}
+  '@substructure.ai/cli-darwin-x64@0.3.1':
+    resolution: {integrity: sha512-3L5NuubpwWlHJNIkOCYtOxHTXHWe6OjNW5GFVZRVY39zQxuUKAhUT7WmNIbmtx4o/RfBuhiRdY1VwtiAd5NgeQ==}
     cpu: [x64]
     os: [darwin]
 
-  '@substructure.ai/cli-linux-arm64@0.3.0':
-    resolution: {integrity: sha512-TZtyUiEOg0ryT1fnsSD5mufKVnF2ZRKN58Lri7nv+ZxNwix+zM7hAtVugQhLx/eUEk95oZqyLbPSU6Wfup0VAg==}
+  '@substructure.ai/cli-linux-arm64@0.3.1':
+    resolution: {integrity: sha512-y+N+VznXOfB504xp5S0CH8KQ+J4Ve9vkpx2rNsZnRqODgPgNGOzlQraWuKneykLR3eAVEWx0KD5XPE18LGPkiA==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@substructure.ai/cli-linux-x64@0.3.0':
-    resolution: {integrity: sha512-T0S+rncwzXK1MzYMXb4CY/+0wf+9vuYLPYWOEmxmJMx5gfLpI9rMVYzQb33job4PXR8eoWGXKk+8mGHkkrDV2Q==}
+  '@substructure.ai/cli-linux-x64@0.3.1':
+    resolution: {integrity: sha512-pksqG3SQxDj8q0oxL4eZjaUoH8MH/9OHBAlsoHveuCDFZ/mODTuygfJeYwQQvrd8nv8f++PoFxbkIc2SW35Mwg==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
@@ -210,16 +210,16 @@ snapshots:
   '@biomejs/cli-win32-x64@2.4.10':
     optional: true
 
-  '@substructure.ai/cli-darwin-arm64@0.3.0':
+  '@substructure.ai/cli-darwin-arm64@0.3.1':
     optional: true
 
-  '@substructure.ai/cli-darwin-x64@0.3.0':
+  '@substructure.ai/cli-darwin-x64@0.3.1':
     optional: true
 
-  '@substructure.ai/cli-linux-arm64@0.3.0':
+  '@substructure.ai/cli-linux-arm64@0.3.1':
     optional: true
 
-  '@substructure.ai/cli-linux-x64@0.3.0':
+  '@substructure.ai/cli-linux-x64@0.3.1':
     optional: true
 
   lefthook-darwin-arm64@2.1.5:

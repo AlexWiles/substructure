@@ -204,7 +204,7 @@ pub(in crate::runtime::session) fn request(
     // replay must lower the way the original did.
     let defer_tools_strategy = state
         .resolve_agent_for(state.head_id.as_deref())
-        .map(|c| c.defer_tools_strategy)
+        .map(|c| c.defer_strategy())
         .unwrap_or_default();
     Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {
         id: call_id,

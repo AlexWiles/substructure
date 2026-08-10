@@ -1113,8 +1113,8 @@ mod tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: Vec::new(),
-            defer_tools: false,
-            defer_tools_strategy: Default::default(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 
@@ -1523,6 +1523,7 @@ mod tests {
             EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
                 defer_tools_strategy: Default::default(),
+                context_ids: Vec::new(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],

@@ -942,7 +942,7 @@ mod tests {
                 msg(Role::User, Some("hi")),
             ]),
             4096,
-            DeferToolsStrategy::Full,
+            DeferToolsStrategy::Search,
             Some(false),
         );
         let v = serde_json::to_value(&body).unwrap();
@@ -974,7 +974,7 @@ mod tests {
                 result_2,
             ]),
             4096,
-            DeferToolsStrategy::Full,
+            DeferToolsStrategy::Search,
             Some(false),
         );
         let v = serde_json::to_value(&body).unwrap();
@@ -1016,7 +1016,7 @@ mod tests {
                 defer: false,
             },
         ]);
-        let v = request_to_wire(&r, DeferToolsStrategy::Full);
+        let v = request_to_wire(&r, DeferToolsStrategy::Search);
         let mark = serde_json::json!({ "type": "ephemeral" });
 
         assert_eq!(v["tools"][1]["cache_control"], mark, "after the tools");
@@ -1037,7 +1037,7 @@ mod tests {
     #[test]
     fn a_request_with_no_tools_and_no_system_still_caches_the_transcript() {
         let r = req(vec![msg(Role::User, Some("hello"))]);
-        let v = request_to_wire(&r, DeferToolsStrategy::Full);
+        let v = request_to_wire(&r, DeferToolsStrategy::Search);
         assert!(v.get("system").is_none());
         assert!(v.get("tools").is_none());
         let block = v["messages"][0]["content"][0].clone();
@@ -1073,7 +1073,7 @@ mod tests {
             exclude: None,
             enabled: None,
         });
-        let v = serde_json::to_value(build_body(&r, 4096, DeferToolsStrategy::Full, Some(true)))
+        let v = serde_json::to_value(build_body(&r, 4096, DeferToolsStrategy::Search, Some(true)))
             .unwrap();
         assert_eq!(v["max_tokens"], 1000);
         assert_eq!(v["tools"][0]["name"], "f");

@@ -79,7 +79,7 @@ Above about forty tools, a model chooses badly, and each definition sits at the
 front of the request where the provider keeps its cache.
 
 Set `defer` on the tools an agent seldom needs. The request leaves them out, and
-the agent gets `list_tools`, `tool_search`, and `call_tool` in their place. The
+the agent gets `tool_search` and `call_tool` in their place. The
 model searches for a tool and names it to `call_tool`. Your worker receives an
 ordinary `tool.execute`, under the tool's own name.
 

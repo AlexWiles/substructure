@@ -14,4 +14,5 @@ output = "pretty"
 auth = false
 
 [slack]
-agent = "my-agent"
+dm = "my-agent"
+mentions = "my-agent"

@@ -242,16 +242,21 @@ pub(in crate::runtime::session) fn request(
 ///
 /// A name the agent cannot reach keeps the wrapper, with an empty target. The
 /// engine answers it with the fault, and nothing is dialled.
+///
+/// Routed at the head, not an anchor: this call has no effect yet. The config
+/// write lands before the actions run, and `insert_effect` anchors the call at
+/// the head — so the head here is the anchor it is about to be given.
 fn unwrap_call(
     state: &SessionState,
     name: String,
     arguments: String,
 ) -> (String, String, ToolHandler, Option<ConnectorTarget>) {
     let named = argument(&arguments, "name").unwrap_or_default();
+    let here = state.head_id.as_deref();
     let target = state
-        .call_tool_fault(&arguments)
+        .call_tool_fault(&arguments, here)
         .is_none()
-        .then(|| state.call_tool_target(&named))
+        .then(|| state.call_tool_target(&named, here))
         .flatten();
     let Some(target) = target else {
         return (

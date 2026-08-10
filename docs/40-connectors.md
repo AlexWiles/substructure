@@ -198,24 +198,24 @@ mcp = [
 | `true` | None of them. |
 
 `defer` sets the flag on each tool the filter kept. The agent then gets
-`list_tools`, `tool_search`, and `call_tool`. A list and a search give each tool
-the same name the model calls directly, such as `aws__s3_list`.
+`tool_search` and `call_tool`. A search gives each tool the same name the model
+calls directly, such as `aws__s3_list`.
 
-The engine answers a list and a search from the tools it read when it opened
-each connection. Neither reaches the network.
+The engine answers a search from the tools it read when it opened each
+connection. It does not reach the network.
 
-An answer also gives the connections of the agent: the number of tools of each
-one, and what the server said it is for.
+An answer gives no list of connections. Each tool name carries its connector,
+such as `aws__s3_list`, and an answer says how many tools it searched.
 
 An agent can mix. A connection that does not defer puts its own tools in the
-list, beside the three. The filter still applies to one that does: a search does
-not show a tool the filter removed, and `call_tool` refuses one.
+request, beside the two. The filter still applies to one that does: a search
+does not show a tool the filter removed, and `call_tool` refuses one.
 
 Use search when a connection has more tools than an agent needs at one time.
 Keep the default when the agent uses most of the tools each session.
 
 Deferral is a property of a tool, and not of MCP: a tool your worker declares
-sets `defer` on its own definition, and the same three tools find it and run it.
+sets `defer` on its own definition, and the same two tools find it and run it.
 See [Deferred tools](./65-deferred-tools.md).
 
 A third answer is [Sub-agents](./80-sub-agents.md): give the connection to a

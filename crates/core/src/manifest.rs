@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
 use crate::protocol::{
-    AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, DeferToolsStrategy, Handler, LlmFormat,
+    AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, DeferTools, Handler, LlmFormat,
     McpServer, McpTools, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
@@ -227,12 +227,14 @@ pub struct AgentSection {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpRef>,
     /// The default for every tool of this agent. A tool or a connection
-    /// overrides it with its own `defer`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub defer_tools: Option<bool>,
-    /// Which tools this agent gets to reach the ones it defers.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub defer_tools_strategy: Option<DeferToolsStrategy>,
+    /// overrides it with its own `defer`. `true` takes the defaults; a table
+    /// sets them.
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::de_defer_tools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub defer_tools: Option<DeferTools>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
     /// Environment variable holding the secret an engine here signs this
@@ -270,8 +272,8 @@ impl AgentSection {
             tools: self.tools.clone(),
             sub_agents: self.to_sub_agents(manifest),
             mcp: self.mcp.iter().map(McpRef::to_server).collect(),
-            defer_tools: self.defer_tools.unwrap_or_default(),
-            defer_tools_strategy: self.defer_tools_strategy.unwrap_or_default(),
+            defer_tools: self.defer_tools,
+            announce_mcp: Default::default(),
         })
     }
 
@@ -751,6 +753,7 @@ pub fn check_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::DeferToolsStrategy;
 
     fn manifest(toml: &str) -> Manifest {
         toml::from_str(toml).unwrap()
@@ -948,7 +951,27 @@ mod tests {
     }
 
     #[test]
-    fn tool_search_is_read_from_the_agent() {
+    fn defer_tools_is_read_from_the_agent() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+defer_tools = { strategy = "search" }
+"#,
+        )
+        .unwrap();
+        m.validate().unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert!(config.defers_tools());
+        assert_eq!(config.defer_strategy(), DeferToolsStrategy::Search);
+    }
+
+    #[test]
+    fn the_bool_shorthand_takes_the_defaults() {
         let m: Manifest = toml::from_str(
             r#"
 name = "p"
@@ -958,18 +981,36 @@ type = "anthropic"
 llm = "claude"
 model = "m"
 defer_tools = true
-defer_tools_strategy = "search"
 "#,
         )
         .unwrap();
-        m.validate().unwrap();
         let config = m.agents()["support"].config.clone().expect("seeded");
-        assert!(config.defer_tools);
-        assert_eq!(config.defer_tools_strategy, DeferToolsStrategy::Search);
+        assert_eq!(config.defer_tools, Some(DeferTools::default()));
     }
 
     #[test]
-    fn an_unknown_tool_search_value_is_an_error() {
+    fn a_false_flag_reads_as_no_opinion() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+defer_tools = false
+"#,
+        )
+        .unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert!(
+            !config.defers_tools(),
+            "a config can turn off what it inherits"
+        );
+    }
+
+    #[test]
+    fn an_unknown_strategy_value_is_an_error() {
         let err = toml::from_str::<Manifest>(
             r#"
 name = "p"
@@ -978,7 +1019,7 @@ type = "anthropic"
 [agent.support]
 llm = "claude"
 model = "m"
-defer_tools_strategy = "sometimes"
+defer_tools = { strategy = "sometimes" }
 "#,
         )
         .unwrap_err()
