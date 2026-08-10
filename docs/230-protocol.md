@@ -391,7 +391,7 @@ type AgentConfig = {
     mcp?: McpServer[]
     defer_tools?: boolean | {   // the default for every tool of this agent.
         strategy?: "search"     //   presence is the switch. omitted: no opinion
-        max_matches?: number    //   matches per search, >= 1. omitted: 10
+        max_matches?: number    //   matches per search, >= 1. omitted: 5
     }
     announce_mcp?: "auto" | "never"  // tell the model a connection exists. omitted: "auto"
 }

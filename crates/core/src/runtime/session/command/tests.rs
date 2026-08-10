@@ -7250,7 +7250,11 @@ fn a_connection_is_announced_once_in_the_system_prefix() {
         Content::Text(t) => t.clone(),
         _ => panic!("a notice is text"),
     };
-    assert!(text.contains("sentry"), "it names the server: {text}");
+    assert!(
+        text.starts_with("{\"mcp_server\":\"sentry\""),
+        "the name leads: a server's own words can be long, and a label after them \
+         is not a label: {text}"
+    );
     assert!(text.contains("\"tools\":1"), "and how many it has: {text}");
 
     let second = call(&mut agg, "call-2");

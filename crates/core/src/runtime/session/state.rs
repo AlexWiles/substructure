@@ -43,6 +43,18 @@ pub struct Source {
     pub instructions: Option<String>,
 }
 
+/// One connection as an announcement gives it to the model.
+///
+/// A struct, and not a `json!` map: a map sorts its keys, which would put a
+/// server's own words ahead of the name that says whose they are.
+#[derive(serde::Serialize)]
+struct Summary<'a> {
+    mcp_server: &'a str,
+    tools: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    about: Option<&'a str>,
+}
+
 /// What a `call_tool` addresses. Any source, because deferral is a property of
 /// a tool and not of where it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -1937,14 +1949,12 @@ impl SessionState {
             .searchable_connectors(leaf)
             .into_iter()
             .find(|source| source.server.id == id)?;
-        let mut entry = serde_json::json!({
-            "mcp_server": source.server.id,
-            "tools": filter::callable(&source.server, &source.offered).len(),
-        });
-        if let Some(instructions) = &source.instructions {
-            entry["about"] = serde_json::json!(instructions);
-        }
-        Some(entry.to_string())
+        serde_json::to_string(&Summary {
+            mcp_server: &source.server.id,
+            tools: filter::callable(&source.server, &source.offered).len(),
+            about: source.instructions.as_deref(),
+        })
+        .ok()
     }
 
     /// Context ids that an earlier call of this path already carried.

@@ -79,7 +79,7 @@ tool, and an answer says how many tools it searched.
 ```toml
 [agent.docs.defer_tools]
 strategy = "search"    # which tools find the deferred ones. the only value today
-max_matches = 5        # how many matches one search answers with. default 10
+max_matches = 10       # how many matches one search answers with. default 5
 ```
 
 The presence of `defer_tools` is the switch, so an agent cannot carry a setting

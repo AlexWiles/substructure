@@ -99,7 +99,7 @@ strategy = "search"
 | Key | Default | What it sets |
 | --- | --- | --- |
 | `strategy` | `search` | Which tools the engine gives the model. `search` is the only value today. |
-| `max_matches` | `10` | The most matches one search answers with. A match carries a whole schema, so an answer of many is the tool list the search replaced. An answer says how many it left out. |
+| `max_matches` | `5` | The most matches one search answers with. A match carries a whole schema, so an answer of many is the tool list the search replaced. An answer says how many it left out. |
 
 `max_matches` is never zero: a search that can answer with nothing is a search
 the model cannot use.

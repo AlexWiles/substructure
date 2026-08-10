@@ -1031,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn a_find_answers_with_at_most_ten_and_says_how_many_matched() {
+    fn a_find_answers_up_to_the_cap_and_says_how_many_matched() {
         let tools: Vec<LlmTool> = (0..15)
             .map(|i| llm(&format!("issue_tool_{i}"), ""))
             .collect();

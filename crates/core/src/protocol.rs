@@ -404,7 +404,7 @@ impl AgentConfig {
 /// A match carries a whole definition, so an answer of many is the tool list
 /// the search replaced. The engine reports what it left out, so a model that
 /// wanted more can narrow the query and ask again.
-pub const DEFAULT_MAX_MATCHES: usize = 10;
+pub const DEFAULT_MAX_MATCHES: usize = 5;
 
 fn default_max_matches() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_MAX_MATCHES).expect("the default is not zero")
