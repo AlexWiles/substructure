@@ -45,6 +45,8 @@ struct SessionState {
     id: Option<String>,
     /// The version the server agreed to, echoed on every later request.
     version: Option<String>,
+    /// What the server said it is for, at the handshake.
+    instructions: Option<String>,
     ready: bool,
 }
 
@@ -65,6 +67,11 @@ impl McpClient {
     }
 
     /// Every tool the connection offers, following `nextCursor` to the end.
+    /// What the server said it is for. Read after a handshake, else `None`.
+    pub async fn instructions(&self) -> Option<String> {
+        self.session.lock().await.instructions.clone()
+    }
+
     pub async fn list_tools(&self) -> Result<Vec<RemoteTool>, ConnectorError> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
@@ -166,6 +173,7 @@ impl McpClient {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         state.version = Some(init.protocol_version);
+        state.instructions = init.instructions;
 
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
         self.post(&note, state.id.as_deref(), state.version.as_deref())
@@ -395,6 +403,10 @@ struct RpcError {
 #[serde(rename_all = "camelCase")]
 struct InitializeResult {
     protocol_version: String,
+    /// The server's own words about itself. Optional in MCP, and the only
+    /// description of a connection that we do not have to write ourselves.
+    #[serde(default)]
+    instructions: Option<String>,
 }
 
 #[derive(Deserialize)]

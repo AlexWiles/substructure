@@ -52,6 +52,7 @@ pub fn spawn_llm_task_executor(
                             attempt: task.attempt,
                             owner: &task.owner,
                             ancestry: &task.ancestry,
+                            defer_tools_strategy: task.defer_tools_strategy,
                         };
                         let result = if task.stream {
                             let (tx, rx) = mpsc::unbounded_channel();

@@ -617,6 +617,8 @@ mod tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: Vec::new(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 
@@ -693,6 +695,7 @@ mod tests {
                     anchor: Some("m1".to_string()),
                 }),
                 EventPayload::LlmCallRequested(LlmCallRequested {
+                    defer_tools_strategy: Default::default(),
                     llm: "claude".to_string(),
                     format: None,
                     id: "call-1".to_string(),

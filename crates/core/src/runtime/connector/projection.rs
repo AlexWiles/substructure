@@ -61,19 +61,31 @@ impl EventProcessor for ConnectorDispatchProjection {
                         tc.name
                     )));
                 };
-                ConnectorTask::CallTool {
-                    source_event_id: event.id,
-                    session_id: event.session_id.clone(),
-                    tenant_id: event.tenant_id.clone(),
-                    tool_call_id: d.id.clone(),
-                    attempt: d.attempt,
-                    connection_id: target.connector.clone(),
-                    remote_name: target.remote_name.clone(),
-                    // Arguments are stored as the raw model string; a tool that
-                    // takes none sends an empty object rather than a null.
-                    arguments: serde_json::from_str(&tc.arguments)
-                        .unwrap_or_else(|_| serde_json::json!({})),
-                    span: event.span,
+                if target.kind.is_remote() {
+                    ConnectorTask::CallTool {
+                        source_event_id: event.id,
+                        session_id: event.session_id.clone(),
+                        tenant_id: event.tenant_id.clone(),
+                        tool_call_id: d.id.clone(),
+                        attempt: d.attempt,
+                        connection_id: target.connector.clone(),
+                        remote_name: target.remote_name.clone(),
+                        // The recorded arguments are the tool's own: a `call_tool`
+                        // was unwrapped into the real call before it was
+                        // recorded.
+                        arguments: serde_json::from_str(&tc.arguments)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                        span: event.span,
+                    }
+                } else {
+                    ConnectorTask::Answer {
+                        source_event_id: event.id,
+                        session_id: event.session_id.clone(),
+                        tenant_id: event.tenant_id.clone(),
+                        tool_call_id: d.id.clone(),
+                        attempt: d.attempt,
+                        span: event.span,
+                    }
                 }
             }
             _ => return Ok(()),
@@ -108,4 +120,19 @@ pub fn spawn_connector_dispatch_processor(
         ..Default::default()
     };
     EventProcessorRunner::new(store, cursor_store, projection, config, cancel).spawn()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::ConnectorToolKind;
+
+    /// Only a `Remote` carries a name to dial. Every other kind is one of the
+    /// engine's own tools, answered from the session.
+    #[test]
+    fn only_a_remote_tool_reaches_the_connection() {
+        assert!(ConnectorToolKind::Remote.is_remote());
+        for kind in [ConnectorToolKind::Find, ConnectorToolKind::Call] {
+            assert!(!kind.is_remote(), "{kind:?} is answered by the engine");
+        }
+    }
 }

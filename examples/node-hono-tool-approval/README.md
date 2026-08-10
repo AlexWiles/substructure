@@ -54,7 +54,7 @@ and the model gets `Denied by the user.` as the tool result.
 ## Slack
 
 Serve the same worker behind the Slack channel
-(see [the Slack docs](../../docs/105-slack.md); the app needs Interactivity
+(see [the Slack docs](../../docs/130-slack.md); the app needs Interactivity
 enabled for buttons):
 
 ```sh

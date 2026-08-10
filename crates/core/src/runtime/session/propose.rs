@@ -499,6 +499,8 @@ mod tests {
             call_id,
             EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
+                defer_tools_strategy: Default::default(),
+                context_ids: Vec::new(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt,
@@ -805,6 +807,7 @@ mod tests {
             description: "d".to_string(),
             input: None,
             output: None,
+            defer: false,
         }]);
         let llm_calls = HashMap::from([("call-1".to_string(), call)]);
         let trigger = DecisionTrigger::ToolExecute {
@@ -972,6 +975,7 @@ mod tests {
             input: None,
             output: None,
             handler,
+            defer: None,
         };
         AgentConfig {
             llm: Some("claude".to_string()),
@@ -987,6 +991,8 @@ mod tests {
                 description: String::new(),
             }],
             mcp: Vec::new(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 
@@ -1100,6 +1106,7 @@ mod tests {
                 input: None,
                 output: None,
                 handler: Some(Handler::Client),
+                defer: None,
             }],
             ..Default::default()
         };

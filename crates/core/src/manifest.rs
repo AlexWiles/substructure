@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
 use crate::protocol::{
-    AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, Handler, LlmFormat, McpServer,
-    McpTools, RetryConfig, SubAgent,
+    AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, DeferTools, Handler, LlmFormat,
+    McpServer, McpTools, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -226,6 +226,15 @@ pub struct AgentSection {
     pub sub_agents: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpRef>,
+    /// The default for every tool of this agent. A tool or a connection
+    /// overrides it with its own `defer`. `true` takes the defaults; a table
+    /// sets them.
+    #[serde(
+        default,
+        deserialize_with = "crate::protocol::de_defer_tools",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub defer_tools: Option<DeferTools>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
     /// Environment variable holding the secret an engine here signs this
@@ -263,6 +272,8 @@ impl AgentSection {
             tools: self.tools.clone(),
             sub_agents: self.to_sub_agents(manifest),
             mcp: self.mcp.iter().map(McpRef::to_server).collect(),
+            defer_tools: self.defer_tools,
+            announce_mcp: Default::default(),
         })
     }
 
@@ -329,9 +340,42 @@ pub enum McpRef {
 pub struct McpEntry {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<McpTools>,
+    pub tools: Option<McpToolsEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_failure: Option<AuthFailure>,
+}
+
+/// The file's spelling of [`McpTools`], mirrored for the one reason
+/// [`McpEntry`] is: `deny_unknown_fields`. A misspelled `defer` would
+/// otherwise read as no setting. [`McpTools`] documents the fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpToolsEntry {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_destructive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer: Option<bool>,
+}
+
+impl McpToolsEntry {
+    fn to_wire(&self) -> McpTools {
+        McpTools {
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
+            read_only: self.read_only,
+            non_destructive: self.non_destructive,
+            idempotent: self.idempotent,
+            defer: self.defer,
+        }
+    }
 }
 
 impl McpRef {
@@ -353,7 +397,7 @@ impl McpRef {
             },
             Self::Filtered(entry) => McpServer {
                 id: entry.id.clone(),
-                tools: entry.tools.clone(),
+                tools: entry.tools.as_ref().map(McpToolsEntry::to_wire),
                 auth_failure: entry.auth_failure.unwrap_or_default(),
             },
         }
@@ -685,7 +729,7 @@ pub fn check_id(id: &str) -> Result<()> {
 }
 
 /// Rejected while reading the document rather than at the first fetch, where it
-/// would surface as a discovery failure against a URL nobody meant to write.
+/// would surface as a metadata failure against a URL nobody meant to write.
 /// `header` carries a static token, so it says nothing under a method that
 /// binds its own. Reported rather than ignored: a file that names one means it
 /// to be sent.
@@ -709,6 +753,7 @@ pub fn check_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::DeferToolsStrategy;
 
     fn manifest(toml: &str) -> Manifest {
         toml::from_str(toml).unwrap()
@@ -903,6 +948,118 @@ mod tests {
             .to_string();
         assert!(err.contains("tool"), "{err}");
         assert!(err.contains("unknown field"), "names the field: {err}");
+    }
+
+    #[test]
+    fn defer_tools_is_read_from_the_agent() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+defer_tools = { strategy = "search" }
+"#,
+        )
+        .unwrap();
+        m.validate().unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert!(config.defers_tools());
+        assert_eq!(config.defer_strategy(), DeferToolsStrategy::Search);
+    }
+
+    #[test]
+    fn the_bool_shorthand_takes_the_defaults() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+defer_tools = true
+"#,
+        )
+        .unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert_eq!(config.defer_tools, Some(DeferTools::default()));
+    }
+
+    #[test]
+    fn a_false_flag_reads_as_no_opinion() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+defer_tools = false
+"#,
+        )
+        .unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert!(
+            !config.defers_tools(),
+            "a config can turn off what it inherits"
+        );
+    }
+
+    #[test]
+    fn an_unknown_strategy_value_is_an_error() {
+        let err = toml::from_str::<Manifest>(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+defer_tools = { strategy = "sometimes" }
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("sometimes"), "names the value: {err}");
+    }
+
+    #[test]
+    fn defer_is_read_from_the_tools_table() {
+        let m = connected(r#"[{ id = "sentry", tools = { defer = true } }]"#).unwrap();
+        m.validate().unwrap();
+        let agents = m.agents();
+        let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
+        assert_eq!(mcp[0].tools.as_ref().expect("a table").defer, Some(true));
+
+        let m = connected(r#"[{ id = "sentry", tools = { read_only = true } }]"#).unwrap();
+        let agents = m.agents();
+        let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
+        assert!(
+            mcp[0].tools.as_ref().expect("a table").defer.is_none(),
+            "unset ⇒ the agent decides"
+        );
+    }
+
+    /// The same fault as a misspelled `tools`, one level down.
+    #[test]
+    fn a_misspelled_key_inside_the_tools_table_is_an_error() {
+        let err = connected(r#"[{ id = "sentry", tools = { defr = true } }]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("defr"), "names the field: {err}");
+        assert!(err.contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn a_defer_that_is_not_a_boolean_is_an_error() {
+        let err = connected(r#"[{ id = "sentry", tools = { defer = "search" } }]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("boolean"), "says what it wanted: {err}");
     }
 
     #[test]

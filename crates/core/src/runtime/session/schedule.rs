@@ -453,6 +453,8 @@ mod tests {
             id,
             tracking(status),
             EffectPayload::LlmCall(LlmCallState {
+                defer_tools_strategy: Default::default(),
+                context_ids: Vec::new(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],
@@ -540,6 +542,8 @@ mod tests {
                 tools: None,
                 auth_failure: Default::default(),
             }],
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 
@@ -591,6 +595,7 @@ mod tests {
                 prefix: None,
                 error: None,
                 auth: None,
+                instructions: None,
             }),
         ));
         add_llm(&mut s, "call-1", EffectStatus::Queued);

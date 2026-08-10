@@ -4,7 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::protocol::{
-    ErrorCode, ErrorInfo, LlmRequest, LlmResponse, LlmTool, SessionOwner, StreamDelta,
+    DeferToolsStrategy, ErrorCode, ErrorInfo, LlmRequest, LlmResponse, LlmTool, SessionOwner,
+    StreamDelta,
 };
 
 impl LlmTool {
@@ -103,6 +104,8 @@ pub struct CallContext<'a> {
     pub owner: &'a SessionOwner,
     /// Parent chain, root-last. Empty for top-level sessions.
     pub ancestry: &'a [String],
+    /// How this call lowers a deferred tool.
+    pub defer_tools_strategy: DeferToolsStrategy,
 }
 
 /// Trait for calling an LLM (single call or streaming).

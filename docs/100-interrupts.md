@@ -97,5 +97,5 @@ open on the branch they left.
 ## Next
 
 - [Slack](./130-slack.md#interrupt-prompts): approval buttons in a thread.
-- [Deferred tools](./110-deferred-tools.md): wait on one call instead of the session.
+- [Async tools](./110-async-tools.md): wait on one call instead of the session.
 - [Durability](./200-durability.md): the engine saves the pause.

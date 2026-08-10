@@ -398,6 +398,8 @@ impl World {
                 tools: None,
                 auth_failure: Default::default(),
             }],
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 
@@ -569,6 +571,7 @@ impl World {
                         Outcome::Connector {
                             prefix: None,
                             tools: vec![],
+                            instructions: None,
                         },
                     )
                 } else {

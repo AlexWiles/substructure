@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::protocol::{
-    ClientContext, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest, LlmResponse,
-    RetryOverride, RetryPolicy,
+    ClientContext, DeferToolsStrategy, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest,
+    LlmResponse, RetryOverride, RetryPolicy,
 };
 use crate::runtime::retry::RetryTarget;
 
@@ -34,6 +34,15 @@ pub enum ToolHandler {
 }
 
 impl ToolHandler {
+    /// Where a tool the config declares runs. `Server` is the engine's alone,
+    /// so a declaration can only choose between the other two.
+    pub fn declared(handler: Option<Handler>) -> Self {
+        match handler {
+            Some(Handler::Client) => Self::Client,
+            _ => Self::Worker,
+        }
+    }
+
     /// Which default bounds a call routed here. The three differ: a worker tool
     /// is bounded but never repeated, a client tool waits indefinitely because a
     /// human may be answering it, and a connector call is the engine's own.
@@ -155,6 +164,8 @@ pub enum Trigger {
         request: LlmRequest,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<LlmFormat>,
+        #[serde(default)]
+        defer_tools_strategy: DeferToolsStrategy,
         #[serde(default)]
         stream: bool,
         attempt: u32,

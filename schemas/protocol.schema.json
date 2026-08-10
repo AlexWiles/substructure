@@ -4,6 +4,21 @@
       "additionalProperties": false,
       "description": "A declared agent identity — the same shape whether it is written in an\n`[agent.<id>]` section or returned by a worker.\n\n`llm` names the `[llm.*]` block every proposed call runs on, and so decides\nboth the venue (the engine with a vendor key, or the agent's own worker) and\nthe wire shape of a worker-run call. It is effectively required: a config\nthat names none fails when the engine resolves a call against it.",
       "properties": {
+        "announce_mcp": {
+          "$ref": "#/$defs/Announce",
+          "description": "Where the engine tells the model that an MCP server is available, and\nwhat that server says it is for.\n\nSeparate from `defer_tools`: a server exists whether or not its tools\nare deferred, and where a notice lands is a fact about this agent's\nprompt rather than about any server."
+        },
+        "defer_tools": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeferToolsWire"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Defer every tool this agent offers, from any source, unless the tool or\nthe connection says otherwise. Absent ⇒ the agent defers nothing of its\nown; a connection may still defer on its own account.\n\nPresence is the switch, so an agent cannot carry settings that do\nnothing. Declared on the agent because an agent can hold this opinion\nbefore it names a connection: one that sets it gets the search tools\nfrom its first turn, so a connection added later costs no cache."
+        },
         "llm": {
           "description": "The `[llm.*]` block this agent's calls run on.",
           "type": [
@@ -63,6 +78,13 @@
       "additionalProperties": false,
       "description": "A function tool the agent offers. The model-facing contract is\n`name`/`description`/`input`/`output`; `handler` selects where a call runs —\n`Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).\n`server` is invalid for tools: engine-executed tools come from a connector,\nwhich a worker declares by id rather than by tool.",
       "properties": {
+        "defer": {
+          "description": "Keep this tool out of the request. See [`LlmTool::defer`]. Absent ⇒\nthe agent's `defer_tools`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "description": {
           "type": "string"
         },
@@ -87,6 +109,22 @@
       ],
       "title": "AgentTool",
       "type": "object"
+    },
+    "Announce": {
+      "description": "Where an MCP announcement lands.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "The system prompt while no call has dispatched; then a block on the\nlast user message; then a message of its own. The engine takes the\nfirst place it can use, so the order is not a setting.",
+          "type": "string"
+        },
+        {
+          "const": "never",
+          "description": "Nowhere. For a server whose own words help nobody.",
+          "type": "string"
+        }
+      ],
+      "title": "Announce"
     },
     "AudioData": {
       "additionalProperties": false,
@@ -1504,6 +1542,49 @@
       ],
       "title": "DecisionTrigger"
     },
+    "DeferTools": {
+      "additionalProperties": {
+        "not": {}
+      },
+      "description": "How an agent's deferred tools reach the model.",
+      "properties": {
+        "max_matches": {
+          "description": "The most matches one search answers with. Never zero: a search that can\nanswer with nothing is a search the model cannot use.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "strategy": {
+          "$ref": "#/$defs/DeferToolsStrategy",
+          "description": "Which tools the agent gets to reach the ones it defers."
+        }
+      },
+      "title": "DeferTools",
+      "type": "object"
+    },
+    "DeferToolsStrategy": {
+      "description": "How the tools an agent defers reach the model.\n\nThe engine holds every deferred definition whatever this says, and answers\nits own tools whatever this says. This chooses two things: which of those\ntools the request advertises, and whether the request carries the deferred\ndefinitions.\n\nDeclared on the agent, beside `defer_tools`: which tools an agent gets is\nthe agent's business, the same way as whether it defers at all.",
+      "oneOf": [
+        {
+          "const": "search",
+          "description": "`tool_search` and `call_tool`. A search answers with the schema, so one\nsearch is the whole distance to a call, and nothing hands the model a\nname it cannot then reach.",
+          "type": "string"
+        }
+      ],
+      "title": "DeferToolsStrategy"
+    },
+    "DeferToolsWire": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/$defs/DeferTools"
+        }
+      ],
+      "description": "The two forms `defer_tools` accepts: `true` for the defaults, or a table.\n`false` reads the same as absent, so a config can turn off what it inherits.",
+      "title": "DeferToolsWire"
+    },
     "DraftMessage": {
       "additionalProperties": false,
       "description": "The wire form of a [`Message`]: `id` is optional because a client-submitted or\nworker-authored message is not yet recorded. `record`/`rerecord`\n(`runtime::session::wire`) are the seams that lower it to the internal\n[`Message`] (id always present) at recording time.",
@@ -2030,6 +2111,10 @@
       "additionalProperties": false,
       "description": "A tool's declared contract: flat on the wire. Providers that need\nOpenAI-style `{\"type\": \"function\", \"function\": {…}}` nesting re-wrap at\ntheir own boundary.",
       "properties": {
+        "defer": {
+          "description": "Keep this definition out of the request.\n\nThe engine still records it, still routes a call to it, and still finds\nit in a search. Only the request omits it, which is what keeps a large\ntool set out of the model's context and out of the cached prefix.\n\nAny source can set it: a tool the config declares, a connection, or\nwhatever comes next. Deferral is a property of a tool, not of where it\ncame from.",
+          "type": "boolean"
+        },
         "description": {
           "type": "string"
         },
@@ -2080,8 +2165,15 @@
     },
     "McpTools": {
       "additionalProperties": false,
-      "description": "An MCP server's tool filter. Applied in order — capability predicates, then\n`include`, then `exclude` — and only ever narrowing, so a filter can never\nwiden what the connection grants.\n\n`include`/`exclude` are globs matched against the tool's name on the\nconnection, the name its own documentation uses, not the prefixed name the\nmodel sees. Capability predicates read the MCP annotations; a tool that\ncarries none fails the predicate, so an unannotated server yields nothing\nunder `read_only` rather than silently passing everything through.",
+      "description": "What the model sees of one connection, for one agent: which tools, and how\nthey reach the model.\n\nThe filter is applied in order — capability predicates, then `include`, then\n`exclude` — and only ever narrowing, so a filter can never widen what the\nconnection grants. `defer` runs after it and removes nothing.\n\n`include`/`exclude` are globs matched against the tool's name on the\nconnection, the name its own documentation uses, not the prefixed name the\nmodel sees. Capability predicates read the MCP annotations; a tool that\ncarries none fails the predicate, so an unannotated server yields nothing\nunder `read_only` rather than silently passing everything through.",
       "properties": {
+        "defer": {
+          "description": "Keep every surviving tool out of the request. See [`LlmTool::defer`].\nAbsent ⇒ the agent's `defer_tools`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "exclude": {
           "items": {
             "type": "string"

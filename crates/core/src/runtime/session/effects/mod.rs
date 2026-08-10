@@ -71,6 +71,7 @@ pub enum Outcome {
     Connector {
         prefix: Option<String>,
         tools: Vec<RemoteTool>,
+        instructions: Option<String>,
     },
     Error(SettleError),
 }

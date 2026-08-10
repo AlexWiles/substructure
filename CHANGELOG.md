@@ -16,6 +16,8 @@ together at the same version.
 ### Added
 
 - Slackbot prompts for MCP reauth by default. Overrideable in config.
+- Engine driven deferred tool definition support.
+- Calls to Anthropic now set cache breakpoints.
 
 ## [0.3.1] - 2026-08-07
 

@@ -7,8 +7,9 @@ use super::decision::{LlmHandler, ToolHandler, Trigger};
 use crate::connectors::{AuthNeed, RemoteTool};
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
-    AgentConfig, DraftMessage, ErrorInfo, InterruptOrigin, LlmFormat, LlmRequest, LlmResponse,
-    Message, MessageTree, NewMessage, RetryPolicy, SessionOwner, WorkerState,
+    AgentConfig, ConnectorToolKind, DeferToolsStrategy, DraftMessage, ErrorInfo, InterruptOrigin,
+    LlmFormat, LlmRequest, LlmResponse, Message, MessageTree, NewMessage, RetryPolicy,
+    SessionOwner, WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +145,9 @@ pub struct LlmCallRequested {
     pub handler: LlmHandler,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<LlmFormat>,
+    /// How a deferred tool reaches the model, from the block this call names.
+    #[serde(default)]
+    pub defer_tools_strategy: DeferToolsStrategy,
 }
 
 /// Dispatch marker: the queued call cleared its gates and starts executing.
@@ -211,6 +215,9 @@ pub struct ConnectorSyncCompleted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
     pub tools: Vec<RemoteTool>,
+    /// What the server said it is for at the handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,7 +270,11 @@ pub struct SubAgentErrored {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConnectorTarget {
     pub connector: String,
+    /// Empty for a `find_tools`, and for a `call_tool` whose name the filter
+    /// refused. An empty name is what keeps the connection out of the call.
     pub remote_name: String,
+    #[serde(default)]
+    pub kind: ConnectorToolKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

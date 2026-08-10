@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 
-use crate::protocol::{ClientAppend, ClientMessage, ClientMessages, NewMessage};
+use crate::protocol::{
+    Announce, ClientAppend, ClientMessage, ClientMessages, DeferTools, NewMessage,
+};
 use crate::runtime::session::reconcile::plan_reconcile;
 use chrono::Utc;
 
 use super::super::aggregate::{CommitContext, SessionAggregate};
-use super::super::state::{AgentVersion, Logged};
+use super::super::state::{AgentVersion, LocalAnswer, Logged};
 use super::*;
 use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
-    AgentTool, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig, RetryOverride,
+    AgentTool, ConnectorToolKind, DeferToolsStrategy, Handler, LlmTool, McpServer, McpTools,
+    Message, RetryConfig, RetryOverride,
 };
 use crate::protocol::{Content, LlmResponse};
 use crate::runtime::retry::RetryTarget;
@@ -280,6 +283,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
                         "properties": { "temp_c": { "type": "number" } },
                         "required": ["temp_c"],
                     })),
+                    defer: false,
                 }]),
                 temperature: None,
                 max_completion_tokens: None,
@@ -2976,6 +2980,7 @@ fn declare_client_tool(agg: &mut SessionAggregate, name: &str) {
         input: None,
         output: None,
         handler: Some(Handler::Client),
+        defer: None,
     });
     agg.state.agent_versions.push(Logged {
         seq: agg.state.agent_versions.last().map_or(0, |v| v.seq),
@@ -3341,7 +3346,7 @@ fn timed_out_effect_fires_tool_result_via_wake() {
 
 /// A tool call with no policy of its own takes the default for *where it runs*,
 /// which is the whole point of splitting them: a worker tool must not hang a
-/// turn forever, and a deferred client tool must be free to.
+/// turn forever, and an async client tool must be free to.
 #[test]
 fn a_tool_call_takes_the_default_for_where_it_runs() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -3370,7 +3375,7 @@ fn a_tool_call_takes_the_default_for_where_it_runs() {
     );
     assert_eq!(
         client.attempt_timeout_secs, None,
-        "a deferred call waits for a human, however long that takes"
+        "an async call waits for a human, however long that takes"
     );
 }
 
@@ -3423,6 +3428,7 @@ fn tool_named(name: &str, handler: Option<Handler>) -> AgentTool {
         input: None,
         output: None,
         handler,
+        defer: None,
     }
 }
 
@@ -5147,15 +5153,15 @@ fn only_the_last_parallel_tool_finish_reports_no_pending_work() {
     );
 }
 
-// Deferred and client-handled tools (and sub-agents) leave their call
+// Async and client-handled tools (and sub-agents) leave their call
 // Pending after `tool.execute` returns — the result arrives later, out of
 // band. A fast sibling's finish must not prompt while that call is still in
-// flight, or the model is prompted without the deferred result. An in-flight
+// flight, or the model is prompted without the async result. An in-flight
 // call keeps `pending_work` non-zero exactly as an unrecorded finish does, so
 // the two patterns compose. (The old in-flight-only count already handled
 // this half; the point here is the fix did not regress it.)
 #[test]
-fn an_in_flight_deferred_sibling_keeps_a_fast_tool_from_prompting() {
+fn an_in_flight_async_sibling_keeps_a_fast_tool_from_prompting() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d0 = decision_with(
         &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
@@ -5169,12 +5175,12 @@ fn an_in_flight_deferred_sibling_keeps_a_fast_tool_from_prompting() {
             node_msg("u1", Role::User, "hi"),
             node_msg("asst", Role::Assistant, "calling"),
         ],
-        vec![call_tool_action("tc-fast"), call_tool_action("tc-deferred")],
+        vec![call_tool_action("tc-fast"), call_tool_action("tc-async")],
     );
 
-    // Answer the fast tool's execute with a result; "start" the deferred one
+    // Answer the fast tool's execute with a result; "start" the async one
     // by answering its execute with nothing — the engine leaves its call
-    // Pending, just as a deferred tool or a client-handled tool would.
+    // Pending, just as an async tool or a client-handled tool would.
     let (exec_fast, t) = live_decision(&agg);
     assert!(matches!(&t, Trigger::ToolExecute { id, .. } if id == "tc-fast"));
     submit_decision(
@@ -5184,27 +5190,27 @@ fn an_in_flight_deferred_sibling_keeps_a_fast_tool_from_prompting() {
         vec![tool_result_action("tc-fast")],
     );
 
-    let (exec_deferred, t) = live_decision(&agg);
-    assert!(matches!(&t, Trigger::ToolExecute { id, .. } if id == "tc-deferred"));
-    submit_decision(&mut agg, exec_deferred, vec![], vec![]);
+    let (exec_async, t) = live_decision(&agg);
+    assert!(matches!(&t, Trigger::ToolExecute { id, .. } if id == "tc-async"));
+    submit_decision(&mut agg, exec_async, vec![], vec![]);
 
-    // The fast tool's finish is live while the deferred call is still in
+    // The fast tool's finish is live while the async call is still in
     // flight — it must report pending work and record only, not prompt.
     let (finish_fast, trigger) = live_decision(&agg);
     assert!(matches!(trigger, Trigger::ToolFinished { .. }));
     assert_eq!(
         agg.state
-            .effect(EffectKind::ToolCall, "tc-deferred")
+            .effect(EffectKind::ToolCall, "tc-async")
             .unwrap()
             .tracking
             .status(),
         EffectStatus::Pending,
-        "the deferred call stays in flight after its execute"
+        "the async call stays in flight after its execute"
     );
     assert_eq!(
         agg.state.event_meta(Utc::now()).pending_work(&finish_fast),
         1,
-        "the fast tool must wait: a deferred sibling is still in flight"
+        "the fast tool must wait: an async sibling is still in flight"
     );
 }
 
@@ -6384,6 +6390,8 @@ fn agent_config(model: &str) -> AgentConfig {
         tools: Vec::new(),
         sub_agents: Vec::new(),
         mcp: Vec::new(),
+        defer_tools: None,
+        announce_mcp: Default::default(),
     }
 }
 
@@ -6463,6 +6471,7 @@ fn settle_sync(agg: &mut SessionAggregate, id: &str, tools: &[&str]) -> Vec<Even
             Outcome::Connector {
                 prefix: Some(id.to_string()),
                 tools: tools.iter().map(|t| remote_tool(t)).collect(),
+                instructions: None,
             },
         ),
         &system(),
@@ -6867,6 +6876,7 @@ fn a_fetch_is_keyed_on_the_connection_not_the_agent_version() {
         input: None,
         output: None,
         handler: None,
+        defer: None,
     });
     let d = open_decision(&mut agg, "hi");
     let events = submit_agent(
@@ -7090,6 +7100,1051 @@ fn connector_tools_reach_the_model_and_route_to_the_engine() {
     );
 }
 
+// ── Deferred tools ───────────────────────────────────────────────────
+
+fn searching_connector_config(ids: &[&str]) -> AgentConfig {
+    AgentConfig {
+        mcp: ids
+            .iter()
+            .map(|id| McpServer {
+                id: id.to_string(),
+                tools: Some(McpTools {
+                    defer: Some(true),
+                    ..Default::default()
+                }),
+                auth_failure: Default::default(),
+            })
+            .collect(),
+        ..agent_config("m1")
+    }
+}
+
+fn session_with_searched_connector(id: &str, tools: &[&str]) -> SessionAggregate {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(searching_connector_config(&[id])),
+    );
+    settle_sync(&mut agg, id, tools);
+    agg
+}
+
+/// What the request would carry: the engine holds every tool, and the request
+/// leaves out the deferred ones.
+fn offered(agg: &SessionAggregate) -> Vec<String> {
+    agg.state
+        .connector_tools(None)
+        .tools
+        .into_iter()
+        .filter(|t| !t.defer)
+        .map(|t| t.name)
+        .collect()
+}
+
+fn held(agg: &SessionAggregate) -> Vec<String> {
+    agg.state
+        .connector_tools(None)
+        .tools
+        .into_iter()
+        .map(|t| t.name)
+        .collect()
+}
+
+fn call(agg: &mut SessionAggregate, id: &str, name: &str, arguments: &str) -> Vec<EventPayload> {
+    dispatch(
+        agg,
+        CommandPayload::RequestToolCall {
+            tool_call_id: id.to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+            retry: None,
+        },
+        &system(),
+    )
+}
+
+/// A search answers from the place the call was made, and not from the head.
+///
+/// The model was shown the tools of one config. It searched against those.
+/// An answer resolved at a head that has since dropped the connection would
+/// describe a different agent from the request the model was answering.
+#[test]
+fn a_search_answers_at_the_anchor_of_the_call() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
+    call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
+
+    // The head moves on, and the config there no longer names the connection.
+    let ctx = CommitContext {
+        span: SpanContext::root(),
+        occurred_at: Utc::now(),
+    };
+    agg.commit(
+        vec![EventPayload::NewMessage(NewMessage {
+            message: node_msg("u9", Role::User, "later").record(),
+            parent_id: agg.state.head_id.clone(),
+        })],
+        &ctx,
+    );
+    agg.commit(
+        vec![EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+            config: AgentConfig {
+                mcp: vec![],
+                ..searching_connector_config(&["sentry"])
+            },
+            anchor: agg.state.head_id.clone(),
+        })],
+        &ctx,
+    );
+    assert!(
+        agg.state
+            .searchable_tools(agg.state.head_id.as_deref())
+            .is_empty(),
+        "the head has dropped the connection, so a new call would find nothing"
+    );
+
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        answer["tools"][0]["name"], "sentry__search_issues",
+        "the call is anchored where the connection existed, and answers from there"
+    );
+}
+
+/// The engine tells the model that a server exists. The worker did not write
+/// this, and could not: it does not know what the connection answered.
+#[test]
+fn a_connection_is_announced_once_in_the_system_prefix() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
+    let call = |agg: &mut SessionAggregate, id: &str| {
+        dispatch(
+            agg,
+            CommandPayload::RequestLlmCall {
+                llm: "claude".to_string(),
+                call_id: id.to_string(),
+                request: request_with(vec![]),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            },
+            &system(),
+        );
+        agg.state.llm_call(id).unwrap().prompt.clone()
+    };
+
+    let first = call(&mut agg, "call-1");
+    let notice = first.first().expect("the prompt carries the notice");
+    assert_eq!(
+        notice.role,
+        Role::System,
+        "no request has committed the prefix yet, so the free place is still open"
+    );
+    let text = match notice.content.as_ref().expect("content") {
+        Content::Text(t) => t.clone(),
+        _ => panic!("a notice is text"),
+    };
+    assert!(
+        text.starts_with("{\"mcp_server\":\"sentry\""),
+        "the name leads: a server's own words can be long, and a label after them \
+         is not a label: {text}"
+    );
+    assert!(text.contains("\"tools\":1"), "and how many it has: {text}");
+
+    let second = call(&mut agg, "call-2");
+    assert!(
+        second.is_empty(),
+        "a server is announced once, and the record is on the earlier call: {second:?}"
+    );
+}
+
+/// `never` is the remedy for a server whose own words help nobody.
+#[test]
+fn announce_never_says_nothing() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            announce_mcp: Announce::Never,
+            ..searching_connector_config(&["sentry"])
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+    dispatch(
+        &mut agg,
+        CommandPayload::RequestLlmCall {
+            llm: "claude".to_string(),
+            call_id: "call-1".to_string(),
+            request: request_with(vec![]),
+            stream: false,
+            retry: RetryPolicy::no_retry(),
+            handler: LlmHandler::Server,
+            format: None,
+        },
+        &system(),
+    );
+    assert!(
+        agg.state.llm_call("call-1").unwrap().prompt.is_empty(),
+        "the engine adds nothing"
+    );
+}
+
+#[test]
+fn a_searched_connector_offers_two_tools_however_many_it_has() {
+    let mut agg =
+        session_with_searched_connector("sentry", &["search_issues", "get_issue", "resolve_issue"]);
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::RequestLlmCall {
+            llm: "claude".to_string(),
+            call_id: "call-1".to_string(),
+            request: LlmRequest {
+                model: "m1".to_string(),
+                messages: vec![],
+                tools: Some(vec![]),
+                temperature: None,
+                max_completion_tokens: None,
+                reasoning: None,
+            },
+            stream: false,
+            retry: RetryPolicy::no_retry(),
+            handler: LlmHandler::Server,
+            format: None,
+        },
+        &system(),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::LlmCallDispatched(_))),
+        "the call dispatches; got {events:?}"
+    );
+    let spec = agg.state.llm_call("call-1").unwrap().spec.clone();
+    let carried: Vec<String> = spec
+        .tools
+        .as_ref()
+        .expect("tools offered")
+        .iter()
+        .filter(|t| !t.defer)
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(
+        carried,
+        ["tool_search", "call_tool"],
+        "four tools cost the request two definitions, and thirty would cost the same two"
+    );
+    assert_eq!(
+        spec.tools.as_ref().unwrap().len(),
+        5,
+        "the engine still holds each one; only the request leaves them out"
+    );
+    assert_eq!(
+        agg.state.tool_handler_for("tool_search"),
+        ToolHandler::Server,
+        "both are the engine's to run"
+    );
+}
+
+#[test]
+fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues", "list_projects"]);
+    let events = call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::DecisionQueued(_))),
+        "the engine answers it; the worker is not asked to; got {events:?}"
+    );
+
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result, not an error");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(answer["tools"][0]["name"], "sentry__search_issues");
+    assert_eq!(answer["matched"], 1);
+    assert_eq!(
+        agg.state
+            .tool_call("tc-1")
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .kind,
+        ConnectorToolKind::Find,
+        "the route is frozen, so a config change cannot turn this into a remote call"
+    );
+    assert!(
+        agg.state
+            .tool_call("tc-1")
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .remote_name
+            .is_empty(),
+        "it stands for no tool on the connection"
+    );
+}
+
+/// A `call_tool` becomes the call it names. Nothing after the request sees a
+/// wrapper: not the target, not the recorded name, not the arguments, and not
+/// the `tool.finished` the worker reads.
+#[test]
+fn call_tool_becomes_the_call_it_names() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
+    call(
+        &mut agg,
+        "tc-1",
+        "call_tool",
+        r#"{"name":"sentry__search_issues","arguments":{"q":"boom"}}"#,
+    );
+    let target = agg
+        .state
+        .tool_call("tc-1")
+        .unwrap()
+        .target
+        .clone()
+        .expect("a connector target");
+    assert_eq!(target.connector, "sentry");
+    assert_eq!(
+        target.remote_name, "search_issues",
+        "the executor calls the tool the model named, not the wrapper"
+    );
+    assert_eq!(
+        target.kind,
+        ConnectorToolKind::Remote,
+        "a `call_tool` becomes the call it names, so nothing downstream sees a wrapper"
+    );
+    assert_eq!(
+        agg.state.tool_call("tc-1").unwrap().name,
+        "sentry__search_issues",
+        "the recorded call names the tool that ran, not the wrapper"
+    );
+    assert_eq!(
+        agg.state.tool_call("tc-1").unwrap().arguments,
+        r#"{"q":"boom"}"#,
+        "and carries that tool's own arguments"
+    );
+}
+
+#[test]
+fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            mcp: vec![McpServer {
+                id: "sentry".to_string(),
+                tools: Some(McpTools {
+                    exclude: vec!["resolve_*".to_string()],
+                    defer: Some(true),
+                    ..Default::default()
+                }),
+                auth_failure: Default::default(),
+            }],
+            ..agent_config("m1")
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues", "resolve_issue"]);
+
+    call(
+        &mut agg,
+        "tc-1",
+        "call_tool",
+        r#"{"name":"sentry__resolve_issue","arguments":{}}"#,
+    );
+    let LocalAnswer::Error(message) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a refused name is an error, not a result");
+    };
+    assert!(
+        message.contains("resolve_issue"),
+        "the message names what the model asked for: {message}"
+    );
+    assert!(
+        message.contains("search_issues"),
+        "and what it could have asked for: {message}"
+    );
+    assert!(
+        agg.state
+            .tool_call("tc-1")
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .remote_name
+            .is_empty(),
+        "an empty remote name is what keeps the connection out of it"
+    );
+}
+
+#[test]
+fn two_searched_connections_share_one_pair_and_one_search() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(searching_connector_config(&["sentry", "linear"])),
+    );
+    settle_sync(&mut agg, "sentry", &["list_projects"]);
+    settle_sync(&mut agg, "linear", &["search_issues"]);
+
+    assert_eq!(
+        offered(&agg),
+        ["tool_search", "call_tool"],
+        "two connections cost the same two definitions as one"
+    );
+
+    call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result, not an error");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        answer["tools"][0]["name"], "linear__search_issues",
+        "one search reaches both connections, and the name says which holds the tool"
+    );
+    assert_eq!(
+        answer["searched"], 2,
+        "one search covers both connections, so neither needs its own"
+    );
+}
+
+/// The whole point of the search shape: a connection that arrives during a
+/// session must not move one byte of the tool list.
+#[test]
+fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
+    let mut agg = session_with_searched_connector("sentry", &["list_projects"]);
+    let before = offered(&agg);
+    assert_eq!(before, ["tool_search", "call_tool"]);
+
+    // The worker writes a config that names a second searched connection.
+    let d = open_decision(&mut agg, "and now linear");
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![node_msg("u2", Role::User, "and now linear")],
+            actions: vec![],
+            state: None,
+            agent: Some(searching_connector_config(&["sentry", "linear"])),
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+    settle_sync(&mut agg, "linear", &["search_issues"]);
+
+    assert_eq!(
+        offered(&agg),
+        before,
+        "the definitions are identical, so the provider's cache holds"
+    );
+
+    call(&mut agg, "tc-9", "tool_search", r#"{"query":"issues"}"#);
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-9")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        answer["tools"][0]["name"], "linear__search_issues",
+        "the new connection reaches the model through the answer, not the tool list"
+    );
+}
+
+/// A listed connection is findable too, so one search covers the agent and an
+/// empty answer means the agent truly has nothing.
+#[test]
+fn a_search_covers_a_connection_that_lists_its_own_tools() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            mcp: vec![
+                McpServer {
+                    id: "sentry".to_string(),
+                    tools: None,
+                    auth_failure: Default::default(),
+                },
+                McpServer {
+                    id: "aws".to_string(),
+                    tools: Some(McpTools {
+                        defer: Some(true),
+                        ..Default::default()
+                    }),
+                    auth_failure: Default::default(),
+                },
+            ],
+            ..agent_config("m1")
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+    settle_sync(&mut agg, "aws", &["s3_list"]);
+
+    assert_eq!(
+        offered(&agg),
+        ["sentry__search_issues", "tool_search", "call_tool"],
+        "the listed connection keeps its own tools, beside the two"
+    );
+    assert!(
+        held(&agg).contains(&"aws__s3_list".to_string()),
+        "and the deferred one is still held, findable, and callable"
+    );
+
+    call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a find is a result");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        answer["tools"][0]["name"], "sentry__search_issues",
+        "a search that skipped the listed connection would report an absence that is not real"
+    );
+    assert_eq!(
+        answer["searched"], 2,
+        "a search covers the agent, and not the deferred half of it"
+    );
+
+    call(
+        &mut agg,
+        "tc-2",
+        "call_tool",
+        r#"{"name":"sentry__search_issues","arguments":{}}"#,
+    );
+    let target = agg.state.tool_call("tc-2").unwrap().target.clone().unwrap();
+    assert_eq!(
+        target.remote_name, "search_issues",
+        "a listed tool has two routes, and both work"
+    );
+}
+
+/// The worker overrides the engine, and keeps whatever it did not override.
+#[test]
+fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            tools: vec![AgentTool {
+                name: "tool_search".to_string(),
+                description: "the worker's own search".to_string(),
+                input: None,
+                output: None,
+                handler: None,
+                defer: None,
+            }],
+            mcp: vec![McpServer {
+                id: "sentry".to_string(),
+                tools: Some(McpTools {
+                    defer: Some(true),
+                    ..Default::default()
+                }),
+                auth_failure: Default::default(),
+            }],
+            ..agent_config("m1")
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+
+    let merged = agg.state.connector_tools(None);
+    assert_eq!(
+        offered(&agg),
+        ["call_tool"],
+        "the worker keeps the name it declared, and the engine keeps the rest"
+    );
+    assert_eq!(
+        merged.collisions,
+        vec!["tool_search".to_string()],
+        "the drop is recorded, so a report can name it"
+    );
+    assert_eq!(
+        agg.state.tool_handler_for("tool_search"),
+        ToolHandler::Worker,
+        "the worker runs its own"
+    );
+    assert_eq!(
+        agg.state.tool_handler_for("call_tool"),
+        ToolHandler::Server,
+        "and the engine still runs the executor the worker did not replace"
+    );
+}
+
+/// The agent holds the opinion, so the tools exist before any connection does.
+/// A worker can then add a connection at any turn, and the tool list is the
+/// same as it was on turn one.
+#[test]
+fn an_agent_can_declare_search_before_it_names_a_connection() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            defer_tools: Some(DeferTools::default()),
+            announce_mcp: Default::default(),
+            mcp: vec![],
+            ..agent_config("m1")
+        }),
+    );
+    let before = offered(&agg);
+    assert_eq!(
+        before,
+        ["tool_search", "call_tool"],
+        "an agent with no connection still gets them"
+    );
+
+    let d = open_decision(&mut agg, "connect sentry");
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![node_msg("u2", Role::User, "connect sentry")],
+            actions: vec![],
+            state: None,
+            agent: Some(AgentConfig {
+                defer_tools: Some(DeferTools::default()),
+                announce_mcp: Default::default(),
+                mcp: vec![McpServer {
+                    id: "sentry".to_string(),
+                    tools: None,
+                    auth_failure: Default::default(),
+                }],
+                ..agent_config("m1")
+            }),
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+
+    assert_eq!(
+        offered(&agg),
+        before,
+        "the first connection of the session costs no cache at all"
+    );
+}
+
+#[test]
+fn a_connection_overrides_the_agents_default() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            defer_tools: Some(DeferTools::default()),
+            announce_mcp: Default::default(),
+            mcp: vec![McpServer {
+                id: "sentry".to_string(),
+                tools: Some(McpTools {
+                    defer: Some(false),
+                    ..Default::default()
+                }),
+                auth_failure: Default::default(),
+            }],
+            ..agent_config("m1")
+        }),
+    );
+    settle_sync(&mut agg, "sentry", &["search_issues"]);
+    assert_eq!(
+        agg.state
+            .connector_tools(None)
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        ["sentry__search_issues", "tool_search", "call_tool"],
+        "the connection lists its own tools; the agent still gets the search"
+    );
+}
+
+#[test]
+fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(searching_connector_config(&["sentry"])),
+    );
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::ConnectorSync,
+            "sentry".to_string(),
+            None,
+            Outcome::Connector {
+                prefix: Some("sentry".to_string()),
+                tools: vec![RemoteTool {
+                    name: "search_issues".to_string(),
+                    description: "search".to_string(),
+                    input: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": { "query": { "type": "string" } },
+                        "required": ["query"]
+                    })),
+                    output: None,
+                    annotations: Default::default(),
+                }],
+                instructions: None,
+            },
+        ),
+        &system(),
+    );
+
+    call(
+        &mut agg,
+        "tc-1",
+        "call_tool",
+        r#"{"name":"sentry__search_issues","arguments":{"query":7}}"#,
+    );
+    let LocalAnswer::Error(message) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("bad arguments are an error");
+    };
+    assert!(
+        message.contains("query"),
+        "the message names the field: {message}"
+    );
+    assert!(
+        agg.state
+            .tool_call("tc-1")
+            .unwrap()
+            .target
+            .as_ref()
+            .unwrap()
+            .remote_name
+            .is_empty(),
+        "the provider held no schema for the inner tool, so the engine stops the call"
+    );
+}
+
+/// The set of engine tools is a strategy the agent picks. A different
+/// combination is a different `defer_tools_strategy`.
+#[test]
+fn tool_search_picks_which_engine_tools_the_agent_gets() {
+    let agent = |strategy: DeferToolsStrategy| AgentConfig {
+        defer_tools: Some(DeferTools {
+            strategy,
+            ..DeferTools::default()
+        }),
+        tools: vec![AgentTool {
+            name: "run_payroll".to_string(),
+            description: "Run payroll.".to_string(),
+            input: None,
+            output: None,
+            handler: None,
+            defer: None,
+        }],
+        mcp: vec![],
+        ..agent_config("m1")
+    };
+    let offered = |search: DeferToolsStrategy| -> Vec<String> {
+        let agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(agent(search)));
+        super::super::state::SessionState::connector_tools(&agg.state, None)
+            .tools
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    };
+    assert_eq!(
+        offered(DeferToolsStrategy::Search),
+        ["tool_search", "call_tool"]
+    );
+    assert_eq!(
+        offered(DeferToolsStrategy::Search),
+        ["tool_search", "call_tool"],
+        "a catalog too long to read is one the agent can leave out"
+    );
+}
+
+/// The agent-wide default reaches every source, not only the connections, and
+/// a tool that states its own overrides it.
+#[test]
+fn defer_tools_defers_every_source_and_a_tool_can_opt_out() {
+    let agent = |defers: bool| AgentConfig {
+        defer_tools: defers.then(DeferTools::default),
+        tools: vec![
+            AgentTool {
+                name: "run_payroll".to_string(),
+                description: "Run payroll.".to_string(),
+                input: None,
+                output: None,
+                handler: None,
+                defer: None,
+            },
+            AgentTool {
+                name: "get_time".to_string(),
+                description: "The time.".to_string(),
+                input: None,
+                output: None,
+                handler: None,
+                defer: Some(false),
+            },
+        ],
+        ..agent_config("m1")
+    };
+    let deferred = |config: AgentConfig| -> Vec<String> {
+        config
+            .tools_as_llm()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.defer)
+            .map(|t| t.name)
+            .collect()
+    };
+    assert!(
+        deferred(agent(false)).is_empty(),
+        "nothing defers without the agent saying so"
+    );
+    assert_eq!(
+        deferred(agent(true)),
+        ["run_payroll"],
+        "the agent's default reaches a tool it declares, and `defer: false` opts out"
+    );
+}
+
+/// Deferral belongs to a tool, not to MCP. A worker tool that sets it is left
+/// out of the request, found by a search, and run by the worker.
+#[test]
+fn a_worker_tool_can_defer_and_the_search_finds_it() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            tools: vec![
+                AgentTool {
+                    name: "send_email".to_string(),
+                    description: "Send an email to somebody.".to_string(),
+                    input: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": { "to": { "type": "string" } },
+                        "required": ["to"]
+                    })),
+                    output: None,
+                    handler: None,
+                    defer: Some(true),
+                },
+                AgentTool {
+                    name: "get_time".to_string(),
+                    description: "The time.".to_string(),
+                    input: None,
+                    output: None,
+                    handler: None,
+                    defer: None,
+                },
+            ],
+            mcp: vec![],
+            ..agent_config("m1")
+        }),
+    );
+
+    assert_eq!(
+        offered(&agg),
+        ["tool_search", "call_tool"],
+        "no connection anywhere, and the agent still gets the search"
+    );
+
+    // The search reaches a tool no connection owns.
+    call(&mut agg, "tc-1", "tool_search", r#"{"query":"email"}"#);
+    let LocalAnswer::Result(result) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("a search is a result");
+    };
+    let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(answer["tools"][0]["name"], "send_email");
+    assert_eq!(
+        answer["searched"], 2,
+        "a search covers each source, so an empty answer means the agent has nothing"
+    );
+
+    // And the call runs on the worker, as a call to `send_email` always would.
+    call(
+        &mut agg,
+        "tc-2",
+        "call_tool",
+        r#"{"name":"send_email","arguments":{"to":"ops@example.com"}}"#,
+    );
+    let tc = agg.state.tool_call("tc-2").unwrap();
+    assert_eq!(tc.name, "send_email");
+    assert_eq!(tc.arguments, r#"{"to":"ops@example.com"}"#);
+    assert_eq!(tc.handler, ToolHandler::Worker);
+    assert!(tc.target.is_none(), "no connection is involved");
+}
+
+#[test]
+fn a_deferred_worker_tool_still_checks_its_arguments() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            tools: vec![AgentTool {
+                name: "send_email".to_string(),
+                description: "Send an email.".to_string(),
+                input: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string" } },
+                    "required": ["to"]
+                })),
+                output: None,
+                handler: None,
+                defer: Some(true),
+            }],
+            mcp: vec![],
+            ..agent_config("m1")
+        }),
+    );
+    call(
+        &mut agg,
+        "tc-1",
+        "call_tool",
+        r#"{"name":"send_email","arguments":{"to":7}}"#,
+    );
+    let LocalAnswer::Error(message) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("bad arguments are an error");
+    };
+    assert!(
+        message.contains("to"),
+        "the provider never saw this schema, so the engine checks it: {message}"
+    );
+    let schema: serde_json::Value = serde_json::from_str(
+        message
+            .split_once("input schema is: ")
+            .expect("the schema")
+            .1,
+    )
+    .expect("the schema is json the model can read");
+    assert_eq!(
+        schema["properties"]["to"]["type"], "string",
+        "the engine holds the schema, so a fault hands it back rather than \
+         leaving the model to guess: {message}"
+    );
+}
+
+#[test]
+fn call_tool_refuses_a_connection_this_agent_does_not_have() {
+    let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
+    call(
+        &mut agg,
+        "tc-1",
+        "call_tool",
+        r#"{"name":"github__search_issues","arguments":{}}"#,
+    );
+    let LocalAnswer::Error(message) = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one")
+    else {
+        panic!("an unknown connection is an error");
+    };
+    assert!(
+        message.contains("github__search_issues"),
+        "the message names what was asked for: {message}"
+    );
+    assert!(
+        message.contains("sentry__search_issues"),
+        "a wrong name is usually a near miss, so the same search ranks the \
+         neighbours: {message}"
+    );
+    assert!(
+        message.contains("tool_search"),
+        "and the message names the way to get a schema: {message}"
+    );
+}
+
+/// The connection's own `output` contract rides on the tool the engine holds,
+/// so the ordinary check finds it. There is no separate path for a `call_tool`:
+/// the wrapper is rewritten into this tool before anything settles.
+#[test]
+fn a_deferred_connector_tool_carries_its_output_contract() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(searching_connector_config(&["sentry"])),
+    );
+    let schema = serde_json::json!({ "type": "object", "required": ["url"] });
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::ConnectorSync,
+            "sentry".to_string(),
+            None,
+            Outcome::Connector {
+                prefix: Some("sentry".to_string()),
+                tools: vec![RemoteTool {
+                    output: Some(schema.clone()),
+                    ..remote_tool("search_issues")
+                }],
+                instructions: None,
+            },
+        ),
+        &system(),
+    );
+    let tool = agg
+        .state
+        .connector_tools(None)
+        .tools
+        .into_iter()
+        .find(|t| t.name == "sentry__search_issues")
+        .expect("the engine holds it");
+    assert!(tool.defer, "and the request leaves it out");
+    assert_eq!(tool.to_llm_tool().output, Some(schema));
+}
+
+/// A deferred tool is left out of the request, and nothing else about it
+/// changes: the engine holds it, routes it, and runs it.
+#[test]
+fn a_deferred_tool_is_still_the_engines_to_run() {
+    let agg = session_with_searched_connector("sentry", &["search_issues"]);
+    assert_eq!(
+        agg.state.tool_handler_for("sentry__search_issues"),
+        ToolHandler::Server
+    );
+    assert!(
+        !offered(&agg).contains(&"sentry__search_issues".to_string()),
+        "and the request does not carry it"
+    );
+}
+
 /// The decision that declares a connector and calls the model in one
 /// breath: the call queues behind the fetch and dispatches with the
 /// fetched tools merged.
@@ -7307,6 +8362,7 @@ fn a_re_prompt_does_not_offer_a_connector_tool_twice() {
             description: "a remote tool".to_string(),
             input: None,
             output: None,
+            defer: false,
         }]),
         temperature: None,
         max_completion_tokens: None,
@@ -7347,6 +8403,7 @@ fn a_declared_tool_keeps_its_name_and_its_handler_against_a_connector() {
         input: None,
         output: None,
         handler: None,
+        defer: None,
     });
     let mut agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(config));
     settle_sync(&mut agg, "sentry", &["search_issues"]);
@@ -8937,6 +9994,7 @@ fn interrupt_voiding_is_scoped_to_the_parked_path() {
     };
     let llm = |id: &str| {
         EventPayload::LlmCallRequested(LlmCallRequested {
+            defer_tools_strategy: Default::default(),
             llm: "claude".to_string(),
             format: None,
             id: id.to_string(),

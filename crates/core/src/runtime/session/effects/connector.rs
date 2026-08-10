@@ -35,7 +35,11 @@ impl KindSpec for ConnectorSpec {
 
     fn settle(&self, state: &SessionState, id: &str, outcome: Outcome) -> Vec<EventPayload> {
         match outcome {
-            Outcome::Connector { prefix, tools } => {
+            Outcome::Connector {
+                prefix,
+                tools,
+                instructions,
+            } => {
                 state.report_filter(id, &tools, prefix.as_deref());
                 // The run tail promotes whatever this fetch was parking.
                 vec![EventPayload::ConnectorSyncCompleted(Box::new(
@@ -43,6 +47,7 @@ impl KindSpec for ConnectorSpec {
                         id: id.to_string(),
                         prefix,
                         tools,
+                        instructions,
                     },
                 ))]
             }
@@ -182,17 +187,19 @@ impl SessionState {
     /// on them anyway — an `include` that matches nothing is a typo for whoever
     /// wrote the config, not a runtime condition for the agent to handle.
     fn report_filter(&self, connection_id: &str, offered: &[RemoteTool], prefix: Option<&str>) {
-        let Some(connector) = self
-            .resolve_agent_for(self.head_id.as_deref())
-            .and_then(|c| c.mcp.into_iter().find(|c| c.id == connection_id))
-        else {
+        let Some(config) = self.resolve_agent_for(self.head_id.as_deref()) else {
             return;
         };
-        let r = filter::resolve(&connector, offered, prefix);
+        let Some(connector) = config.mcp.iter().find(|c| c.id == connection_id).cloned() else {
+            return;
+        };
+        let defers = filter::defers(&connector, config.defers_tools());
+        let r = filter::resolve(&connector, offered, prefix, defers);
         tracing::info!(
             connection = %connection_id,
             offered = r.offered,
             resolved = r.tools.len(),
+            defer = defers,
             "fetched connector tools"
         );
         if !r.unmatched_include.is_empty() {
@@ -202,12 +209,42 @@ impl SessionState {
                 "connector include patterns matched no tool"
             );
         }
-        if !r.oversized.is_empty() {
+        // A search carries a name as an argument, so no name is too long.
+        if !r.oversized.is_empty() && !defers {
             tracing::warn!(
                 connection = %connection_id,
                 tools = ?r.oversized,
                 "connector tool names too long to offer; shorten the connection id or turn off prefixing"
             );
+        }
+        // Names this fetch lost. Scoped to this connection, because every other
+        // connection reports its own when it settles.
+        let collisions = self.connector_tools_for_config(&config).collisions;
+        for name in collisions
+            .iter()
+            .filter(|name| r.tools.iter().any(|t| &&t.name == name))
+        {
+            tracing::warn!(
+                connection = %connection_id,
+                tool = %name,
+                "tool name claimed twice; it is offered to the model by neither connector"
+            );
+        }
+        // A worker that took one of the engine's names on purpose is overriding
+        // the engine. One that took it by accident has quietly turned off the
+        // search this connection depends on.
+        if defers {
+            for name in collisions
+                .iter()
+                .filter(|n| [filter::TOOL_SEARCH, filter::CALL_TOOL].contains(&n.as_str()))
+            {
+                tracing::warn!(
+                    connection = %connection_id,
+                    tool = %name,
+                    "the config declares `{name}`, so the engine's own is not offered; \
+                     this connection's tools cannot be found"
+                );
+            }
         }
         if r.unannotated > 0 {
             tracing::warn!(

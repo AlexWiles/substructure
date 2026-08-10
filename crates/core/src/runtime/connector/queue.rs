@@ -3,8 +3,9 @@ use uuid::Uuid;
 
 use crate::runtime::span::SpanContext;
 
-/// Work the engine owes a connection. Both variants are network calls the
-/// session cannot make itself, dispatched off the events that request them.
+/// Work the engine owes a connection, dispatched off the events that request
+/// it. [`ConnectorTask::Answer`] reaches no network, and runs here so that one
+/// seam settles every tool call.
 #[derive(Debug, Clone)]
 pub enum ConnectorTask {
     /// Fetch one connection's tool list.
@@ -29,6 +30,15 @@ pub enum ConnectorTask {
         arguments: Value,
         span: SpanContext,
     },
+    /// Answer one of the engine's own tools, from the session.
+    Answer {
+        source_event_id: Uuid,
+        session_id: String,
+        tenant_id: String,
+        tool_call_id: String,
+        attempt: u32,
+        span: SpanContext,
+    },
 }
 
 impl ConnectorTask {
@@ -48,14 +58,20 @@ impl ConnectorTask {
                 attempt,
                 ..
             } => format!("connector:call:{session_id}:{tool_call_id}:{attempt}"),
+            ConnectorTask::Answer {
+                session_id,
+                tool_call_id,
+                attempt,
+                ..
+            } => format!("connector:answer:{session_id}:{tool_call_id}:{attempt}"),
         }
     }
 
     pub fn session_id(&self) -> &str {
         match self {
-            ConnectorTask::Sync { session_id, .. } | ConnectorTask::CallTool { session_id, .. } => {
-                session_id
-            }
+            ConnectorTask::Sync { session_id, .. }
+            | ConnectorTask::CallTool { session_id, .. }
+            | ConnectorTask::Answer { session_id, .. } => session_id,
         }
     }
 }

@@ -6,6 +6,7 @@ pub mod effects;
 pub mod events;
 pub mod index;
 pub mod message;
+pub mod prompt_context;
 pub mod propose;
 pub mod reconcile;
 pub mod schedule;

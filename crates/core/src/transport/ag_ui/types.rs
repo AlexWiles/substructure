@@ -109,6 +109,7 @@ impl RunAgentInput {
                     input: t.parameters.clone(),
                     output: None,
                     handler: Some(Handler::Client),
+                    defer: None,
                 })
                 .collect(),
             context: self.context.clone(),

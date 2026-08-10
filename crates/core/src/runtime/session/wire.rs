@@ -611,13 +611,14 @@ pub fn to_wire_trigger(
             id,
             request,
             format,
+            defer_tools_strategy,
             stream,
             attempt,
             deadline,
         } => DecisionTrigger::LlmExecute {
             id,
             request: match format {
-                Some(f) => f.request_to_wire(&request),
+                Some(f) => f.request_to_wire(&request, defer_tools_strategy),
                 None => serde_json::to_value(&request).unwrap_or_default(),
             },
             format,
@@ -796,6 +797,7 @@ mod tests {
             input: None,
             output: None,
             handler: Some(Handler::Server),
+            defer: None,
         });
         let err = resolve_response(
             DecisionResponse {
@@ -981,6 +983,7 @@ mod tests {
         };
         let wire = to_wire_trigger(
             Trigger::LlmExecute {
+                defer_tools_strategy: Default::default(),
                 id: "llm-1".to_string(),
                 request: request.clone(),
                 format: Some(LlmFormat::Anthropic),
@@ -997,7 +1000,7 @@ mod tests {
                 request, format, ..
             } => {
                 assert_eq!(format, Some(LlmFormat::Anthropic));
-                assert_eq!(request["system"], "be nice");
+                assert_eq!(request["system"][0]["text"], "be nice");
                 assert_eq!(request["messages"][0]["content"][0]["text"], "hi");
                 assert!(
                     request.get("stream").is_none(),
@@ -1010,6 +1013,7 @@ mod tests {
         // No format ⇒ the neutral LlmRequest JSON, verbatim.
         let wire = to_wire_trigger(
             Trigger::LlmExecute {
+                defer_tools_strategy: Default::default(),
                 format: None,
                 id: "llm-1".to_string(),
                 request: request.clone(),
@@ -1109,6 +1113,8 @@ mod tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: Vec::new(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 
@@ -1516,6 +1522,8 @@ mod tests {
             "call-1",
             EffectTracking::new(RetryPolicy::no_retry(), chrono::Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
+                defer_tools_strategy: Default::default(),
+                context_ids: Vec::new(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],
@@ -1526,6 +1534,7 @@ mod tests {
                         description: "d".to_string(),
                         input: Some(schema),
                         output: None,
+                        defer: false,
                     }]),
                     temperature: None,
                     max_completion_tokens: None,

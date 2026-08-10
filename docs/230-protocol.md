@@ -158,7 +158,7 @@ type DecisionResponse = {
 | `channels` | How a frontend shows this decision, keyed by kind. The engine passes it through. See [Slack](./130-slack.md#customizing-what-the-bot-shows). |
 
 An empty response `{}` writes nothing. Use it to leave a tool call open. See
-[Deferred tools](./110-deferred-tools.md).
+[Async tools](./110-async-tools.md).
 
 ## Triggers
 
@@ -389,6 +389,11 @@ type AgentConfig = {
     tools?: AgentTool[]
     sub_agents?: SubAgent[]
     mcp?: McpServer[]
+    defer_tools?: boolean | {   // the default for every tool of this agent.
+        strategy?: "search"     //   presence is the switch. omitted: no opinion
+        max_matches?: number    //   matches per search, >= 1. omitted: 5
+    }
+    announce_mcp?: "auto" | "never"  // tell the model a connection exists. omitted: "auto"
 }
 
 type AgentTool = {
@@ -397,6 +402,8 @@ type AgentTool = {
     input?: unknown             // JSON Schema for the arguments
     output?: unknown            // JSON Schema the result must match
     handler?: "worker" | "client"  // default worker
+    defer?: boolean             // keep it out of the request; a search still finds it.
+                                // omitted: the agent's defer_tools
 }
 
 type SubAgent = {
@@ -415,6 +422,7 @@ type McpTools = {
     read_only?: boolean         // these read the MCP annotations
     non_destructive?: boolean
     idempotent?: boolean
+    defer?: boolean             // omitted: the agent's defer_tools
 }
 ```
 

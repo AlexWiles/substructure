@@ -142,6 +142,51 @@ The model now sees `sentry__search_issues` beside your own tools. When it calls
 one, the engine runs it. Your worker still sees the call: `tool.finished`
 arrives with the result.
 
+## Announcing a connection
+
+The model cannot see a connection. It sees tools, and a deferred tool is not
+even that. So the engine tells it: once per connection, on the first request
+that can carry the notice.
+
+```json
+{ "mcp_server": "sentry", "tools": 12, "about": "…" }
+```
+
+`about` is what the server said it is for. A server that says nothing is
+announced without it.
+
+The engine takes the first place it can use:
+
+| Place | When |
+| --- | --- |
+| The system prompt | While no request of this branch has been sent. It is free there, because no cache exists yet. |
+| The last user message | After that. An earlier system prompt must not change, because a change to it drops the cache. |
+| A message of its own | When the turn ends on anything but a user message. |
+
+The order is fixed, so it is not a setting. `announce_mcp` on the agent chooses
+whether the engine announces at all.
+
+```toml title="substructure.toml"
+[agent.support]
+mcp = ["sentry"]
+announce_mcp = "never"
+```
+
+| Value | The engine |
+| --- | --- |
+| `auto` (the default) | Announces each connection once |
+| `never` | Says nothing |
+
+Use `never` for a server whose own words help nobody.
+
+A connection is announced after it is authorized, and never before. A request
+waits for each connection it names to answer, so a notice cannot claim a server
+the engine has not reached. A connection that fails is not announced, and is
+announced later if it recovers.
+
+A branch announces on its own. A fork that never held a connection announces it
+when it gets one.
+
 ## Filtering
 
 A connection can offer a hundred tools. Above about forty, a model chooses
@@ -154,8 +199,12 @@ type McpTools = {
     read_only?: boolean
     non_destructive?: boolean
     idempotent?: boolean
+    defer?: boolean
 }
 ```
+
+The first five keys say which tools the agent may reach. `defer` says how they
+reach the model, and it is the next section.
 
 The engine applies the capability keys, then `include`, then `exclude`. Each one
 can only remove tools.
@@ -166,6 +215,56 @@ model sees.
 The capability keys read the connection's MCP annotations. A tool with no
 annotation fails them. Annotations are hints from the server. Use them to take
 fewer tools, not as a security boundary.
+
+## Deferring a connection
+
+Filtering is one answer to a large connection. Search is the other. Set `defer`
+and the model searches for a tool instead of reading a list of them.
+
+```toml title="substructure.toml"
+[agent.support]
+mcp = [{ id = "aws", tools = { defer = true } }]
+```
+
+`defer_tools` sets it for every tool of an agent. A connection overrides it.
+
+```toml title="substructure.toml"
+[agent.support]
+defer_tools = true
+mcp = [
+  "aws",                                         # deferred, from the agent
+  { id = "sentry", tools = { defer = false } },  # this one is listed
+]
+```
+
+| `defer` | The request carries |
+| --- | --- |
+| `false` (the default) | Each tool the filter kept. |
+| `true` | None of them. |
+
+`defer` sets the flag on each tool the filter kept. The agent then gets
+`tool_search` and `call_tool`. A search gives each tool the same name the model
+calls directly, such as `aws__s3_list`.
+
+The engine answers a search from the tools it read when it opened each
+connection. It does not reach the network.
+
+An answer gives no list of connections. Each tool name carries its connector,
+such as `aws__s3_list`, and an answer says how many tools it searched.
+
+An agent can mix. A connection that does not defer puts its own tools in the
+request, beside the two. The filter still applies to one that does: a search
+does not show a tool the filter removed, and `call_tool` refuses one.
+
+Use search when a connection has more tools than an agent needs at one time.
+Keep the default when the agent uses most of the tools each session.
+
+Deferral is a property of a tool, and not of MCP: a tool your worker declares
+sets `defer` on its own definition, and the same two tools find it and run it.
+See [Deferred tools](./65-deferred-tools.md).
+
+A third answer is [Sub-agents](./80-sub-agents.md): give the connection to a
+child agent, and the parent pays one tool.
 
 ## Names
 
@@ -238,5 +337,6 @@ what the `Retry` button proposes. See [Protocol](./230-protocol.md#actions).
 ## Next
 
 - [Tool calls](./60-tools.md): tools your worker runs.
+- [Deferred tools](./65-deferred-tools.md): what `defer` turns on.
 - [Agents](./30-agents.md): the section that names a connection.
 - [Sub-agents](./80-sub-agents.md): put a large connector behind a child agent.

@@ -29,8 +29,67 @@ use uuid::Uuid;
 
 use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
+use super::prompt_context;
+use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{ConnectorTool, Handler};
+use crate::protocol::{AgentTool, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, McpServer};
+
+/// One connection as the engine's own tools see it: what the agent declared,
+/// what the connection offered, and what it said it is for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Source {
+    pub server: McpServer,
+    pub offered: Vec<RemoteTool>,
+    pub instructions: Option<String>,
+}
+
+/// One connection as an announcement gives it to the model.
+///
+/// A struct, and not a `json!` map: a map sorts its keys, which would put a
+/// server's own words ahead of the name that says whose they are.
+#[derive(serde::Serialize)]
+struct Summary<'a> {
+    mcp_server: &'a str,
+    tools: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    about: Option<&'a str>,
+}
+
+/// What a `call_tool` addresses. Any source, because deferral is a property of
+/// a tool and not of where it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallTarget {
+    Connector(ConnectorTool),
+    Declared(AgentTool),
+}
+
+impl CallTarget {
+    pub fn input(&self) -> Option<serde_json::Value> {
+        match self {
+            CallTarget::Connector(t) => t.input.clone(),
+            CallTarget::Declared(t) => t.input.clone(),
+        }
+    }
+}
+
+/// The tool's own arguments, out of the `call_tool` wrapper.
+///
+/// A model that sent them as a JSON string meant the object, and we hold the
+/// schema that says so. Refusing it would teach the model nothing.
+pub(in crate::runtime::session) fn inner_arguments(raw: &serde_json::Value) -> String {
+    match raw.get("arguments") {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(value) => value.to_string(),
+        None => "{}".to_string(),
+    }
+}
+
+/// What the engine answers for one of its own connector tools.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LocalAnswer {
+    Result(String),
+    Error(String),
+}
 use rust_decimal::Decimal;
 
 pub use crate::protocol::EffectKind;
@@ -388,6 +447,15 @@ pub struct LlmCallState {
     pub handler: LlmHandler,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<LlmFormat>,
+    /// How a deferred tool reaches the model, frozen from the block at request
+    /// time so a replay lowers the same way.
+    #[serde(default)]
+    pub defer_tools_strategy: DeferToolsStrategy,
+    /// Ids of the engine-derived context this call's prompt already carries.
+    /// The record a retry checks, and the record a later call of this path
+    /// reads to know what the model has already been told.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_ids: Vec<String>,
 }
 
 /// An `LlmRequest` without its message list; the prompt is stored alongside.
@@ -482,6 +550,10 @@ pub struct ConnectorSyncState {
     /// The prefix its tools expand under, frozen at fetch time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    /// What the server said it is for. The only description of a connection
+    /// that the engine does not have to write itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     /// Why the last attempt failed; `Some` only while the fetch is unsettled or
     /// terminally failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1021,6 +1093,7 @@ impl SessionState {
                 call.stream = payload.stream;
                 call.handler = payload.handler;
                 call.format = payload.format;
+                call.defer_tools_strategy = payload.defer_tools_strategy;
             }
         } else {
             self.insert_effect(
@@ -1033,6 +1106,8 @@ impl SessionState {
                     stream: payload.stream,
                     handler: payload.handler,
                     format: payload.format,
+                    context_ids: Vec::new(),
+                    defer_tools_strategy: payload.defer_tools_strategy,
                 }),
             );
         }
@@ -1048,6 +1123,8 @@ impl SessionState {
             .and_then(|e| e.anchor.clone())
             .or_else(|| self.head_id.clone());
         let connector_tools = self.connector_tools(leaf.as_deref()).tools;
+        let owed = prompt_context::owed(self, leaf.as_deref(), &payload.id);
+        let system_open = self.system_prefix_open(leaf.as_deref(), &payload.id);
         if let Some(effect) = self.effect_mut(EffectKind::LlmCall, &payload.id) {
             effect.tracking.dispatch(now);
             if let Some(call) = effect.llm_mut() {
@@ -1059,6 +1136,13 @@ impl SessionState {
                         }
                     }
                 }
+                prompt_context::merge(
+                    &mut call.prompt,
+                    &mut call.context_ids,
+                    &payload.id,
+                    system_open,
+                    owed,
+                );
             }
         }
         self.dequeue(EffectKind::LlmCall, &payload.id);
@@ -1333,6 +1417,7 @@ impl SessionState {
                         EffectPayload::ConnectorSync(ConnectorSyncState {
                             tools: Vec::new(),
                             prefix: None,
+                            instructions: None,
                             error: None,
                             auth: None,
                         }),
@@ -1354,6 +1439,7 @@ impl SessionState {
                     if let Some(sync) = e.connector_mut() {
                         sync.tools = p.tools.clone();
                         sync.prefix = p.prefix.clone();
+                        sync.instructions = p.instructions.clone();
                         sync.error = None;
                         sync.auth = None;
                     }
@@ -1689,10 +1775,7 @@ impl SessionState {
     pub fn tool_handler_for(&self, name: &str) -> ToolHandler {
         let config = self.resolve_agent_for(self.head_id.as_deref());
         match config.as_ref().and_then(|c| c.tool(name)) {
-            Some(t) => match t.handler {
-                Some(Handler::Client) => ToolHandler::Client,
-                _ => ToolHandler::Worker,
-            },
+            Some(t) => ToolHandler::declared(t.handler),
             None if self.connector_tool_for(name).is_some() => ToolHandler::Server,
             None => ToolHandler::Worker,
         }
@@ -1725,14 +1808,34 @@ impl SessionState {
     }
 
     pub fn connector_tools_for_config(&self, config: &AgentConfig) -> filter::Merged {
-        let resolutions = config.mcp.iter().filter_map(|connector| {
-            let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
-            let sync = effect.connector()?;
-            effect
-                .tracking
-                .is_ready()
-                .then(|| filter::resolve(connector, &sync.tools, sync.prefix.as_deref()))
-        });
+        let mut resolutions: Vec<filter::Resolution> = config
+            .mcp
+            .iter()
+            .filter_map(|connector| {
+                let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
+                let sync = effect.connector()?;
+                effect.tracking.is_ready().then(|| {
+                    filter::resolve(
+                        connector,
+                        &sync.tools,
+                        sync.prefix.as_deref(),
+                        filter::defers(connector, config.defers_tools()),
+                    )
+                })
+            })
+            .collect();
+        // From the config alone: a fetch that has not settled must not decide
+        // whether a tool definition exists. An agent that says `search` thus
+        // gets these from its first turn, and a connection added later moves
+        // no definition.
+        let defers = config.defers_tools()
+            || config.tools.iter().any(|t| t.defer == Some(true))
+            || config.mcp.iter().any(|c| filter::defers(c, false));
+        if defers {
+            resolutions.push(filter::Resolution::of(filter::search_tools(
+                config.defer_strategy(),
+            )));
+        }
         let taken: Vec<&str> = config
             .tools
             .iter()
@@ -1740,6 +1843,235 @@ impl SessionState {
             .chain(config.sub_agents.iter().map(|s| s.id.as_str()))
             .collect();
         filter::merge(resolutions, taken)
+    }
+
+    /// The connection as the config at `leaf` names it, with the offer this
+    /// session recorded.
+    fn connector_source(&self, connector_id: &str, leaf: Option<&str>) -> Option<Source> {
+        let config = self.resolve_agent_for(leaf)?;
+        let server = config.mcp.into_iter().find(|c| c.id == connector_id)?;
+        let sync = self.connector_sync(connector_id)?;
+        Some(Source {
+            server,
+            offered: sync.tools.clone(),
+            instructions: sync.instructions.clone(),
+        })
+    }
+
+    /// Every connection of the agent whose offer has arrived, with that offer.
+    /// What the pair of search tools answers over.
+    ///
+    /// Every connection, not only the searched ones. A connection on `all` is
+    /// listed up front *and* findable, so one search covers the agent and an
+    /// answer of nothing means nothing is there.
+    ///
+    /// Readiness belongs here and not in the tool list: a connection that
+    /// arrives during a session joins the next answer, and no definition moves.
+    fn searchable_connectors(&self, leaf: Option<&str>) -> Vec<Source> {
+        let Some(config) = self.resolve_agent_for(leaf) else {
+            return Vec::new();
+        };
+        config
+            .mcp
+            .iter()
+            .filter(|c| {
+                self.effect(EffectKind::ConnectorSync, &c.id)
+                    .is_some_and(|e| e.tracking.is_ready())
+            })
+            .filter_map(|c| self.connector_source(&c.id, leaf))
+            .collect()
+    }
+
+    /// The engine's answer to one of its own tools, or `None` when the call is
+    /// the connection's. Read from state, so a replay answers the same.
+    pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<LocalAnswer> {
+        let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
+        let leaf = effect.anchor.clone();
+        let tc = effect.tool()?;
+        let target = tc.target.as_ref()?;
+        if target.kind.is_remote() {
+            return None;
+        }
+        let argument = |key: &str| {
+            serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                .ok()
+                .and_then(|v| v.get(key)?.as_str().map(str::to_string))
+                .unwrap_or_default()
+        };
+        match target.kind {
+            ConnectorToolKind::Remote => None,
+            ConnectorToolKind::Find => Some(LocalAnswer::Result(filter::find_answer(
+                &self.searchable_tools(leaf.as_deref()),
+                &argument("query"),
+                self.resolve_agent_for(leaf.as_deref())
+                    .map(|c| c.defer_settings())
+                    .unwrap_or_default()
+                    .max_matches,
+            ))),
+            ConnectorToolKind::Call => Some(LocalAnswer::Error(
+                self.call_tool_fault(&tc.arguments, leaf.as_deref())
+                    .unwrap_or_else(|| "the call could not be routed".to_string()),
+            )),
+        }
+    }
+
+    /// Every tool the agent can reach, deferred or not, as the model would see
+    /// it. What a search answers over.
+    ///
+    /// Each source, not only the connections: deferral is a property of a tool,
+    /// so a search that skipped one source would report an absence that is not
+    /// real. The engine's own two are left out — they are how you search, not
+    /// something to find — and so are the sub-agents, which a `call_tool`
+    /// cannot place.
+    pub fn searchable_tools(&self, leaf: Option<&str>) -> Vec<LlmTool> {
+        let Some(config) = self.resolve_agent_for(leaf) else {
+            return Vec::new();
+        };
+        let declared = config
+            .tools
+            .iter()
+            .map(|t| t.to_llm_tool(config.defers_tools()));
+        let connector = self
+            .connector_tools_for_config(&config)
+            .tools
+            .into_iter()
+            .filter(|t| t.kind.is_remote())
+            .map(|t| t.to_llm_tool())
+            .collect::<Vec<_>>();
+        declared.chain(connector).collect()
+    }
+
+    /// What one connection is, for an announcement: its size, and its own
+    /// words. `None` while the connection has not settled, so a notice never
+    /// claims a server the engine cannot yet reach.
+    pub fn connection_summary(&self, id: &str, leaf: Option<&str>) -> Option<String> {
+        let source = self
+            .searchable_connectors(leaf)
+            .into_iter()
+            .find(|source| source.server.id == id)?;
+        serde_json::to_string(&Summary {
+            mcp_server: &source.server.id,
+            tools: filter::callable(&source.server, &source.offered).len(),
+            about: source.instructions.as_deref(),
+        })
+        .ok()
+    }
+
+    /// Context ids that an earlier call of this path already carried.
+    ///
+    /// Read from the effects on the path, so a fork that never held a call does
+    /// not inherit what it said, and a rewind that removed one lets it be said
+    /// again.
+    pub fn context_ids_on_path(
+        &self,
+        leaf: Option<&str>,
+        exclude: &str,
+    ) -> std::collections::HashSet<String> {
+        let path = self.path_set(leaf);
+        self.effects
+            .values()
+            .filter(|e| e.id != exclude && Self::anchored_on(&path, e.anchor.as_deref()))
+            .filter_map(EffectState::llm)
+            .flat_map(|call| call.context_ids.iter().cloned())
+            .collect()
+    }
+
+    /// Whether the system prefix is still free to write.
+    ///
+    /// It is free until a call commits it. A provider caches the prefix, and
+    /// the Anthropic wire gathers every system message into it whatever the
+    /// position, so a system message added later rewrites what is cached.
+    pub fn system_prefix_open(&self, leaf: Option<&str>, exclude: &str) -> bool {
+        let path = self.path_set(leaf);
+        !self.effects.values().any(|e| {
+            e.id != exclude
+                && matches!(e.payload, EffectPayload::LlmCall(_))
+                && Self::anchored_on(&path, e.anchor.as_deref())
+                && e.tracking.status() != EffectStatus::Queued
+        })
+    }
+
+    /// The ids from the root to `leaf`, walked once. A caller that asked per
+    /// effect would walk the whole path again for each one.
+    fn path_set<'a>(&'a self, leaf: Option<&'a str>) -> std::collections::HashSet<&'a str> {
+        leaf.map(|l| self.path_ids(l)).unwrap_or_default()
+    }
+
+    /// An unanchored effect belongs to every path, the same way an unanchored
+    /// agent version does.
+    fn anchored_on(path: &std::collections::HashSet<&str>, anchor: Option<&str>) -> bool {
+        anchor.is_none_or(|a| path.contains(a))
+    }
+
+    /// The tool a `call_tool` names, and where a call to it runs.
+    pub fn call_tool_target(&self, named: &str, leaf: Option<&str>) -> Option<CallTarget> {
+        let config = self.resolve_agent_for(leaf)?;
+        if let Some(declared) = config.tool(named) {
+            return Some(CallTarget::Declared(declared.clone()));
+        }
+        self.connector_tool_for(named)
+            .filter(|t| t.kind.is_remote())
+            .map(CallTarget::Connector)
+    }
+
+    /// Why a `call_tool` cannot be placed, if it cannot: an unknown name, or
+    /// arguments that break that tool's schema.
+    ///
+    /// Each fault carries what the model needs to fix it. The engine holds the
+    /// schema the provider never received, so a fault that withheld it would
+    /// leave the model to guess or to search again.
+    ///
+    /// One function for two callers. The route freezes an empty remote name
+    /// when this answers `Some`, and the answer reads the same fault again to
+    /// tell the model which of the three it was.
+    pub fn call_tool_fault(&self, arguments: &str, leaf: Option<&str>) -> Option<String> {
+        let raw: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+        let named = raw
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let Some(target) = self.call_tool_target(&named, leaf) else {
+            // The name is the query: a wrong name is usually a near miss, and
+            // the same search the model should have run ranks the neighbours.
+            let tools = self.searchable_tools(leaf);
+            let cap = self
+                .resolve_agent_for(leaf)
+                .map(|c| c.defer_settings())
+                .unwrap_or_default()
+                .max_matches
+                .get();
+            let near: Vec<&str> = filter::find(&tools, &named)
+                .into_iter()
+                .take(cap)
+                .map(|t| t.name.as_str())
+                .collect();
+            return Some(if near.is_empty() {
+                format!(
+                    "no tool `{named}` for this agent. Call `{}` with an empty query for every \
+                     tool.",
+                    filter::TOOL_SEARCH
+                )
+            } else {
+                format!(
+                    "no tool `{named}` for this agent. The closest are: {}. Call `{}` for the \
+                     schema of one.",
+                    near.join(", "),
+                    filter::TOOL_SEARCH
+                )
+            });
+        };
+        // The provider never received this tool's schema, so it checked
+        // nothing. The engine holds one, so the engine checks it — and hands it
+        // back, because the model is the party that can act on it.
+        let input = target.input();
+        classify_arguments(&inner_arguments(&raw), input.as_ref())
+            .error()
+            .map(|e| match &input {
+                Some(schema) => format!("`{named}`: {e}. Its input schema is: {schema}"),
+                None => format!("`{named}`: {e}"),
+            })
     }
 
     /// Connections the config in force on `leaf` names but has never fetched.
@@ -2022,6 +2354,8 @@ mod open_llm_calls_tests {
             call_id,
             EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
             EffectPayload::LlmCall(LlmCallState {
+                defer_tools_strategy: Default::default(),
+                context_ids: Vec::new(),
                 format: None,
                 llm: "claude".to_string(),
                 prompt: vec![],
@@ -2258,6 +2592,8 @@ mod agent_version_tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: Vec::new(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
         }
     }
 
@@ -2293,6 +2629,64 @@ mod agent_version_tests {
         s.agent_versions.push(version("m2", Some("u2")));
         // m2 is off the u1→x1 path; the branch sees config as-of u1.
         assert_eq!(s.resolve_agent_for(Some("x1")), Some(config("m1")));
+    }
+
+    /// The summary answers at a place in the tree, and not at the head.
+    ///
+    /// A call built where a connection existed must be able to describe that
+    /// connection, whatever the head has done since. The head is for choosing
+    /// what to do next; a call already in flight reads its own anchor.
+    #[test]
+    fn a_connection_is_summarised_where_the_work_was_authored() {
+        let with_sentry = |model: &str, anchor: Option<&str>| Logged {
+            seq: 0,
+            entry: AgentVersion {
+                value: AgentConfig {
+                    mcp: vec![McpServer {
+                        id: "sentry".to_string(),
+                        tools: None,
+                        auth_failure: Default::default(),
+                    }],
+                    ..config(model)
+                },
+                anchor: anchor.map(str::to_string),
+            },
+        };
+        let mut s = forked_session();
+        s.head_id = Some("u2".to_string());
+        // u1 has the connection; u2 drops it. x1 forks from u1 and keeps it.
+        s.agent_versions.push(with_sentry("m1", Some("u1")));
+        s.agent_versions.push(version("m2", Some("u2")));
+        s.insert_effect(
+            "sentry",
+            EffectTracking::new_queued(RetryPolicy::no_retry()),
+            EffectPayload::ConnectorSync(ConnectorSyncState {
+                prefix: Some("sentry".to_string()),
+                tools: vec![RemoteTool {
+                    name: "search_issues".to_string(),
+                    description: String::new(),
+                    input: None,
+                    output: None,
+                    annotations: Default::default(),
+                }],
+                instructions: None,
+                error: None,
+                auth: None,
+            }),
+        );
+        if let Some(e) = s.effect_mut(EffectKind::ConnectorSync, "sentry") {
+            e.tracking.dispatch(Utc::now());
+            e.tracking.complete();
+        }
+
+        assert!(
+            s.connection_summary("sentry", Some("x1")).is_some(),
+            "the fork still holds the connection, so a call there can describe it"
+        );
+        assert!(
+            s.connection_summary("sentry", Some("u2")).is_none(),
+            "u2 dropped it, so a call there has nothing to describe"
+        );
     }
 
     #[test]

@@ -9,8 +9,8 @@ use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningEffort, SessionOwner, StreamDelta,
-    ToolCall, ToolCallChunk, ToolCallFunction,
+    DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningEffort, SessionOwner,
+    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -83,7 +83,7 @@ fn is_reasoning_model(model: &str) -> bool {
 impl<'a> WireBody<'a> {
     /// `stream: None` omits the field so the body is valid input for both the
     /// create and stream calls a worker might make.
-    fn build(request: &'a LlmRequest, stream: Option<bool>) -> Self {
+    fn build(request: &'a LlmRequest, search: DeferToolsStrategy, stream: Option<bool>) -> Self {
         let reasoning_effort = request
             .reasoning
             .as_ref()
@@ -101,9 +101,8 @@ impl<'a> WireBody<'a> {
             model: &request.model,
             messages: &request.messages,
             tools: request
-                .tools
-                .as_ref()
-                .map(|ts| ts.iter().map(WireTool::from).collect()),
+                .offered_tools(search)
+                .map(|ts| ts.into_iter().map(WireTool::from).collect()),
             temperature,
             max_completion_tokens: request.max_completion_tokens,
             reasoning_effort,
@@ -231,8 +230,11 @@ struct ToolCallAccum {
 // ── Worker-format seam ───────────────────────────────────────────────────
 
 /// The Chat Completions body for `request`, `stream` omitted.
-pub(crate) fn request_to_wire(request: &LlmRequest) -> serde_json::Value {
-    serde_json::to_value(WireBody::build(request, None)).unwrap_or_default()
+pub(crate) fn request_to_wire(
+    request: &LlmRequest,
+    search: DeferToolsStrategy,
+) -> serde_json::Value {
+    serde_json::to_value(WireBody::build(request, search, None)).unwrap_or_default()
 }
 
 /// A raw Chat Completions response → the neutral `LlmResponse`.
@@ -408,9 +410,10 @@ impl OpenAiClient {
     async fn post_chat_completion(
         &self,
         request: &LlmRequest,
+        search: DeferToolsStrategy,
         stream: bool,
     ) -> Result<reqwest::Response, LlmCallError> {
-        let wire = WireBody::build(request, Some(stream));
+        let wire = WireBody::build(request, search, Some(stream));
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         self.http
@@ -453,9 +456,11 @@ impl LlmCallable for OpenAiClient {
     async fn call(
         &self,
         request: &LlmRequest,
-        _ctx: &CallContext<'_>,
+        ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let resp = self.post_chat_completion(request, false).await?;
+        let resp = self
+            .post_chat_completion(request, ctx.defer_tools_strategy, false)
+            .await?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| {
             LlmCallError::new(ErrorCode::ProviderError, format!("read body: {e}"), true)
@@ -475,10 +480,12 @@ impl LlmCallable for OpenAiClient {
     async fn call_streaming(
         &self,
         request: &LlmRequest,
-        _ctx: &CallContext<'_>,
+        ctx: &CallContext<'_>,
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let resp = self.post_chat_completion(request, true).await?;
+        let resp = self
+            .post_chat_completion(request, ctx.defer_tools_strategy, true)
+            .await?;
         let status = resp.status();
 
         if !status.is_success() {
@@ -579,7 +586,8 @@ mod tests {
             exclude: None,
             enabled: None,
         });
-        let v = serde_json::to_value(WireBody::build(&r, Some(false))).unwrap();
+        let v = serde_json::to_value(WireBody::build(&r, DeferToolsStrategy::Search, Some(false)))
+            .unwrap();
         assert_eq!(v["reasoning_effort"], "high");
         assert!(v.get("temperature").is_none());
         assert_eq!(v["max_completion_tokens"], 500);
@@ -588,14 +596,24 @@ mod tests {
 
     #[test]
     fn reasoning_model_without_explicit_effort_still_strips_temperature() {
-        let v = serde_json::to_value(WireBody::build(&req("gpt-5.4-mini"), Some(false))).unwrap();
+        let v = serde_json::to_value(WireBody::build(
+            &req("gpt-5.4-mini"),
+            DeferToolsStrategy::Search,
+            Some(false),
+        ))
+        .unwrap();
         assert!(v.get("temperature").is_none());
         assert!(v.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn non_reasoning_model_keeps_temperature() {
-        let v = serde_json::to_value(WireBody::build(&req("gpt-4o"), Some(false))).unwrap();
+        let v = serde_json::to_value(WireBody::build(
+            &req("gpt-4o"),
+            DeferToolsStrategy::Search,
+            Some(false),
+        ))
+        .unwrap();
         assert_eq!(v["temperature"], 0.7);
         assert!(v.get("reasoning_effort").is_none());
     }

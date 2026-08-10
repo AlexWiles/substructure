@@ -92,4 +92,4 @@ already uses. Use this for browser features the worker does not know about. See
 
 - [Tool calls](./60-tools.md): worker tools, schemas, and errors.
 - [AG-UI](./140-ag-ui.md): the browser protocol that carries these.
-- [Deferred tools](./110-deferred-tools.md): the same wait, run by your worker.
+- [Async tools](./110-async-tools.md): the same wait, run by your worker.

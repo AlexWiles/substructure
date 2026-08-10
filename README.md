@@ -192,7 +192,7 @@ Examples: [Node](./examples/node-hono-tool-approval)
 A tool does not have to answer immediately. Accept the call, do the work on your
 own schedule, and report the result later.
 
-Docs: [Deferred tools](./docs/110-deferred-tools.md)
+Docs: [Async tools](./docs/110-async-tools.md)
 
 ### Full chat support
 

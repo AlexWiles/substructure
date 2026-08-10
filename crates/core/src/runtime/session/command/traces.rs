@@ -143,6 +143,8 @@ fn config() -> AgentConfig {
         tools: Vec::new(),
         sub_agents: Vec::new(),
         mcp: Vec::new(),
+        defer_tools: None,
+        announce_mcp: Default::default(),
     }
 }
 
@@ -154,6 +156,7 @@ fn config_with_client_tool(tool: &str) -> AgentConfig {
             input: None,
             output: None,
             handler: Some(Handler::Client),
+            defer: None,
         }],
         ..config()
     }
@@ -568,6 +571,7 @@ fn flow_connector_gating() -> Trace {
                     output: None,
                     annotations: Default::default(),
                 }],
+                instructions: None,
             },
         ),
         &system(),

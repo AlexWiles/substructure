@@ -69,8 +69,21 @@ type AgentTool = {
     input?: unknown             // JSON Schema for the arguments
     output?: unknown            // JSON Schema the result must match
     handler?: "worker" | "client"  // where it runs. default worker
+    defer?: boolean             // keep it out of the request. default: the agent's defer_tools
 }
 ```
+
+## Many tools
+
+Above about forty tools, a model chooses badly, and each definition sits at the
+front of the request where the provider keeps its cache.
+
+Set `defer` on the tools an agent seldom needs. The request leaves them out, and
+the agent gets `tool_search` and `call_tool` in their place. The
+model searches for a tool and names it to `call_tool`. Your worker receives an
+ordinary `tool.execute`, under the tool's own name.
+
+See [Deferred tools](./65-deferred-tools.md).
 
 ## Schemas
 
@@ -203,8 +216,9 @@ The model reads `error` as the tool's result. Write it for the model to read.
 
 ## Next
 
+- [Deferred tools](./65-deferred-tools.md): keep a large tool set out of the request.
 - [Client-side tools](./150-client-tools.md): tools that run in the browser.
-- [Deferred tools](./110-deferred-tools.md): answer a call later.
+- [Async tools](./110-async-tools.md): answer a call later.
 - [Connectors](./40-connectors.md): tools the engine runs on a service.
 - [Sub-agents](./80-sub-agents.md): a tool call that starts another agent.
 - [Retries](./210-retries.md): timeouts and backoff.
