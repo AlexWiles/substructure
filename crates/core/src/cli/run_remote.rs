@@ -5,11 +5,10 @@
 
 use anyhow::{Context as _, Result};
 
-use crate::api::v1::{RunFormat, RunRequest};
+use crate::api::v1::{RunFormat, RunRequest, RUN_DONE_EVENT};
 use crate::protocol::ClientInput;
 use crate::session::SessionEvent;
 use crate::transport::ag_ui::events::AgUiEvent;
-use crate::transport::ag_ui::translator::AgUiTranslator;
 
 use super::cloud::context::Context;
 use super::cloud::{CloudGlobals, ProjectScope};
@@ -50,7 +49,10 @@ pub async fn run(cmd: Run) -> Result<()> {
     let mut renderer = Renderer::new(cmd.output, pretty::color());
     let mut session_id = cmd.session_id;
     let mut failed: Option<anyhow::Error> = None;
-    let mut finished = Finished::new(format);
+    // A stream that stops early is not a turn that finished. Each format ends
+    // with an event that says so: AG-UI with `RUN_FINISHED`, the engine's own
+    // events with `RUN_DONE_EVENT`.
+    let mut finished = false;
 
     ctx.client
         .post_sse(
@@ -60,6 +62,10 @@ pub async fn run(cmd: Run) -> Result<()> {
             ),
             &body,
             |line| {
+                if line.trim_end() == format!("event: {RUN_DONE_EVENT}") {
+                    finished = true;
+                    return;
+                }
                 let Some(data) = line.strip_prefix("data:") else {
                     return;
                 };
@@ -68,7 +74,7 @@ pub async fn run(cmd: Run) -> Result<()> {
                     return;
                 }
                 let rendered = match format {
-                    RunFormat::Events => raw(&mut stdout, data, &mut session_id, &mut finished),
+                    RunFormat::Events => raw(&mut stdout, data, &mut session_id),
                     RunFormat::AgUi => translated(
                         &mut stdout,
                         &mut renderer,
@@ -87,7 +93,7 @@ pub async fn run(cmd: Run) -> Result<()> {
     if let Some(e) = failed {
         return Err(e);
     }
-    if !finished.yes() {
+    if !finished {
         anyhow::bail!("event stream ended before the run finished");
     }
 
@@ -97,59 +103,13 @@ pub async fn run(cmd: Run) -> Result<()> {
     Ok(())
 }
 
-/// Whether the turn ended. A deployment can close a stream before it does.
-enum Finished {
-    Translated(bool),
-    Raw(Box<AgUiTranslator>),
-}
-
-impl Finished {
-    fn new(format: RunFormat) -> Self {
-        match format {
-            RunFormat::AgUi => Finished::Translated(false),
-            RunFormat::Events => {
-                Finished::Raw(Box::new(AgUiTranslator::new(String::new(), String::new())))
-            }
-        }
-    }
-
-    fn saw(&mut self, event: &AgUiEvent) {
-        if let Finished::Translated(done) = self {
-            *done |= matches!(
-                event,
-                AgUiEvent::RunFinished { .. } | AgUiEvent::RunError { .. }
-            );
-        }
-    }
-
-    fn saw_raw(&mut self, event: SessionEvent) {
-        if let Finished::Raw(oracle) = self {
-            oracle.on_event(event.payload);
-        }
-    }
-
-    fn yes(&self) -> bool {
-        match self {
-            Finished::Translated(done) => *done,
-            Finished::Raw(oracle) => oracle.terminated,
-        }
-    }
-}
-
-fn raw(
-    stdout: &mut std::io::Stdout,
-    data: &str,
-    session_id: &mut Option<String>,
-    finished: &mut Finished,
-) -> Result<()> {
+fn raw(stdout: &mut std::io::Stdout, data: &str, session_id: &mut Option<String>) -> Result<()> {
     let event: SessionEvent =
         serde_json::from_str(data).context("the deployment sent an event this CLI cannot read")?;
     if session_id.is_none() {
         *session_id = Some(event.session_id.clone());
     }
-    write_json(stdout, &event)?;
-    finished.saw_raw(event);
-    Ok(())
+    write_json(stdout, &event)
 }
 
 fn translated(
@@ -157,14 +117,18 @@ fn translated(
     renderer: &mut Renderer,
     data: &str,
     session_id: &mut Option<String>,
-    finished: &mut Finished,
+    finished: &mut bool,
 ) -> Result<()> {
     let event: AgUiEvent = serde_json::from_str(data)
         .context("the deployment sent an AG-UI event this CLI cannot read")?;
     if let (None, AgUiEvent::RunStarted { thread_id, .. }) = (&session_id, &event) {
         *session_id = Some(thread_id.clone());
     }
-    finished.saw(&event);
+    // AG-UI's own terminal events, which the protocol defines as the end.
+    *finished |= matches!(
+        event,
+        AgUiEvent::RunFinished { .. } | AgUiEvent::RunError { .. }
+    );
     renderer.emit(stdout, vec![event])
 }
 
@@ -193,7 +157,7 @@ mod tests {
         let mut session_id = None;
         let mut stdout = std::io::stdout();
         let mut renderer = Renderer::new(OutputFormat::AgUi, false);
-        let mut finished = Finished::new(RunFormat::AgUi);
+        let mut finished = false;
         let started = serde_json::to_string(&AgUiEvent::RunStarted {
             thread_id: "sess-1".into(),
             run_id: "turn-1".into(),
@@ -211,32 +175,35 @@ mod tests {
         assert_eq!(session_id.as_deref(), Some("sess-1"));
     }
 
-    #[test]
-    fn a_translated_run_is_unfinished_until_it_says_otherwise() {
-        let mut finished = Finished::new(RunFormat::AgUi);
-        assert!(!finished.yes());
+    fn saw(event: &AgUiEvent) -> bool {
+        let mut finished = false;
+        let json = serde_json::to_string(event).unwrap();
+        translated(
+            &mut std::io::stdout(),
+            &mut Renderer::new(OutputFormat::AgUi, false),
+            &json,
+            &mut None,
+            &mut finished,
+        )
+        .unwrap();
+        finished
+    }
 
-        finished.saw(&AgUiEvent::TextMessageContent {
+    #[test]
+    fn only_a_terminal_event_ends_a_translated_run() {
+        assert!(!saw(&AgUiEvent::TextMessageContent {
             message_id: "m".into(),
             delta: "hi".into(),
-        });
-        assert!(!finished.yes(), "content is not an ending");
-
-        finished.saw(&AgUiEvent::RunFinished {
+        }));
+        assert!(saw(&AgUiEvent::RunFinished {
             thread_id: "s".into(),
             run_id: "r".into(),
             result: None,
             outcome: None,
-        });
-        assert!(finished.yes());
-    }
-
-    #[test]
-    fn a_run_error_ends_the_run() {
-        let mut finished = Finished::new(RunFormat::AgUi);
-        finished.saw(&AgUiEvent::RunError {
+        }));
+        // An error is an ending too: the reader has been told what happened.
+        assert!(saw(&AgUiEvent::RunError {
             message: "no".into(),
-        });
-        assert!(finished.yes());
+        }));
     }
 }

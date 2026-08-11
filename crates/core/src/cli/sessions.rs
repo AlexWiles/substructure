@@ -196,7 +196,7 @@ async fn local_page(cmd: &ListCommand, db: &str) -> Result<Page> {
         tenant_id: Some(DEFAULT_TENANT.to_string()),
         session_id: cmd.session_id.clone(),
         agent_id: cmd.agent_id.clone(),
-        // The API default. A sub-agent session is part of its parent.
+        // A sub-agent session is part of its parent, so the list omits it.
         top_level: true,
         sort: SessionSort::LastEventDesc,
         limit: Some(cmd.limit as usize),
@@ -304,9 +304,10 @@ impl Replay {
         let Some((_, translator)) = self.turn.as_mut() else {
             return Ok(());
         };
-        let events = translator.on_event(event.payload);
+        let ends_run = event.ends_run();
+        let events = translator.on_event(event.payload, ends_run);
         self.renderer.emit(stdout, events)?;
-        if translator.terminated {
+        if translator.terminated() {
             self.turn = None;
         }
         Ok(())

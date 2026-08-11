@@ -240,9 +240,13 @@ pub enum RunFormat {
     Events,
 }
 
+/// The SSE event a `format=events` run ends with. A stream that stops without
+/// one was cut short.
+pub const RUN_DONE_EVENT: &str = "done";
+
 impl RunFormat {
-    /// The `format` query value, which is the serde name. A test holds the
-    /// two together: a mismatch takes the default and does not fail.
+    /// The `format` query value: the serde name. A mismatch is silent, and
+    /// takes the default.
     pub fn as_query(self) -> &'static str {
         match self {
             RunFormat::AgUi => "ag-ui",

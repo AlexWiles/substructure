@@ -85,6 +85,11 @@ export interface ClientContext {
  * which a worker declares by id rather than by tool.
  */
 export interface AgentTool {
+    /**
+     * Keep this tool out of the request. See [`LlmTool::defer`]. Absent ⇒
+     * the agent's `defer_tools`.
+     */
+    defer?: boolean | null;
     description?: string;
     handler?: Handler | null;
     input?: unknown;
@@ -239,23 +244,39 @@ export interface DecisionRequest {
  */
 export interface AgentConfig {
     /**
+     * Where the engine tells the model that an MCP server is available, and
+     * what that server says it is for.
+     *
+     * Separate from `defer_tools`: a server exists whether or not its tools
+     * are deferred, and where a notice lands is a fact about this agent's
+     * prompt rather than about any server.
+     */
+    announce_mcp?: Announce;
+    /**
+     * Defer every tool this agent offers, from any source, unless the tool or
+     * the connection says otherwise. Absent ⇒ the agent defers nothing of its
+     * own; a connection may still defer on its own account.
+     *
+     * Presence is the switch, so an agent cannot carry settings that do
+     * nothing. Declared on the agent because an agent can hold this opinion
+     * before it names a connection: one that sets it gets the search tools
+     * from its first turn, so a connection added later costs no cache.
+     */
+    defer_tools?: boolean | null | DeferTools;
+    /**
      * The `[llm.*]` block this agent's calls run on.
      */
     llm?: null | string;
     /**
-     * MCP servers the agent draws tools from. The engine resolves each against
-     * its connection registry into [`ConnectorTool`]s the model sees alongside
-     * `tools`. Like `sub_agents`, these are never merged into `tools` — the
-     * worker declares the server, not its tools.
-     *
-     * A second protocol gets its own field rather than a `type` tag here: its
-     * filter would not be this one (MCP annotations mean nothing to an A2A
-     * agent), and a union of conditionally-valid fields generates badly in the
-     * Go and Python bindings.
+     * MCP servers
      */
     mcp?: MCPServer[];
     model: string;
-    retry?: RetryPolicy | null;
+    /**
+     * Boxed: five per-kind overrides is a lot of bytes to carry inline
+     * through every command that holds a config.
+     */
+    retry?: RetryConfig | null;
     /**
      * Sub-agents the model can delegate to. Presented to the model as tools (by
      * id) alongside `tools`, but each call spawns a child session rather than
@@ -270,12 +291,66 @@ export interface AgentConfig {
 }
 
 /**
+ * Where the engine tells the model that an MCP server is available, and
+ * what that server says it is for.
+ *
+ * Separate from `defer_tools`: a server exists whether or not its tools
+ * are deferred, and where a notice lands is a fact about this agent's
+ * prompt rather than about any server.
+ *
+ * Where an MCP announcement lands.
+ *
+ * The system prompt while no call has dispatched; then a block on the
+ * last user message; then a message of its own. The engine takes the
+ * first place it can use, so the order is not a setting.
+ *
+ * Nowhere. For a server whose own words help nobody.
+ */
+export type Announce = "auto" | "never";
+
+/**
+ * How an agent's deferred tools reach the model.
+ */
+export interface DeferTools {
+    /**
+     * The most matches one search answers with. Never zero: a search that can
+     * answer with nothing is a search the model cannot use.
+     */
+    max_matches?: number;
+    /**
+     * Which tools the agent gets to reach the ones it defers.
+     */
+    strategy?: DeferToolsStrategy;
+    [property: string]: unknown;
+}
+
+/**
+ * Which tools the agent gets to reach the ones it defers.
+ *
+ * How the tools an agent defers reach the model.
+ *
+ * The engine holds every deferred definition whatever this says, and answers
+ * its own tools whatever this says. This chooses two things: which of those
+ * tools the request advertises, and whether the request carries the deferred
+ * definitions.
+ *
+ * Declared on the agent, beside `defer_tools`: which tools an agent gets is
+ * the agent's business, the same way as whether it defers at all.
+ *
+ * `tool_search` and `call_tool`. A search answers with the schema, so one
+ * search is the whole distance to a call, and nothing hands the model a
+ * name it cannot then reach.
+ */
+export type DeferToolsStrategy = "search";
+
+/**
  * An MCP server the agent draws tools from. `id` resolves against the engine's
  * connection registry — locally from `[mcp]` in `substructure.toml`, in the
  * cloud from the connections an admin granted this app. The worker never names
  * a URL or a credential.
  */
 export interface MCPServer {
+    auth_failure?: AuthFailure;
     id: string;
     /**
      * Narrows what the model sees. Absent ⇒ every tool the connection grants.
@@ -284,9 +359,23 @@ export interface MCPServer {
 }
 
 /**
- * An MCP server's tool filter. Applied in order — capability predicates, then
- * `include`, then `exclude` — and only ever narrowing, so a filter can never
- * widen what the connection grants.
+ * What a session does when a connection needs a person to authorize it. It
+ * belongs to the pair: one credential serves an agent that stops and asks, and
+ * an agent that has nobody to ask.
+ *
+ * Stop and ask. A channel that cannot show the question degrades instead.
+ *
+ * Go on without this connection's tools.
+ */
+export type AuthFailure = "interrupt" | "degrade";
+
+/**
+ * What the model sees of one connection, for one agent: which tools, and how
+ * they reach the model.
+ *
+ * The filter is applied in order — capability predicates, then `include`, then
+ * `exclude` — and only ever narrowing, so a filter can never widen what the
+ * connection grants. `defer` runs after it and removes nothing.
  *
  * `include`/`exclude` are globs matched against the tool's name on the
  * connection, the name its own documentation uses, not the prefixed name the
@@ -295,6 +384,11 @@ export interface MCPServer {
  * under `read_only` rather than silently passing everything through.
  */
 export interface MCPTools {
+    /**
+     * Keep every surviving tool out of the request. See [`LlmTool::defer`].
+     * Absent ⇒ the agent's `defer_tools`.
+     */
+    defer?: boolean | null;
     exclude?: string[];
     idempotent?: boolean | null;
     include?: string[];
@@ -303,14 +397,36 @@ export interface MCPTools {
 }
 
 /**
- * Fully-resolved retry policy — no optional fields. Stored on call state and
- * read directly by retry logic.
+ * An agent's retry overrides, one per effect kind. `default` covers the kinds
+ * that name nothing; a kind is layered on top of it, so the two compose.
+ *
+ * Per kind because the kinds are not alike: an LLM call is idempotent and worth
+ * retrying, a tool call may not be, and a connector fetch holds up every
+ * decision behind it.
  */
-export interface RetryPolicy {
-    backoff_base_secs: number;
-    backoff_max_secs: number;
-    max_retries: number;
-    timeout_secs?: number | null;
+export interface RetryConfig {
+    connector?: RetryOverride | null;
+    default?: RetryOverride | null;
+    llm?: RetryOverride | null;
+    sub_agent?: RetryOverride | null;
+    tool?: RetryOverride | null;
+}
+
+/**
+ * A partial retry policy: only the fields it names change, and the rest are
+ * inherited. Every override is a layer over the engine's default for the effect
+ * kind, so tuning one knob does not mean restating the other four — and leaving
+ * a timeout out keeps the default bound rather than removing it.
+ *
+ * An override cannot set a timeout back to unbounded. Waiting effectively
+ * forever is a large number, which is also the honest way to say it.
+ */
+export interface RetryOverride {
+    attempt_timeout_secs?: number | null;
+    backoff_base_secs?: number | null;
+    backoff_max_secs?: number | null;
+    max_attempts?: number | null;
+    total_timeout_secs?: number | null;
 }
 
 /**
@@ -367,17 +483,28 @@ export interface Effect {
  */
 export type EffectKind = "tool_call" | "sub_agent" | "llm_call" | "connector_sync" | "decision" | "turn_end";
 
-export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled" | "queued";
+/**
+ * Dispatched and alive, awaiting its result. Off the deadline clock: the
+ * work succeeded in starting, and how long it then runs is its own
+ * business. A delegation sits here for as long as its child turn takes.
+ */
+export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled" | "queued" | "running";
 
 /**
- * The owner as delivered to the worker on `DecisionRequest.identity`: the
- * subject and its metadata, without the tenant. The tenant scopes the session
- * internally but is not sent to the worker.
+ * The owner as delivered to the worker on `DecisionRequest.identity`, without
+ * the tenant. Read `kind` with `id`: only `frontend` is an end user.
  */
 export interface WorkerIdentity {
     id?: null | string;
+    kind?: OwnerKind;
     metadata: { [key: string]: string };
 }
+
+/**
+ * What kind of caller owns a session. Part of the identity: only `frontend` is
+ * an end user, and an ownership check grants access to no other kind.
+ */
+export type OwnerKind = "frontend" | "admin" | "api_key" | "system";
 
 export interface MessageTree {
     head_id?: null | string;
@@ -412,6 +539,11 @@ export interface DecisionResponse {
      * A new agent config write; omitted keeps the current config.
      */
     agent?: AgentConfig | null;
+    /**
+     * How each channel shows this decision, keyed by channel kind (e.g.
+     * `slack`). Opaque to the engine.
+     */
+    channels?: { [key: string]: unknown };
     messages?: DraftMessage[];
     /**
      * Omitted or `null` keeps the current state; clear with a non-null empty value.
@@ -448,6 +580,11 @@ export interface DecisionResponse {
  * fencing the result to the attempt that ran.
  *
  * `interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.
+ *
+ * Resolve an open interrupt and resume the session.
+ *
+ * Fetch a connection's tools again, after a person replaced its
+ * credential.
  */
 export interface DecisionAction {
     id?: null | string;
@@ -461,7 +598,17 @@ export interface DecisionAction {
     messages?: DraftMessage[] | null;
     model?: null | string;
     reasoning?: ReasoningConfig | null;
-    retry?: RetryPolicy | null;
+    /**
+     * Layered over the agent config's `llm` policy, else over the engine's
+     * default.
+     *
+     * Layered over the agent config's policy for this kind, else over the
+     * engine's default for where the tool runs.
+     *
+     * Layered over the agent config's `sub_agent` policy, else over the
+     * engine's default.
+     */
+    retry?: RetryOverride | null;
     stream?: boolean | null;
     temperature?: number | null;
     tools?: LlmTool[] | null;
@@ -483,19 +630,47 @@ export interface DecisionAction {
      */
     retryable?: boolean;
     agent_id?: string;
+    /**
+     * The child's opening message. It travels with the spawn, so it
+     * cannot race the creation of the session it opens.
+     */
+    message?: DraftMessage | null;
     session_id?: string;
     /**
      * The model tool-call this delegation answers — always required.
      */
     tool_call_id?: string;
-    message?: DraftMessage;
     interrupt_id?: null | string;
     payload?: unknown;
     reason?: string;
     data?: unknown;
 }
 
-export type ErrorCode = "provider_error" | "rate_limited" | "refused" | "budget_exceeded" | "deadline_exceeded";
+/**
+ * What kind of failure, for a consumer that branches instead of reading the
+ * sentence. A closed set, and required on every [`ErrorInfo`]: an optional
+ * code is one nobody fills in, which leaves every consumer handling a `None`
+ * that should not exist.
+ *
+ * `provider_error`, `rate_limited`, `refused`, `budget_exceeded` and
+ * `deadline_exceeded` describe a call that ran and went wrong.
+ * `invalid_response` — a document did not parse, or parsed into something
+ * unusable. `handler_error` — whoever was asked to do the work (a worker, a
+ * client) reported a failure of its own. `worker_unreachable` — it was never
+ * reached. `unroutable` — nothing could decide. `internal` — the engine's own
+ * fault, and the honest answer when nothing else fits.
+ */
+export type ErrorCode =
+    | "provider_error"
+    | "rate_limited"
+    | "refused"
+    | "budget_exceeded"
+    | "deadline_exceeded"
+    | "invalid_response"
+    | "handler_error"
+    | "worker_unreachable"
+    | "unroutable"
+    | "internal";
 
 export interface ReasoningConfig {
     effort?: ReasoningEffort | null;
@@ -512,6 +687,18 @@ export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | 
  * their own boundary.
  */
 export interface LlmTool {
+    /**
+     * Keep this definition out of the request.
+     *
+     * The engine still records it, still routes a call to it, and still finds
+     * it in a search. Only the request omits it, which is what keeps a large
+     * tool set out of the model's context and out of the cached prefix.
+     *
+     * Any source can set it: a tool the config declares, a connection, or
+     * whatever comes next. Deferral is a property of a tool, not of where it
+     * came from.
+     */
+    defer?: boolean;
     description: string;
     /**
      * JSON Schema for the tool's arguments; omitted declares a no-argument
@@ -537,6 +724,8 @@ export type DecisionActionType =
     | "sub_agent.spawn"
     | "message.send"
     | "interrupt"
+    | "interrupt.resolve"
+    | "connector.sync"
     | "done";
 
 /**
@@ -581,7 +770,7 @@ export interface DecisionTrigger {
      * object). Always on the wire.
      */
     input?: ToolInput;
-    error?: null | string;
+    error?: ErrorInfo | null;
     ok?: boolean;
     result?: null | string;
     format?: LlmFormat | null;
@@ -591,9 +780,7 @@ export interface DecisionTrigger {
      */
     request?: unknown;
     stream?: boolean;
-    code?: ErrorCode | null;
     cost?: null | string;
-    detail?: unknown;
     message?: DraftMessage | null;
     truncated?: boolean;
     usage?: unknown;
@@ -603,6 +790,33 @@ export interface DecisionTrigger {
     payload?: unknown;
     data?: unknown;
     turn_id?: string;
+}
+
+/**
+ * Why something failed. One shape on every event, on the wire, and in the
+ * internal carriers that produce them — shaped after a Stripe API error.
+ *
+ * `retryable` is deliberately absent: whether to try again is a decision the
+ * engine makes about one attempt, not a fact about the failure, and it is
+ * meaningless on a terminal like `turn.completed`. It rides on the events
+ * that settle an attempt instead.
+ */
+export interface ErrorInfo {
+    code: ErrorCode;
+    /**
+     * Small structured particulars: a status, the llm blocks that exist.
+     */
+    detail?: unknown;
+    /**
+     * One engine-authored sentence, safe to show a human. Never a raw
+     * document — an unbounded body belongs in the log.
+     */
+    message: string;
+    /**
+     * The one input to go and fix, when the failure names one: `agent.llm`,
+     * `actions[0].type`. Stripe's `param`.
+     */
+    param?: null | string;
 }
 
 /**

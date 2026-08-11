@@ -51,6 +51,17 @@ impl Caller {
         }
     }
 
+    /// This caller as the owner of a session it starts. The counterpart of
+    /// [`owns`](Self::owns): what this writes, that matches.
+    pub fn as_owner(&self) -> SessionOwner {
+        SessionOwner {
+            tenant_id: self.tenant_id().to_string(),
+            id: self.subject().map(str::to_string),
+            kind: self.owner_kind(),
+            metadata: HashMap::new(),
+        }
+    }
+
     /// The kind must agree as well as the name. Names come from different
     /// issuers, so the same name is not the same owner.
     pub fn owns(&self, owner: &SessionOwner) -> bool {
@@ -109,6 +120,27 @@ mod tests {
         let mut other = owner(OwnerKind::Frontend, "alex");
         other.tenant_id = "tenant-b".to_string();
         assert!(!frontend("alex").owns(&other));
+    }
+
+    /// What a caller writes as an owner is what it matches as one.
+    #[test]
+    fn a_caller_owns_the_sessions_it_starts() {
+        for caller in [
+            frontend("alex"),
+            Caller::Admin {
+                tenant_id: "tenant-a".to_string(),
+                user_id: "alex".to_string(),
+            },
+            Caller::ApiKey {
+                tenant_id: "tenant-a".to_string(),
+                key_id: "alex".to_string(),
+            },
+        ] {
+            assert!(
+                caller.owns(&caller.as_owner()),
+                "{caller:?} does not own what it starts"
+            );
+        }
     }
 
     /// The engine names nobody. Privilege lets it past a check, not a match.

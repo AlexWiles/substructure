@@ -6,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome};
 use crate::protocol::TokenDelta;
-use crate::runtime::session::decision::ToolHandler;
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
@@ -17,20 +16,6 @@ fn non_empty_args(arguments: &str) -> String {
         "{}".to_string()
     } else {
         arguments.to_string()
-    }
-}
-
-struct ToolBatch {
-    pending_client_tool_calls: HashSet<String>,
-    pending_worker_tool_calls: HashSet<String>,
-    has_client: bool,
-}
-
-impl ToolBatch {
-    fn is_yield_point(&self) -> bool {
-        self.has_client
-            && self.pending_client_tool_calls.is_empty()
-            && self.pending_worker_tool_calls.is_empty()
     }
 }
 
@@ -47,8 +32,7 @@ pub struct AgUiTranslator {
     current_call_id: Option<String>,
     open_tools: HashSet<String>,
     sub_agent_calls: HashMap<String, String>,
-    batch: Option<ToolBatch>,
-    pub terminated: bool,
+    terminated: bool,
 }
 
 impl AgUiTranslator {
@@ -66,9 +50,12 @@ impl AgUiTranslator {
             current_call_id: None,
             open_tools: HashSet::new(),
             sub_agent_calls: HashMap::new(),
-            batch: None,
             terminated: false,
         }
+    }
+
+    pub fn terminated(&self) -> bool {
+        self.terminated
     }
 
     pub fn start(&self) -> Vec<AgUiEvent> {
@@ -79,7 +66,7 @@ impl AgUiTranslator {
     }
 
     pub fn on_delta(&mut self, delta: TokenDelta) -> Vec<AgUiEvent> {
-        if self.terminated {
+        if self.terminated() {
             return vec![];
         }
         match (&self.turn_id, &delta.turn_id) {
@@ -158,8 +145,10 @@ impl AgUiTranslator {
         out
     }
 
-    pub fn on_event(&mut self, event: EventPayload) -> Vec<AgUiEvent> {
-        if self.terminated {
+    /// `ends_run` is [`SessionEvent::ends_run`](crate::session::SessionEvent::ends_run)
+    /// for the event this payload came from.
+    pub fn on_event(&mut self, event: EventPayload, ends_run: bool) -> Vec<AgUiEvent> {
+        if self.terminated() {
             return vec![];
         }
         match event {
@@ -171,20 +160,7 @@ impl AgUiTranslator {
                 self.current_call_id = Some(r.id);
                 vec![]
             }
-            EventPayload::LlmCallCompleted(c) => {
-                let ids: HashSet<String> = c
-                    .response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| tc.id.clone())
-                    .collect();
-                self.batch = (!ids.is_empty()).then(|| ToolBatch {
-                    pending_client_tool_calls: ids,
-                    pending_worker_tool_calls: HashSet::new(),
-                    has_client: false,
-                });
-                self.on_llm_completed(c.id, c.response.content)
-            }
+            EventPayload::LlmCallCompleted(c) => self.on_llm_completed(c.id, c.response.content),
             EventPayload::ToolCallRequested(t) => {
                 let mut out = if self.streamed_tool_calls.remove(&t.id) {
                     self.open_tools.remove(&t.id);
@@ -219,48 +195,21 @@ impl AgUiTranslator {
                     ]
                 };
                 self.closed_tool_calls.insert(t.id.clone());
-                let is_client = t.handler == ToolHandler::Client;
-                let yield_now = if let Some(batch) = self.batch.as_mut() {
-                    if batch.pending_client_tool_calls.remove(&t.id) {
-                        if is_client {
-                            batch.has_client = true;
-                        } else {
-                            batch.pending_worker_tool_calls.insert(t.id.clone());
-                        }
-                        batch.is_yield_point()
-                    } else {
-                        is_client
-                    }
-                } else {
-                    is_client
-                };
-                if yield_now {
+                if ends_run {
                     out.extend(self.finish_client_yield());
                 }
                 out
             }
             EventPayload::ToolCallCompleted(t) => {
                 let mut out = vec![tool_result(t.id.clone(), t.result)];
-                let yield_now = if let Some(batch) = self.batch.as_mut() {
-                    batch.pending_worker_tool_calls.remove(&t.id);
-                    batch.is_yield_point()
-                } else {
-                    false
-                };
-                if yield_now {
+                if ends_run {
                     out.extend(self.finish_client_yield());
                 }
                 out
             }
             EventPayload::ToolCallErrored(t) => {
                 let mut out = vec![tool_result(t.id.clone(), t.error.message)];
-                let yield_now = if let Some(batch) = self.batch.as_mut() {
-                    batch.pending_worker_tool_calls.remove(&t.id);
-                    batch.is_yield_point()
-                } else {
-                    false
-                };
-                if yield_now {
+                if ends_run {
                     out.extend(self.finish_client_yield());
                 }
                 out
@@ -289,26 +238,17 @@ impl AgUiTranslator {
                     ]
                 };
                 self.closed_tool_calls.insert(s.tool_call_id.clone());
-                // A sub-agent runs server-side and never yields the run to the
-                // client; track it like a worker tool so a mixed batch waits for
-                // its result before finishing.
-                if let Some(batch) = self.batch.as_mut() {
-                    if batch.pending_client_tool_calls.remove(&s.tool_call_id) {
-                        batch.pending_worker_tool_calls.insert(s.tool_call_id);
-                    }
-                }
                 out
             }
             EventPayload::SubAgentTurnCompleted(s) => {
-                self.settle_sub_agent(&s.id, sub_agent_result(&s.data))
+                self.settle_sub_agent(&s.id, sub_agent_result(&s.data), ends_run)
             }
-            EventPayload::SubAgentErrored(s) => self.settle_sub_agent(&s.id, s.error.message),
-            EventPayload::LlmCallErrored(e) if !e.retryable => self.finalize_error(e.error.message),
-            EventPayload::SessionCancelled => self.finalize_error("session cancelled".to_string()),
+            EventPayload::SubAgentErrored(s) => {
+                self.settle_sub_agent(&s.id, s.error.message, ends_run)
+            }
+            EventPayload::LlmCallErrored(e) if !e.retryable => self.run_error(e.error.message),
+            EventPayload::SessionCancelled => self.run_error("session cancelled".to_string()),
             EventPayload::SessionInterrupted(p) => {
-                if self.terminated {
-                    return vec![];
-                }
                 let mut out = self.close_all_open();
                 out.push(AgUiEvent::RunFinished {
                     thread_id: self.thread_id.clone(),
@@ -324,7 +264,7 @@ impl AgUiTranslator {
             EventPayload::TurnCompleted(t) => {
                 // A terminally-failed finalizer completes the turn as a failed run.
                 if let Some(err) = t.error {
-                    return self.finalize_error(err.message);
+                    return self.run_error(err.message);
                 }
                 let mut out = self.close_all_open();
                 out.push(AgUiEvent::RunFinished {
@@ -385,24 +325,24 @@ impl AgUiTranslator {
 
     /// Emit a sub-agent's answer as the result of its delegating tool call,
     /// then finish the run if it was the last unresolved call in a client batch.
-    fn settle_sub_agent(&mut self, session_id: &str, content: String) -> Vec<AgUiEvent> {
+    fn settle_sub_agent(
+        &mut self,
+        session_id: &str,
+        content: String,
+        ends_run: bool,
+    ) -> Vec<AgUiEvent> {
         let Some(tool_call_id) = self.sub_agent_calls.remove(session_id) else {
             return vec![];
         };
-        let mut out = vec![tool_result(tool_call_id.clone(), content)];
-        let yield_now = if let Some(batch) = self.batch.as_mut() {
-            batch.pending_worker_tool_calls.remove(&tool_call_id);
-            batch.is_yield_point()
-        } else {
-            false
-        };
-        if yield_now {
+        let mut out = vec![tool_result(tool_call_id, content)];
+        if ends_run {
             out.extend(self.finish_client_yield());
         }
         out
     }
 
     fn finish_client_yield(&mut self) -> Vec<AgUiEvent> {
+        self.terminated = true;
         let mut out = self.close_all_open();
         out.push(AgUiEvent::RunFinished {
             thread_id: self.thread_id.clone(),
@@ -410,8 +350,6 @@ impl AgUiTranslator {
             result: None,
             outcome: None,
         });
-        self.terminated = true;
-        self.batch = None;
         out
     }
 
@@ -440,12 +378,16 @@ impl AgUiTranslator {
     }
 
     pub fn finalize_error(&mut self, message: String) -> Vec<AgUiEvent> {
-        if self.terminated {
+        if self.terminated() {
             return vec![];
         }
+        self.run_error(message)
+    }
+
+    fn run_error(&mut self, message: String) -> Vec<AgUiEvent> {
+        self.terminated = true;
         let mut out = self.close_all_open();
         out.push(AgUiEvent::RunError { message });
-        self.terminated = true;
         out
     }
 }
@@ -496,6 +438,7 @@ pub fn run_ag_ui_translation(
                 }
                 ev = event_rx.recv() => match ev {
                     Some(event) => {
+                        let ends_run = event.ends_run();
                         let payload = event.payload;
                         // Drain queued deltas before handling `llm.call.completed`
                         // (and the tool.call.requested events that follow) so no
@@ -509,17 +452,17 @@ pub fn run_ag_ui_translation(
                                 }
                             }
                         }
-                        for v in t.on_event(payload) {
+                        for v in t.on_event(payload, ends_run) {
                             if out_tx.send(v.to_sse()).await.is_err() {
                                 return;
                             }
                         }
-                        if t.terminated {
+                        if t.terminated() {
                             return;
                         }
                     }
                     None => {
-                        if !t.terminated {
+                        if !t.terminated() {
                             let msg = "run stream closed before completion".to_string();
                             for v in t.finalize_error(msg) {
                                 let _ = out_tx.send(v.to_sse()).await;
@@ -642,17 +585,23 @@ mod tests {
         let b = vals(t.on_delta(delta("c1", "r1", "lo")));
         assert_eq!(kinds(&b), ["TEXT_MESSAGE_CONTENT"]);
 
-        let c = vals(t.on_event(ev(json!({
-            "type": "llm.call.completed", "id": "c1", "attempt": 0,
-            "response": {"model": "m"},
-        }))));
+        let c = vals(t.on_event(
+            ev(json!({
+                "type": "llm.call.completed", "id": "c1", "attempt": 0,
+                "response": {"model": "m"},
+            })),
+            false,
+        ));
         assert_eq!(kinds(&c), ["TEXT_MESSAGE_END"]);
 
-        let d = vals(t.on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"}))));
+        let d = vals(t.on_event(
+            ev(json!({"type": "turn.completed", "turn_id": "r1"})),
+            false,
+        ));
         assert_eq!(kinds(&d), ["RUN_FINISHED"]);
         assert_eq!(d[0]["threadId"], "t1");
         assert_eq!(d[0]["runId"], "r1");
-        assert!(t.terminated);
+        assert!(t.terminated());
         assert!(t.open_text.is_empty());
     }
 
@@ -687,10 +636,13 @@ mod tests {
             ]
         );
 
-        let d = vals(t.on_event(ev(json!({
-            "type": "llm.call.completed", "id": "c1", "attempt": 0,
-            "response": {"model": "m"},
-        }))));
+        let d = vals(t.on_event(
+            ev(json!({
+                "type": "llm.call.completed", "id": "c1", "attempt": 0,
+                "response": {"model": "m"},
+            })),
+            false,
+        ));
         assert_eq!(kinds(&d), ["TEXT_MESSAGE_END"]);
         assert!(t.open_reasoning.is_empty());
     }
@@ -743,10 +695,13 @@ mod tests {
     fn reasoning_only_response_closes_on_completion() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_delta(reasoning_delta("c1", "r1", "hmm"));
-        let done = vals(t.on_event(ev(json!({
-            "type": "llm.call.completed", "id": "c1", "attempt": 0,
-            "response": {"model": "m"},
-        }))));
+        let done = vals(t.on_event(
+            ev(json!({
+                "type": "llm.call.completed", "id": "c1", "attempt": 0,
+                "response": {"model": "m"},
+            })),
+            true,
+        ));
         assert_eq!(kinds(&done), ["REASONING_MESSAGE_END", "REASONING_END"]);
         assert!(t.open_reasoning.is_empty());
     }
@@ -754,11 +709,14 @@ mod tests {
     #[test]
     fn streamed_tool_args_then_requested_only_closes() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        t.on_event(ev(json!({
-            "type": "llm.call.requested", "id": "c1", "attempt": 0, "llm": "claude",
-            "request": {"model": "m", "messages": []}, "stream": true,
-            "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
-        })));
+        t.on_event(
+            ev(json!({
+                "type": "llm.call.requested", "id": "c1", "attempt": 0, "llm": "claude",
+                "request": {"model": "m", "messages": []}, "stream": true,
+                "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
+            })),
+            false,
+        );
 
         let a = vals(t.on_delta(tool_args_delta(
             "c1",
@@ -777,13 +735,11 @@ mod tests {
         assert_eq!(kinds(&b), ["TOOL_CALL_ARGS"]);
         assert_eq!(b[0]["delta"], "255}");
 
-        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
-        let r = vals(t.on_event(tool_requested(
-            "call-1",
-            "set_color",
-            r#"{"red":255}"#,
-            "worker",
-        )));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]), false);
+        let r = vals(t.on_event(
+            tool_requested("call-1", "set_color", r#"{"red":255}"#, "worker"),
+            false,
+        ));
         assert_eq!(kinds(&r), ["TOOL_CALL_END"]);
         assert!(t.open_tools.is_empty());
         assert!(t.streamed_tool_calls.is_empty());
@@ -800,8 +756,8 @@ mod tests {
             None,
         )));
         assert_eq!(kinds(&a), ["TOOL_CALL_START"]);
-        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
-        let r = vals(t.on_event(tool_requested("call-1", "get_color", "{}", "worker")));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]), false);
+        let r = vals(t.on_event(tool_requested("call-1", "get_color", "{}", "worker"), false));
         assert_eq!(kinds(&r), ["TOOL_CALL_ARGS", "TOOL_CALL_END"]);
         assert_eq!(r[0]["delta"], "{}");
     }
@@ -818,8 +774,11 @@ mod tests {
             Some("get_timezone"),
             None,
         ));
-        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
-        let r = vals(t.on_event(tool_requested("call-1", "get_timezone", "", "client")));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]), false);
+        let r = vals(t.on_event(
+            tool_requested("call-1", "get_timezone", "", "client"),
+            false,
+        ));
         let args = r
             .iter()
             .find(|e| e["type"] == "TOOL_CALL_ARGS")
@@ -831,8 +790,8 @@ mod tests {
     fn late_tool_fragment_after_requested_is_ignored() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_delta(tool_args_delta("c1", "r1", "call-1", Some("f"), Some("{}")));
-        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
-        let _ = t.on_event(tool_requested("call-1", "f", "{}", "worker"));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]), false);
+        let _ = t.on_event(tool_requested("call-1", "f", "{}", "worker"), false);
         let late = vals(t.on_delta(tool_args_delta("c1", "r1", "call-1", None, Some("X"))));
         assert!(late.is_empty());
     }
@@ -847,25 +806,28 @@ mod tests {
             Some("get_color"),
             Some("{}"),
         ));
-        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
-        let r = vals(t.on_event(tool_requested("call-1", "get_color", "{}", "client")));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]), false);
+        let r = vals(t.on_event(tool_requested("call-1", "get_color", "{}", "client"), true));
         assert_eq!(kinds(&r), ["TOOL_CALL_END", "RUN_FINISHED"]);
-        assert!(t.terminated);
+        assert!(t.terminated());
     }
 
     #[test]
     fn run_finished_carries_result() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let d = vals(t.on_event(ev(json!({
-            "type": "turn.completed", "turn_id": "r1", "data": {"answer": 42},
-        }))));
+        let d = vals(t.on_event(
+            ev(json!({
+                "type": "turn.completed", "turn_id": "r1", "data": {"answer": 42},
+            })),
+            false,
+        ));
         assert_eq!(d[0]["result"], json!({"answer": 42}));
     }
 
     #[test]
     fn ignores_deltas_from_other_runs() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(ev(json!({"type": "turn.started", "turn_id": "r1"})));
+        let _ = t.on_event(ev(json!({"type": "turn.started", "turn_id": "r1"})), false);
         assert!(t.on_delta(delta("c1", "OTHER", "x")).is_empty());
     }
 
@@ -880,10 +842,13 @@ mod tests {
     #[test]
     fn non_streaming_synthesizes_text() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let c = vals(t.on_event(ev(json!({
-            "type": "llm.call.completed", "id": "c2", "attempt": 0,
-            "response": {"model": "m", "content": "hi there"},
-        }))));
+        let c = vals(t.on_event(
+            ev(json!({
+                "type": "llm.call.completed", "id": "c2", "attempt": 0,
+                "response": {"model": "m", "content": "hi there"},
+            })),
+            false,
+        ));
         assert_eq!(
             kinds(&c),
             [
@@ -900,7 +865,7 @@ mod tests {
     fn server_tool_call_and_result() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let s = tool_requested("x", "get_weather", r#"{"city":"SF"}"#, "worker");
-        let s = vals(t.on_event(s));
+        let s = vals(t.on_event(s, false));
         assert_eq!(
             kinds(&s),
             ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END"]
@@ -909,10 +874,13 @@ mod tests {
         assert_eq!(s[0]["toolCallName"], "get_weather");
         assert_eq!(s[1]["delta"], r#"{"city":"SF"}"#);
 
-        let r = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "id": "x",
-            "name": "get_weather", "result": r#"{"temp":62}"#,
-        }))));
+        let r = vals(t.on_event(
+            ev(json!({
+                "type": "tool.call.completed", "id": "x",
+                "name": "get_weather", "result": r#"{"temp":62}"#,
+            })),
+            false,
+        ));
         assert_eq!(kinds(&r), ["TOOL_CALL_RESULT"]);
         assert_eq!(r[0]["toolCallId"], "x");
         assert_eq!(r[0]["content"], r#"{"temp":62}"#);
@@ -922,12 +890,18 @@ mod tests {
     #[test]
     fn tool_call_carries_parent_message_id_from_llm_call() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        t.on_event(ev(json!({
-            "type": "llm.call.requested", "id": "c9", "attempt": 0, "llm": "claude",
-            "request": {"model": "m", "messages": []}, "stream": true,
-            "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
-        })));
-        let s = vals(t.on_event(tool_requested("x", "get_user_timezone", "{}", "client")));
+        t.on_event(
+            ev(json!({
+                "type": "llm.call.requested", "id": "c9", "attempt": 0, "llm": "claude",
+                "request": {"model": "m", "messages": []}, "stream": true,
+                "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
+            })),
+            false,
+        );
+        let s = vals(t.on_event(
+            tool_requested("x", "get_user_timezone", "{}", "client"),
+            true,
+        ));
         assert_eq!(s[0]["type"], "TOOL_CALL_START");
         assert_eq!(s[0]["parentMessageId"], "c9");
         assert_eq!(s[0]["toolCallId"], "x");
@@ -936,15 +910,15 @@ mod tests {
     #[test]
     fn tool_call_without_llm_call_omits_parent_message_id() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let s = vals(t.on_event(tool_requested("x", "f", "{}", "worker")));
+        let s = vals(t.on_event(tool_requested("x", "f", "{}", "worker"), false));
         assert!(s[0].get("parentMessageId").is_none());
     }
 
     #[test]
     fn parallel_tool_calls_bracket_independently() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let a = vals(t.on_event(tool_requested("a", "f", "{}", "worker")));
-        let b = vals(t.on_event(tool_requested("b", "g", "{}", "worker")));
+        let a = vals(t.on_event(tool_requested("a", "f", "{}", "worker"), false));
+        let b = vals(t.on_event(tool_requested("b", "g", "{}", "worker"), false));
         assert_eq!(a[0]["toolCallId"], "a");
         assert_eq!(b[0]["toolCallId"], "b");
         assert_eq!(
@@ -960,7 +934,10 @@ mod tests {
     #[test]
     fn lone_client_tool_call_yields_run() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let s = vals(t.on_event(tool_requested("x", "get_user_timezone", "{}", "client")));
+        let s = vals(t.on_event(
+            tool_requested("x", "get_user_timezone", "{}", "client"),
+            true,
+        ));
         assert_eq!(
             kinds(&s),
             [
@@ -970,7 +947,7 @@ mod tests {
                 "RUN_FINISHED"
             ]
         );
-        assert!(t.terminated);
+        assert!(t.terminated());
     }
 
     #[test]
@@ -980,17 +957,23 @@ mod tests {
         // run), so each settle surfaces a TOOL_CALL_RESULT keyed by tool_call_id
         // and the run does not prematurely finish.
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let a = t.on_event(ev(json!({
-            "type": "tool.call.completed", "id": "tc-1", "name": "f", "result": "RA",
-        })));
+        let a = t.on_event(
+            ev(json!({
+                "type": "tool.call.completed", "id": "tc-1", "name": "f", "result": "RA",
+            })),
+            false,
+        );
         assert_eq!(kinds(&vals(a.clone())), ["TOOL_CALL_RESULT"]);
         assert_eq!(vals(a)[0]["messageId"], "tc-1");
 
-        let b = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "id": "tc-2", "name": "g", "result": "RB",
-        }))));
+        let b = vals(t.on_event(
+            ev(json!({
+                "type": "tool.call.completed", "id": "tc-2", "name": "g", "result": "RB",
+            })),
+            false,
+        ));
         assert_eq!(kinds(&b), ["TOOL_CALL_RESULT"]);
-        assert!(!t.terminated, "settles in a fresh run must not finish it");
+        assert!(!t.terminated(), "settles in a fresh run must not finish it");
     }
 
     fn llm_completed_with_tools(call_id: &str, tool_ids: &[&str]) -> EventPayload {
@@ -1012,17 +995,17 @@ mod tests {
     #[test]
     fn parallel_client_tools_yield_once_after_whole_batch() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(llm_completed_with_tools("c1", &["a", "b"]));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["a", "b"]), false);
 
-        let first = vals(t.on_event(tool_requested("a", "set_color", "{}", "client")));
+        let first = vals(t.on_event(tool_requested("a", "set_color", "{}", "client"), false));
         assert_eq!(
             kinds(&first),
             ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END"],
             "first parallel client tool must not end the run"
         );
-        assert!(!t.terminated);
+        assert!(!t.terminated());
 
-        let second = vals(t.on_event(tool_requested("b", "get_color", "{}", "client")));
+        let second = vals(t.on_event(tool_requested("b", "get_color", "{}", "client"), true));
         assert_eq!(
             kinds(&second),
             [
@@ -1033,60 +1016,76 @@ mod tests {
             ],
             "the last call in the batch yields the run once"
         );
-        assert!(t.terminated);
+        assert!(t.terminated());
     }
 
     #[test]
     fn mixed_batch_waits_for_worker_result_before_yielding() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(llm_completed_with_tools("c1", &["w", "c"]));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["w", "c"]), false);
 
         assert!(!t
-            .on_event(tool_requested("w", "get_weather", "{}", "worker"))
+            .on_event(tool_requested("w", "get_weather", "{}", "worker"), false)
             .iter()
             .any(|e| matches!(e, AgUiEvent::RunFinished { .. })));
-        let after_client = vals(t.on_event(tool_requested("c", "set_color", "{}", "client")));
+        let after_client =
+            vals(t.on_event(tool_requested("c", "set_color", "{}", "client"), false));
         assert_eq!(
             kinds(&after_client),
             ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END"],
             "must not yield while a worker tool in the batch is unresolved"
         );
-        assert!(!t.terminated);
+        assert!(!t.terminated());
 
-        let done = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "id": "w",
-            "name": "get_weather", "result": r#"{"temp":62}"#,
-        }))));
+        let done = vals(t.on_event(
+            ev(json!({
+                "type": "tool.call.completed", "id": "w",
+                "name": "get_weather", "result": r#"{"temp":62}"#,
+            })),
+            true,
+        ));
         assert_eq!(kinds(&done), ["TOOL_CALL_RESULT", "RUN_FINISHED"]);
-        assert!(t.terminated);
+        assert!(t.terminated());
     }
 
     #[test]
     fn pure_worker_batch_does_not_yield() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(llm_completed_with_tools("c1", &["w1", "w2"]));
-        let _ = t.on_event(tool_requested("w1", "f", "{}", "worker"));
-        let _ = t.on_event(tool_requested("w2", "g", "{}", "worker"));
-        let r1 = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "id": "w1", "name": "f", "result": "1",
-        }))));
-        let r2 = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "id": "w2", "name": "g", "result": "2",
-        }))));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["w1", "w2"]), false);
+        let _ = t.on_event(tool_requested("w1", "f", "{}", "worker"), false);
+        let _ = t.on_event(tool_requested("w2", "g", "{}", "worker"), false);
+        let r1 = vals(t.on_event(
+            ev(json!({
+                "type": "tool.call.completed", "id": "w1", "name": "f", "result": "1",
+            })),
+            false,
+        ));
+        let r2 = vals(t.on_event(
+            ev(json!({
+                "type": "tool.call.completed", "id": "w2", "name": "g", "result": "2",
+            })),
+            false,
+        ));
         assert_eq!(kinds(&r1), ["TOOL_CALL_RESULT"]);
         assert_eq!(kinds(&r2), ["TOOL_CALL_RESULT"]);
-        assert!(!t.terminated);
-        let end = vals(t.on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"}))));
+        assert!(!t.terminated());
+        let end = vals(t.on_event(
+            ev(json!({"type": "turn.completed", "turn_id": "r1"})),
+            false,
+        ));
         assert_eq!(kinds(&end), ["RUN_FINISHED"]);
     }
 
     #[test]
     fn client_tool_result_emitted_on_resume() {
         let mut t = AgUiTranslator::new("t1".into(), "r2".into());
-        let r = vals(t.on_event(ev(json!({
-            "type": "tool.call.completed", "id": "x",
-            "name": "get_user_timezone", "result": "America/Los_Angeles",
-        }))));
+        let r = vals(t.on_event(
+            ev(json!({
+                "type": "tool.call.completed", "id": "x",
+                "name": "get_user_timezone", "result": "America/Los_Angeles",
+            })),
+            false,
+        ));
         assert_eq!(kinds(&r), ["TOOL_CALL_RESULT"]);
         assert_eq!(r[0]["toolCallId"], "x");
         assert_eq!(r[0]["content"], "America/Los_Angeles");
@@ -1096,35 +1095,47 @@ mod tests {
     fn terminal_error_closes_open_text_then_run_error() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_delta(delta("c1", "r1", "partial"));
-        let e = vals(t.on_event(ev(json!({
-            "type": "llm.call.errored", "id": "c1", "attempt": 0,
-            "error": {"message": "boom", "code": "internal"}, "retryable": false,
-        }))));
+        let e = vals(t.on_event(
+            ev(json!({
+                "type": "llm.call.errored", "id": "c1", "attempt": 0,
+                "error": {"message": "boom", "code": "internal"}, "retryable": false,
+            })),
+            false,
+        ));
         assert_eq!(kinds(&e), ["TEXT_MESSAGE_END", "RUN_ERROR"]);
         assert_eq!(e[1]["message"], "boom");
-        assert!(t.terminated);
+        assert!(t.terminated());
         assert!(t.open_text.is_empty());
     }
 
     #[test]
     fn retryable_error_is_silent() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let e = t.on_event(ev(json!({
-            "type": "llm.call.errored", "id": "c1", "attempt": 0,
-            "error": {"message": "temporary", "code": "internal"}, "retryable": true,
-        })));
+        let e = t.on_event(
+            ev(json!({
+                "type": "llm.call.errored", "id": "c1", "attempt": 0,
+                "error": {"message": "temporary", "code": "internal"}, "retryable": true,
+            })),
+            false,
+        );
         assert!(e.is_empty());
-        assert!(!t.terminated);
+        assert!(!t.terminated());
     }
 
     #[test]
     fn nothing_emitted_after_termination() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"})));
-        assert!(t.terminated);
+        let _ = t.on_event(
+            ev(json!({"type": "turn.completed", "turn_id": "r1"})),
+            false,
+        );
+        assert!(t.terminated());
         assert!(t.on_delta(delta("c1", "r1", "late")).is_empty());
         assert!(t
-            .on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"})))
+            .on_event(
+                ev(json!({"type": "turn.completed", "turn_id": "r1"})),
+                false
+            )
             .is_empty());
     }
 
@@ -1132,17 +1143,20 @@ mod tests {
     fn session_interrupt_finishes_run_with_interrupt_outcome() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_delta(delta("c1", "r1", "thinking..."));
-        let e = vals(t.on_event(ev(json!({
-            "type": "session.interrupted",
-            "interrupt_id": "int-1",
-            "origin": "frontend",
-            "reason": "confirmation",
-            "payload": {
-                "message": "Send the email?",
-                "toolCallId": "tc-1",
-                "responseSchema": {"type": "object"},
-            },
-        }))));
+        let e = vals(t.on_event(
+            ev(json!({
+                "type": "session.interrupted",
+                "interrupt_id": "int-1",
+                "origin": "frontend",
+                "reason": "confirmation",
+                "payload": {
+                    "message": "Send the email?",
+                    "toolCallId": "tc-1",
+                    "responseSchema": {"type": "object"},
+                },
+            })),
+            false,
+        ));
         assert_eq!(kinds(&e), ["TEXT_MESSAGE_END", "RUN_FINISHED"]);
         let finished = &e[1];
         assert_eq!(finished["outcome"]["type"], "interrupt");
@@ -1152,7 +1166,7 @@ mod tests {
         assert_eq!(interrupt["message"], "Send the email?");
         assert_eq!(interrupt["toolCallId"], "tc-1");
         assert_eq!(interrupt["responseSchema"]["type"], "object");
-        assert!(t.terminated);
+        assert!(t.terminated());
     }
 
     fn sub_agent_requested(session: &str, agent: &str, tool_id: &str) -> EventPayload {
@@ -1185,38 +1199,47 @@ mod tests {
             Some(r#"{"message":"Paris?"}"#),
         )));
         assert_eq!(kinds(&a), ["TOOL_CALL_START", "TOOL_CALL_ARGS"]);
-        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]), false);
 
         // `sub_agent.requested` stands in for `tool.call.requested`: it closes the bracket.
-        let req = vals(t.on_event(sub_agent_requested("child-1", "weather", "call-1")));
+        let req = vals(t.on_event(sub_agent_requested("child-1", "weather", "call-1"), false));
         assert_eq!(kinds(&req), ["TOOL_CALL_END"]);
         assert!(t.open_tools.is_empty());
-        assert!(!t.terminated, "a lone sub-agent must not yield the run");
+        assert!(!t.terminated(), "a lone sub-agent must not yield the run");
 
         // The child's answer surfaces as the tool result, keyed by the tool call id.
-        let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!("Clear, 68F."))));
+        let done = vals(t.on_event(
+            sub_agent_turn_completed("child-1", json!("Clear, 68F.")),
+            false,
+        ));
         assert_eq!(kinds(&done), ["TOOL_CALL_RESULT"]);
         assert_eq!(done[0]["toolCallId"], "call-1");
         assert_eq!(done[0]["content"], "Clear, 68F.");
-        assert!(!t.terminated);
+        assert!(!t.terminated());
 
         // The turn finishes on the parent's own completion, not the sub-agent's.
-        let end = vals(t.on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"}))));
+        let end = vals(t.on_event(
+            ev(json!({"type": "turn.completed", "turn_id": "r1"})),
+            false,
+        ));
         assert_eq!(kinds(&end), ["RUN_FINISHED"]);
     }
 
     #[test]
     fn non_string_sub_agent_result_is_serialized_as_json() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(sub_agent_requested("child-1", "lookup", "call-1"));
-        let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!({"tempF": 68}))));
+        let _ = t.on_event(sub_agent_requested("child-1", "lookup", "call-1"), false);
+        let done = vals(t.on_event(
+            sub_agent_turn_completed("child-1", json!({"tempF": 68})),
+            true,
+        ));
         assert_eq!(done[0]["content"], r#"{"tempF":68}"#);
     }
 
     #[test]
     fn unstreamed_sub_agent_call_synthesizes_the_bracket() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let req = vals(t.on_event(sub_agent_requested("child-1", "weather", "call-1")));
+        let req = vals(t.on_event(sub_agent_requested("child-1", "weather", "call-1"), false));
         assert_eq!(kinds(&req), ["TOOL_CALL_START", "TOOL_CALL_END"]);
         assert_eq!(req[0]["toolCallName"], "weather");
         assert_eq!(req[0]["toolCallId"], "call-1");
@@ -1225,12 +1248,15 @@ mod tests {
     #[test]
     fn sub_agent_error_surfaces_as_a_result() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(sub_agent_requested("child-1", "weather", "call-1"));
-        let err = vals(t.on_event(ev(json!({
-            "type": "sub_agent.errored",
-            "id": "child-1",
-            "error": {"message": "child boom", "code": "internal"},
-        }))));
+        let _ = t.on_event(sub_agent_requested("child-1", "weather", "call-1"), false);
+        let err = vals(t.on_event(
+            ev(json!({
+                "type": "sub_agent.errored",
+                "id": "child-1",
+                "error": {"message": "child boom", "code": "internal"},
+            })),
+            false,
+        ));
         assert_eq!(kinds(&err), ["TOOL_CALL_RESULT"]);
         assert_eq!(err[0]["toolCallId"], "call-1");
         assert_eq!(err[0]["content"], "child boom");
@@ -1239,29 +1265,33 @@ mod tests {
     #[test]
     fn mixed_batch_waits_for_sub_agent_before_yielding() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(llm_completed_with_tools("c1", &["sub", "c"]));
+        let _ = t.on_event(llm_completed_with_tools("c1", &["sub", "c"]), false);
 
-        let after_sub = vals(t.on_event(sub_agent_requested("child-1", "weather", "sub")));
+        let after_sub = vals(t.on_event(sub_agent_requested("child-1", "weather", "sub"), false));
         assert_eq!(kinds(&after_sub), ["TOOL_CALL_START", "TOOL_CALL_END"]);
-        assert!(!t.terminated);
+        assert!(!t.terminated());
 
-        let after_client = vals(t.on_event(tool_requested("c", "set_color", "{}", "client")));
+        let after_client =
+            vals(t.on_event(tool_requested("c", "set_color", "{}", "client"), false));
         assert_eq!(
             kinds(&after_client),
             ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END"],
             "must not yield while the sub-agent in the batch is unresolved"
         );
-        assert!(!t.terminated);
+        assert!(!t.terminated());
 
-        let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!("done"))));
+        let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!("done")), true));
         assert_eq!(kinds(&done), ["TOOL_CALL_RESULT", "RUN_FINISHED"]);
-        assert!(t.terminated);
+        assert!(t.terminated());
     }
 
     #[test]
     fn normal_completion_has_no_outcome() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let e = vals(t.on_event(ev(json!({"type": "turn.completed", "turn_id": "r1"}))));
+        let e = vals(t.on_event(
+            ev(json!({"type": "turn.completed", "turn_id": "r1"})),
+            false,
+        ));
         assert_eq!(kinds(&e), ["RUN_FINISHED"]);
         assert!(e[0].get("outcome").is_none());
     }

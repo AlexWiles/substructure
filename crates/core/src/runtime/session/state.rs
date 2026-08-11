@@ -32,7 +32,9 @@ use super::events::*;
 use super::prompt_context;
 use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{AgentTool, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, McpServer};
+use crate::protocol::{
+    AgentTool, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, Handler, McpServer,
+};
 
 /// One connection as the engine's own tools see it: what the agent declared,
 /// what the connection offered, and what it said it is for.
@@ -2131,6 +2133,12 @@ impl SessionState {
     ///
     /// A fetch is surfaced too, so a worker sees one in flight rather than
     /// inferring it from a decision that has not arrived.
+    /// Nothing to do until the caller answers: every outstanding call is one
+    /// only the client can settle.
+    pub fn waiting_on_client(&self) -> bool {
+        waiting_on_client(&self.effects())
+    }
+
     pub fn effects(&self) -> Vec<Effect> {
         let mut effects: Vec<Effect> = self
             .effects
@@ -2763,4 +2771,10 @@ mod node_wire_compat_tests {
         .expect("unknown fields are ignored");
         assert_eq!(node.message.id, "m1");
     }
+}
+
+/// Nothing to do until the caller answers: every outstanding call is one only
+/// the client can settle.
+pub fn waiting_on_client(calls: &[Effect]) -> bool {
+    !calls.is_empty() && calls.iter().all(|c| c.handler == Some(Handler::Client))
 }

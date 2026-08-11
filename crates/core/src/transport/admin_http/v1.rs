@@ -1,7 +1,8 @@
 //! The hosted cloud's `/api/v1` surface, served by a local server so the same
-//! commands work against both. A local server is single-tenant, so `{org}`/
-//! `{project}` segments are accepted and ignored; control-plane mutations
-//! (create/rename/delete project, API keys) are rejected.
+//! commands work against both. Scope comes from the caller's tenant, so `{org}`
+//! and `{project}` are accepted and ignored: a local server has one of each.
+//! Control-plane mutations (create/rename/delete project, API keys) are
+//! rejected.
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::header::{HeaderName, HeaderValue};
@@ -17,11 +18,10 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::api::v1::{ApiError, Meta, Org, Project, RunFormat, RunRequest};
-use crate::protocol::{OwnerKind, SessionOwner};
+use crate::api::v1::{ApiError, Meta, Org, Project, RunFormat, RunRequest, RUN_DONE_EVENT};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::session::SessionEvent;
-use crate::transport::ag_ui::translator::{run_ag_ui_translation, AgUiTranslator};
+use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::http::runtime_error_response;
 use crate::{Caller, HandleClientInput};
 
@@ -131,7 +131,7 @@ async fn run(
     let session_id = req
         .session_id
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    let owner = operator_owner(&caller);
+    let owner = caller.as_owner();
 
     // Subscribe before the input, or the first events have no listener.
     let spec = SessionSubscriptionSpec {
@@ -143,10 +143,18 @@ async fn run(
         Ok(rx) => rx,
         Err(e) => return runtime_error_response(e),
     };
-    let delta_rx = state
-        .runtime
-        .subscribe_token_deltas(&caller, &session_id)
-        .await;
+    // A token delta is a fragment of a translated message, so only the
+    // translated stream subscribes. Before the input, like the events: both are
+    // transient.
+    let delta_rx = match params.format {
+        RunFormat::AgUi => Some(
+            state
+                .runtime
+                .subscribe_token_deltas(&caller, &session_id)
+                .await,
+        ),
+        RunFormat::Events => None,
+    };
 
     let turn = state
         .runtime
@@ -164,56 +172,25 @@ async fn run(
         Err(e) => return runtime_error_response(e),
     };
 
-    match params.format {
-        RunFormat::AgUi => {
-            let out = run_ag_ui_translation(
-                event_rx,
-                delta_rx,
-                session_id,
-                turn_id,
-                state.shutdown.clone(),
-            );
-            Sse::new(ReceiverStream::new(out).map(Ok::<_, std::convert::Infallible>))
-                .keep_alive(KeepAlive::default())
-                .into_response()
-        }
-        RunFormat::Events => {
-            let out = run_raw_events(event_rx, session_id, turn_id, state.shutdown.clone());
-            Sse::new(ReceiverStream::new(out).map(Ok::<_, std::convert::Infallible>))
-                .keep_alive(KeepAlive::default())
-                .into_response()
-        }
-    }
+    let shutdown = state.shutdown.clone();
+    let out = match delta_rx {
+        Some(delta_rx) => run_ag_ui_translation(event_rx, delta_rx, session_id, turn_id, shutdown),
+        None => run_raw_events(event_rx, shutdown),
+    };
+    Sse::new(ReceiverStream::new(out).map(Ok::<_, std::convert::Infallible>))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
-/// Who started an operator session.
-fn operator_owner(caller: &Caller) -> SessionOwner {
-    SessionOwner {
-        tenant_id: caller.tenant_id().to_string(),
-        id: caller.subject().map(str::to_string),
-        kind: match caller {
-            Caller::Admin { .. } => OwnerKind::Admin,
-            Caller::ApiKey { .. } => OwnerKind::ApiKey,
-            _ => OwnerKind::System,
-        },
-        metadata: Default::default(),
-    }
-}
-
-/// Stored engine events, as `subs run -o jsonl` prints them.
-///
-/// A translator gives the end of the turn, which no stored event gives. Each
-/// event is sent before the translator reads it, so the last one is in the
-/// output.
+/// Stored engine events, as `subs run -o jsonl` prints them. Ends with
+/// [`RUN_DONE_EVENT`] when the turn does, and with nothing when the server
+/// stops first.
 fn run_raw_events(
     mut event_rx: mpsc::Receiver<SessionEvent>,
-    thread_id: String,
-    run_id: String,
     shutdown: CancellationToken,
 ) -> mpsc::Receiver<SseEvent> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(async move {
-        let mut oracle = AgUiTranslator::new(thread_id, run_id);
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => return,
@@ -226,8 +203,8 @@ fn run_raw_events(
                     if tx.send(sse).await.is_err() {
                         return;
                     }
-                    oracle.on_event(event.payload);
-                    if oracle.terminated {
+                    if event.ends_run() {
+                        let _ = tx.send(SseEvent::default().event(RUN_DONE_EVENT).data("")).await;
                         return;
                     }
                 }

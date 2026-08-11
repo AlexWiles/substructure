@@ -242,6 +242,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                 if raw {
                     write_json(&mut stdout, &event)?;
                 }
+                let ends_run = event.ends_run();
                 let payload = event.payload;
                 // Drain queued deltas before `llm.call.completed` so no closing
                 // event outruns its last streamed fragment.
@@ -251,9 +252,9 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                         renderer.emit(&mut stdout, evs)?;
                     }
                 }
-                let evs = translator.on_event(payload);
+                let evs = translator.on_event(payload, ends_run);
                 renderer.emit(&mut stdout, evs)?;
-                if translator.terminated {
+                if translator.terminated() {
                     break;
                 }
             }
@@ -269,7 +270,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         }
     }
 
-    if translator.terminated {
+    if translator.terminated() {
         await_indexed(&rt, &session_id).await;
         print_resume_hint(&session_id, &agent, output_mode, Some(&db_path));
         Ok(())

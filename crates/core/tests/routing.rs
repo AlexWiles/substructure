@@ -16,8 +16,8 @@ use substructure_core::llm::{
     LlmProviderRegistry, LlmProviderTrait, LlmTask,
 };
 use substructure_core::protocol::{
-    AgentConfig, ClientInput, Content, DraftMessage, ErrorCode, LlmRequest, LlmResponse, Role,
-    SessionOwner, SubAgent, ToolCall, ToolCallFunction,
+    AgentConfig, ClientInput, Content, DraftMessage, ErrorCode, LlmRequest, LlmResponse, OwnerKind,
+    Role, SessionOwner, SubAgent, ToolCall, ToolCallFunction,
 };
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::sqlite::{
@@ -274,7 +274,7 @@ async fn drain(
             session_id: session_id.clone(),
             caller: caller.clone(),
             owner: SessionOwner {
-                kind: substructure_core::protocol::OwnerKind::Frontend,
+                kind: OwnerKind::Frontend,
                 tenant_id: TENANT.to_string(),
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),

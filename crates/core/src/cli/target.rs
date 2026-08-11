@@ -1,7 +1,7 @@
 //! Where a command acts. The `[remote]` section decides.
 //!
-//! `login`, `logout`, `whoami`, `apply`, and `link` do not use this rule. They
-//! must work before a file has a `[remote]`.
+//! Credential and bootstrap commands do not use this rule. They must work
+//! before a file has a `[remote]`.
 
 use anyhow::{bail, Result};
 

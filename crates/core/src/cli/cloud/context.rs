@@ -100,8 +100,8 @@ impl Context {
         Ok((ctx, org))
     }
 
-    /// Every project-scoped command comes through here, so the `[remote]` rule
-    /// applies here. A command that also runs locally must branch before this.
+    /// The `[remote]` rule, for a command that resolves its project here. One
+    /// that also runs locally must branch before this.
     pub async fn from_project(scope: &ProjectScope) -> Result<(Self, String)> {
         crate::cli::target::require_deployment(&scope.globals, "this command")?;
         let ctx = Self::load(&scope.globals)?;

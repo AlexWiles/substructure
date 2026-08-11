@@ -31,7 +31,12 @@ npx quicktype --src-lang schema --lang typescript \
     --just-types --prefer-unions -o protocol.ts
 ```
 
-Swap `--lang go --package main -o protocol.go` for Go.
+Go takes neither `--just-types` nor `--prefer-unions`:
+
+```sh
+npx quicktype --src-lang schema --lang go --package main \
+    --src schemas/protocol.schema.json --top-level Protocol -o protocol.go
+```
 
 Python, with
 [datamodel-code-generator](https://github.com/koxudaxi/datamodel-code-generator):
@@ -39,7 +44,7 @@ Python, with
 ```sh
 datamodel-codegen \
     --input schemas/protocol.schema.json --input-file-type jsonschema \
-    --output-model-type pydantic_v2.BaseModel --output protocol.py
+    --output-model-type pydantic_v2.BaseModel --disable-timestamp --output protocol.py
 ```
 
 For OpenAPI tools, generate from `worker.openapi.json` instead.
