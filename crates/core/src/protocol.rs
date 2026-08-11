@@ -164,6 +164,7 @@ pub struct NewMessage {
 #[schemars(title = "InterruptOrigin")]
 pub enum InterruptOrigin {
     System,
+    Admin,
     Machine,
     Frontend,
 }
@@ -273,11 +274,28 @@ pub struct RetryConfig {
 
 // ── Identity ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// What kind of caller owns a session. Part of the identity: an admin and an
+/// end user with the same name are not the same owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "OwnerKind")]
+pub enum OwnerKind {
+    /// An end user. The only kind an ownership check grants access to.
+    #[default]
+    Frontend,
+    Admin,
+    ApiKey,
+    System,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOwner {
     pub tenant_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Defaults to `Frontend`, which is what every stored owner was.
+    #[serde(default)]
+    pub kind: OwnerKind,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
 }

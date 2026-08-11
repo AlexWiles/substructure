@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::protocol::SessionOwner;
+use crate::protocol::{OwnerKind, SessionOwner};
 use crate::session::command::SessionError;
 use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
@@ -265,6 +265,7 @@ pub async fn submit_client_payload(
     let owner = SessionOwner {
         tenant_id: caller.tenant_id().to_string(),
         id: Some(req.identity.id),
+        kind: OwnerKind::Frontend,
         metadata: req.identity.metadata,
     };
 

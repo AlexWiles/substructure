@@ -14,7 +14,7 @@ use super::{
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
-use crate::protocol::{ClientInput, Role, SessionOwner};
+use crate::protocol::{ClientInput, OwnerKind, Role, SessionOwner};
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
 use crate::session::state::SessionStatus;
@@ -573,6 +573,7 @@ impl SlackBot {
                 // Used only if the click starts the session; an existing
                 // session keeps its owner.
                 owner: SessionOwner {
+                    kind: OwnerKind::Frontend,
                     tenant_id: ws.tenant_id.clone(),
                     id: Some(format!("slack:{}", click.user)),
                     metadata: HashMap::from_iter([
@@ -787,6 +788,7 @@ impl SlackBot {
                     tenant_id: ws.tenant_id.clone(),
                 },
                 owner: SessionOwner {
+                    kind: OwnerKind::Frontend,
                     tenant_id: ws.tenant_id.clone(),
                     id: Some(format!("slack:{}", inbound.user)),
                     metadata: HashMap::from_iter(
@@ -2681,6 +2683,7 @@ mod tests {
             status,
             wake_at: None,
             owner: Some(SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "t".into(),
                 id: None,
                 metadata: [
@@ -2809,6 +2812,7 @@ mod tests {
             status: crate::session::state::SessionStatus::Idle,
             wake_at: None,
             owner: Some(SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "t".into(),
                 id: None,
                 metadata: metadata

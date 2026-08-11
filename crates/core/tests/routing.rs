@@ -274,6 +274,7 @@ async fn drain(
             session_id: session_id.clone(),
             caller: caller.clone(),
             owner: SessionOwner {
+                kind: substructure_core::protocol::OwnerKind::Frontend,
                 tenant_id: TENANT.to_string(),
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),

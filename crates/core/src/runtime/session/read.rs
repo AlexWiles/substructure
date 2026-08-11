@@ -69,10 +69,7 @@ impl SessionReader {
 
     /// Only a frontend caller is answerable to an owner.
     pub async fn authorize(&self, session_id: &str, caller: &Caller) -> Result<(), RuntimeError> {
-        let Caller::Frontend {
-            tenant_id, user_id, ..
-        } = caller
-        else {
+        let Caller::Frontend { tenant_id, .. } = caller else {
             return Ok(());
         };
 
@@ -84,12 +81,9 @@ impl SessionReader {
             Err(e) => return Err(internal(e)),
         };
 
-        let owner_id = session.state.owner.as_ref().and_then(|o| o.id.as_deref());
-
-        if owner_id == Some(user_id.as_str()) {
-            Ok(())
-        } else {
-            Err(RuntimeError::Session(SessionError::SessionAccessDenied))
+        match session.state.owner.as_ref().is_some_and(|o| caller.owns(o)) {
+            true => Ok(()),
+            false => Err(RuntimeError::Session(SessionError::SessionAccessDenied)),
         }
     }
 }

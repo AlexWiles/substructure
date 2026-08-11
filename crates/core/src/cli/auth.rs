@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::transport::auth::{
     ApiKeyBinding, AuthResolver, BearerHashedApiKeyAuthResolver, JwtHs256ClientTokenAuthResolver,
-    NoopAuthResolver,
+    NoopAuthResolver, SOURCE_API_KEY,
 };
 
 use super::env::AuthEnvVars;
@@ -27,19 +27,16 @@ impl AuthWiring {
             "substructure-dev",
             &secret,
         ));
-        // Worker/admin endpoints check `principal.source == "api_key"` (and
-        // require a non-empty subject) for machine-only operations like
-        // `mint_client_token`. The dev resolver bypasses auth but still
-        // needs to present itself as a machine principal for those checks
-        // to pass. Client endpoints validate the JWT minted by `issuer` so
-        // the browser flow exercises the real token plumbing.
+        // A dev server has no credential to read, so it presents a key: the
+        // machine-only operations need a machine principal. Client endpoints
+        // still validate the JWT `issuer` mints.
         Self {
             client: issuer.clone(),
             worker: Arc::new(
-                NoopAuthResolver::new(DEFAULT_TENANT).with_principal("api_key", "dev-worker"),
+                NoopAuthResolver::new(DEFAULT_TENANT).with_principal(SOURCE_API_KEY, "dev-worker"),
             ),
             admin: Arc::new(
-                NoopAuthResolver::new(DEFAULT_TENANT).with_principal("api_key", "dev-admin"),
+                NoopAuthResolver::new(DEFAULT_TENANT).with_principal(SOURCE_API_KEY, "dev-admin"),
             ),
             issuer,
         }

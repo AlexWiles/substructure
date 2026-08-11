@@ -454,6 +454,7 @@ mod tests {
             decision_id: "dec-1".to_string(),
             agent_id: "agent-1".to_string(),
             identity: SessionOwner {
+                kind: crate::protocol::OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),

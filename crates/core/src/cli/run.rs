@@ -10,7 +10,7 @@ use super::run_remote;
 use super::target::target;
 use super::{local, DEFAULT_TENANT};
 use crate::event_store::Seq;
-use crate::protocol::{ClientInput, Content, DraftMessage, Role, SessionOwner};
+use crate::protocol::{ClientInput, Content, DraftMessage, OwnerKind, Role, SessionOwner};
 use crate::providers::sqlite::SqliteDb;
 use crate::session::events::EventPayload;
 use crate::session::index::SessionFilter;
@@ -184,6 +184,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     let owner = SessionOwner {
         tenant_id: DEFAULT_TENANT.to_string(),
         id: Some("dev".to_string()),
+        kind: OwnerKind::Frontend,
         metadata: Default::default(),
     };
 

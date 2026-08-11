@@ -379,6 +379,7 @@ mod tests {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
+                    kind: crate::protocol::OwnerKind::Frontend,
                     tenant_id: "tenant-a".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),
@@ -446,6 +447,7 @@ mod tests {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
+                    kind: crate::protocol::OwnerKind::Frontend,
                     tenant_id: "tenant-a".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),

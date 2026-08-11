@@ -18,7 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::v1::{ApiError, Meta, Org, Project, RunFormat, RunRequest};
-use crate::protocol::SessionOwner;
+use crate::protocol::{OwnerKind, SessionOwner};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::session::SessionEvent;
 use crate::transport::ag_ui::translator::{run_ag_ui_translation, AgUiTranslator};
@@ -131,11 +131,7 @@ async fn run(
     let session_id = req
         .session_id
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    let owner = SessionOwner {
-        tenant_id: caller.tenant_id().to_string(),
-        id: None,
-        metadata: Default::default(),
-    };
+    let owner = operator_owner(&caller);
 
     // Subscribe before the input, or the first events have no listener.
     let spec = SessionSubscriptionSpec {
@@ -187,6 +183,21 @@ async fn run(
                 .keep_alive(KeepAlive::default())
                 .into_response()
         }
+    }
+}
+
+/// Who started an operator session. The kind keeps it apart from an end user
+/// with the same name.
+fn operator_owner(caller: &Caller) -> SessionOwner {
+    SessionOwner {
+        tenant_id: caller.tenant_id().to_string(),
+        id: caller.subject().map(str::to_string),
+        kind: match caller {
+            Caller::Admin { .. } => OwnerKind::Admin,
+            Caller::ApiKey { .. } => OwnerKind::ApiKey,
+            _ => OwnerKind::System,
+        },
+        metadata: Default::default(),
     }
 }
 

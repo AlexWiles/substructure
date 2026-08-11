@@ -14,10 +14,15 @@ it sends your worker.
 | Caller | Who | Credential |
 | --- | --- | --- |
 | Frontend | An end-user client. | An HS256 bearer JWT. |
-| Machine | Your backend, or an operator. | An API key. |
+| Admin | A person who logged in. | A user token. |
+| ApiKey | Your backend, or a worker. | An API key. |
 | System | The engine itself. | Internal. |
 
-System has the most privilege, then Machine, then Frontend.
+System has the most privilege, then ApiKey and Admin, then Frontend.
+
+ApiKey and Admin differ in who holds the credential: a program holds a key, a
+person logs in. Only a worker answers a decision the engine hands out, so only
+ApiKey may. An admin administers a session and does not run the model for it.
 
 ## Client tokens
 
@@ -109,7 +114,13 @@ Worker responses are not signed. The engine trusts the connection it opened.
 
 - A Frontend caller acts only on a session it owns.
 - A Frontend caller ends only client-handled tool calls.
-- A worker decision needs a Machine or System caller.
+- A worker decision needs an ApiKey or System caller. An Admin caller cannot
+  submit one, and cannot answer an `llm.execute`.
+- Cancelling a session needs any caller but Frontend.
+- A session records the kind of owner as well as the name. An end user opens
+  only a session an end user owns, so an admin and a user with the same name
+  are different owners.
+- A session an operator starts is owned by that credential, and named by it.
 - To resume an interrupt, a caller needs at least the privilege of the caller
   that raised it.
 

@@ -14,6 +14,11 @@ together at the same version.
 - Improve MCP auth failure handling.
 - Standardize usage reporting.
 - Clearer split between remote/local command handling
+- Split the machine caller into an API key caller and an admin caller. Only an
+  API key answers a worker decision.
+- A session owner now records its kind. An end user opens only a session an end
+  user owns.
+- Add the `admin` interrupt origin. It has more privilege than `machine`.
 
 ### Added
 

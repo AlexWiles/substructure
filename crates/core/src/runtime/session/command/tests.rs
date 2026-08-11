@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::protocol::{
-    Announce, ClientAppend, ClientMessage, ClientMessages, DeferTools, NewMessage,
+    Announce, ClientAppend, ClientMessage, ClientMessages, DeferTools, NewMessage, OwnerKind,
 };
 use crate::runtime::session::reconcile::plan_reconcile;
 use chrono::Utc;
@@ -57,6 +57,7 @@ fn create_session_with_config(
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: tenant_id.to_string(),
                 id: Some(user_id.to_string()),
                 metadata: HashMap::new(),
@@ -511,7 +512,7 @@ fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
         })
         .expect("worker-handled tool call emits a tool.execute decision");
 
-    let machine = Caller::Machine {
+    let machine = Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     };
@@ -589,7 +590,7 @@ fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() 
                 result: "ok".to_string(),
             },
         ),
-        &Caller::Machine {
+        &Caller::ApiKey {
             tenant_id: "tenant-a".to_string(),
             key_id: "prod-key-1".to_string(),
         },
@@ -630,7 +631,7 @@ fn complete_tool_call_with_wrong_attempt_fails() {
         },
     );
 
-    let caller = Caller::Machine {
+    let caller = Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     };
@@ -733,7 +734,7 @@ fn submit_worker_decision_dispatches_action_and_completes_decision() {
         })
         .expect("user message should request a worker decision");
 
-    let machine = Caller::Machine {
+    let machine = Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     };
@@ -803,7 +804,7 @@ fn duplicate_submit_worker_decision_is_no_op() {
         })
         .expect("user message should request a worker decision");
 
-    let machine = Caller::Machine {
+    let machine = Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     };
@@ -897,7 +898,7 @@ fn user_message_rejected_while_session_interrupted() {
 fn complete_unknown_tool_call_fails() {
     let agg = create_session("sess-1", "tenant-a", "user-1");
 
-    let caller = Caller::Machine {
+    let caller = Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     };
@@ -2515,7 +2516,7 @@ fn return_llm_result_completes_worker_handled_call() {
         })
         .expect("worker-handled llm call emits an llm.execute decision");
 
-    let machine = Caller::Machine {
+    let machine = Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     };
@@ -2589,7 +2590,7 @@ fn fail_tool_call_emits_errored() {
         })
         .expect("worker-handled tool call emits a tool.execute decision");
 
-    let machine = Caller::Machine {
+    let machine = Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     };
@@ -2947,7 +2948,7 @@ fn a_returned_delegation_waits_for_its_running_sibling() {
 // ── Batched effect completion ────────────────────────────────────────
 
 fn machine() -> Caller {
-    Caller::Machine {
+    Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     }
@@ -2964,6 +2965,13 @@ fn frontend() -> Caller {
         tenant_id: "tenant-a".to_string(),
         user_id: "user-1".to_string(),
         attrs: HashMap::new(),
+    }
+}
+
+fn admin() -> Caller {
+    Caller::Admin {
+        tenant_id: "tenant-a".to_string(),
+        user_id: "alex@example.test".to_string(),
     }
 }
 
@@ -3534,7 +3542,7 @@ fn machine_cannot_resume_system_interrupt() {
                 interrupt_id: "int-1".to_string(),
                 payload: serde_json::Value::Null,
             },
-            &Caller::Machine {
+            &Caller::ApiKey {
                 tenant_id: "tenant-a".to_string(),
                 key_id: "prod-key-1".to_string(),
             },
@@ -3571,7 +3579,7 @@ fn machine_cannot_resume_system_interrupt() {
 #[test]
 fn machine_resumes_machine_interrupt() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
-    let machine = Caller::Machine {
+    let machine = Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
         key_id: "prod-key-1".to_string(),
     };
@@ -3738,7 +3746,7 @@ fn frontend_cannot_resume_machine_interrupt() {
             reason: "awaiting approval".to_string(),
             payload: serde_json::Value::Null,
         },
-        &Caller::Machine {
+        &Caller::ApiKey {
             tenant_id: "tenant-a".to_string(),
             key_id: "prod-key-1".to_string(),
         },
@@ -3778,7 +3786,7 @@ fn machine_resumes_frontend_interrupt() {
             interrupt_id: "int-1".to_string(),
             payload: serde_json::Value::Null,
         },
-        &Caller::Machine {
+        &Caller::ApiKey {
             tenant_id: "tenant-a".to_string(),
             key_id: "prod-key-1".to_string(),
         },
@@ -4704,7 +4712,7 @@ fn fail_worker_decision_emits_errored() {
 fn machine_caller_from_wrong_tenant_is_denied() {
     let agg = create_session("sess-1", "tenant-a", "user-1");
 
-    let cross_tenant_machine = Caller::Machine {
+    let cross_tenant_machine = Caller::ApiKey {
         tenant_id: "tenant-b".to_string(),
         key_id: "key-from-tenant-b".to_string(),
     };
@@ -4749,6 +4757,7 @@ fn frontend_caller_with_mismatched_tenant_on_create_session_is_denied() {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
+                    kind: OwnerKind::Frontend,
                     tenant_id: "tenant-b".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),
@@ -5640,6 +5649,7 @@ fn create_session_with_retry(retry: RetryPolicy) -> SessionAggregate {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -8564,6 +8574,7 @@ fn create_session_emits_session_start_before_client_input() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -8598,6 +8609,7 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -8686,6 +8698,7 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -8815,6 +8828,7 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -9666,6 +9680,7 @@ fn fork_drops_a_retrying_settle_decision() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -10202,6 +10217,7 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -10733,4 +10749,95 @@ fn a_queued_turn_id_cannot_be_opened_by_another_path() {
         SessionError::TurnAlreadyActive { turn_id } => assert_eq!(turn_id, "turn-2"),
         other => panic!("expected TurnAlreadyActive; got {other:?}"),
     }
+}
+
+// ── Admin ────────────────────────────────────────────────────────────
+
+/// An admin administers a session. It is not a worker, so it cannot answer a
+/// decision the engine handed to one.
+#[test]
+fn admin_cannot_submit_a_worker_decision() {
+    assert!(matches!(
+        SessionState::ensure_worker_or_system(&admin()),
+        Err(SessionError::SessionAccessDenied)
+    ));
+    assert!(SessionState::ensure_worker_or_system(&machine()).is_ok());
+    assert!(SessionState::ensure_worker_or_system(&system()).is_ok());
+    assert!(matches!(
+        SessionState::ensure_worker_or_system(&frontend()),
+        Err(SessionError::SessionAccessDenied)
+    ));
+}
+
+/// Cancelling is an operation on a session, not a decision in it.
+#[test]
+fn an_admin_can_cancel_a_session_and_an_end_user_cannot() {
+    assert!(SessionState::ensure_operator_or_system(&admin()).is_ok());
+    assert!(SessionState::ensure_operator_or_system(&machine()).is_ok());
+    assert!(SessionState::ensure_operator_or_system(&system()).is_ok());
+    assert!(matches!(
+        SessionState::ensure_operator_or_system(&frontend()),
+        Err(SessionError::SessionAccessDenied)
+    ));
+}
+
+/// Only the worker that was handed a call answers it. The caller is judged
+/// before the call is, so an unknown call still tells the two apart: a worker
+/// gets "no such call", and everyone else gets "not yours".
+#[test]
+fn only_a_worker_answers_an_llm_call() {
+    let state = SessionState::new("sess-1".to_string());
+    assert!(matches!(
+        state.check_llm_call_caller(None, &machine()),
+        Err(SessionError::EffectNotFound)
+    ));
+    assert!(matches!(
+        state.check_llm_call_caller(None, &admin()),
+        Err(SessionError::EffectWrongHandler)
+    ));
+    assert!(matches!(
+        state.check_llm_call_caller(None, &frontend()),
+        Err(SessionError::EffectWrongHandler)
+    ));
+    assert!(state.check_llm_call_caller(None, &system()).is_ok());
+}
+
+/// An admin reads and writes any session in its tenant, and none outside it.
+#[test]
+fn an_admin_is_bound_to_its_tenant() {
+    assert!(SessionState::ensure_tenant_matches(&admin(), "tenant-a").is_ok());
+    assert!(matches!(
+        SessionState::ensure_tenant_matches(&admin(), "tenant-b"),
+        Err(SessionError::SessionAccessDenied)
+    ));
+}
+
+/// A session an admin started has no end user, so ownership does not gate it.
+#[test]
+fn an_admin_does_not_answer_to_a_session_owner() {
+    let state = SessionState::new("sess-1".to_string());
+    assert!(state.ensure_owns_session(&admin()).is_ok());
+}
+
+/// An admin outranks a worker: a person unblocks what a program parked, and
+/// not the reverse.
+#[test]
+fn an_admin_outranks_a_machine_and_answers_to_the_engine() {
+    use crate::protocol::InterruptOrigin;
+    assert!(InterruptOrigin::Admin.privilege() > InterruptOrigin::Machine.privilege());
+    assert!(InterruptOrigin::Admin.privilege() > InterruptOrigin::Frontend.privilege());
+    assert!(InterruptOrigin::Admin.privilege() < InterruptOrigin::System.privilege());
+}
+
+#[test]
+fn an_admin_caller_raises_an_admin_interrupt() {
+    use crate::protocol::InterruptOrigin;
+    assert!(matches!(
+        SessionState::caller_interrupt_origin(&admin()),
+        InterruptOrigin::Admin
+    ));
+    assert!(matches!(
+        SessionState::caller_interrupt_origin(&machine()),
+        InterruptOrigin::Machine
+    ));
 }

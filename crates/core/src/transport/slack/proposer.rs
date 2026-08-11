@@ -369,6 +369,7 @@ mod tests {
     fn state() -> SessionState {
         let mut s = SessionState::new(SESSION.to_string());
         s.owner = Some(crate::protocol::SessionOwner {
+            kind: crate::protocol::OwnerKind::Frontend,
             tenant_id: "t".to_string(),
             id: Some("slack:U1".to_string()),
             metadata: std::collections::HashMap::from_iter([

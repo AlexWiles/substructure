@@ -310,7 +310,9 @@ pub struct ToolCallErrored {
 impl InterruptOrigin {
     pub fn privilege(self) -> u8 {
         match self {
-            InterruptOrigin::System => 2,
+            InterruptOrigin::System => 3,
+            // A person who logs in has authority over a program that runs.
+            InterruptOrigin::Admin => 2,
             InterruptOrigin::Machine => 1,
             InterruptOrigin::Frontend => 0,
         }

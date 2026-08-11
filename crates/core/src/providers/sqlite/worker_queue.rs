@@ -143,7 +143,7 @@ fn do_dequeue(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{DecisionResponse, DecisionTrigger, LlmRequest, SessionOwner};
+    use crate::protocol::{DecisionResponse, DecisionTrigger, LlmRequest, OwnerKind, SessionOwner};
     use crate::runtime::span::SpanContext;
     use uuid::Uuid;
 
@@ -153,6 +153,7 @@ mod tests {
             decision_id: decision_id.to_string(),
             agent_id: "agent-1".to_string(),
             identity: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: tenant_id.to_string(),
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),
