@@ -219,7 +219,7 @@ type Trigger =
           ok: boolean
           message?: DraftMessage
           truncated: boolean
-          usage?: unknown
+          usage?: Usage
           cost?: string
           error?: ErrorInfo
       }
@@ -238,7 +238,7 @@ type Trigger =
           turn_id: string
           data?: unknown            // the turn's final output
           cost: string
-          usage: Record<string, number>
+          usage: Usage
       }
 
 type ToolInput =
@@ -526,9 +526,22 @@ type LlmResponse = {
     content?: string
     tool_calls?: ToolCall[]
     finish_reason?: string
-    usage?: unknown
+    usage?: Usage
     cost?: string               // dollars, decimal string
     images?: { url: string }[]
+}
+
+// What one call read and wrote. Every provider means these the same way: the
+// adapter normalizes the vendor's own counts, so the totals of a session that
+// changes model, and of a tree whose agents name different blocks, add up.
+type Usage = {
+    input: number           // every input token, cached or not
+    output: number
+    uncached_input: number  // the part of `input` read fresh
+    cache_read: number      // the part of `input` read from the cache
+    cache_write: number     // the part of `input` written to the cache
+    total: number           // `input` and `output` together
+    provider?: unknown      // the counts as the provider reported them
 }
 ```
 

@@ -1431,7 +1431,16 @@
               "const": "llm.finished",
               "type": "string"
             },
-            "usage": {}
+            "usage": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Usage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
           },
           "required": [
             "type",
@@ -1525,12 +1534,7 @@
               "type": "string"
             },
             "usage": {
-              "additionalProperties": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": "object"
+              "$ref": "#/$defs/Usage"
             }
           },
           "required": [
@@ -2099,7 +2103,16 @@
           },
           "type": "array"
         },
-        "usage": {}
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
       },
       "required": [
         "model"
@@ -2768,6 +2781,60 @@
         }
       ],
       "title": "ToolInput"
+    },
+    "Usage": {
+      "additionalProperties": false,
+      "description": "What one call read and wrote, in counts every provider means the same way.\n\nEach vendor names and scopes these differently: Anthropic reports the part\nof the prompt it did not read from the cache, OpenAI reports the whole\nprompt including that part. A session that changes model, and a tree whose\nagents name different blocks, add these counts together, so the adapter\nnormalizes them rather than the reader.",
+      "properties": {
+        "cache_read": {
+          "description": "The part of `input` the provider read from the cache.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_write": {
+          "description": "The part of `input` the provider wrote to the cache.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "input": {
+          "description": "Every input token of the call, cached or not.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider": {
+          "description": "The counts as the provider reported them, for a reader that wants a\nnumber this type does not name."
+        },
+        "total": {
+          "description": "`input` and `output` together.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uncached_input": {
+          "description": "The part of `input` the provider read fresh.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "uncached_input",
+        "cache_read",
+        "cache_write",
+        "total"
+      ],
+      "title": "Usage",
+      "type": "object"
     },
     "VideoUrl": {
       "additionalProperties": false,

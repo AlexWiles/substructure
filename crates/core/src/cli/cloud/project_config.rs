@@ -184,6 +184,7 @@ impl ProjectConfig {
                     kind: spec.kind,
                     api_key_env: spec.api_key_env()?,
                     base_url: spec.base_url.clone(),
+                    cache_ttl: spec.cache_ttl.clone(),
                 })
             })
             .collect()

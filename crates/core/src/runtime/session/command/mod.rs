@@ -13,7 +13,7 @@ use super::state::{
 use crate::protocol::ErrorInfo;
 use crate::protocol::{
     AgentConfig, ClientContext, ClientPayload, DraftMessage, EffectStatus, InterruptOrigin,
-    LlmFormat, LlmRequest, RetryOverride, RetryPolicy, Role, SessionOwner, WorkerState,
+    LlmFormat, LlmRequest, RetryOverride, RetryPolicy, Role, SessionOwner, Usage, WorkerState,
 };
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::Caller;
@@ -82,7 +82,7 @@ pub enum CommandPayload {
         turn_id: String,
         data: serde_json::Value,
         cost: Decimal,
-        token_usage: BTreeMap<String, u64>,
+        token_usage: Usage,
     },
     Interrupt {
         interrupt_id: String,

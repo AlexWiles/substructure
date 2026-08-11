@@ -774,6 +774,67 @@ pub struct ResponseImage {
     pub url: String,
 }
 
+/// What one call read and wrote, in counts every provider means the same way.
+///
+/// Each vendor names and scopes these differently: Anthropic reports the part
+/// of the prompt it did not read from the cache, OpenAI reports the whole
+/// prompt including that part. A session that changes model, and a tree whose
+/// agents name different blocks, add these counts together, so the adapter
+/// normalizes them rather than the reader.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "Usage")]
+pub struct Usage {
+    /// Every input token of the call, cached or not.
+    pub input: u64,
+    pub output: u64,
+    /// The part of `input` the provider read fresh.
+    pub uncached_input: u64,
+    /// The part of `input` the provider read from the cache.
+    pub cache_read: u64,
+    /// The part of `input` the provider wrote to the cache.
+    pub cache_write: u64,
+    /// `input` and `output` together.
+    pub total: u64,
+    /// The counts as the provider reported them, for a reader that wants a
+    /// number this type does not name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Value>,
+}
+
+impl Usage {
+    /// The counts of one call, from the parts a provider reports. `input` and
+    /// `total` follow from the rest, so no caller states them.
+    pub fn new(uncached_input: u64, cache_read: u64, cache_write: u64, output: u64) -> Self {
+        let input = uncached_input + cache_read + cache_write;
+        Self {
+            input,
+            output,
+            uncached_input,
+            cache_read,
+            cache_write,
+            total: input + output,
+            provider: None,
+        }
+    }
+
+    pub fn with_provider(mut self, raw: Value) -> Self {
+        self.provider = Some(raw);
+        self
+    }
+
+    /// Add the counts of another call. The raw report belongs to one call, so
+    /// a sum carries none.
+    pub fn add(&mut self, other: &Usage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.uncached_input += other.uncached_input;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.total += other.total;
+        self.provider = None;
+    }
+}
+
 /// Normalized LLM response. Provider adapters convert their raw responses
 /// into this type at the boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -787,7 +848,7 @@ pub struct LlmResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<Value>,
+    pub usage: Option<Usage>,
     /// Cost in dollars for this call, if the provider reports it. A decimal
     /// string on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1378,7 +1439,7 @@ pub enum DecisionTrigger {
         message: Option<DraftMessage>,
         truncated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        usage: Option<Value>,
+        usage: Option<Usage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[schemars(schema_with = "decimal_string_schema")]
         cost: Option<Decimal>,
@@ -1411,8 +1472,8 @@ pub enum DecisionTrigger {
         #[serde(default)]
         #[schemars(schema_with = "decimal_string_schema")]
         cost: Decimal,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        usage: BTreeMap<String, u64>,
+        #[serde(default)]
+        usage: Usage,
     },
 }
 

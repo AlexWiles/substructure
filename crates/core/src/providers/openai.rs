@@ -10,7 +10,7 @@ use tokio_stream::StreamExt;
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
     DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningEffort, SessionOwner,
-    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
+    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -59,6 +59,44 @@ struct WireBody<'a> {
     reasoning_effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// Which cache machine the prompt routes to. Sessions of one agent open
+    /// alike, so without this they crowd onto one machine and spill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_retention: Option<&'a str>,
+    /// A streamed call reports no tokens at all without this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+/// What the caller knows about caching this call: the session the prompt
+/// belongs to, and how long the vendor holds it.
+#[derive(Default, Clone, Copy)]
+struct CacheOpts<'a> {
+    key: Option<&'a str>,
+    retention: Option<&'a str>,
+}
+
+/// The API refuses a longer key, and a session id is the caller's own string:
+/// a Slack thread names one, and a client can send any name it likes.
+const CACHE_KEY_MAX_CHARS: usize = 64;
+
+/// The first 64 characters of `session_id`, or nothing for an unnamed session.
+/// Two sessions sharing those characters share a machine, and nothing worse.
+fn cache_key(session_id: &str) -> Option<&str> {
+    if session_id.is_empty() {
+        return None;
+    }
+    Some(match session_id.char_indices().nth(CACHE_KEY_MAX_CHARS) {
+        Some((end, _)) => &session_id[..end],
+        None => session_id,
+    })
 }
 
 fn effort_str(e: ReasoningEffort) -> &'static str {
@@ -83,7 +121,12 @@ fn is_reasoning_model(model: &str) -> bool {
 impl<'a> WireBody<'a> {
     /// `stream: None` omits the field so the body is valid input for both the
     /// create and stream calls a worker might make.
-    fn build(request: &'a LlmRequest, search: DeferToolsStrategy, stream: Option<bool>) -> Self {
+    fn build(
+        request: &'a LlmRequest,
+        search: DeferToolsStrategy,
+        stream: Option<bool>,
+        cache: CacheOpts<'a>,
+    ) -> Self {
         let reasoning_effort = request
             .reasoning
             .as_ref()
@@ -107,6 +150,11 @@ impl<'a> WireBody<'a> {
             max_completion_tokens: request.max_completion_tokens,
             reasoning_effort,
             stream,
+            prompt_cache_key: cache.key,
+            prompt_cache_retention: cache.retention,
+            stream_options: (stream == Some(true)).then_some(StreamOptions {
+                include_usage: true,
+            }),
         }
     }
 }
@@ -117,6 +165,47 @@ struct ChatCompletionResponse {
     choices: Vec<Choice>,
     #[serde(default)]
     usage: Option<serde_json::Value>,
+}
+
+/// The counts the API reports, where `prompt_tokens` is the whole prompt and
+/// the cached part of it is one level down.
+#[derive(Debug, Default, Deserialize)]
+struct ChatUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: PromptTokensDetails,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+    /// OpenRouter only: an upstream that bills for the write reports it here.
+    #[serde(default)]
+    cache_write_tokens: u64,
+}
+
+/// The counts of one Chat Completions response, or nothing where the provider
+/// reported none. Shared with OpenRouter, which answers the same shape.
+pub(crate) fn usage_from_value(raw: Option<serde_json::Value>) -> Option<Usage> {
+    let raw = raw?;
+    let counts: ChatUsage = serde_json::from_value(raw.clone()).unwrap_or_default();
+    let cache_read = counts.prompt_tokens_details.cached_tokens;
+    let cache_write = counts.prompt_tokens_details.cache_write_tokens;
+    Some(
+        Usage::new(
+            counts
+                .prompt_tokens
+                .saturating_sub(cache_read + cache_write),
+            cache_read,
+            cache_write,
+            counts.completion_tokens,
+        )
+        .with_provider(raw),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,7 +260,7 @@ impl ChatCompletionResponse {
                 .map(|tcs| tcs.iter().map(|tc| tc.clone().into()).collect())
                 .unwrap_or_default(),
             finish_reason: choice.and_then(|c| c.finish_reason),
-            usage: self.usage,
+            usage: usage_from_value(self.usage),
             cost: None,
             images: Vec::new(),
         }
@@ -229,12 +318,14 @@ struct ToolCallAccum {
 
 // ── Worker-format seam ───────────────────────────────────────────────────
 
-/// The Chat Completions body for `request`, `stream` omitted.
+/// The Chat Completions body for `request`, `stream` omitted. The worker owns
+/// its own call, so the caching fields are the worker's to add.
 pub(crate) fn request_to_wire(
     request: &LlmRequest,
     search: DeferToolsStrategy,
 ) -> serde_json::Value {
-    serde_json::to_value(WireBody::build(request, search, None)).unwrap_or_default()
+    serde_json::to_value(WireBody::build(request, search, None, CacheOpts::default()))
+        .unwrap_or_default()
 }
 
 /// A raw Chat Completions response → the neutral `LlmResponse`.
@@ -351,7 +442,7 @@ impl StreamParser {
                 })
                 .collect(),
             finish_reason: self.finish_reason,
-            usage: self.usage,
+            usage: usage_from_value(self.usage),
             cost: None,
             images: Vec::new(),
         }
@@ -366,6 +457,10 @@ pub struct OpenAiConfig {
     pub organization: Option<String>,
     #[serde(default)]
     pub project: Option<String>,
+    /// How long a cached prefix lives: `24h`, or `in_memory` for the default
+    /// few minutes. Absent sends nothing, which the newer models want.
+    #[serde(default)]
+    pub cache_retention: Option<String>,
 }
 
 impl OpenAiConfig {
@@ -375,6 +470,7 @@ impl OpenAiConfig {
             api_key: api_key.into(),
             organization: None,
             project: None,
+            cache_retention: None,
         }
     }
 }
@@ -384,6 +480,7 @@ pub struct OpenAiClient {
     base_url: String,
     api_key: String,
     extra_headers: HeaderMap,
+    cache_retention: Option<String>,
 }
 
 impl OpenAiClient {
@@ -404,6 +501,7 @@ impl OpenAiClient {
             base_url: config.base_url,
             api_key: config.api_key,
             extra_headers,
+            cache_retention: config.cache_retention,
         }
     }
 
@@ -412,8 +510,13 @@ impl OpenAiClient {
         request: &LlmRequest,
         search: DeferToolsStrategy,
         stream: bool,
+        session_id: &str,
     ) -> Result<reqwest::Response, LlmCallError> {
-        let wire = WireBody::build(request, search, Some(stream));
+        let cache = CacheOpts {
+            key: cache_key(session_id),
+            retention: self.cache_retention.as_deref(),
+        };
+        let wire = WireBody::build(request, search, Some(stream), cache);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         self.http
@@ -459,7 +562,7 @@ impl LlmCallable for OpenAiClient {
         ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self
-            .post_chat_completion(request, ctx.defer_tools_strategy, false)
+            .post_chat_completion(request, ctx.defer_tools_strategy, false, ctx.session_id)
             .await?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| {
@@ -484,7 +587,7 @@ impl LlmCallable for OpenAiClient {
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self
-            .post_chat_completion(request, ctx.defer_tools_strategy, true)
+            .post_chat_completion(request, ctx.defer_tools_strategy, true, ctx.session_id)
             .await?;
         let status = resp.status();
 
@@ -586,8 +689,13 @@ mod tests {
             exclude: None,
             enabled: None,
         });
-        let v = serde_json::to_value(WireBody::build(&r, DeferToolsStrategy::Search, Some(false)))
-            .unwrap();
+        let v = serde_json::to_value(WireBody::build(
+            &r,
+            DeferToolsStrategy::Search,
+            Some(false),
+            CacheOpts::default(),
+        ))
+        .unwrap();
         assert_eq!(v["reasoning_effort"], "high");
         assert!(v.get("temperature").is_none());
         assert_eq!(v["max_completion_tokens"], 500);
@@ -600,6 +708,7 @@ mod tests {
             &req("gpt-5.4-mini"),
             DeferToolsStrategy::Search,
             Some(false),
+            CacheOpts::default(),
         ))
         .unwrap();
         assert!(v.get("temperature").is_none());
@@ -612,9 +721,77 @@ mod tests {
             &req("gpt-4o"),
             DeferToolsStrategy::Search,
             Some(false),
+            CacheOpts::default(),
         ))
         .unwrap();
         assert_eq!(v["temperature"], 0.7);
         assert!(v.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn a_streamed_call_names_its_session_and_asks_for_the_token_counts() {
+        let cache = CacheOpts {
+            key: Some("sess_1"),
+            retention: Some("24h"),
+        };
+        let v = serde_json::to_value(WireBody::build(
+            &req("gpt-4o"),
+            DeferToolsStrategy::Search,
+            Some(true),
+            cache,
+        ))
+        .unwrap();
+        assert_eq!(v["prompt_cache_key"], "sess_1");
+        assert_eq!(v["prompt_cache_retention"], "24h");
+        assert_eq!(v["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn the_counts_of_a_response_read_the_same_as_any_other_provider() {
+        let usage = usage_from_value(Some(serde_json::json!({
+            "prompt_tokens": 10000,
+            "completion_tokens": 200,
+            "prompt_tokens_details": { "cached_tokens": 9000 }
+        })))
+        .expect("usage");
+        // The vendor counts the cached part inside `prompt_tokens`, so the
+        // uncached part is what is left of it.
+        assert_eq!(usage.input, 10000);
+        assert_eq!(usage.uncached_input, 1000);
+        assert_eq!(usage.cache_read, 9000);
+        assert_eq!(usage.cache_write, 0);
+        assert_eq!(usage.output, 200);
+        assert_eq!(usage.total, 10200);
+    }
+
+    #[test]
+    fn a_response_that_counts_nothing_still_reads() {
+        assert_eq!(usage_from_value(None), None);
+        let usage = usage_from_value(Some(serde_json::json!({}))).expect("usage");
+        assert_eq!(usage.total, 0);
+    }
+
+    #[test]
+    fn a_long_session_name_is_cut_to_what_the_api_takes() {
+        let long = "sé".repeat(80);
+        let key = cache_key(&long).expect("a key");
+        assert_eq!(key.chars().count(), 64);
+        assert!(long.starts_with(key));
+        assert_eq!(cache_key("sess_1"), Some("sess_1"));
+        assert_eq!(cache_key(""), None);
+    }
+
+    #[test]
+    fn a_body_that_does_not_stream_asks_for_no_stream_options() {
+        let v = serde_json::to_value(WireBody::build(
+            &req("gpt-4o"),
+            DeferToolsStrategy::Search,
+            Some(false),
+            CacheOpts::default(),
+        ))
+        .unwrap();
+        assert!(v.get("stream_options").is_none());
+        assert!(v.get("prompt_cache_key").is_none());
+        assert!(v.get("prompt_cache_retention").is_none());
     }
 }

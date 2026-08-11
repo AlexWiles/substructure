@@ -2847,7 +2847,7 @@ fn complete_sub_agent_turn_emits_completed() {
             turn_id: "turn-x".to_string(),
             data: serde_json::json!("done"),
             cost: rust_decimal::Decimal::ZERO,
-            token_usage: std::collections::BTreeMap::new(),
+            token_usage: Default::default(),
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2922,7 +2922,7 @@ fn a_returned_delegation_waits_for_its_running_sibling() {
         turn_id: turn.to_string(),
         data: serde_json::json!("done"),
         cost: rust_decimal::Decimal::ZERO,
-        token_usage: std::collections::BTreeMap::new(),
+        token_usage: Default::default(),
     };
 
     dispatch(&mut agg, complete("child-1", "turn-a"), &system());
@@ -3193,7 +3193,7 @@ fn batch_mixes_tool_and_sub_agent() {
             turn_id: "turn-1".to_string(),
             data: serde_json::json!("FINDINGS"),
             cost: rust_decimal::Decimal::ZERO,
-            token_usage: std::collections::BTreeMap::new(),
+            token_usage: Default::default(),
         },
         &system(),
     );

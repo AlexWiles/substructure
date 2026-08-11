@@ -544,7 +544,7 @@ mod tests {
             turn_id: turn_id.to_string(),
             data,
             cost: rust_decimal::Decimal::ZERO,
-            usage: std::collections::BTreeMap::new(),
+            usage: Default::default(),
         }
     }
 

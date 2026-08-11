@@ -78,6 +78,7 @@ pub struct ProviderEnv {
     pub kind: ProviderKind,
     pub api_key: String,
     pub base_url: Option<String>,
+    pub cache_ttl: Option<String>,
 }
 
 /// One engine-run llm block as the file declares it, before binding.
@@ -86,6 +87,7 @@ pub struct ProviderBinding {
     pub kind: ProviderKind,
     pub api_key_env: String,
     pub base_url: Option<String>,
+    pub cache_ttl: Option<String>,
 }
 
 pub struct AuthEnvVars {
@@ -177,6 +179,7 @@ impl EnvVars {
                 kind: b.kind,
                 api_key,
                 base_url: b.base_url,
+                cache_ttl: b.cache_ttl,
             })
             .collect();
 

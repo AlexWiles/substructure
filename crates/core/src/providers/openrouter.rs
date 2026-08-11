@@ -57,6 +57,40 @@ struct WireBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<&'a ReasoningConfig>,
     stream: bool,
+    /// One breakpoint, placed by the router. A model that caches on its own
+    /// ignores it; an Anthropic one caches nothing without it.
+    cache_control: CacheControl,
+    /// Pins the turn to the provider holding the cache. The root names the
+    /// whole tree, so a delegation keeps the parent's place while it waits.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    session_id: &'a str,
+}
+
+/// A cache breakpoint, and how long what it caches lives.
+#[derive(Serialize, Clone, Copy)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    /// Absent is the default life, five minutes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
+}
+
+impl CacheControl {
+    const EPHEMERAL: Self = Self {
+        kind: "ephemeral",
+        ttl: None,
+    };
+
+    fn with_ttl(ttl: Option<&str>) -> Self {
+        match ttl {
+            Some("1h") => Self {
+                kind: "ephemeral",
+                ttl: Some("1h"),
+            },
+            _ => Self::EPHEMERAL,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,7 +188,7 @@ impl ChatCompletionResponse {
                 .map(|tcs| tcs.iter().map(|tc| tc.clone().into()).collect())
                 .unwrap_or_default(),
             finish_reason: choice.and_then(|c| c.finish_reason),
-            usage: self.usage,
+            usage: super::openai::usage_from_value(self.usage),
             cost,
             images,
         }
@@ -232,37 +266,45 @@ struct ToolCallAccum {
 pub struct OpenRouterConfig {
     pub base_url: String,
     pub api_key: String,
+    /// How long a cached prefix lives: `1h`, or the default five minutes.
+    #[serde(default)]
+    pub cache_ttl: Option<String>,
 }
 
 pub struct OpenRouterClient {
     http: Client,
     config: OpenRouterConfig,
+    cache: CacheControl,
 }
 
 impl OpenRouterClient {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self {
-            http: crate::providers::http_client(),
-            config: OpenRouterConfig {
-                base_url: base_url.into(),
-                api_key: api_key.into(),
-            },
-        }
+        Self::from_config(OpenRouterConfig {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            cache_ttl: None,
+        })
     }
 
     pub fn from_config(config: OpenRouterConfig) -> Self {
         Self {
             http: crate::providers::http_client(),
+            cache: CacheControl::with_ttl(config.cache_ttl.as_deref()),
             config,
         }
     }
 
-    async fn post_chat_completion(
-        &self,
-        request: &LlmRequest,
-        stream: bool,
-    ) -> Result<reqwest::Response, LlmCallError> {
-        let wire = WireBody {
+    /// The router refuses a longer name, and a session id is the caller's own
+    /// string: a Slack thread names one, and a client can send any name it
+    /// likes.
+    const SESSION_ID_MAX_CHARS: usize = 256;
+
+    fn body<'a>(&self, request: &'a LlmRequest, stream: bool, session_id: &'a str) -> WireBody<'a> {
+        let session_id = match session_id.char_indices().nth(Self::SESSION_ID_MAX_CHARS) {
+            Some((end, _)) => &session_id[..end],
+            None => session_id,
+        };
+        WireBody {
             model: &request.model,
             messages: &request.messages,
             tools: request
@@ -273,7 +315,18 @@ impl OpenRouterClient {
             max_completion_tokens: request.max_completion_tokens,
             reasoning: request.reasoning.as_ref(),
             stream,
-        };
+            cache_control: self.cache,
+            session_id,
+        }
+    }
+
+    async fn post_chat_completion(
+        &self,
+        request: &LlmRequest,
+        stream: bool,
+        session_id: &str,
+    ) -> Result<reqwest::Response, LlmCallError> {
+        let wire = self.body(request, stream, session_id);
 
         let url = format!(
             "{}/v1/chat/completions",
@@ -322,9 +375,11 @@ impl LlmCallable for OpenRouterClient {
     async fn call(
         &self,
         request: &LlmRequest,
-        _ctx: &CallContext<'_>,
+        ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let resp = self.post_chat_completion(request, false).await?;
+        let resp = self
+            .post_chat_completion(request, false, ctx.root_session_id())
+            .await?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| {
             LlmCallError::new(ErrorCode::ProviderError, format!("read body: {e}"), true)
@@ -344,10 +399,12 @@ impl LlmCallable for OpenRouterClient {
     async fn call_streaming(
         &self,
         request: &LlmRequest,
-        _ctx: &CallContext<'_>,
+        ctx: &CallContext<'_>,
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let resp = self.post_chat_completion(request, true).await?;
+        let resp = self
+            .post_chat_completion(request, true, ctx.root_session_id())
+            .await?;
         let status = resp.status();
 
         if !status.is_success() {
@@ -493,7 +550,7 @@ impl LlmCallable for OpenRouterClient {
                 })
                 .collect(),
             finish_reason,
-            usage,
+            usage: super::openai::usage_from_value(usage),
             cost,
             images,
         })
@@ -516,5 +573,77 @@ impl OpenRouterProvider {
 impl LlmProviderTrait for OpenRouterProvider {
     async fn resolve(&self, _owner: &SessionOwner) -> Result<Arc<dyn LlmCallable>, String> {
         Ok(self.client.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{Content, DraftMessage, Role};
+
+    fn req() -> LlmRequest {
+        LlmRequest {
+            model: "anthropic/claude-opus-4-8".to_string(),
+            messages: vec![DraftMessage {
+                id: None,
+                role: Role::User,
+                content: Some(Content::Text("hi".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            tools: None,
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+        }
+    }
+
+    fn body(cache_ttl: Option<&str>, session_id: &str) -> serde_json::Value {
+        let client = OpenRouterClient::from_config(OpenRouterConfig {
+            base_url: "https://openrouter.ai/api".to_string(),
+            api_key: "k".to_string(),
+            cache_ttl: cache_ttl.map(str::to_string),
+        });
+        serde_json::to_value(client.body(&req(), false, session_id)).unwrap()
+    }
+
+    #[test]
+    fn every_call_asks_for_a_breakpoint_and_names_its_session() {
+        let v = body(None, "sess_1");
+        assert_eq!(
+            v["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+        assert_eq!(v["session_id"], "sess_1");
+    }
+
+    #[test]
+    fn the_configured_life_rides_the_breakpoint() {
+        let v = body(Some("1h"), "sess_1");
+        assert_eq!(
+            v["cache_control"],
+            serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        // Anything else is the default five minutes, which sends no ttl.
+        assert!(body(Some("5m"), "sess_1")["cache_control"]
+            .get("ttl")
+            .is_none());
+    }
+
+    #[test]
+    fn a_call_with_no_session_names_none() {
+        assert!(body(None, "").get("session_id").is_none());
+    }
+
+    #[test]
+    fn a_long_session_name_is_cut_to_what_the_router_takes() {
+        let long = "sé".repeat(200);
+        let sent = body(None, &long)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(sent.chars().count(), 256);
+        assert!(long.starts_with(&sent));
     }
 }

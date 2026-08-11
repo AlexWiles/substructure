@@ -1,11 +1,10 @@
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 use crate::protocol::{
     ClientContext, DeferToolsStrategy, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest,
-    LlmResponse, RetryOverride, RetryPolicy,
+    LlmResponse, RetryOverride, RetryPolicy, Usage,
 };
 use crate::runtime::retry::RetryTarget;
 
@@ -204,7 +203,7 @@ pub enum Trigger {
         #[serde(default)]
         truncated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        usage: Option<serde_json::Value>,
+        usage: Option<Usage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<Decimal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,8 +225,8 @@ pub enum Trigger {
         data: serde_json::Value,
         #[serde(default)]
         cost: Decimal,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        usage: BTreeMap<String, u64>,
+        #[serde(default)]
+        usage: Usage,
     },
 }
 
@@ -244,7 +243,7 @@ impl Trigger {
         id: String,
         message: DraftMessage,
         truncated: bool,
-        usage: Option<serde_json::Value>,
+        usage: Option<Usage>,
         cost: Option<Decimal>,
     ) -> Self {
         Trigger::LlmFinished {
@@ -274,7 +273,7 @@ impl Trigger {
         turn_id: String,
         data: serde_json::Value,
         cost: Decimal,
-        usage: BTreeMap<String, u64>,
+        usage: Usage,
     ) -> Self {
         Trigger::TurnFinished {
             turn_id,

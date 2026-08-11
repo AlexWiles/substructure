@@ -19,7 +19,7 @@ use tokio_stream::StreamExt;
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
     Content, ContentPart, DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, ReasoningEffort,
-    Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
+    Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -34,10 +34,28 @@ const DEFAULT_MAX_TOKENS: u64 = 4096;
 struct CacheControl {
     #[serde(rename = "type")]
     kind: &'static str,
+    /// Absent is the default life, five minutes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
 }
 
 impl CacheControl {
-    const EPHEMERAL: Self = Self { kind: "ephemeral" };
+    const EPHEMERAL: Self = Self {
+        kind: "ephemeral",
+        ttl: None,
+    };
+
+    /// One life for every breakpoint in the request: the API reads a longer one
+    /// after a shorter one as an error, and a single value cannot order wrong.
+    fn with_ttl(ttl: Option<&str>) -> Self {
+        match ttl {
+            Some("1h") => Self {
+                kind: "ephemeral",
+                ttl: Some("1h"),
+            },
+            _ => Self::EPHEMERAL,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -115,14 +133,12 @@ enum RequestBlock {
 }
 
 impl RequestBlock {
-    fn cache(&mut self) {
+    fn cache(&mut self, control: CacheControl) {
         match self {
             RequestBlock::Text { cache_control, .. }
             | RequestBlock::Image { cache_control, .. }
             | RequestBlock::ToolUse { cache_control, .. }
-            | RequestBlock::ToolResult { cache_control, .. } => {
-                *cache_control = Some(CacheControl::EPHEMERAL)
-            }
+            | RequestBlock::ToolResult { cache_control, .. } => *cache_control = Some(control),
         }
     }
 }
@@ -231,6 +247,7 @@ fn build_body(
     default_max_tokens: u64,
     search: DeferToolsStrategy,
     stream: Option<bool>,
+    cache: CacheControl,
 ) -> AnthropicBody {
     let mut system_parts: Vec<String> = Vec::new();
     let mut turns: Vec<AnthropicMessage> = Vec::new();
@@ -293,15 +310,13 @@ fn build_body(
         }
     }
 
-    // Three breakpoints, in the order the provider reads the request: after the
-    // tools, after the system prompt, and after the last block of the last
-    // message. The first two hold for the session. The third grows the cached
-    // part by one turn each turn, which is where the transcript is.
+    // Four breakpoints: the tools and the system prompt, which hold for the
+    // session, and the last two user turns, which follow the transcript.
     let system = (!system_parts.is_empty()).then(|| {
         vec![SystemBlock {
             kind: "text",
             text: system_parts.join("\n\n"),
-            cache_control: Some(CacheControl::EPHEMERAL),
+            cache_control: Some(cache),
         }]
     });
 
@@ -319,12 +334,22 @@ fn build_body(
         // The last tool the provider reads for itself. A deferred one cannot
         // carry a breakpoint, so the mark goes on the last that is not.
         if let Some(last) = ts.iter_mut().rev().find(|t| !t.defer) {
-            last.cache_control = Some(CacheControl::EPHEMERAL);
+            last.cache_control = Some(cache);
         }
         ts
     });
-    if let Some(block) = turns.last_mut().and_then(|t| t.content.last_mut()) {
-        block.cache();
+
+    // Two marks: this transcript's end, and the previous user turn, where the
+    // last request ended and left an entry. One will not do — a mark reaches
+    // twenty blocks back, and a turn of parallel tool calls adds more.
+    let last = turns.len().checked_sub(1);
+    let previous = turns[..turns.len().saturating_sub(1)]
+        .iter()
+        .rposition(|t| t.role == "user");
+    for turn in [previous, last].into_iter().flatten() {
+        if let Some(block) = turns[turn].content.last_mut() {
+            block.cache(cache);
+        }
     }
 
     let (thinking, output_config) = match request.reasoning.as_ref().and_then(|r| r.effort) {
@@ -376,6 +401,39 @@ struct MessagesResponse {
     usage: Option<serde_json::Value>,
 }
 
+/// The counts the API reports, where `input_tokens` is the part of the prompt
+/// it did not read from the cache.
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+}
+
+impl AnthropicUsage {
+    fn normalize(&self, raw: serde_json::Value) -> Usage {
+        Usage::new(
+            self.input_tokens,
+            self.cache_read_input_tokens,
+            self.cache_creation_input_tokens,
+            self.output_tokens,
+        )
+        .with_provider(raw)
+    }
+}
+
+/// The counts of one response, or nothing where the provider reported none.
+fn usage_from_value(raw: Option<serde_json::Value>) -> Option<Usage> {
+    let raw = raw?;
+    let counts: AnthropicUsage = serde_json::from_value(raw.clone()).unwrap_or_default();
+    Some(counts.normalize(raw))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResponseBlock {
@@ -414,7 +472,7 @@ impl MessagesResponse {
             content: (!content.is_empty()).then_some(content),
             tool_calls,
             finish_reason: self.stop_reason.as_deref().map(map_stop_reason),
-            usage: self.usage,
+            usage: usage_from_value(self.usage),
             cost: None,
             images: Vec::new(),
         }
@@ -428,7 +486,14 @@ pub(crate) fn request_to_wire(
     request: &LlmRequest,
     search: DeferToolsStrategy,
 ) -> serde_json::Value {
-    serde_json::to_value(build_body(request, DEFAULT_MAX_TOKENS, search, None)).unwrap_or_default()
+    serde_json::to_value(build_body(
+        request,
+        DEFAULT_MAX_TOKENS,
+        search,
+        None,
+        CacheControl::EPHEMERAL,
+    ))
+    .unwrap_or_default()
 }
 
 /// A raw Messages API response → the neutral `LlmResponse`.
@@ -458,7 +523,7 @@ enum StreamEvent {
     MessageDelta {
         delta: StreamMessageDelta,
         #[serde(default)]
-        usage: Option<StreamUsage>,
+        usage: Option<serde_json::Value>,
     },
     MessageStop {},
     Ping {},
@@ -474,7 +539,7 @@ struct StreamMessageStart {
     #[serde(default)]
     model: String,
     #[serde(default)]
-    usage: Option<StreamUsage>,
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -510,12 +575,27 @@ struct StreamMessageDelta {
     stop_reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct StreamUsage {
-    #[serde(default)]
-    input_tokens: Option<u64>,
-    #[serde(default)]
-    output_tokens: Option<u64>,
+/// What the stream said about tokens. `message_start` reports the input and
+/// what the cache did with it, `message_delta` the output, so the counts of one
+/// call arrive in two events. The later event wins each field it names.
+#[derive(Default)]
+struct UsageAccum {
+    raw: serde_json::Map<String, serde_json::Value>,
+}
+
+impl UsageAccum {
+    fn merge(&mut self, reported: serde_json::Value) {
+        if let serde_json::Value::Object(obj) = reported {
+            self.raw.extend(obj);
+        }
+    }
+
+    fn into_usage(self) -> Option<Usage> {
+        match self.raw.is_empty() {
+            true => None,
+            false => usage_from_value(Some(serde_json::Value::Object(self.raw))),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -545,8 +625,7 @@ pub(crate) struct StreamParser {
     blocks: Vec<BlockAccum>,
     finish_reason: Option<String>,
     model: Option<String>,
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
+    usage: UsageAccum,
 }
 
 impl StreamParser {
@@ -571,7 +650,7 @@ impl StreamParser {
                     self.model = Some(message.model);
                 }
                 if let Some(u) = message.usage {
-                    self.input_tokens = u.input_tokens.or(self.input_tokens);
+                    self.usage.merge(u);
                 }
                 Ok(None)
             }
@@ -630,7 +709,7 @@ impl StreamParser {
             }),
             StreamEvent::MessageDelta { delta, usage } => {
                 if let Some(u) = usage {
-                    self.output_tokens = u.output_tokens.or(self.output_tokens);
+                    self.usage.merge(u);
                 }
                 Ok(delta.stop_reason.map(|reason| {
                     let mapped = map_stop_reason(&reason);
@@ -678,7 +757,7 @@ impl StreamParser {
             content: (!self.content.is_empty()).then_some(self.content),
             tool_calls,
             finish_reason: self.finish_reason,
-            usage: build_usage(self.input_tokens, self.output_tokens),
+            usage: self.usage.into_usage(),
             cost: None,
             images: Vec::new(),
         }
@@ -695,6 +774,9 @@ pub struct AnthropicConfig {
     pub version: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u64,
+    /// How long a cached prefix lives: `1h`, or the default five minutes.
+    #[serde(default)]
+    pub cache_ttl: Option<String>,
 }
 
 fn default_version() -> String {
@@ -712,6 +794,7 @@ impl AnthropicConfig {
             api_key: api_key.into(),
             version: DEFAULT_VERSION.to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
+            cache_ttl: None,
         }
     }
 }
@@ -721,6 +804,7 @@ pub struct AnthropicClient {
     base_url: String,
     headers: HeaderMap,
     default_max_tokens: u64,
+    cache: CacheControl,
 }
 
 impl AnthropicClient {
@@ -737,6 +821,7 @@ impl AnthropicClient {
             base_url: config.base_url,
             headers,
             default_max_tokens: config.max_tokens,
+            cache: CacheControl::with_ttl(config.cache_ttl.as_deref()),
         }
     }
 
@@ -746,7 +831,13 @@ impl AnthropicClient {
         search: DeferToolsStrategy,
         stream: bool,
     ) -> Result<reqwest::Response, LlmCallError> {
-        let body = build_body(request, self.default_max_tokens, search, Some(stream));
+        let body = build_body(
+            request,
+            self.default_max_tokens,
+            search,
+            Some(stream),
+            self.cache,
+        );
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
 
         self.http
@@ -781,16 +872,6 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
         None => format!("Anthropic API error {status}"),
     };
     LlmCallError::new(code, message, retryable)
-}
-
-fn build_usage(input_tokens: Option<u64>, output_tokens: Option<u64>) -> Option<serde_json::Value> {
-    if input_tokens.is_none() && output_tokens.is_none() {
-        return None;
-    }
-    Some(serde_json::json!({
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-    }))
 }
 
 #[async_trait]
@@ -944,6 +1025,7 @@ mod tests {
             4096,
             DeferToolsStrategy::Search,
             Some(false),
+            CacheControl::EPHEMERAL,
         );
         let v = serde_json::to_value(&body).unwrap();
         assert_eq!(v["system"][0]["text"], "be nice");
@@ -976,6 +1058,7 @@ mod tests {
             4096,
             DeferToolsStrategy::Search,
             Some(false),
+            CacheControl::EPHEMERAL,
         );
         let v = serde_json::to_value(&body).unwrap();
 
@@ -1034,6 +1117,191 @@ mod tests {
         );
     }
 
+    /// One user message of many blocks, as a transcript reaches the engine
+    /// after a run of parallel tool calls.
+    fn wide_message(blocks: usize) -> DraftMessage {
+        let parts = (0..blocks)
+            .map(|i| ContentPart::Text {
+                text: format!("block {i}"),
+            })
+            .collect();
+        let mut m = msg(Role::User, None);
+        m.content = Some(Content::Parts(parts));
+        m
+    }
+
+    fn wide_turn(blocks: usize) -> LlmRequest {
+        req(vec![wide_message(blocks)])
+    }
+
+    fn marked_indexes(v: &serde_json::Value) -> Vec<usize> {
+        v["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .flat_map(|t| t["content"].as_array().unwrap())
+            .enumerate()
+            .filter(|(_, b)| b.get("cache_control").is_some())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The one tool a test needs to spend the fourth breakpoint.
+    fn one_tool() -> Vec<LlmTool> {
+        vec![LlmTool {
+            name: "a".into(),
+            description: String::new(),
+            input: None,
+            output: None,
+            defer: false,
+        }]
+    }
+
+    #[test]
+    fn the_transcript_is_marked_at_the_last_two_user_turns() {
+        let v = request_to_wire(
+            &req(vec![
+                msg(Role::User, Some("one")),
+                msg(Role::Assistant, Some("a")),
+                msg(Role::User, Some("two")),
+                msg(Role::Assistant, Some("b")),
+                msg(Role::User, Some("three")),
+            ]),
+            DeferToolsStrategy::Search,
+        );
+        // One block per turn, so the marks land on turns three and five.
+        assert_eq!(marked_indexes(&v), vec![2, 4]);
+
+        // A transcript of one turn has only its own end to mark.
+        let v = request_to_wire(&wide_turn(8), DeferToolsStrategy::Search);
+        assert_eq!(marked_indexes(&v), vec![7]);
+    }
+
+    #[test]
+    fn a_turn_of_any_width_leaves_the_older_mark_where_the_last_request_put_it() {
+        // The request before this one ended at the first user turn, and marked
+        // its last block. However wide the turn between them, this request
+        // marks that same block again, and the provider reads the entry back.
+        let mut assistant = msg(Role::Assistant, None);
+        assistant.tool_calls = Some(
+            (0..10)
+                .map(|i| tool_call(&i.to_string(), "t", "{}"))
+                .collect(),
+        );
+        let r = req(vec![
+            msg(Role::User, Some("go")),
+            assistant,
+            wide_message(10),
+        ]);
+        let v = request_to_wire(&r, DeferToolsStrategy::Search);
+        // user(1) assistant(10) user(10): 21 blocks, more than the provider
+        // looks back, and the marks still name both ends.
+        assert_eq!(marked_indexes(&v), vec![0, 20]);
+    }
+
+    #[test]
+    fn a_request_carries_no_more_breakpoints_than_the_api_allows() {
+        let mut r = req(vec![
+            msg(Role::System, Some("be nice")),
+            msg(Role::User, Some("one")),
+            msg(Role::Assistant, Some("a")),
+            msg(Role::User, Some("two")),
+        ]);
+        r.tools = Some(one_tool());
+        let v = request_to_wire(&r, DeferToolsStrategy::Search);
+        let marks = 1 + 1 + marked_indexes(&v).len();
+        assert_eq!(marks, 4, "tools, system, and the last two user turns");
+    }
+
+    #[test]
+    fn the_configured_life_rides_every_breakpoint() {
+        let mut r = req(vec![
+            msg(Role::System, Some("be nice")),
+            msg(Role::User, Some("one")),
+            msg(Role::Assistant, Some("a")),
+            msg(Role::User, Some("two")),
+        ]);
+        r.tools = Some(one_tool());
+        let v = serde_json::to_value(build_body(
+            &r,
+            4096,
+            DeferToolsStrategy::Search,
+            Some(false),
+            CacheControl::with_ttl(Some("1h")),
+        ))
+        .unwrap();
+        let hour = json!({ "type": "ephemeral", "ttl": "1h" });
+        assert_eq!(v["tools"][0]["cache_control"], hour);
+        assert_eq!(v["system"][0]["cache_control"], hour);
+        assert_eq!(v["messages"][0]["content"][0]["cache_control"], hour);
+        assert_eq!(v["messages"][2]["content"][0]["cache_control"], hour);
+
+        // Anything else is the default five minutes, which sends no ttl.
+        assert_eq!(
+            serde_json::to_value(CacheControl::with_ttl(Some("5m"))).unwrap(),
+            json!({ "type": "ephemeral" })
+        );
+    }
+
+    #[test]
+    fn a_streamed_call_reports_what_the_cache_did() {
+        let mut parser = StreamParser::new();
+        parser.parse_data(
+            r#"{"type":"message_start","message":{"model":"claude-opus-4-8","usage":{"input_tokens":12,"cache_read_input_tokens":9000,"cache_creation_input_tokens":300}}}"#,
+        );
+        parser.parse_data(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}"#,
+        );
+        let usage = parser
+            .into_response("claude-opus-4-8")
+            .usage
+            .expect("usage");
+        assert_eq!(usage.uncached_input, 12);
+        assert_eq!(usage.cache_read, 9000);
+        assert_eq!(usage.cache_write, 300);
+        assert_eq!(usage.output, 7);
+        assert_eq!(usage.input, 9312, "every input token, cached or not");
+        assert_eq!(usage.total, 9319);
+        // The counts the provider sent stay whole, nested fields included.
+        let raw = usage.provider.expect("the provider report");
+        assert_eq!(raw["cache_read_input_tokens"], 9000);
+    }
+
+    /// The counts of two vendors add up only because the adapter states them
+    /// the same way. Anthropic reports the uncached part of the prompt, OpenAI
+    /// reports the whole prompt, and a tree that uses both adds them together.
+    #[test]
+    fn the_counts_of_two_vendors_add_up() {
+        let anthropic = usage_from_value(Some(json!({
+            "input_tokens": 1000,
+            "cache_read_input_tokens": 9000,
+            "output_tokens": 200
+        })))
+        .expect("usage");
+        let openai = crate::providers::openai::usage_from_value(Some(json!({
+            "prompt_tokens": 10000,
+            "completion_tokens": 200,
+            "prompt_tokens_details": { "cached_tokens": 9000 }
+        })))
+        .expect("usage");
+        assert_eq!(anthropic.input, openai.input, "the same prompt");
+        assert_eq!(anthropic.cache_read, openai.cache_read);
+
+        let mut total = anthropic.clone();
+        total.add(&openai);
+        assert_eq!(total.input, 20000);
+        assert_eq!(total.cache_read, 18000);
+        assert_eq!(total.output, 400);
+        assert!(total.provider.is_none(), "a sum reports for no one call");
+    }
+
+    #[test]
+    fn a_stream_that_says_nothing_about_tokens_reports_no_usage() {
+        let mut parser = StreamParser::new();
+        parser.parse_data(r#"{"type":"message_start","message":{"model":"claude-opus-4-8"}}"#);
+        assert!(parser.into_response("claude-opus-4-8").usage.is_none());
+    }
+
     #[test]
     fn a_request_with_no_tools_and_no_system_still_caches_the_transcript() {
         let r = req(vec![msg(Role::User, Some("hello"))]);
@@ -1073,8 +1341,14 @@ mod tests {
             exclude: None,
             enabled: None,
         });
-        let v = serde_json::to_value(build_body(&r, 4096, DeferToolsStrategy::Search, Some(true)))
-            .unwrap();
+        let v = serde_json::to_value(build_body(
+            &r,
+            4096,
+            DeferToolsStrategy::Search,
+            Some(true),
+            CacheControl::EPHEMERAL,
+        ))
+        .unwrap();
         assert_eq!(v["max_tokens"], 1000);
         assert_eq!(v["tools"][0]["name"], "f");
         assert_eq!(v["tools"][0]["input_schema"]["type"], "object");
@@ -1116,7 +1390,13 @@ mod tests {
             serde_json::from_str(&resp.tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["city"], "NYC");
         assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
-        assert_eq!(resp.usage.unwrap()["input_tokens"], 10);
+        let usage = resp.usage.expect("usage");
+        assert_eq!(usage.uncached_input, 10);
+        assert_eq!(
+            usage.input, 10,
+            "nothing was cached, so the input is the whole prompt"
+        );
+        assert_eq!(usage.output, 5);
     }
 
     #[test]
@@ -1164,7 +1444,7 @@ mod tests {
         match msg_delta {
             StreamEvent::MessageDelta { delta, usage } => {
                 assert_eq!(delta.stop_reason.as_deref(), Some("tool_use"));
-                assert_eq!(usage.unwrap().output_tokens, Some(7));
+                assert_eq!(usage.unwrap()["output_tokens"], 7);
             }
             _ => panic!("expected message_delta"),
         }

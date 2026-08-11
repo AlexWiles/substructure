@@ -12,12 +12,10 @@
 //! event and queues `sub_agent.finished(ok)`; a delegation that never starts
 //! folds the error back as the delegation's result instead.
 
-use std::collections::BTreeMap;
-
 use rust_decimal::Decimal;
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::{DraftMessage, RetryPolicy};
+use crate::protocol::{DraftMessage, RetryPolicy, Usage};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::Trigger;
 use crate::runtime::session::events::*;
@@ -127,7 +125,7 @@ pub(in crate::runtime::session) fn complete_turn(
     session_id: String,
     data: serde_json::Value,
     cost: Decimal,
-    token_usage: BTreeMap<String, u64>,
+    token_usage: Usage,
     caller: &Caller,
 ) -> Result<Vec<EventPayload>, SessionError> {
     SessionState::ensure_internal(caller)?;
