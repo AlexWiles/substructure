@@ -783,7 +783,7 @@ export interface DecisionTrigger {
     cost?: null | string;
     message?: DraftMessage | null;
     truncated?: boolean;
-    usage?: unknown;
+    usage?: Usage | null;
     agent_id?: string;
     session_id?: string;
     interrupt_id?: string;
@@ -862,6 +862,44 @@ export type DecisionTriggerType =
     | "sub_agent.finished"
     | "interrupt.resumed"
     | "turn.finished";
+
+/**
+ * What one call read and wrote, in counts every provider means the same way.
+ *
+ * Each vendor names and scopes these differently: Anthropic reports the part
+ * of the prompt it did not read from the cache, OpenAI reports the whole
+ * prompt including that part. A session that changes model, and a tree whose
+ * agents name different blocks, add these counts together, so the adapter
+ * normalizes them rather than the reader.
+ */
+export interface Usage {
+    /**
+     * The part of `input` the provider read from the cache.
+     */
+    cache_read: number;
+    /**
+     * The part of `input` the provider wrote to the cache.
+     */
+    cache_write: number;
+    /**
+     * Every input token of the call, cached or not.
+     */
+    input: number;
+    output: number;
+    /**
+     * The counts as the provider reported them, for a reader that wants a
+     * number this type does not name.
+     */
+    provider?: unknown;
+    /**
+     * `input` and `output` together.
+     */
+    total: number;
+    /**
+     * The part of `input` the provider read fresh.
+     */
+    uncached_input: number;
+}
 
 /**
  * An interrupt payload following the AG-UI Interrupt shape (spec spelling;

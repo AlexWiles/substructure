@@ -184,17 +184,6 @@ class DecisionTrigger9(BaseModel):
     type: Literal['interrupt.resumed']
 
 
-class DecisionTrigger10(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    cost: constr(pattern=r'^-?\d+(\.\d+)?$') | None = None
-    data: Any | None = None
-    turn_id: str
-    type: Literal['turn.finished']
-    usage: dict[str, conint(ge=0)] | None = None
-
-
 class DeferToolsStrategy(Enum):
     search = 'search'
 
@@ -503,6 +492,30 @@ class ToolInput(RootModel[ToolInput1 | ToolInput2 | ToolInput3]):
     )
 
 
+class Usage(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    cache_read: conint(ge=0) = Field(
+        ..., description='The part of `input` the provider read from the cache.'
+    )
+    cache_write: conint(ge=0) = Field(
+        ..., description='The part of `input` the provider wrote to the cache.'
+    )
+    input: conint(ge=0) = Field(
+        ..., description='Every input token of the call, cached or not.'
+    )
+    output: conint(ge=0)
+    provider: Any | None = Field(
+        None,
+        description='The counts as the provider reported them, for a reader that wants a\nnumber this type does not name.',
+    )
+    total: conint(ge=0) = Field(..., description='`input` and `output` together.')
+    uncached_input: conint(ge=0) = Field(
+        ..., description='The part of `input` the provider read fresh.'
+    )
+
+
 class VideoUrl(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -679,6 +692,17 @@ class DecisionTrigger8(BaseModel):
     result: str | None = None
     session_id: str
     type: Literal['sub_agent.finished']
+
+
+class DecisionTrigger10(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    cost: constr(pattern=r'^-?\d+(\.\d+)?$') | None = None
+    data: Any | None = None
+    turn_id: str
+    type: Literal['turn.finished']
+    usage: Usage | None = None
 
 
 class DeferTools(BaseModel):
@@ -889,7 +913,7 @@ class LlmResponse(BaseModel):
     )
     model: str
     tool_calls: list[ToolCall] | None = None
-    usage: Any | None = None
+    usage: Usage | None = None
 
 
 class Message(BaseModel):
@@ -1160,7 +1184,7 @@ class DecisionTrigger7(BaseModel):
     ok: bool
     truncated: bool
     type: Literal['llm.finished']
-    usage: Any | None = None
+    usage: Usage | None = None
 
 
 class DecisionTrigger(

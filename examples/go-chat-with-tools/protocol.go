@@ -558,7 +558,7 @@ type DecisionTrigger struct {
 	Cost                                                                      *string             `json:"cost"`
 	Message                                                                   *DraftMessage       `json:"message"`
 	Truncated                                                                 *bool               `json:"truncated,omitempty"`
-	Usage                                                                     interface{}         `json:"usage"`
+	Usage                                                                     *Usage              `json:"usage"`
 	AgentID                                                                   *string             `json:"agent_id,omitempty"`
 	SessionID                                                                 *string             `json:"session_id,omitempty"`
 	InterruptID                                                               *string             `json:"interrupt_id,omitempty"`
@@ -605,6 +605,30 @@ type ToolInput struct {
 	Status Status      `json:"status"`
 	Value  interface{} `json:"value"`
 	Error  *string     `json:"error,omitempty"`
+}
+
+// What one call read and wrote, in counts every provider means the same way.
+//
+// Each vendor names and scopes these differently: Anthropic reports the part
+// of the prompt it did not read from the cache, OpenAI reports the whole
+// prompt including that part. A session that changes model, and a tree whose
+// agents name different blocks, add these counts together, so the adapter
+// normalizes them rather than the reader.
+type Usage struct {
+	// The part of `input` the provider read from the cache.                          
+	CacheRead                                                             int64       `json:"cache_read"`
+	// The part of `input` the provider wrote to the cache.                           
+	CacheWrite                                                            int64       `json:"cache_write"`
+	// Every input token of the call, cached or not.                                  
+	Input                                                                 int64       `json:"input"`
+	Output                                                                int64       `json:"output"`
+	// The counts as the provider reported them, for a reader that wants a            
+	// number this type does not name.                                                
+	Provider                                                              interface{} `json:"provider"`
+	// `input` and `output` together.                                                 
+	Total                                                                 int64       `json:"total"`
+	// The part of `input` the provider read fresh.                                   
+	UncachedInput                                                         int64       `json:"uncached_input"`
 }
 
 // An interrupt payload following the AG-UI Interrupt shape (spec spelling;
