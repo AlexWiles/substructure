@@ -39,9 +39,12 @@ system = "You are the on-call assistant."
 [slack]
 dm = "oncall"
 mentions = "oncall"
+
+[remote]
+url = "https://api.substructure.ai"
 ```
 
-Ship it.
+`[remote]` says the file describes a deployment. Ship it.
 
 ```sh
 subs apply
@@ -101,7 +104,8 @@ Docs: [Workers](./docs/50-workers.md)
 
 ## Develop locally
 
-Run the engine on your machine and iterate before you deploy.
+Run the engine on your machine and iterate before you deploy. A file with no
+`[remote]` runs the turn here, on your own key.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...

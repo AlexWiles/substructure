@@ -19,9 +19,3 @@ port = 8765
 [run]
 agent = "oncall"
 output = "pretty"
-
-[remote]
-url = "http://localhost:5174"
-org = "019fd0d3-1c0e-7462-881d-0649c7d34b9b"
-project = "019fd0d3-47a9-7752-9a5d-be3a0b0cf2d8"
-

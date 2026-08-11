@@ -167,6 +167,10 @@ subs serve                       # run it here
 subs apply                       # deploy the same declaration
 ```
 
+`subs serve` is the engine, so it runs here whatever the file names. Every other
+command follows the `[remote]`: with one, `subs run` sends the turn to the
+deployment. Keep a second file with no `[remote]` to run turns here.
+
 `subs run` and `subs serve` read `api_key_env` and `signing_secret_env`. `subs
 apply` strips them.
 

@@ -10,8 +10,8 @@ Tool definitions sit at the front of the request, before the conversation. A
 provider caches an exact prefix, so a definition that moves costs the cache of
 everything behind it. Deferral keeps a large tool set out of that prefix.
 
-Use it above about forty tools. A model chooses badly above that number, and it
-reads every definition on every turn.
+Use it when the list is long enough that the model starts choosing badly, or
+when the definitions cost more than they earn. It reads every one on every turn.
 
 ## Example
 

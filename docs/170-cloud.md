@@ -28,7 +28,13 @@ model = "claude-sonnet-4-5"
 # Your code decides.
 [agent.triage]
 worker = "https://my-worker.example.com/agent"
+
+[remote]
+url = "https://api.substructure.ai"
 ```
+
+`[remote]` is what makes this file a deployment's. Without it, every command
+reads the engine on your machine instead.
 
 ```sh
 subs apply

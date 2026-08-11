@@ -189,8 +189,8 @@ when it gets one.
 
 ## Filtering
 
-A connection can offer a hundred tools. Above about forty, a model chooses
-badly. Take fewer.
+A connection can offer a hundred tools. A model chooses worse as the list grows,
+and worst between tools that look alike. Take fewer.
 
 ```typescript
 type McpTools = {

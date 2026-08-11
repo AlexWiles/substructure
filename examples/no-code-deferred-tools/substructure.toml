@@ -17,3 +17,5 @@ url = "https://mcp.deepwiki.com/mcp"
 agent = "docs"
 output = "pretty"
 
+[remote]
+url = "https://api.substructure.ai"

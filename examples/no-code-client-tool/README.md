@@ -14,12 +14,19 @@ Install the CLI:
 npm i -g @substructure.ai/cli
 ```
 
-One terminal. Ask something that depends on where you are. The model calls
-`get_location`, and the turn yields with the call pending:
+Deploy the file and give it a key:
 
 ```sh
-export OPENROUTER_API_KEY=sk-or-...
-subs run -c substructure.toml --agent assistant "recommend a coffee shop near me"
+subs login
+subs apply
+subs llm set-key openrouter
+```
+
+Ask something that depends on where you are. The model calls `get_location`, and
+the turn yields with the call pending:
+
+```sh
+subs run "recommend a coffee shop near me"
 ```
 
 Pretty output prints the pending call with its id, and the command to continue
@@ -30,3 +37,12 @@ the session. Take that command and answer the call:
 ```
 
 The turn resumes where it stopped. A call can wait as long as it needs to.
+
+## Run it here instead
+
+Delete `[remote]` and the turn runs on this machine, on your own key:
+
+```sh
+export OPENROUTER_API_KEY=sk-or-...
+subs run -c substructure.toml --agent assistant "recommend a coffee shop near me"
+```

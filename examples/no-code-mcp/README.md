@@ -17,15 +17,30 @@ Install the CLI:
 npm i -g @substructure.ai/cli
 ```
 
-One terminal.
+Deploy the file and give it a key:
+
+```sh
+subs login
+subs apply
+subs llm set-key openrouter
+```
+
+```sh
+subs run "how does routing work in honojs/hono?"
+```
+
+The model calls `deepwiki__ask_question`. The connection id is in front of the
+tool name, because `prefix_tools` is on by default.
+
+## Run it here instead
+
+Delete `[remote]` and the engine dials the connection from this machine, on your
+own key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
 subs run -c substructure.toml --agent docs "how does routing work in honojs/hono?"
 ```
-
-The model calls `deepwiki__ask_question`. The connection id is in front of the
-tool name, because `prefix_tools` is on by default.
 
 ## Fewer tools
 

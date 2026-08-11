@@ -75,8 +75,9 @@ type AgentTool = {
 
 ## Many tools
 
-Above about forty tools, a model chooses badly, and each definition sits at the
-front of the request where the provider keeps its cache.
+A model chooses worse as the tool list grows, and worst between tools that look
+alike. Each definition also sits at the front of the request, where the provider
+keeps its cache.
 
 Set `defer` on the tools an agent seldom needs. The request leaves them out, and
 the agent gets `tool_search` and `call_tool` in their place. The

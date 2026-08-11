@@ -26,12 +26,26 @@ Install the CLI:
 npm i -g @substructure.ai/cli
 ```
 
-One terminal.
+Deploy the file and give it a key:
+
+```sh
+subs login
+subs apply
+subs llm set-key openrouter
+```
+
+```sh
+subs run "two sentences for the homepage of a bicycle repair shop that comes to you"
+```
+
+Pretty output shows each delegation as it runs.
+
+## Run it here instead
+
+Delete `[remote]` and the turn runs on this machine, on your own key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
 subs run -c substructure.toml --agent assistant \
     "two sentences for the homepage of a bicycle repair shop that comes to you"
 ```
-
-Pretty output shows each delegation as it runs.

@@ -33,10 +33,14 @@ system = "You are the on-call assistant."
 [slack]
 dm = "oncall"
 mentions = "oncall"
+
+[remote]
+url = "https://api.substructure.ai"
 ```
 
 `[llm.openrouter]` says which provider to call. `[agent.oncall]` says who calls
-it. `[slack]` says where the agent answers. The file holds no keys.
+it. `[slack]` says where the agent answers. `[remote]` says the file describes a
+deployment, so every command below acts on the cloud. The file holds no keys.
 
 ## 3. Create the project
 
