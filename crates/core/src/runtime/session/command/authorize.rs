@@ -19,8 +19,7 @@ impl SessionState {
         }
     }
 
-    /// The engine, or a worker answering what it was handed. An admin is not a
-    /// worker: no engine gave it a decision to submit.
+    /// The engine, or a worker answering what it was handed.
     pub(in crate::runtime::session) fn ensure_worker_or_system(
         caller: &Caller,
     ) -> Result<(), SessionError> {
@@ -32,7 +31,7 @@ impl SessionState {
         }
     }
 
-    /// Anyone but an end user. For operations on a session rather than in it.
+    /// For operations on a session rather than in it.
     pub(in crate::runtime::session) fn ensure_operator_or_system(
         caller: &Caller,
     ) -> Result<(), SessionError> {
@@ -106,8 +105,7 @@ impl SessionState {
         Ok(())
     }
 
-    /// A worker may answer only the calls it was handed. Nobody else answers
-    /// one: an admin administers the session, it does not run the model.
+    /// A worker answers only the calls it was handed. Nobody else answers one.
     pub(in crate::runtime::session) fn check_llm_call_caller(
         &self,
         call: Option<&LlmCallState>,

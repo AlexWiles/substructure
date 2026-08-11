@@ -186,8 +186,7 @@ async fn run(
     }
 }
 
-/// Who started an operator session. The kind keeps it apart from an end user
-/// with the same name.
+/// Who started an operator session.
 fn operator_owner(caller: &Caller) -> SessionOwner {
     SessionOwner {
         tenant_id: caller.tenant_id().to_string(),

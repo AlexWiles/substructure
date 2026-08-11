@@ -12,9 +12,8 @@ pub use resolvers::{
     ClientTokenIssuerError, JwtHs256ClientTokenAuthResolver, NoopAuthResolver,
 };
 
-/// A credential a program holds.
 pub const SOURCE_API_KEY: &str = "api_key";
-/// A credential a person holds, from a login.
+/// A login, rather than a key.
 pub const SOURCE_USER: &str = "user";
 
 #[derive(Debug, Clone)]
@@ -28,8 +27,7 @@ pub struct AuthPrincipal {
 }
 
 impl AuthPrincipal {
-    /// The caller a worker surface builds. Always a key: a worker is a program,
-    /// and a person who logs in does not answer decisions.
+    /// A worker is a program, so this is always a key.
     pub fn api_key_caller(&self) -> Option<Caller> {
         self.named_subject().map(|key_id| Caller::ApiKey {
             tenant_id: self.tenant_id.clone(),
@@ -37,8 +35,6 @@ impl AuthPrincipal {
         })
     }
 
-    /// The caller an operator surface builds: the person the credential names,
-    /// or the key that holds it.
     pub fn operator_caller(&self) -> Option<Caller> {
         let subject = self.named_subject()?;
         Some(match self.source {
@@ -53,7 +49,6 @@ impl AuthPrincipal {
         })
     }
 
-    /// A machine subject must name something. An empty one names nobody.
     fn named_subject(&self) -> Option<String> {
         self.subject
             .as_deref()
@@ -107,8 +102,6 @@ mod tests {
         }
     }
 
-    /// A person who logs in is an admin. A program with a key is not, and the
-    /// operator surface is where the two arrive together.
     #[test]
     fn the_credential_decides_which_operator_it_is() {
         let user = principal(SOURCE_USER, Some("alex@example.test"));
@@ -124,15 +117,12 @@ mod tests {
         ));
     }
 
-    /// A worker is a program. A person's credential does not make one, so the
-    /// worker surface builds a key whatever it is given.
     #[test]
     fn the_worker_surface_is_always_a_key() {
         let user = principal(SOURCE_USER, Some("alex@example.test"));
         assert!(matches!(user.api_key_caller(), Some(Caller::ApiKey { .. })));
     }
 
-    /// A subject that names nobody is not a caller.
     #[test]
     fn a_machine_subject_must_name_something() {
         assert!(principal(SOURCE_API_KEY, None).operator_caller().is_none());
@@ -142,7 +132,6 @@ mod tests {
         assert!(principal(SOURCE_USER, Some("")).api_key_caller().is_none());
     }
 
-    /// An unknown source is not trusted with a person's privileges.
     #[test]
     fn an_unknown_source_is_a_key() {
         assert!(matches!(

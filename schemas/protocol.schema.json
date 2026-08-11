@@ -2304,6 +2304,17 @@
       "title": "MessageTree",
       "type": "object"
     },
+    "OwnerKind": {
+      "description": "What kind of caller owns a session. Part of the identity: only `frontend` is\nan end user, and an ownership check grants access to no other kind.",
+      "enum": [
+        "frontend",
+        "admin",
+        "api_key",
+        "system"
+      ],
+      "title": "OwnerKind",
+      "type": "string"
+    },
     "ReasoningConfig": {
       "additionalProperties": false,
       "properties": {
@@ -2852,13 +2863,16 @@
     },
     "WorkerIdentity": {
       "additionalProperties": false,
-      "description": "The owner as delivered to the worker on `DecisionRequest.identity`: the\nsubject and its metadata, without the tenant. The tenant scopes the session\ninternally but is not sent to the worker.",
+      "description": "The owner as delivered to the worker on `DecisionRequest.identity`, without\nthe tenant. Read `kind` with `id`: only `frontend` is an end user.",
       "properties": {
         "id": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "kind": {
+          "$ref": "#/$defs/OwnerKind"
         },
         "metadata": {
           "additionalProperties": {

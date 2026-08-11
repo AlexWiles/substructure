@@ -2,20 +2,21 @@ use std::collections::HashMap;
 
 use crate::protocol::{OwnerKind, SessionOwner};
 
-/// Who is acting, in descending privilege.
-///
-/// `ApiKey` and `Admin` are both machine-authenticated, and they differ in what
-/// holds the credential: a program holds a key, a person logs in. Only a worker
-/// answers the calls the engine hands out, so only `ApiKey` may.
+/// Who is acting, in descending privilege. A program holds a key, a person logs
+/// in. Only a worker answers a decision, so only `ApiKey` may.
 #[derive(Debug, Clone)]
 pub enum Caller {
-    /// The engine itself.
-    System { tenant_id: String },
-    /// A program with an API key. Workers submit decisions as this.
-    ApiKey { tenant_id: String, key_id: String },
-    /// A person who logged in, through the CLI or the dashboard.
-    Admin { tenant_id: String, user_id: String },
-    /// An end user, holding a client token.
+    System {
+        tenant_id: String,
+    },
+    ApiKey {
+        tenant_id: String,
+        key_id: String,
+    },
+    Admin {
+        tenant_id: String,
+        user_id: String,
+    },
     Frontend {
         tenant_id: String,
         user_id: String,
@@ -33,7 +34,6 @@ impl Caller {
         }
     }
 
-    /// What the credential names: a key id, or a person.
     pub fn subject(&self) -> Option<&str> {
         match self {
             Caller::System { .. } => None,
@@ -51,11 +51,8 @@ impl Caller {
         }
     }
 
-    /// Whether this caller is the owner of a session.
-    ///
-    /// The kind must agree as well as the name. An admin and an end user called
-    /// the same thing are different owners, and their names come from different
-    /// issuers, so one must never open the other's session.
+    /// The kind must agree as well as the name. Names come from different
+    /// issuers, so the same name is not the same owner.
     pub fn owns(&self, owner: &SessionOwner) -> bool {
         let Some(subject) = self.subject() else {
             return false;
@@ -87,8 +84,6 @@ mod tests {
         }
     }
 
-    /// The names come from different issuers, so the same string is not the
-    /// same person. An end user must not open an admin's session with it.
     #[test]
     fn one_kind_of_owner_does_not_match_another() {
         let name = "alex@example.test";
@@ -109,7 +104,6 @@ mod tests {
         assert!(!admin.owns(&owner(OwnerKind::Frontend, "alex")));
     }
 
-    /// A name is only a name inside its tenant.
     #[test]
     fn an_owner_in_another_tenant_is_not_this_one() {
         let mut other = owner(OwnerKind::Frontend, "alex");
@@ -117,8 +111,7 @@ mod tests {
         assert!(!frontend("alex").owns(&other));
     }
 
-    /// The engine names nobody, so it owns nothing. It is allowed past an
-    /// ownership check by privilege, not by matching one.
+    /// The engine names nobody. Privilege lets it past a check, not a match.
     #[test]
     fn the_engine_owns_nothing() {
         let system = Caller::System {
@@ -127,7 +120,6 @@ mod tests {
         assert!(!system.owns(&owner(OwnerKind::System, "anything")));
     }
 
-    /// An owner stored before the kind existed was an end user's.
     #[test]
     fn a_stored_owner_without_a_kind_reads_as_an_end_user() {
         let stored = r#"{"tenant_id":"tenant-a","id":"alex"}"#;

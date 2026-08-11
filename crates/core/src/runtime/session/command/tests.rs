@@ -10753,8 +10753,6 @@ fn a_queued_turn_id_cannot_be_opened_by_another_path() {
 
 // ── Admin ────────────────────────────────────────────────────────────
 
-/// An admin administers a session. It is not a worker, so it cannot answer a
-/// decision the engine handed to one.
 #[test]
 fn admin_cannot_submit_a_worker_decision() {
     assert!(matches!(
@@ -10769,7 +10767,6 @@ fn admin_cannot_submit_a_worker_decision() {
     ));
 }
 
-/// Cancelling is an operation on a session, not a decision in it.
 #[test]
 fn an_admin_can_cancel_a_session_and_an_end_user_cannot() {
     assert!(SessionState::ensure_operator_or_system(&admin()).is_ok());
@@ -10781,9 +10778,8 @@ fn an_admin_can_cancel_a_session_and_an_end_user_cannot() {
     ));
 }
 
-/// Only the worker that was handed a call answers it. The caller is judged
-/// before the call is, so an unknown call still tells the two apart: a worker
-/// gets "no such call", and everyone else gets "not yours".
+/// The caller is judged before the call, so an unknown call still separates
+/// them: a worker gets "no such call", everyone else "not yours".
 #[test]
 fn only_a_worker_answers_an_llm_call() {
     let state = SessionState::new("sess-1".to_string());
@@ -10802,7 +10798,6 @@ fn only_a_worker_answers_an_llm_call() {
     assert!(state.check_llm_call_caller(None, &system()).is_ok());
 }
 
-/// An admin reads and writes any session in its tenant, and none outside it.
 #[test]
 fn an_admin_is_bound_to_its_tenant() {
     assert!(SessionState::ensure_tenant_matches(&admin(), "tenant-a").is_ok());
@@ -10812,15 +10807,13 @@ fn an_admin_is_bound_to_its_tenant() {
     ));
 }
 
-/// A session an admin started has no end user, so ownership does not gate it.
 #[test]
 fn an_admin_does_not_answer_to_a_session_owner() {
     let state = SessionState::new("sess-1".to_string());
     assert!(state.ensure_owns_session(&admin()).is_ok());
 }
 
-/// An admin outranks a worker: a person unblocks what a program parked, and
-/// not the reverse.
+/// A person unblocks what a program parked, not the reverse.
 #[test]
 fn an_admin_outranks_a_machine_and_answers_to_the_engine() {
     use crate::protocol::InterruptOrigin;

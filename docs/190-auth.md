@@ -60,15 +60,24 @@ The engine fixes a session's owner when it creates the session. It checks every
 later input against that owner. The tenant must match, and a Frontend caller
 must own the session.
 
-The worker receives that owner as `DecisionRequest.identity`. It holds the id
-and the metadata, not the tenant.
+The worker receives that owner as `DecisionRequest.identity`. It holds the id,
+the kind, and the metadata, not the tenant.
 
 ```typescript
-type WorkerIdentity = { id?: string; metadata?: Record<string, string> }
+type OwnerKind = "frontend" | "admin" | "api_key" | "system"
+type WorkerIdentity = {
+    id?: string
+    kind: OwnerKind
+    metadata?: Record<string, string>
+}
 ```
 
 The engine sets this once and vouches for it. Read it without verifying it. It
 is the owner, not the caller of this request.
+
+`kind` is part of the identity. Only `frontend` is an end user: an operator who
+runs a turn owns the session as `admin` or `api_key`. Two owners with the same
+`id` and different kinds are different owners.
 
 ## Patterns
 
@@ -79,11 +88,15 @@ give it to the browser. That user owns every session the browser opens.
 
 ### Limit by identity
 
-Read `identity` on each decision to give an owner only their own data.
+Read `identity` on each decision to give an owner only their own data. Check
+`kind` as well as `id`: an operator is not the end user with that name.
 
 ```javascript
 function decide({ trigger, proposed, identity }) {
     if (trigger.type === "tool.execute" && trigger.name === "list_files") {
+        if (identity.kind !== "frontend") {
+            return { actions: [{ type: "tool.error", error: "not an end user" }] };
+        }
         return { actions: [{ type: "tool.result", result: filesFor(identity.id) }] };
     }
     return proposed;
