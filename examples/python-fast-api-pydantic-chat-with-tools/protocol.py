@@ -295,7 +295,7 @@ class InterruptOption(BaseModel):
 
 class InterruptOrigin(Enum):
     system = 'system'
-    admin = 'admin'
+    operator = 'operator'
     machine = 'machine'
     frontend = 'frontend'
 
@@ -376,7 +376,7 @@ class McpTools(BaseModel):
 
 class OwnerKind(Enum):
     frontend = 'frontend'
-    admin = 'admin'
+    operator = 'operator'
     api_key = 'api_key'
     system = 'system'
 

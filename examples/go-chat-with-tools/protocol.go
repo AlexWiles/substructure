@@ -850,8 +850,8 @@ type OwnerKind string
 
 const (
 	APIKey          OwnerKind = "api_key"
-	Operator        OwnerKind = "operator"
 	Frontend        OwnerKind = "frontend"
+	Operator        OwnerKind = "operator"
 	OwnerKindSystem OwnerKind = "system"
 )
 
