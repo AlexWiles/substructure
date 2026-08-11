@@ -2,3 +2,8 @@
 node = "24"
 pnpm = "latest"
 "npm:typescript-language-server" = "5.1.3"
+
+[env]
+# `packages/cli` postinstall replaces its tracked shim with the native binary.
+# In this repo that is a 29MB change to a committed file.
+SUBS_SKIP_POSTINSTALL = "1"
