@@ -15,8 +15,7 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    /// The `type` the file writes. What a message about a block should call it,
-    /// so the name a reader is given is the one they would grep for.
+    /// The `type` the file writes. Use it in messages about a block.
     pub fn name(self) -> &'static str {
         match self {
             Self::Openrouter => "openrouter",

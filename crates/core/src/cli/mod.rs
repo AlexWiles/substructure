@@ -113,9 +113,8 @@ pub enum Command {
         #[command(subcommand)]
         command: cloud::keys::KeysCommand,
     },
-    /// Inspect sessions (list, stream events). Reads the deployment the file's
-    /// `[remote]` names, or the database an engine here writes when it names
-    /// none.
+    /// Inspect sessions (list, stream events). Reads the deployment the
+    /// `[remote]` names, or the database an engine here writes.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Sessions {
         #[command(subcommand)]

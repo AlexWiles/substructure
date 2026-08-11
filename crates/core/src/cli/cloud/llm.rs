@@ -5,9 +5,8 @@
 //! on this side of the write partition — and it never appears in argv, where a
 //! shell history would keep it.
 //!
-//! An engine here holds no key. The file *names* the variable each block reads,
-//! and this machine's environment holds it, so `list` reports which of those
-//! variables are set and the two binding commands say which one to export.
+//! An engine here holds no key. The file names the variable each block reads,
+//! and this machine holds it.
 
 use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
@@ -74,17 +73,10 @@ pub async fn run(command: LlmCommand) -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// An engine here: the file declares the blocks, and this machine's environment
-// holds their keys.
-// ---------------------------------------------------------------------------
-
-/// One declared block, as this machine can answer for it: the name, the venue,
-/// and whether the variable it reads holds anything.
+/// The name, the type, and whether the variable holds a key.
 fn declared(name: &str, config: &ProjectConfig) -> Option<[String; 3]> {
     let spec = config.llm.get(name)?;
-    // A worker block runs the call itself, so there is no key here to bind and
-    // an empty cell would read as one that is missing.
+    // A worker block makes the call, so no key binds here.
     let key = match spec.kind {
         ProviderKind::Worker => "n/a (your worker runs it)".to_string(),
         _ => match spec.api_key_env() {
@@ -123,9 +115,7 @@ fn list_here(config: &ProjectConfig, scope: &ProjectScope) -> Result<()> {
     Ok(())
 }
 
-/// A key here is a variable this machine holds, so there is nothing to upload
-/// or remove. The command says which variable, which is the thing you actually
-/// needed to know.
+/// There is no key to upload or remove here. Says which variable holds it.
 fn key_is_a_variable(block: &str, config: &ProjectConfig, verb: &str) -> Result<()> {
     let Some(spec) = config.llm.get(block) else {
         bail!(
@@ -244,8 +234,6 @@ mod tests {
          [llm.byo]\ntype = \"worker\"\n\
          [agent.a]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n";
 
-    /// The block's key here is a variable, so the answer is its name and
-    /// whether it holds anything.
     #[test]
     fn a_block_here_reports_the_variable_it_reads() {
         let config = config(BLOCKS);
@@ -255,8 +243,6 @@ mod tests {
         assert_eq!(key, "$NOT_SET_ANTHROPIC (not set)");
     }
 
-    /// A worker block never needs a key where the engine runs, so an empty cell
-    /// would read as a missing one.
     #[test]
     fn a_worker_block_needs_no_key_here() {
         let config = config(BLOCKS);
@@ -265,7 +251,6 @@ mod tests {
         assert!(key.contains("your worker runs it"), "{key}");
     }
 
-    /// Nothing to upload: the message names the variable to export instead.
     #[test]
     fn setting_a_key_here_names_the_variable() {
         let config = config(BLOCKS);

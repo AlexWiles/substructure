@@ -4,9 +4,8 @@ use std::io::{self, IsTerminal, Write};
 use super::env::OutputFormat;
 use crate::transport::ag_ui::events::{AgUiEvent, RunOutcome};
 
-/// Where translated AG-UI events go. `Jsonl` renders nothing here — its raw
-/// engine events are written straight to stdout by the caller instead, which is
-/// the one thing a translation cannot say.
+/// Where translated AG-UI events go. `Jsonl` renders nothing: the caller writes
+/// the engine events.
 pub(crate) enum Renderer {
     AgUi,
     Jsonl,
@@ -14,8 +13,6 @@ pub(crate) enum Renderer {
 }
 
 impl Renderer {
-    /// `color` is the caller's answer to "is stdout a terminal", which only
-    /// `Pretty` has any use for.
     pub(crate) fn new(output: OutputFormat, color: bool) -> Self {
         match output {
             OutputFormat::AgUi => Renderer::AgUi,
@@ -24,7 +21,6 @@ impl Renderer {
         }
     }
 
-    /// Whether the caller writes the raw engine events itself.
     pub(crate) fn is_raw(&self) -> bool {
         matches!(self, Renderer::Jsonl)
     }
@@ -51,8 +47,7 @@ impl Renderer {
     }
 }
 
-/// Serialized first, written second, so a reader that went away surfaces as the
-/// `io::Error` it is rather than as a serialization failure wrapping one.
+/// Serializes first and writes second, so a closed pipe gives an `io::Error`.
 pub(crate) fn write_json<T: serde::Serialize>(
     stdout: &mut std::io::Stdout,
     value: &T,
@@ -64,7 +59,6 @@ pub(crate) fn write_json<T: serde::Serialize>(
     Ok(())
 }
 
-/// Whether styling belongs in this output: only when stdout is a terminal.
 pub(crate) fn color() -> bool {
     std::io::stdout().is_terminal()
 }

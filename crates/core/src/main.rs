@@ -37,9 +37,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Whether the reader went away — `subs sessions events … | head`, or a pager
-/// someone quit. Nothing failed, so nothing is reported: the output ends where
-/// the reader stopped reading.
+/// The reader stopped, as `| head` does. Nothing failed, so report nothing.
 fn is_broken_pipe(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause

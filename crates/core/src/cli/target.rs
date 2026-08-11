@@ -1,36 +1,15 @@
-//! Where a command acts: an engine on this machine, or a deployment.
+//! Where a command acts. The `[remote]` section decides.
 //!
-//! One rule, in one place. **The `[remote]` section decides.** A file that
-//! names one describes a deployment you administer, so that is what a command
-//! reads and writes. A file that names none describes an engine you run here,
-//! so this machine's environment and this machine's database are the whole
-//! truth. `--url` and `--db` each name a target outright, for when the file is
-//! not the one to ask.
-//!
-//! Three kinds of command follow from it:
-//!
-//! - **Both.** `sessions`, `agents`, `llm`, `mcp`, `doctor`, `slack` — the same
-//!   question has an answer in either place.
-//! - **Here only.** `run`, `serve` — a `[remote]` does not change what they do.
-//! - **A deployment only.** `keys`, `open`, `config log`, and the commands that
-//!   bind a secret. With no `[remote]` these have nothing to act on, and say so
-//!   rather than reaching for the hosted cloud and asking you to log in to it.
-//!
-//! Deliberately outside the rule: `login`, `logout`, and `whoami` are about a
-//! credential rather than a project, and `apply` and `link` are how a file gets
-//! a `[remote]` in the first place. All five must work before there is one.
+//! `login`, `logout`, `whoami`, `apply`, and `link` do not use this rule. They
+//! must work before a file has a `[remote]`.
 
 use anyhow::{bail, Result};
 
 use super::cloud::project_config::{self, ProjectConfig};
 use super::cloud::CloudGlobals;
 
-/// What a command acts on.
 pub enum Target {
-    /// An engine you run here, described by this file.
     Here(Box<ProjectConfig>),
-    /// The deployment `--url` or `[remote]` names — or, with no file at all,
-    /// the default one.
     Deployment,
 }
 
@@ -43,10 +22,8 @@ impl Target {
     }
 }
 
-/// Where this invocation acts: `--url` first, since naming a server is asking
-/// for it; then the file's `[remote]`; then here. A file that does not exist
-/// reads as a deployment, so a command run outside a project still reaches the
-/// one it would have.
+/// Precedence: `--url`, then `[remote]`, then here. No file reads as a
+/// deployment.
 pub fn target(globals: &CloudGlobals) -> Result<Target> {
     if globals.url.is_some() {
         return Ok(Target::Deployment);
@@ -60,8 +37,6 @@ pub fn target(globals: &CloudGlobals) -> Result<Target> {
     })
 }
 
-/// What a deployment-only command says when the file names no deployment. The
-/// two ways forward are both in it, because "not configured" is not advice.
 pub fn no_deployment(what: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "{what} acts on a deployment, and this project names no `[remote]`.\n\
@@ -71,7 +46,6 @@ pub fn no_deployment(what: &str) -> anyhow::Error {
     )
 }
 
-/// The guard a deployment-only command runs before it reaches for a server.
 pub fn require_deployment(globals: &CloudGlobals, what: &str) -> Result<()> {
     match target(globals)? {
         Target::Deployment => Ok(()),
@@ -120,7 +94,6 @@ mod tests {
         assert!(!is_here(&wrote(A_REMOTE)));
     }
 
-    /// Naming a server is asking for it, whatever the file says.
     #[test]
     fn the_url_flag_wins_over_a_file_that_names_no_remote() {
         let mut globals = wrote(ENGINE_HERE);
@@ -128,7 +101,6 @@ mod tests {
         assert!(!is_here(&globals));
     }
 
-    /// A `-c` that names nothing is a mistake, not a reason to pick a target.
     #[test]
     fn a_config_path_that_does_not_resolve_is_an_error() {
         let globals = CloudGlobals {
@@ -138,7 +110,6 @@ mod tests {
         assert!(target(&globals).is_err());
     }
 
-    /// "Not configured" is not advice: both ways forward are in the message.
     #[test]
     fn a_deployment_only_command_says_how_to_get_one() {
         let err = require_deployment(&wrote(ENGINE_HERE), "subs keys")

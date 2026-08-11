@@ -358,8 +358,7 @@ impl CloudClient {
         self.stream(self.request(Method::GET, path), on_line).await
     }
 
-    /// The same, for a stream a request body opens: a run is submitted and
-    /// watched by one call, so nothing can happen between the two.
+    /// The same, for a stream that a request body opens.
     pub async fn post_sse<B: Serialize, F>(&self, path: &str, body: &B, on_line: F) -> Result<()>
     where
         F: FnMut(&str),

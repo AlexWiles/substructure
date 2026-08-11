@@ -1,18 +1,7 @@
 //! `subs run` against the deployment the file names.
 //!
-//! The same turn, somewhere else. What differs is only where the events come
-//! from: an engine here hands them over in process, and a deployment streams
-//! them over one request that both submits the input and watches it — a client
-//! that submitted and then subscribed would have missed the start of its own
-//! turn.
-//!
-//! No credential of its own. The operator surface is the one the CLI already
-//! authenticates against, so a turn run from a terminal needs what `subs login`
-//! stored and nothing else.
-//!
-//! The rendering is `run`'s, unchanged: `pretty` and `ag-ui` read the AG-UI
-//! events the deployment translates (token deltas included, which is what makes
-//! a reply arrive as it is written), and `jsonl` reads the engine's own events.
+//! One request submits the input and streams the turn. A client that submits
+//! first and subscribes second loses the start of its turn.
 
 use anyhow::{Context as _, Result};
 
@@ -20,6 +9,7 @@ use crate::api::v1::{RunFormat, RunRequest};
 use crate::protocol::ClientInput;
 use crate::session::SessionEvent;
 use crate::transport::ag_ui::events::AgUiEvent;
+use crate::transport::ag_ui::translator::AgUiTranslator;
 
 use super::cloud::context::Context;
 use super::cloud::{CloudGlobals, ProjectScope};
@@ -27,14 +17,13 @@ use super::env::OutputFormat;
 use super::pretty::{self, write_json, Renderer};
 
 pub struct Run {
-    pub config: Option<std::path::PathBuf>,
+    pub globals: CloudGlobals,
     pub session_id: Option<String>,
     pub input: ClientInput,
     pub output: OutputFormat,
     pub agent: String,
 }
 
-/// What the deployment should stream for a given output mode.
 fn format_for(output: OutputFormat) -> RunFormat {
     match output {
         OutputFormat::Jsonl => RunFormat::Events,
@@ -46,21 +35,11 @@ pub async fn run(cmd: Run) -> Result<()> {
     let scope = ProjectScope {
         org: None,
         project: None,
-        globals: CloudGlobals {
-            config: cmd.config,
-            ..Default::default()
-        },
+        globals: cmd.globals,
     };
     let (ctx, project) = Context::from_project(&scope).await?;
 
-    // `jsonl` prints what the engine stored, so it asks for that; the rendered
-    // modes take the deployment's translation, which carries the token deltas
-    // no stored event has.
     let format = format_for(cmd.output);
-    let query = match format {
-        RunFormat::Events => "?format=events",
-        RunFormat::AgUi => "?format=ag-ui",
-    };
 
     let body = RunRequest {
         session_id: cmd.session_id.clone(),
@@ -71,10 +50,14 @@ pub async fn run(cmd: Run) -> Result<()> {
     let mut renderer = Renderer::new(cmd.output, pretty::color());
     let mut session_id = cmd.session_id;
     let mut failed: Option<anyhow::Error> = None;
+    let mut finished = Finished::new(format);
 
     ctx.client
         .post_sse(
-            &format!("/api/v1/projects/{project}/run{query}"),
+            &format!(
+                "/api/v1/projects/{project}/run?format={}",
+                format.as_query()
+            ),
             &body,
             |line| {
                 let Some(data) = line.strip_prefix("data:") else {
@@ -85,10 +68,14 @@ pub async fn run(cmd: Run) -> Result<()> {
                     return;
                 }
                 let rendered = match format {
-                    RunFormat::Events => raw(&mut stdout, data, &mut session_id),
-                    RunFormat::AgUi => {
-                        translated(&mut stdout, &mut renderer, data, &mut session_id)
-                    }
+                    RunFormat::Events => raw(&mut stdout, data, &mut session_id, &mut finished),
+                    RunFormat::AgUi => translated(
+                        &mut stdout,
+                        &mut renderer,
+                        data,
+                        &mut session_id,
+                        &mut finished,
+                    ),
                 };
                 if let Err(e) = rendered {
                     failed = Some(e);
@@ -100,6 +87,9 @@ pub async fn run(cmd: Run) -> Result<()> {
     if let Some(e) = failed {
         return Err(e);
     }
+    if !finished.yes() {
+        anyhow::bail!("event stream ended before the run finished");
+    }
 
     if let Some(session_id) = session_id {
         super::run::print_resume_hint(&session_id, &cmd.agent, cmd.output, None);
@@ -107,31 +97,74 @@ pub async fn run(cmd: Run) -> Result<()> {
     Ok(())
 }
 
-/// A stored event, printed as it came. Also where a `jsonl` run learns the
-/// session it opened, since nothing translated is there to say it.
-fn raw(stdout: &mut std::io::Stdout, data: &str, session_id: &mut Option<String>) -> Result<()> {
+/// Whether the turn ended. A deployment can close a stream before it does.
+enum Finished {
+    Translated(bool),
+    Raw(Box<AgUiTranslator>),
+}
+
+impl Finished {
+    fn new(format: RunFormat) -> Self {
+        match format {
+            RunFormat::AgUi => Finished::Translated(false),
+            RunFormat::Events => {
+                Finished::Raw(Box::new(AgUiTranslator::new(String::new(), String::new())))
+            }
+        }
+    }
+
+    fn saw(&mut self, event: &AgUiEvent) {
+        if let Finished::Translated(done) = self {
+            *done |= matches!(
+                event,
+                AgUiEvent::RunFinished { .. } | AgUiEvent::RunError { .. }
+            );
+        }
+    }
+
+    fn saw_raw(&mut self, event: SessionEvent) {
+        if let Finished::Raw(oracle) = self {
+            oracle.on_event(event.payload);
+        }
+    }
+
+    fn yes(&self) -> bool {
+        match self {
+            Finished::Translated(done) => *done,
+            Finished::Raw(oracle) => oracle.terminated,
+        }
+    }
+}
+
+fn raw(
+    stdout: &mut std::io::Stdout,
+    data: &str,
+    session_id: &mut Option<String>,
+    finished: &mut Finished,
+) -> Result<()> {
     let event: SessionEvent =
         serde_json::from_str(data).context("the deployment sent an event this CLI cannot read")?;
     if session_id.is_none() {
         *session_id = Some(event.session_id.clone());
     }
-    write_json(stdout, &event)
+    write_json(stdout, &event)?;
+    finished.saw_raw(event);
+    Ok(())
 }
 
-/// An AG-UI event the deployment translated, rendered by the same printer a
-/// local run uses. A run's first event names the thread it opened, which is the
-/// session to continue.
 fn translated(
     stdout: &mut std::io::Stdout,
     renderer: &mut Renderer,
     data: &str,
     session_id: &mut Option<String>,
+    finished: &mut Finished,
 ) -> Result<()> {
     let event: AgUiEvent = serde_json::from_str(data)
         .context("the deployment sent an AG-UI event this CLI cannot read")?;
     if let (None, AgUiEvent::RunStarted { thread_id, .. }) = (&session_id, &event) {
         *session_id = Some(thread_id.clone());
     }
+    finished.saw(&event);
     renderer.emit(stdout, vec![event])
 }
 
@@ -139,9 +172,15 @@ fn translated(
 mod tests {
     use super::*;
 
-    /// `jsonl` means the engine's own events, so it asks the deployment for
-    /// those; the rendered modes take the translation, which carries the token
-    /// deltas no stored event has.
+    #[test]
+    fn the_query_value_is_the_name_the_route_parses() {
+        for format in [RunFormat::AgUi, RunFormat::Events] {
+            let parsed: RunFormat =
+                serde_json::from_value(serde_json::json!(format.as_query())).unwrap();
+            assert_eq!(parsed, format, "{} did not parse back", format.as_query());
+        }
+    }
+
     #[test]
     fn the_output_mode_picks_what_the_deployment_streams() {
         assert_eq!(format_for(OutputFormat::Jsonl), RunFormat::Events);
@@ -149,20 +188,55 @@ mod tests {
         assert_eq!(format_for(OutputFormat::AgUi), RunFormat::AgUi);
     }
 
-    /// A run that opened a session learns which one from the stream, so the
-    /// hint can offer to continue it.
     #[test]
     fn a_new_session_is_learned_from_the_first_event() {
         let mut session_id = None;
         let mut stdout = std::io::stdout();
         let mut renderer = Renderer::new(OutputFormat::AgUi, false);
+        let mut finished = Finished::new(RunFormat::AgUi);
         let started = serde_json::to_string(&AgUiEvent::RunStarted {
             thread_id: "sess-1".into(),
             run_id: "turn-1".into(),
         })
         .unwrap();
 
-        translated(&mut stdout, &mut renderer, &started, &mut session_id).unwrap();
+        translated(
+            &mut stdout,
+            &mut renderer,
+            &started,
+            &mut session_id,
+            &mut finished,
+        )
+        .unwrap();
         assert_eq!(session_id.as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn a_translated_run_is_unfinished_until_it_says_otherwise() {
+        let mut finished = Finished::new(RunFormat::AgUi);
+        assert!(!finished.yes());
+
+        finished.saw(&AgUiEvent::TextMessageContent {
+            message_id: "m".into(),
+            delta: "hi".into(),
+        });
+        assert!(!finished.yes(), "content is not an ending");
+
+        finished.saw(&AgUiEvent::RunFinished {
+            thread_id: "s".into(),
+            run_id: "r".into(),
+            result: None,
+            outcome: None,
+        });
+        assert!(finished.yes());
+    }
+
+    #[test]
+    fn a_run_error_ends_the_run() {
+        let mut finished = Finished::new(RunFormat::AgUi);
+        finished.saw(&AgUiEvent::RunError {
+            message: "no".into(),
+        });
+        assert!(finished.yes());
     }
 }

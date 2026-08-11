@@ -4,9 +4,8 @@ use serde_json::Value;
 
 use crate::protocol::ToolCall;
 
-/// A `role` on the wire is a constant the client's schema requires, not data.
-/// Reading one back would borrow from the input, so each is skipped on the way
-/// in and restored from the constant it was written from.
+/// A `role` is a constant the client schema needs, not data. Deserialization
+/// skips it and uses these.
 fn assistant() -> &'static str {
     "assistant"
 }
@@ -211,10 +210,7 @@ impl AgUiEvent {
 mod tests {
     use super::*;
 
-    /// The CLI reads this protocol as well as the server writes it: `subs run`
-    /// against a deployment renders the events it is sent. Every variant has to
-    /// survive the trip, including the ones whose optional fields are omitted
-    /// on the way out.
+    /// The CLI reads these events, so each variant must survive the trip.
     #[test]
     fn every_event_survives_the_round_trip() {
         let events = vec![
@@ -283,9 +279,6 @@ mod tests {
         }
     }
 
-    /// A `role` is a constant the client's schema requires, and it is skipped
-    /// on the way in — so it has to come back as the same constant rather than
-    /// as an empty string.
     #[test]
     fn a_skipped_role_comes_back_as_its_constant() {
         let json = r#"{"type":"TEXT_MESSAGE_START","messageId":"m","role":"assistant"}"#;
@@ -294,7 +287,7 @@ mod tests {
             other => panic!("expected TEXT_MESSAGE_START, got {}", other.type_name()),
         }
 
-        // Even absent, since it is not read from the input at all.
+        // Also when absent: deserialization does not read it.
         let json = r#"{"type":"REASONING_MESSAGE_START","messageId":"m"}"#;
         match serde_json::from_str::<AgUiEvent>(json).unwrap() {
             AgUiEvent::ReasoningMessageStart { role, .. } => assert_eq!(role, "reasoning"),

@@ -44,9 +44,8 @@ pub struct SessionCursor {
 }
 
 impl SessionCursor {
-    /// The opaque string a page hands back and the next call hands in. It
-    /// lives here rather than beside either caller so the API and the CLI
-    /// reading a database directly cannot encode it two ways.
+    /// The opaque string a page returns and the next call sends. Kept here so
+    /// the API and the CLI cannot encode it two ways.
     pub fn encode(&self) -> Result<String, String> {
         let json = serde_json::to_string(self).map_err(|e| e.to_string())?;
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes()))

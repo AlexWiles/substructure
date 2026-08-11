@@ -223,9 +223,7 @@ pub struct LlmBlockView {
 }
 
 /// The customer key for one block. Write-only: no read ever returns it.
-/// What an operator sends to run one turn: the same tagged `ClientInput` a
-/// client sends, plus the session it addresses. A turn started here belongs to
-/// no end user — see the route.
+/// One turn, sent by an operator. See the route for what the turn belongs to.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,16 +231,24 @@ pub struct RunRequest {
     pub input: crate::protocol::ClientInput,
 }
 
-/// How a run's events come back.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunFormat {
-    /// Translated AG-UI protocol events, streamed token by token.
     #[default]
     AgUi,
-    /// The engine's own events, as they are stored. No token deltas: a
-    /// fragment is not an event, and nothing persists one.
+    /// Stored engine events. No token deltas: nothing stores a fragment.
     Events,
+}
+
+impl RunFormat {
+    /// The `format` query value, which is the serde name. A test holds the
+    /// two together: a mismatch takes the default and does not fail.
+    pub fn as_query(self) -> &'static str {
+        match self {
+            RunFormat::AgUi => "ag-ui",
+            RunFormat::Events => "events",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

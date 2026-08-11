@@ -47,6 +47,10 @@ pub struct RunArgs {
     /// `substructure.toml`).
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
+    /// Run the turn on the deployment at this URL. Point it at a `subs serve`
+    /// to use the engine that runs there.
+    #[arg(long)]
+    url: Option<String>,
     /// SQLite dev database path. [default: substructure.db]
     #[arg(long)]
     db: Option<String>,
@@ -140,16 +144,15 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         }
     };
 
-    // A `[remote]` says the agent runs there, so the turn does too — the same
-    // rule every other command follows. Nothing starts here in that case: no
-    // engine, no database, and no key, because the deployment holds them.
+    // With a `[remote]`, no engine, database, or key is necessary here.
     let globals = super::cloud::CloudGlobals {
         config: args.config.clone(),
+        url: args.url.clone(),
         ..Default::default()
     };
     if target(&globals)?.here().is_none() {
         return run_remote::run(run_remote::Run {
-            config: args.config,
+            globals,
             session_id: args.session,
             input,
             output: output_mode,
@@ -274,9 +277,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     }
 }
 
-/// The command that continues this session, printed after a turn. `db` is the
-/// database a run here wrote; a run against a deployment names none, because
-/// the session is not on this machine.
+/// `db` is the database a run here wrote. A remote run gives none.
 pub(crate) fn print_resume_hint(
     session_id: &str,
     agent: &str,
@@ -302,14 +303,10 @@ pub(crate) fn print_resume_hint(
     }
 }
 
-/// Wait for the session index to take in what this turn wrote, so `subs
-/// sessions list` on this database reports the turn that just finished rather
-/// than the one before it. The index is a projection that polls, so a run that
-/// exits the moment its stream ends leaves the row short of its own last
-/// events — and with nothing running afterwards, short forever.
+/// Waits for the session index to read this turn, so `subs sessions list`
+/// shows it. The index polls, and nothing runs after this process stops.
 ///
-/// Best effort: a row one turn behind is not worth failing a finished turn
-/// over, and the next run catches it up.
+/// Best effort. The next run reads what this one leaves.
 async fn await_indexed(rt: &Runtime, session_id: &str) {
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
     const POLL: std::time::Duration = std::time::Duration::from_millis(20);

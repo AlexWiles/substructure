@@ -1,13 +1,7 @@
-//! Reading sessions back: the list, one session, and its events.
+//! Reads a session: the list, one session, and its events.
 //!
-//! Held apart from [`Runtime`](crate::Runtime) because a read needs two stores
-//! and nothing else — no decision loops, no executors, no queue. That is what
-//! lets `subs sessions` read a database on this machine the same way the API
-//! reads a deployment's, without starting an engine to answer a question about
-//! what already happened.
-//!
-//! `Runtime`'s inspection methods delegate here, so there is one definition of
-//! what reading a session means rather than one per caller.
+//! A read needs the two stores and nothing else, so a caller with no engine can
+//! use it. `Runtime` delegates here.
 
 use std::sync::Arc;
 
@@ -73,9 +67,7 @@ impl SessionReader {
         self.store.query_events(&filter).await.map_err(internal)
     }
 
-    /// Whether this caller may read this session. Only a frontend caller is
-    /// answerable to an owner; a machine or the engine itself reads what it
-    /// asks for.
+    /// Only a frontend caller is answerable to an owner.
     pub async fn authorize(&self, session_id: &str, caller: &Caller) -> Result<(), RuntimeError> {
         let Caller::Frontend {
             tenant_id, user_id, ..

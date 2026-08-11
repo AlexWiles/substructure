@@ -113,21 +113,13 @@ async fn advertise_defaults(
     res
 }
 
-/// Run one turn and stream it back.
+/// Runs one turn and streams it back, for an operator credential.
 ///
-/// An operator's own way in: the CLI already authenticates here, so a turn run
-/// from a terminal needs the credential `subs login` stored and nothing else —
-/// no API key, and no client token minted for an identity nobody has.
+/// The caller is a machine, so the session has no end user. To run as a user,
+/// mint a client token and use the client surface.
 ///
-/// That is also what the turn *is*. A client token carries a person, and a
-/// session opened with one belongs to them; this caller is a machine, so the
-/// session it opens has no end user behind it and is not scoped to one. An
-/// operator session, which is what `subs run` has always made. To reproduce a
-/// real user's session instead, mint a client token for them and use the
-/// client surface.
-///
-/// Submitting and streaming are one call because they cannot be two: a client
-/// that submits and then subscribes has already missed the start of its turn.
+/// One call submits and streams. A caller that submits first and subscribes
+/// second loses the start of its turn.
 async fn run(
     State(state): State<V1State>,
     Extension(caller): Extension<Caller>,
@@ -145,8 +137,7 @@ async fn run(
         metadata: Default::default(),
     };
 
-    // Subscribed before the input is handled, so the turn's first events cannot
-    // land before anything is listening.
+    // Subscribe before the input, or the first events have no listener.
     let spec = SessionSubscriptionSpec {
         scope: SubscriptionScope::All,
         caller: caller.clone(),
@@ -167,8 +158,7 @@ async fn run(
             session_id: session_id.clone(),
             caller,
             owner,
-            // The tagged union carries its own addressing — a submit's
-            // `agent_id`, a settle's effect id — so the route needs none.
+            // The tagged union carries its own addressing.
             input: req.input,
             span: crate::span::SpanContext::root().child("v1_run"),
         })
@@ -200,13 +190,11 @@ async fn run(
     }
 }
 
-/// The engine's own events, as `subs run -o jsonl` prints them.
+/// Stored engine events, as `subs run -o jsonl` prints them.
 ///
-/// A translator runs alongside purely as the oracle for the end: `terminated`
-/// flips on the turn's last event — completion, a client-tool yield, or an
-/// interrupt — so a raw stream ends exactly where a translated one would, and
-/// `-o jsonl` does not hang on a turn that parked. The event is sent before it
-/// is judged, so the one that ends the turn is in the output.
+/// A translator gives the end of the turn, which no stored event gives. Each
+/// event is sent before the translator reads it, so the last one is in the
+/// output.
 fn run_raw_events(
     mut event_rx: mpsc::Receiver<SessionEvent>,
     thread_id: String,

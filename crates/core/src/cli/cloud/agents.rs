@@ -1,14 +1,12 @@
-//! `subs agents`: what each agent the file declares looks like where it runs.
+//! `subs agents`: shows each agent the file declares.
 //!
 //! Read-only but for rotation — an agent exists because `substructure.toml`
 //! declares it, so there is nothing to create here. Printing a signing secret
 //! is its own command: no other output carries one, so a secret reaches a
 //! terminal or a pipe only where that was the point.
 //!
-//! An engine here holds no secret to print or rotate. The file *names* the
-//! variable a decision is signed with, and this machine's environment holds it,
-//! so those two commands say where the secret is rather than reaching for a
-//! deployment that would have one.
+//! An engine here holds no secret. The file names the variable that signs a
+//! decision, and this machine holds it.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -82,21 +80,14 @@ pub async fn run(command: AgentsCommand) -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// An engine here: the file declares the agents, and this machine's environment
-// holds what signs their decisions.
-// ---------------------------------------------------------------------------
-
-/// One declared agent, as this machine can answer for it. The same columns the
-/// deployment answers with, filled in from the file rather than asked for.
+/// The columns the deployment sends, read from the file.
 fn declared<'a>(id: &'a str, section: &'a AgentSection) -> [String; 5] {
     let hosting = section
         .worker
         .clone()
         .unwrap_or_else(|| "engine".to_string());
-    // A secret is "set" when the variable the file names holds something. An
-    // agent naming none sends decisions unsigned, which is a dash rather than
-    // a missing key.
+    // An agent that names no variable does not sign. That is a dash, not a
+    // missing key.
     let secret = match &section.signing_secret_env {
         None => "-".to_string(),
         Some(var) => match env_value(var).is_some() {
@@ -183,10 +174,7 @@ fn show_here(agent_id: &str, config: &ProjectConfig, scope: &ProjectScope) -> Re
     Ok(())
 }
 
-/// An engine here signs with a variable this machine holds, so there is nothing
-/// for this command to fetch. It says where the secret is instead — including
-/// when the answer is "nowhere", which is the reason a worker rejects a
-/// decision.
+/// There is no secret to fetch here. Says which variable holds it.
 fn secret_here(agent_id: &str, config: &ProjectConfig) -> Result<()> {
     let section = section(agent_id, config)?;
     let Some(var) = &section.signing_secret_env else {
@@ -344,8 +332,6 @@ mod tests {
          [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n\
          signing_secret_env = \"NOT_SET_SECRET\"\n";
 
-    /// The columns the deployment answers with, filled in from the file: an
-    /// agent's hosting and its signing are properties of the declaration.
     #[test]
     fn an_agent_here_reads_its_row_off_the_file() {
         let config = config(WORKER_AGENT);
@@ -355,11 +341,9 @@ mod tests {
         assert_eq!(llm, "byo");
         assert_eq!(model, "m");
         assert_eq!(hosting, "https://w.test");
-        // Named but empty: the variable is the answer, and so is its emptiness.
         assert_eq!(secret, "$NOT_SET_SECRET (not set)");
     }
 
-    /// An engine-hosted agent has no worker to sign for.
     #[test]
     fn an_engine_hosted_agent_reports_no_secret() {
         let config =
@@ -369,8 +353,6 @@ mod tests {
         assert_eq!(secret, "-");
     }
 
-    /// There is no secret here to print: the file names a variable, and saying
-    /// which one is the useful answer.
     #[test]
     fn the_secret_here_is_named_not_printed() {
         let config = config(WORKER_AGENT);
@@ -383,7 +365,6 @@ mod tests {
         assert!(err.contains("$NOT_SET_SECRET"), "{err}");
     }
 
-    /// A typo names the agents that were declared, as every other command does.
     #[test]
     fn an_undeclared_agent_lists_the_declared_ones() {
         let config = config(WORKER_AGENT);

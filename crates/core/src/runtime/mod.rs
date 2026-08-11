@@ -613,8 +613,8 @@ impl Runtime {
 
     // ---- Admin / inspection methods ----
 
-    /// Reading a session needs the two stores and nothing else, so it is
-    /// defined once, where a caller without an engine can use it too.
+    /// A read needs the two stores only, so a caller with no engine can use
+    /// this.
     pub fn reader(&self) -> SessionReader {
         SessionReader::new(self.store.clone(), self.session_index.clone())
     }

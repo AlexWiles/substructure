@@ -1,11 +1,7 @@
-//! `subs sessions`: what has happened, from whichever store holds it.
+//! `subs sessions`: reads sessions from the store that holds them.
 //!
-//! Two sources, one output — the rule `subs doctor` already follows. A file
-//! naming a `[remote]` asks the deployment, which holds the sessions. A file
-//! naming none describes an engine you run here, whose sessions are in this
-//! machine's database, so the list and the events are read straight off the
-//! SQLite file `subs run` and `subs serve` write. Without that, a turn run here
-//! leaves state no command can read.
+//! With no `[remote]`, it reads the SQLite file `subs run` and `subs serve`
+//! write.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,12 +26,9 @@ use super::pretty::{self, write_json, Renderer};
 use super::target::target;
 use super::DEFAULT_TENANT;
 
-/// How often a local `--stream` re-reads the file. There is no server to push,
-/// so following one means asking it again.
+/// A local `--stream` polls: no server pushes from a file.
 const POLL: Duration = Duration::from_millis(250);
 
-/// How long the database is held open for, matching `run` and `serve`, so a
-/// read while an engine writes waits rather than failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Subcommand)]
@@ -102,17 +95,12 @@ pub async fn run(command: SessionsCommand) -> Result<()> {
     }
 }
 
-/// Where a `sessions` command reads from.
 enum Source {
-    /// The deployment the file, the flag, or the default names.
     Remote,
-    /// The database at this path, which an engine here writes.
     Local(String),
 }
 
-/// Which store answers. `--db` names one outright — the one case the file
-/// cannot decide, since a database is not something a `[remote]` has an opinion
-/// about. Everything else is [`target`], the rule every command follows.
+/// `--db` names a store outright. Everything else follows [`target`].
 fn source(globals: &CloudGlobals, db: Option<String>) -> Result<Source> {
     if let Some(db) = db {
         return Ok(Source::Local(db));
@@ -123,8 +111,7 @@ fn source(globals: &CloudGlobals, db: Option<String>) -> Result<Source> {
     })
 }
 
-/// The database an engine here wrote. Never created: this reads what happened,
-/// and an empty file at a mistyped path answers every question with silence.
+/// Does not create the database. An empty one answers every question.
 fn open_db(path: &str) -> Result<SqliteDb> {
     if !std::path::Path::new(path).exists() {
         bail!("no database at {path}. `subs run` or `subs serve` creates one.");
@@ -132,9 +119,6 @@ fn open_db(path: &str) -> Result<SqliteDb> {
     SqliteDb::open(path, BUSY_TIMEOUT).with_context(|| format!("opening {path}"))
 }
 
-/// The engine's own reader over a database on this machine — the code the API
-/// serves its sessions with, without an engine around it. Reading needs the two
-/// stores and nothing else, so nothing else is started.
 fn reader(path: &str) -> Result<SessionReader> {
     let db = open_db(path)?;
     Ok(SessionReader::new(
@@ -143,18 +127,11 @@ fn reader(path: &str) -> Result<SessionReader> {
     ))
 }
 
-/// Who the CLI reads as. `run` acts as the same caller, and a system caller
-/// answers to no session owner — this machine's database is already its own
-/// permission.
 fn caller() -> Caller {
     Caller::System {
         tenant_id: DEFAULT_TENANT.to_string(),
     }
 }
-
-// ---------------------------------------------------------------------------
-// list
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SessionRow {
@@ -212,7 +189,6 @@ async fn local_list(cmd: &ListCommand, db: &str) -> Result<()> {
     render(&page, cmd.scope.globals.json)
 }
 
-/// The same page the API builds, read off the file instead of asked for.
 async fn local_page(cmd: &ListCommand, db: &str) -> Result<Page> {
     let reader = reader(db)?;
 
@@ -220,8 +196,7 @@ async fn local_page(cmd: &ListCommand, db: &str) -> Result<Page> {
         tenant_id: Some(DEFAULT_TENANT.to_string()),
         session_id: cmd.session_id.clone(),
         agent_id: cmd.agent_id.clone(),
-        // What the API defaults to: a sub-agent's session is part of the
-        // session that spawned it, not a row beside it.
+        // The API default. A sub-agent session is part of its parent.
         top_level: true,
         sort: SessionSort::LastEventDesc,
         limit: Some(cmd.limit as usize),
@@ -287,19 +262,10 @@ fn render(page: &Page, json: bool) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// events
-// ---------------------------------------------------------------------------
-
-/// Renders a stored stream the way `subs run` renders a live one, so reading a
-/// session back looks like watching it happen.
+/// Renders a stored stream as `subs run` renders a live one.
 ///
-/// A translator is one turn's — `terminated` flips at that turn's end and it
-/// goes quiet — so a session of many turns gets one per turn. Every event in a
-/// turn carries its id, so a turn opens on the first event belonging to it
-/// rather than on `turn.started` alone: `--from` lands mid-turn, and the rest
-/// of that turn is still worth reading. Events belonging to no turn belong to
-/// no run, and translate to nothing.
+/// A translator covers one turn, so each turn gets its own. Each turn opens on
+/// its first event, because `--from` can start in the middle of a turn.
 struct Replay {
     session_id: String,
     renderer: Renderer,
@@ -315,8 +281,6 @@ impl Replay {
         }
     }
 
-    /// Whether the caller prints the stored events itself. A translation cannot
-    /// say what the engine wrote, so `jsonl` is not rendered from one.
     fn raw(&self) -> bool {
         self.renderer.is_raw()
     }
@@ -330,8 +294,6 @@ impl Replay {
             return Ok(());
         };
 
-        // A turn that is not the open one opens its own: the previous turn
-        // ended, or this is the first event this replay has seen.
         if self.turn.as_ref().is_none_or(|(open, _)| *open != turn_id) {
             let translator = AgUiTranslator::new(self.session_id.clone(), turn_id.clone());
             let started = translator.start();
@@ -362,8 +324,7 @@ async fn remote_events(cmd: &EventsCommand) -> Result<()> {
             "/api/v1/projects/{project}/sessions/{session_id}/events/stream?after_seq={}",
             cmd.from
         );
-        // The line callback cannot fail, so the first failure is carried out
-        // and reported once the stream ends rather than swallowed per line.
+        // The line callback cannot fail. Report the first failure at the end.
         let mut failed: Option<anyhow::Error> = None;
         ctx.client
             .stream_sse(&path, |line| {
@@ -398,8 +359,7 @@ async fn remote_events(cmd: &EventsCommand) -> Result<()> {
     Ok(())
 }
 
-/// One event as the deployment sent it. `jsonl` prints those bytes rather than
-/// a re-serialization of them, so what this shows is what the API answered.
+/// `jsonl` prints the bytes the API sent, not a re-serialization of them.
 fn render_wire(replay: &mut Replay, stdout: &mut std::io::Stdout, wire: &str) -> Result<()> {
     if replay.raw() {
         use std::io::Write as _;
@@ -411,22 +371,17 @@ fn render_wire(replay: &mut Replay, stdout: &mut std::io::Stdout, wire: &str) ->
     replay.push(stdout, event)
 }
 
-/// What to print, defaulting to the stored events themselves. `[run].output` is
-/// deliberately not read: it says how a turn you are watching should look, and
-/// this command's job is what the engine wrote.
+/// `[run].output` is not read. It applies to a turn you watch.
 fn output(cmd: &EventsCommand) -> OutputFormat {
     cmd.output.unwrap_or(OutputFormat::Jsonl)
 }
 
-/// The stream as the file holds it. `--stream` polls, because nothing pushes
-/// from a file: it shows what an engine writing to this database appends.
 async fn local_events(cmd: &EventsCommand, db: &str) -> Result<()> {
     let session_id = require_session(cmd.session_id.as_deref())?;
     let reader = reader(db)?;
     let caller = caller();
 
-    // A mistyped id would otherwise print nothing and, with `--stream`, print
-    // nothing for as long as you left it running.
+    // A mistyped id would print nothing, and `--stream` would wait forever.
     let head = reader.events(&caller, &session_id, None, Some(1)).await?;
     if head.is_empty() {
         bail!("no session {session_id} in {db}");
@@ -481,7 +436,6 @@ mod tests {
         dir
     }
 
-    /// Writes a `substructure.toml` and returns globals pointing `-c` at it.
     fn wrote(body: &str) -> (CloudGlobals, PathBuf) {
         let dir = tmpdir();
         let path = dir.join(project_config::FILENAME);
@@ -506,8 +460,6 @@ mod tests {
         matches!(source, Source::Remote)
     }
 
-    /// The rule `doctor` follows: no `[remote]` means the engine is here, so
-    /// the sessions are too.
     const ENGINE_HERE: &str = "[llm.byo]\ntype = \"worker\"\n\
          [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n";
     const A_REMOTE: &str = "[remote]\nurl = \"https://subs.test\"\n";
@@ -527,9 +479,6 @@ mod tests {
         assert!(is_remote(source(&globals, None).unwrap()));
     }
 
-    /// Both flags name a store outright, so neither has to agree with the file:
-    /// `--db` reads a database a `[remote]` file also has, and `--url` reaches a
-    /// server the file never mentions.
     #[test]
     fn the_flags_name_a_store_the_file_does_not() {
         let (remote, _dir) = wrote(A_REMOTE);
@@ -543,8 +492,6 @@ mod tests {
         assert!(is_remote(source(&here, None).unwrap()));
     }
 
-    /// A read never creates one: an empty database at a mistyped path would
-    /// answer every question with an empty list.
     #[test]
     fn a_database_that_does_not_exist_is_an_error_not_a_new_one() {
         let path = tmpdir().join("absent.db");
@@ -556,7 +503,6 @@ mod tests {
         assert!(!path.exists(), "the read created {}", path.display());
     }
 
-    /// The page shape is the API's, whichever store filled it in.
     #[test]
     fn a_local_row_carries_the_same_fields_the_api_returns() {
         let item = SessionItem {
@@ -612,8 +558,6 @@ mod tests {
         }
     }
 
-    /// The whole point: a session an engine here wrote is one this reads back,
-    /// off the file, with nothing running.
     #[tokio::test]
     async fn a_session_in_the_database_is_listed_from_it() {
         let db = tmpdir().join("t.db").display().to_string();
@@ -623,8 +567,7 @@ mod tests {
             .upsert_session_index(indexed("sess-1", "assistant", true))
             .await
             .unwrap();
-        // A sub-agent's session belongs to the one that spawned it, so the list
-        // leaves it out — the same default the API applies.
+        // A sub-agent session is part of its parent, so the list omits it.
         index
             .upsert_session_index(indexed("sess-2", "researcher", false))
             .await
@@ -639,23 +582,18 @@ mod tests {
         assert_eq!(listed, vec!["sess-1".to_string()]);
         assert_eq!(page.items[0].agent_id.as_deref(), Some("assistant"));
 
-        // The filters reach the store, rather than being dropped on the way.
         let none = local_page(&list_command(&db, Some("nobody")), &db)
             .await
             .unwrap();
         assert!(none.items.is_empty(), "{:?}", none.items);
     }
 
-    /// A session of many turns is many runs. One translator for the whole
-    /// stream would go quiet at the first turn's end, leaving every later turn
-    /// unrendered.
     #[test]
     fn each_turn_in_a_replay_is_its_own_run() {
         let mut replay = Replay::new("sess-1".into(), OutputFormat::AgUi);
         let mut stdout = std::io::stdout();
 
         assert!(replay.turn.is_none());
-        // An event belonging to no turn opens nothing.
         replay.push(&mut stdout, event(None)).unwrap();
         assert!(replay.turn.is_none());
 
@@ -665,15 +603,12 @@ mod tests {
             Some("turn-1")
         );
 
-        // The same turn keeps the run it opened...
         replay.push(&mut stdout, event(Some("turn-1"))).unwrap();
         assert_eq!(
             replay.turn.as_ref().map(|(id, _)| id.as_str()),
             Some("turn-1")
         );
 
-        // ...and the next turn is a new one, whether or not the last one's end
-        // was in the events this replay was given.
         replay.push(&mut stdout, event(Some("turn-2"))).unwrap();
         assert_eq!(
             replay.turn.as_ref().map(|(id, _)| id.as_str()),
@@ -681,8 +616,6 @@ mod tests {
         );
     }
 
-    /// An event carrying only what the replay reads off it: which turn it
-    /// belongs to.
     fn event(turn_id: Option<&str>) -> SessionEvent {
         let at = chrono::DateTime::UNIX_EPOCH;
         SessionEvent {
@@ -714,8 +647,6 @@ mod tests {
         }
     }
 
-    /// The cursor a page hands back is the one the next call hands in,
-    /// whichever store produced it.
     #[test]
     fn a_cursor_survives_the_round_trip() {
         let cursor = SessionCursor {
