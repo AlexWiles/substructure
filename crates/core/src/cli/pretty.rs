@@ -1,7 +1,67 @@
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
+use super::env::OutputFormat;
 use crate::transport::ag_ui::events::{AgUiEvent, RunOutcome};
+
+/// Where translated AG-UI events go. `Jsonl` renders nothing: the caller writes
+/// the engine events.
+pub(crate) enum Renderer {
+    AgUi,
+    Jsonl,
+    Pretty(PrettyPrinter),
+}
+
+impl Renderer {
+    pub(crate) fn new(output: OutputFormat, color: bool) -> Self {
+        match output {
+            OutputFormat::AgUi => Renderer::AgUi,
+            OutputFormat::Jsonl => Renderer::Jsonl,
+            OutputFormat::Pretty => Renderer::Pretty(PrettyPrinter::new(color)),
+        }
+    }
+
+    pub(crate) fn is_raw(&self) -> bool {
+        matches!(self, Renderer::Jsonl)
+    }
+
+    pub(crate) fn emit(
+        &mut self,
+        stdout: &mut std::io::Stdout,
+        events: Vec<AgUiEvent>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Renderer::AgUi => {
+                for ev in events {
+                    write_json(stdout, &ev)?;
+                }
+            }
+            Renderer::Pretty(printer) => {
+                for ev in &events {
+                    printer.render(stdout, ev)?;
+                }
+            }
+            Renderer::Jsonl => {}
+        }
+        Ok(())
+    }
+}
+
+/// Serializes first and writes second, so a closed pipe gives an `io::Error`.
+pub(crate) fn write_json<T: serde::Serialize>(
+    stdout: &mut std::io::Stdout,
+    value: &T,
+) -> anyhow::Result<()> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    stdout.write_all(&line)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+pub(crate) fn color() -> bool {
+    std::io::stdout().is_terminal()
+}
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";

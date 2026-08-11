@@ -60,7 +60,7 @@ impl BearerHashedApiKeyAuthResolver {
             if key_hash.ct_eq(&binding.key_hash).unwrap_u8() == 1 {
                 return Ok(AuthPrincipal {
                     tenant_id: binding.tenant_id.clone(),
-                    source: "api_key",
+                    source: crate::transport::auth::SOURCE_API_KEY,
                     subject: Some(binding.key_id.clone()),
                     attrs: std::collections::HashMap::new(),
                 });

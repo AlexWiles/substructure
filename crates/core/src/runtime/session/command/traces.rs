@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::protocol::{ErrorCode, LlmResponse};
+use crate::protocol::{ErrorCode, LlmResponse, OwnerKind};
 
 use super::super::aggregate::{CommitContext, SessionAggregate};
 use super::super::decision::Trigger;
@@ -217,6 +217,7 @@ impl Trace {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
+                    kind: OwnerKind::Frontend,
                     tenant_id: TENANT.to_string(),
                     id: Some(USER.to_string()),
                     metadata: HashMap::new(),

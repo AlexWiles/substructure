@@ -39,7 +39,7 @@ impl KindSpec for DecisionSpec {
         _id: &str,
         caller: &Caller,
     ) -> Result<(), SessionError> {
-        SessionState::ensure_machine_or_system(caller)
+        SessionState::ensure_worker_or_system(caller)
     }
 
     /// No attempt to fence and no external claim on the answer: a late failure

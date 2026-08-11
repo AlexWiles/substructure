@@ -255,6 +255,7 @@ mod tests {
     use chrono::Utc;
 
     use super::{extract, AgentDirectory};
+    use crate::protocol::OwnerKind;
     use crate::protocol::{
         AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, RetryPolicy, Role,
         SessionOwner,
@@ -379,6 +380,7 @@ mod tests {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
+                    kind: OwnerKind::Frontend,
                     tenant_id: "tenant-a".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),
@@ -446,6 +448,7 @@ mod tests {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
+                    kind: OwnerKind::Frontend,
                     tenant_id: "tenant-a".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),

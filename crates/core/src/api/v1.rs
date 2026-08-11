@@ -223,6 +223,38 @@ pub struct LlmBlockView {
 }
 
 /// The customer key for one block. Write-only: no read ever returns it.
+/// One turn, sent by an operator. See the route for what the turn belongs to.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RunRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub input: crate::protocol::ClientInput,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunFormat {
+    #[default]
+    AgUi,
+    /// Stored engine events. No token deltas: nothing stores a fragment.
+    Events,
+}
+
+/// The SSE event a `format=events` run ends with. A stream that stops without
+/// one was cut short.
+pub const RUN_DONE_EVENT: &str = "done";
+
+impl RunFormat {
+    /// The `format` query value: the serde name. A mismatch is silent, and
+    /// takes the default.
+    pub fn as_query(self) -> &'static str {
+        match self {
+            RunFormat::AgUi => "ag-ui",
+            RunFormat::Events => "events",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmKeyRequest {

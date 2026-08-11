@@ -13,9 +13,12 @@ together at the same version.
 
 - Improve MCP auth failure handling.
 - Standardize usage reporting.
+- Clearer split between remote/local command handling
+- Split the machine caller into an API key caller and an admin caller.
 
 ### Added
 
+- CLI run works against a remote server
 - Slackbot prompts for MCP reauth by default. Overrideable in config.
 - Engine driven deferred tool definition support.
 - Calls to Anthropic, OpenAI, and OpenRouter now cache the prompt.

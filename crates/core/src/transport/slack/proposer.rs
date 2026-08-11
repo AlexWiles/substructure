@@ -328,7 +328,7 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{AgentConfig, InterruptOrigin, McpServer, RetryPolicy};
+    use crate::protocol::{AgentConfig, InterruptOrigin, McpServer, OwnerKind, RetryPolicy};
     use crate::runtime::session::state::OpenInterrupt;
     use crate::session::events::{AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested};
     use crate::session::events::{ToolCallCompleted, ToolCallRequested, TurnStarted};
@@ -369,6 +369,7 @@ mod tests {
     fn state() -> SessionState {
         let mut s = SessionState::new(SESSION.to_string());
         s.owner = Some(crate::protocol::SessionOwner {
+            kind: OwnerKind::Frontend,
             tenant_id: "t".to_string(),
             id: Some("slack:U1".to_string()),
             metadata: std::collections::HashMap::from_iter([

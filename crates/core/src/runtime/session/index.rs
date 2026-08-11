@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,22 @@ pub struct SessionFilter {
 pub struct SessionCursor {
     pub at: DateTime<Utc>,
     pub session_id: String,
+}
+
+impl SessionCursor {
+    /// The opaque string a page returns and the next call sends. Kept here so
+    /// the API and the CLI cannot encode it two ways.
+    pub fn encode(&self) -> Result<String, String> {
+        let json = serde_json::to_string(self).map_err(|e| e.to_string())?;
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes()))
+    }
+
+    pub fn decode(encoded: &str) -> Result<Self, String> {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|e| format!("invalid cursor encoding: {e}"))?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("invalid cursor: {e}"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

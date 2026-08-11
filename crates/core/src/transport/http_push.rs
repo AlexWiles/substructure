@@ -430,7 +430,7 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use crate::protocol::{LlmRequest, SessionOwner};
+    use crate::protocol::{LlmRequest, OwnerKind, SessionOwner};
     use crate::runtime::span::SpanContext;
 
     #[derive(Default)]
@@ -454,6 +454,7 @@ mod tests {
             decision_id: "dec-1".to_string(),
             agent_id: "agent-1".to_string(),
             identity: SessionOwner {
+                kind: OwnerKind::Frontend,
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),

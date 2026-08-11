@@ -1099,7 +1099,7 @@ impl Working {
                 agent,
                 channels,
             } => {
-                SessionState::ensure_machine_or_system(caller)?;
+                SessionState::ensure_worker_or_system(caller)?;
                 match self
                     .tracking(EffectKind::Decision, &decision_id)
                     .map(|t| t.status())
@@ -1159,7 +1159,7 @@ impl Working {
             }
 
             CommandPayload::CancelSession => {
-                SessionState::ensure_machine_or_system(caller)?;
+                SessionState::ensure_operator_or_system(caller)?;
                 if matches!(self.status, SessionStatus::Done) {
                     return Ok(());
                 }

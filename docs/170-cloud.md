@@ -121,6 +121,15 @@ The response holds the `session_id` and the `turn_id`. Pass the same
 For a browser, mint a short-lived client token instead. See
 [Authentication](./190-auth.md).
 
+## Run a turn against it
+
+```sh
+subs run "hi"
+```
+
+With a `[remote]`, `subs run` sends the turn to the deployment and streams it
+back. It uses the credential `subs login` stored.
+
 ## Watch it run
 
 ```sh

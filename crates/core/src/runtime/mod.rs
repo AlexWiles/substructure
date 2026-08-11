@@ -13,7 +13,7 @@ use crate::protocol::{
 };
 use crate::providers::memory_queue::TaskQueue;
 use connector::{spawn_connector_dispatch_processor, spawn_connector_task_executor, ConnectorTask};
-use event_store::{EventFilter, EventStore, Seq, StoreError};
+use event_store::{EventStore, Seq};
 use llm::{
     spawn_llm_dispatch_processor, spawn_llm_task_executor, LlmBlocks, LlmResolver, LlmTask,
     TokenDeltaTransport,
@@ -27,6 +27,7 @@ use session::decision::{EffectResultPayload, WorkKind};
 use session::index::{
     spawn_session_index_processor, SessionFilter, SessionIndexStore, SessionPage,
 };
+use session::read::SessionReader;
 use session::state::EffectKind;
 use session::subscriptions::SessionSubscriptionSpec;
 use session::wire::result_to_string;
@@ -556,28 +557,7 @@ impl Runtime {
         session_id: &str,
         caller: &Caller,
     ) -> Result<(), RuntimeError> {
-        let Caller::Frontend {
-            tenant_id, user_id, ..
-        } = caller
-        else {
-            return Ok(());
-        };
-
-        let session = match self.store.load(tenant_id, session_id).await {
-            Ok(session) => session,
-            // An uncreated session has no owner yet — nothing to leak; the read
-            // is simply empty, and the first turn binds the session to its owner.
-            Err(StoreError::StreamNotFound) => return Ok(()),
-            Err(e) => return Err(RuntimeError::Internal(e.to_string())),
-        };
-
-        let owner_id = session.state.owner.as_ref().and_then(|o| o.id.as_deref());
-
-        if owner_id == Some(user_id.as_str()) {
-            Ok(())
-        } else {
-            Err(RuntimeError::Session(SessionError::SessionAccessDenied))
-        }
+        self.reader().authorize(session_id, caller).await
     }
 
     /// Attach a durable event processor, joined into runtime shutdown. With
@@ -633,18 +613,18 @@ impl Runtime {
 
     // ---- Admin / inspection methods ----
 
+    /// A read needs the two stores only, so a caller with no engine can use
+    /// this.
+    pub fn reader(&self) -> SessionReader {
+        SessionReader::new(self.store.clone(), self.session_index.clone())
+    }
+
     pub async fn list_sessions(&self, filter: &SessionFilter) -> Result<SessionPage, RuntimeError> {
-        self.session_index
-            .list_sessions(filter)
-            .await
-            .map_err(|e| RuntimeError::Internal(e.to_string()))
+        self.reader().list(filter).await
     }
 
     pub async fn count_sessions(&self, filter: &SessionFilter) -> Result<u64, RuntimeError> {
-        self.session_index
-            .count_sessions(filter)
-            .await
-            .map_err(|e| RuntimeError::Internal(e.to_string()))
+        self.reader().count(filter).await
     }
 
     pub async fn get_session(
@@ -652,10 +632,7 @@ impl Runtime {
         tenant_id: &str,
         session_id: &str,
     ) -> Result<SessionAggregate, RuntimeError> {
-        self.store
-            .load(tenant_id, session_id)
-            .await
-            .map_err(|e| RuntimeError::Internal(e.to_string()))
+        self.reader().session(tenant_id, session_id).await
     }
 
     pub async fn read_session_events(
@@ -665,17 +642,7 @@ impl Runtime {
         after: Option<Seq>,
         limit: Option<usize>,
     ) -> Result<Vec<SessionEvent>, RuntimeError> {
-        self.authorize_session_read(session_id, caller).await?;
-        let filter = EventFilter {
-            session_id: Some(session_id.to_string()),
-            tenant_id: Some(caller.tenant_id().to_string()),
-            after_seq: after,
-            limit,
-        };
-        self.store
-            .query_events(&filter)
-            .await
-            .map_err(|e| RuntimeError::Internal(e.to_string()))
+        self.reader().events(caller, session_id, after, limit).await
     }
 
     pub async fn submit_decision(&self, input: SubmitDecision) -> Result<(), RuntimeError> {

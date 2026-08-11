@@ -1,18 +1,29 @@
 //! The hosted cloud's `/api/v1` surface, served by a local server so the same
-//! commands work against both. A local server is single-tenant, so `{org}`/
-//! `{project}` segments are accepted and ignored; control-plane mutations
-//! (create/rename/delete project, API keys) are rejected.
+//! commands work against both. Scope comes from the caller's tenant, so `{org}`
+//! and `{project}` are accepted and ignored: a local server has one of each.
+//! Control-plane mutations (create/rename/delete project, API keys) are
+//! rejected.
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
+use futures_util::StreamExt;
+use serde::Deserialize;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 
-use crate::api::v1::{ApiError, Meta, Org, Project};
-use crate::Caller;
+use crate::api::v1::{ApiError, Meta, Org, Project, RunFormat, RunRequest, RUN_DONE_EVENT};
+use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
+use crate::session::SessionEvent;
+use crate::transport::ag_ui::translator::run_ag_ui_translation;
+use crate::transport::http::runtime_error_response;
+use crate::{Caller, HandleClientInput};
 
 use super::routes::{self, SessionEventsParams};
 use super::{machine_auth_middleware, AdminHttpState};
@@ -53,6 +64,7 @@ pub fn router(admin: AdminHttpState) -> Router {
             "/api/v1/projects/{project}/sessions/{session_id}/events/stream",
             get(stream_session_events),
         )
+        .route("/api/v1/projects/{project}/run", post(run))
         .route("/api/v1/orgs", get(list_orgs))
         .route("/api/v1/orgs/{org}/projects", get(list_projects))
         .route("/api/v1/projects/{project}", get(get_project))
@@ -99,6 +111,113 @@ async fn advertise_defaults(
         HeaderValue::from_static(LOCAL_PROJECT),
     );
     res
+}
+
+/// Runs one turn and streams it back, for an operator credential.
+///
+/// The caller is a machine, so the session has no end user. To run as a user,
+/// mint a client token and use the client surface.
+///
+/// One call submits and streams. A caller that submits first and subscribes
+/// second loses the start of its turn.
+async fn run(
+    State(state): State<V1State>,
+    Extension(caller): Extension<Caller>,
+    Path(_project): Path<String>,
+    Query(params): Query<RunParams>,
+    Json(req): Json<RunRequest>,
+) -> Response {
+    let state = state.admin;
+    let session_id = req
+        .session_id
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    let owner = caller.as_owner();
+
+    // Subscribe before the input, or the first events have no listener.
+    let spec = SessionSubscriptionSpec {
+        scope: SubscriptionScope::All,
+        caller: caller.clone(),
+        session_id: session_id.clone(),
+    };
+    let event_rx = match state.runtime.stream(spec, None).await {
+        Ok(rx) => rx,
+        Err(e) => return runtime_error_response(e),
+    };
+    // A token delta is a fragment of a translated message, so only the
+    // translated stream subscribes. Before the input, like the events: both are
+    // transient.
+    let delta_rx = match params.format {
+        RunFormat::AgUi => Some(
+            state
+                .runtime
+                .subscribe_token_deltas(&caller, &session_id)
+                .await,
+        ),
+        RunFormat::Events => None,
+    };
+
+    let turn = state
+        .runtime
+        .handle_client_input(HandleClientInput {
+            session_id: session_id.clone(),
+            caller,
+            owner,
+            // The tagged union carries its own addressing.
+            input: req.input,
+            span: crate::span::SpanContext::root().child("v1_run"),
+        })
+        .await;
+    let turn_id = match turn {
+        Ok(output) => output.turn_id,
+        Err(e) => return runtime_error_response(e),
+    };
+
+    let shutdown = state.shutdown.clone();
+    let out = match delta_rx {
+        Some(delta_rx) => run_ag_ui_translation(event_rx, delta_rx, session_id, turn_id, shutdown),
+        None => run_raw_events(event_rx, shutdown),
+    };
+    Sse::new(ReceiverStream::new(out).map(Ok::<_, std::convert::Infallible>))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Stored engine events, as `subs run -o jsonl` prints them. Ends with
+/// [`RUN_DONE_EVENT`] when the turn does, and with nothing when the server
+/// stops first.
+fn run_raw_events(
+    mut event_rx: mpsc::Receiver<SessionEvent>,
+    shutdown: CancellationToken,
+) -> mpsc::Receiver<SseEvent> {
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                event = event_rx.recv() => {
+                    let Some(event) = event else { return };
+                    let sse = SseEvent::default()
+                        .id(event.seq.to_string())
+                        .event(event.payload_type())
+                        .data(serde_json::to_string(&event).unwrap_or_default());
+                    if tx.send(sse).await.is_err() {
+                        return;
+                    }
+                    if event.ends_run() {
+                        let _ = tx.send(SseEvent::default().event(RUN_DONE_EVENT).data("")).await;
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    rx
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RunParams {
+    #[serde(default)]
+    format: RunFormat,
 }
 
 async fn get_session(

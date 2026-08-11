@@ -4,9 +4,22 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Any, Dict, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    conint,
+    constr,
+)
+
+
+class Announce(Enum):
+    auto = 'auto'
+    never = 'never'
 
 
 class AudioData(BaseModel):
@@ -15,6 +28,11 @@ class AudioData(BaseModel):
     )
     data: str
     format: str
+
+
+class AuthFailure(Enum):
+    interrupt = 'interrupt'
+    degrade = 'degrade'
 
 
 class ClientInput4(BaseModel):
@@ -41,7 +59,7 @@ class ClientInput6(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    attempt: Annotated[int | None, Field(ge=0)] = None
+    attempt: conint(ge=0) | None = None
     id: str
     result: Any | None = None
     type: Literal['tool.result']
@@ -51,7 +69,7 @@ class ClientInput7(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    attempt: Annotated[int | None, Field(ge=0)] = None
+    attempt: conint(ge=0) | None = None
     error: str
     id: str
     retryable: bool
@@ -87,7 +105,7 @@ class DecisionAction3(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    attempt: Annotated[int | None, Field(ge=0)] = None
+    attempt: conint(ge=0) | None = None
     id: str | None = None
     result: Any
     type: Literal['tool.result']
@@ -97,14 +115,12 @@ class DecisionAction4(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    attempt: Annotated[int | None, Field(ge=0)] = None
+    attempt: conint(ge=0) | None = None
     id: str | None = None
-    response: Annotated[
-        Any,
-        Field(
-            description="A neutral `LlmResponse`, or the provider's native response when the\nanswered `llm.execute` carried a `format`."
-        ),
-    ]
+    response: Any = Field(
+        ...,
+        description="A neutral `LlmResponse`, or the provider's native response when the\nanswered `llm.execute` carried a `format`.",
+    )
     type: Literal['llm.result']
 
 
@@ -119,6 +135,23 @@ class DecisionAction9(BaseModel):
 
 
 class DecisionAction10(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    interrupt_id: str
+    payload: Any | None = None
+    type: Literal['interrupt.resolve']
+
+
+class DecisionAction11(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    id: str
+    type: Literal['connector.sync']
+
+
+class DecisionAction12(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
@@ -142,31 +175,6 @@ class DecisionTrigger3(BaseModel):
     type: Literal['client.action']
 
 
-class DecisionTrigger5(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    error: str | None = None
-    id: str
-    name: str
-    ok: bool
-    result: str | None = None
-    type: Literal['tool.finished']
-
-
-class DecisionTrigger8(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    agent_id: str
-    error: str | None = None
-    id: str
-    ok: bool
-    result: str | None = None
-    session_id: str
-    type: Literal['sub_agent.finished']
-
-
 class DecisionTrigger9(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -176,15 +184,8 @@ class DecisionTrigger9(BaseModel):
     type: Literal['interrupt.resumed']
 
 
-class DecisionTrigger10(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    cost: Annotated[str | None, Field(pattern='^-?\\d+(\\.\\d+)?$')] = None
-    data: Any | None = None
-    turn_id: str
-    type: Literal['turn.finished']
-    usage: dict[str, int] | None = None
+class DeferToolsStrategy(Enum):
+    search = 'search'
 
 
 class EffectKind1(Enum):
@@ -193,12 +194,36 @@ class EffectKind1(Enum):
     llm_call = 'llm_call'
 
 
-class EffectStatus(Enum):
+class EffectKind(
+    RootModel[
+        EffectKind1
+        | Literal['connector_sync']
+        | Literal['decision']
+        | Literal['turn_end']
+    ]
+):
+    root: (
+        EffectKind1
+        | Literal['connector_sync']
+        | Literal['decision']
+        | Literal['turn_end']
+    ) = Field(
+        ...,
+        description="What kind of work an effect is. One enum for the wire and for the engine's\nown scheduling: a decision and a turn's end queue beside the calls and are\nswept the same way, so they are kinds too. Neither ever appears on an\n[`Effect`] — a decision rides the decision list, a turn end has no record.",
+        title='EffectKind',
+    )
+
+
+class EffectStatus1(Enum):
     pending = 'pending'
     completed = 'completed'
     failed = 'failed'
     retry_scheduled = 'retry_scheduled'
     queued = 'queued'
+
+
+class EffectStatus(RootModel[EffectStatus1 | Literal['running']]):
+    root: EffectStatus1 | Literal['running'] = Field(..., title='EffectStatus')
 
 
 class ErrorCode(Enum):
@@ -207,6 +232,30 @@ class ErrorCode(Enum):
     refused = 'refused'
     budget_exceeded = 'budget_exceeded'
     deadline_exceeded = 'deadline_exceeded'
+    invalid_response = 'invalid_response'
+    handler_error = 'handler_error'
+    worker_unreachable = 'worker_unreachable'
+    unroutable = 'unroutable'
+    internal = 'internal'
+
+
+class ErrorInfo(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    code: ErrorCode
+    detail: Any | None = Field(
+        None,
+        description='Small structured particulars: a status, the llm blocks that exist.',
+    )
+    message: str = Field(
+        ...,
+        description='One engine-authored sentence, safe to show a human. Never a raw\ndocument — an unbounded body belongs in the log.',
+    )
+    param: str | None = Field(
+        None,
+        description="The one input to go and fix, when the failure names one: `agent.llm`,\n`actions[0].type`. Stripe's `param`.",
+    )
 
 
 class FileData(BaseModel):
@@ -235,20 +284,18 @@ class InterruptOption(BaseModel):
         extra='forbid',
     )
     label: str
-    style: Annotated[
-        str | None,
-        Field(description='`primary` or `danger`; anything else renders plain.'),
-    ] = None
-    value: Annotated[
-        Any,
-        Field(
-            description="Delivered verbatim as the resolution's `payload`; worker vocabulary."
-        ),
-    ]
+    style: str | None = Field(
+        None, description='`primary` or `danger`; anything else renders plain.'
+    )
+    value: Any = Field(
+        ...,
+        description="Delivered verbatim as the resolution's `payload`; worker vocabulary.",
+    )
 
 
 class InterruptOrigin(Enum):
     system = 'system'
+    admin = 'admin'
     machine = 'machine'
     frontend = 'frontend'
 
@@ -257,42 +304,34 @@ class InterruptPayload(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    expiresAt: Annotated[
-        str | None, Field(description='RFC 3339; display only until engine TTLs land.')
-    ] = None
-    message: Annotated[
-        str | None,
-        Field(
-            description="Markdown; channels down-convert. Without it, channels fall back to\nthe interrupt's `reason`."
-        ),
-    ] = None
-    metadata: Annotated[
-        Any | None,
-        Field(
-            description='Free-form, delivered to clients verbatim. `metadata.options`\n([`InterruptOption`] list) renders as Slack buttons.'
-        ),
-    ] = None
-    responseSchema: Annotated[
-        Any | None,
-        Field(description='JSON Schema for the expected resolution payload.'),
-    ] = None
-    toolCallId: Annotated[
-        str | None, Field(description='Binds the interrupt to a prior tool call.')
-    ] = None
+    expiresAt: str | None = Field(
+        None, description='RFC 3339; display only until engine TTLs land.'
+    )
+    message: str | None = Field(
+        None,
+        description="Markdown; channels down-convert. Without it, channels fall back to\nthe interrupt's `reason`.",
+    )
+    metadata: Any | None = Field(
+        None,
+        description='Free-form, delivered to clients verbatim. `metadata.options`\n([`InterruptOption`] list) renders as Slack buttons.',
+    )
+    responseSchema: Any | None = Field(
+        None, description='JSON Schema for the expected resolution payload.'
+    )
+    toolCallId: str | None = Field(
+        None, description='Binds the interrupt to a prior tool call.'
+    )
 
 
 class InterruptResponder(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    channel: Annotated[
-        str, Field(description='The channel kind, e.g. `slack`, `ag-ui`.')
-    ]
-    label: Annotated[
-        str | None,
-        Field(description="The chosen option's label, when the resolution was a pick."),
-    ] = None
-    user: Annotated[str | None, Field(description='Channel-native user id.')] = None
+    channel: str = Field(..., description='The channel kind, e.g. `slack`, `ag-ui`.')
+    label: str | None = Field(
+        None, description="The chosen option's label, when the resolution was a pick."
+    )
+    user: str | None = Field(None, description='Channel-native user id.')
 
 
 class LlmFormat(Enum):
@@ -304,31 +343,42 @@ class LlmTool(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    defer: bool | None = Field(
+        None,
+        description="Keep this definition out of the request.\n\nThe engine still records it, still routes a call to it, and still finds\nit in a search. Only the request omits it, which is what keeps a large\ntool set out of the model's context and out of the cached prefix.\n\nAny source can set it: a tool the config declares, a connection, or\nwhatever comes next. Deferral is a property of a tool, not of where it\ncame from.",
+    )
     description: str
-    input: Annotated[
-        Any | None,
-        Field(
-            description="JSON Schema for the tool's arguments; omitted declares a no-argument\ntool. The engine validates each call's arguments against it and hands\nproviders their native form."
-        ),
-    ] = None
+    input: Any | None = Field(
+        None,
+        description="JSON Schema for the tool's arguments; omitted declares a no-argument\ntool. The engine validates each call's arguments against it and hands\nproviders their native form.",
+    )
     name: str
-    output: Annotated[
-        Any | None,
-        Field(
-            description='JSON Schema the settled result must satisfy; never sent to the model.\nA violating result settles as a terminal tool error.'
-        ),
-    ] = None
+    output: Any | None = Field(
+        None,
+        description='JSON Schema the settled result must satisfy; never sent to the model.\nA violating result settles as a terminal tool error.',
+    )
 
 
 class McpTools(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    defer: bool | None = Field(
+        None,
+        description="Keep every surviving tool out of the request. See [`LlmTool::defer`].\nAbsent ⇒ the agent's `defer_tools`.",
+    )
     exclude: list[str] | None = None
     idempotent: bool | None = None
     include: list[str] | None = None
     non_destructive: bool | None = None
     read_only: bool | None = None
+
+
+class OwnerKind(Enum):
+    frontend = 'frontend'
+    admin = 'admin'
+    api_key = 'api_key'
+    system = 'system'
 
 
 class ReasoningEffort(Enum):
@@ -352,14 +402,29 @@ class ResumeStatus(Enum):
     cancelled = 'cancelled'
 
 
+class RetryOverride(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    attempt_timeout_secs: conint(ge=0) | None = None
+    backoff_base_secs: conint(ge=0) | None = None
+    backoff_max_secs: conint(ge=0) | None = None
+    max_attempts: conint(ge=0) | None = None
+    total_timeout_secs: conint(ge=0) | None = None
+
+
 class RetryPolicy(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    backoff_base_secs: Annotated[int, Field(ge=0)]
-    backoff_max_secs: Annotated[int, Field(ge=0)]
-    max_retries: Annotated[int, Field(ge=0)]
-    timeout_secs: Annotated[int | None, Field(ge=0)] = None
+    attempt_timeout_secs: conint(ge=0) | None = None
+    backoff_base_secs: conint(ge=0)
+    backoff_max_secs: conint(ge=0)
+    max_attempts: conint(ge=0) = Field(
+        ...,
+        description='Cap on total attempts, not on retries: `1` allows one try and no retry.',
+    )
+    total_timeout_secs: conint(ge=0) | None = None
 
 
 class Role(Enum):
@@ -419,6 +484,38 @@ class ToolInput3(BaseModel):
     status: Literal['malformed']
 
 
+class ToolInput(RootModel[ToolInput1 | ToolInput2 | ToolInput3]):
+    root: ToolInput1 | ToolInput2 | ToolInput3 = Field(
+        ...,
+        description="The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",
+        title='ToolInput',
+    )
+
+
+class Usage(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    cache_read: conint(ge=0) = Field(
+        ..., description='The part of `input` the provider read from the cache.'
+    )
+    cache_write: conint(ge=0) = Field(
+        ..., description='The part of `input` the provider wrote to the cache.'
+    )
+    input: conint(ge=0) = Field(
+        ..., description='Every input token of the call, cached or not.'
+    )
+    output: conint(ge=0)
+    provider: Any | None = Field(
+        None,
+        description='The counts as the provider reported them, for a reader that wants a\nnumber this type does not name.',
+    )
+    total: conint(ge=0) = Field(..., description='`input` and `output` together.')
+    uncached_input: conint(ge=0) = Field(
+        ..., description='The part of `input` the provider read fresh.'
+    )
+
+
 class VideoUrl(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -431,12 +528,25 @@ class WorkerIdentity(BaseModel):
         extra='forbid',
     )
     id: str | None = None
+    kind: OwnerKind | None = None
     metadata: dict[str, str]
+
+
+class WorkerState(RootModel[Any]):
+    root: Any = Field(
+        ...,
+        description='Opaque worker state: JSON the engine stores but never interprets.',
+        title='WorkerState',
+    )
 
 
 class AgentTool(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
+    )
+    defer: bool | None = Field(
+        None,
+        description="Keep this tool out of the request. See [`LlmTool::defer`]. Absent ⇒\nthe agent's `defer_tools`.",
     )
     description: str | None = None
     handler: Handler | None = None
@@ -479,6 +589,14 @@ class ContentPart5(BaseModel):
     video_url: VideoUrl
 
 
+class ContentPart(
+    RootModel[ContentPart1 | ContentPart2 | ContentPart3 | ContentPart4 | ContentPart5]
+):
+    root: ContentPart1 | ContentPart2 | ContentPart3 | ContentPart4 | ContentPart5 = (
+        Field(..., title='ContentPart')
+    )
+
+
 class DecisionAction2(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -486,7 +604,10 @@ class DecisionAction2(BaseModel):
     arguments: Any
     id: str | None = None
     name: str
-    retry: RetryPolicy | None = None
+    retry: RetryOverride | None = Field(
+        None,
+        description="Layered over the agent config's policy for this kind, else over the\nengine's default for where the tool runs.",
+    )
     type: Literal['tool.call']
 
 
@@ -494,12 +615,12 @@ class DecisionAction5(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    attempt: Annotated[int | None, Field(ge=0)] = None
+    attempt: conint(ge=0) | None = None
     code: ErrorCode | None = None
     detail: Any | None = None
     error: str
     id: str | None = None
-    retryable: Annotated[bool | None, Field(description='Omitted ⇒ terminal.')] = None
+    retryable: bool | None = Field(None, description='Omitted ⇒ terminal.')
     type: Literal['tool.error']
 
 
@@ -507,35 +628,13 @@ class DecisionAction6(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    attempt: Annotated[int | None, Field(ge=0)] = None
+    attempt: conint(ge=0) | None = None
     code: ErrorCode | None = None
     detail: Any | None = None
     error: str
     id: str | None = None
-    retryable: Annotated[bool | None, Field(description='Omitted ⇒ terminal.')] = None
+    retryable: bool | None = Field(None, description='Omitted ⇒ terminal.')
     type: Literal['llm.error']
-
-
-class DecisionAction7(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    agent_id: str
-    message: Annotated[
-        DraftMessage | None,
-        Field(
-            description='The child\'s opening message. It travels with the spawn, so it\ncannot race the creation of the session it opens.'
-        ),
-    ] = None
-    retry: RetryPolicy | None = None
-    session_id: str
-    tool_call_id: Annotated[
-        str,
-        Field(
-            description='The model tool-call this delegation answers — always required.'
-        ),
-    ]
-    type: Literal['sub_agent.spawn']
 
 
 class DecisionTrigger4(BaseModel):
@@ -543,36 +642,91 @@ class DecisionTrigger4(BaseModel):
         extra='forbid',
     )
     arguments: str
-    attempt: Annotated[int, Field(ge=0)]
+    attempt: conint(ge=0)
     deadline: AwareDatetime | None = None
     id: str
-    input: Annotated[
-        ToolInput1 | ToolInput2 | ToolInput3,
-        Field(
-            description="The engine's classification of `arguments` against the tool's\ndeclared `input` schema: `valid` (with the parsed `value`),\n`invalid` (value plus the violation), or `malformed` (not a JSON\nobject). Always on the wire.",
-            title='ToolInput',
-        ),
-    ]
+    input: ToolInput = Field(
+        ...,
+        description="The engine's classification of `arguments` against the tool's\ndeclared `input` schema: `valid` (with the parsed `value`),\n`invalid` (value plus the violation), or `malformed` (not a JSON\nobject). Always on the wire.",
+    )
     name: str
     type: Literal['tool.execute']
+
+
+class DecisionTrigger5(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    error: ErrorInfo | None = None
+    id: str
+    name: str
+    ok: bool
+    result: str | None = None
+    type: Literal['tool.finished']
 
 
 class DecisionTrigger6(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    attempt: Annotated[int, Field(ge=0)]
+    attempt: conint(ge=0)
     deadline: AwareDatetime | None = None
     format: LlmFormat | None = None
     id: str
-    request: Annotated[
-        Any,
-        Field(
-            description="The neutral `LlmRequest` JSON, or the provider's native request body\nwhen `format` is set."
-        ),
-    ]
+    request: Any = Field(
+        ...,
+        description="The neutral `LlmRequest` JSON, or the provider's native request body\nwhen `format` is set.",
+    )
     stream: bool
     type: Literal['llm.execute']
+
+
+class DecisionTrigger8(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    agent_id: str
+    error: ErrorInfo | None = None
+    id: str
+    ok: bool
+    result: str | None = None
+    session_id: str
+    type: Literal['sub_agent.finished']
+
+
+class DecisionTrigger10(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    cost: constr(pattern=r'^-?\d+(\.\d+)?$') | None = None
+    data: Any | None = None
+    turn_id: str
+    type: Literal['turn.finished']
+    usage: Usage | None = None
+
+
+class DeferTools(BaseModel):
+    model_config = ConfigDict(
+        extra='allow',
+    )
+    __annotations__ = {
+        '__pydantic_extra__': Dict[str, Any],
+    }
+    max_matches: conint(ge=1) | None = Field(
+        None,
+        description='The most matches one search answers with. Never zero: a search that can\nanswer with nothing is a search the model cannot use.',
+    )
+    strategy: DeferToolsStrategy | None = Field(
+        None, description='Which tools the agent gets to reach the ones it defers.'
+    )
+
+
+class DeferToolsWire(RootModel[bool | DeferTools]):
+    root: bool | DeferTools = Field(
+        ...,
+        description='The two forms `defer_tools` accepts: `true` for the defaults, or a table.\n`false` reads the same as absent, so a config can turn off what it inherits.',
+        title='DeferToolsWire',
+    )
 
 
 class Effect(BaseModel):
@@ -580,33 +734,22 @@ class Effect(BaseModel):
         extra='forbid',
     )
     agent_id: str | None = None
-    anchor: Annotated[
-        str | None, Field(description='The tree node the effect was requested at.')
-    ] = None
+    anchor: str | None = Field(
+        None, description='The tree node the effect was requested at.'
+    )
     arguments: str | None = None
-    attempt: Annotated[int, Field(ge=0)]
+    attempt: conint(ge=0)
     deadline: AwareDatetime | None = None
     handler: Handler | None = None
     id: str
-    kind: Annotated[
-        EffectKind1
-        | Literal['connector_sync']
-        | Literal['decision']
-        | Literal['turn_end'],
-        Field(
-            description="What kind of work an effect is. One enum for the wire and for the engine's\nown scheduling: a decision and a turn's end queue beside the calls and are\nswept the same way, so they are kinds too. Neither ever appears on an\n[`Effect`] — a decision rides the decision list, a turn end has no record.",
-            title='EffectKind',
-        ),
-    ]
+    kind: EffectKind
     name: str | None = None
     status: EffectStatus
     stream: bool | None = None
-    tool_call_id: Annotated[
-        str | None,
-        Field(
-            description='The model tool call a delegation answers; its own `id` is the child session.'
-        ),
-    ] = None
+    tool_call_id: str | None = Field(
+        None,
+        description='The model tool call a delegation answers; its own `id` is the child session.',
+    )
 
 
 class InterruptResolution(BaseModel):
@@ -622,13 +765,12 @@ class McpServer(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
+    auth_failure: AuthFailure | None = None
     id: str
-    tools: Annotated[
-        McpTools | None,
-        Field(
-            description='Narrows what the model sees. Absent ⇒ every tool the connection grants.'
-        ),
-    ] = None
+    tools: McpTools | None = Field(
+        None,
+        description='Narrows what the model sees. Absent ⇒ every tool the connection grants.',
+    )
 
 
 class ReasoningConfig(BaseModel):
@@ -638,7 +780,18 @@ class ReasoningConfig(BaseModel):
     effort: ReasoningEffort | None = None
     enabled: bool | None = None
     exclude: bool | None = None
-    max_tokens: Annotated[int | None, Field(ge=0)] = None
+    max_tokens: conint(ge=0) | None = None
+
+
+class RetryConfig(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    connector: RetryOverride | None = None
+    default: RetryOverride | None = None
+    llm: RetryOverride | None = None
+    sub_agent: RetryOverride | None = None
+    tool: RetryOverride | None = None
 
 
 class StreamDelta(BaseModel):
@@ -656,21 +809,18 @@ class TokenDelta(BaseModel):
         extra='forbid',
     )
     agent_id: str
-    attempt: Annotated[int, Field(ge=0)]
+    attempt: conint(ge=0)
     call_id: str
     finish_reason: str | None = None
     reasoning: str | None = None
-    root_session_id: Annotated[str, Field(description='Transport routing key.')]
-    seq: Annotated[
-        int,
-        Field(
-            description='Per-call counter, distinct from event-store sequence.', ge=0
-        ),
-    ]
-    session_id: Annotated[str, Field(description='May be a sub-agent of root.')]
-    tenant_id: Annotated[
-        str, Field(description='Tenant isolation key — subscribers must match.')
-    ]
+    root_session_id: str = Field(..., description='Transport routing key.')
+    seq: conint(ge=0) = Field(
+        ..., description='Per-call counter, distinct from event-store sequence.'
+    )
+    session_id: str = Field(..., description='May be a sub-agent of root.')
+    tenant_id: str = Field(
+        ..., description='Tenant isolation key — subscribers must match.'
+    )
     text: str | None = None
     tool_calls: list[ToolCallChunk]
     turn_id: str | None = None
@@ -689,39 +839,46 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    llm: Annotated[
-        str | None, Field(description="The `[llm.*]` block this agent's calls run on.")
-    ] = None
-    mcp: Annotated[
-        list[McpServer] | None,
-        Field(
-            description='MCP servers the agent draws tools from. The engine resolves each against\nits connection registry into [`ConnectorTool`]s the model sees alongside\n`tools`. Like `sub_agents`, these are never merged into `tools` — the\nworker declares the server, not its tools.\n\nA second protocol gets its own field rather than a `type` tag here: its\nfilter would not be this one (MCP annotations mean nothing to an A2A\nagent), and a union of conditionally-valid fields generates badly in the\nGo and Python bindings.'
-        ),
-    ] = None
+    announce_mcp: Announce | None = Field(
+        None,
+        description="Where the engine tells the model that an MCP server is available, and\nwhat that server says it is for.\n\nSeparate from `defer_tools`: a server exists whether or not its tools\nare deferred, and where a notice lands is a fact about this agent's\nprompt rather than about any server.",
+    )
+    defer_tools: DeferToolsWire | None = Field(
+        None,
+        description='Defer every tool this agent offers, from any source, unless the tool or\nthe connection says otherwise. Absent ⇒ the agent defers nothing of its\nown; a connection may still defer on its own account.\n\nPresence is the switch, so an agent cannot carry settings that do\nnothing. Declared on the agent because an agent can hold this opinion\nbefore it names a connection: one that sets it gets the search tools\nfrom its first turn, so a connection added later costs no cache.',
+    )
+    llm: str | None = Field(
+        None, description="The `[llm.*]` block this agent's calls run on."
+    )
+    mcp: list[McpServer] | None = Field(None, description='MCP servers')
     model: str
-    retry: RetryPolicy | None = None
-    sub_agents: Annotated[
-        list[SubAgent] | None,
-        Field(
-            description='Sub-agents the model can delegate to. Presented to the model as tools (by\nid) alongside `tools`, but each call spawns a child session rather than\nexecuting a function.'
-        ),
-    ] = None
+    retry: RetryConfig | None = Field(
+        None,
+        description='Boxed: five per-kind overrides is a lot of bytes to carry inline\nthrough every command that holds a config.',
+    )
+    sub_agents: list[SubAgent] | None = Field(
+        None,
+        description='Sub-agents the model can delegate to. Presented to the model as tools (by\nid) alongside `tools`, but each call spawns a child session rather than\nexecuting a function.',
+    )
     system: str | None = None
-    tools: Annotated[
-        list[AgentTool] | None,
-        Field(description='Worker- or client-executed tools the model can call.'),
-    ] = None
+    tools: list[AgentTool] | None = Field(
+        None, description='Worker- or client-executed tools the model can call.'
+    )
+
+
+class Content(RootModel[str | list[ContentPart]]):
+    root: str | list[ContentPart] = Field(
+        ...,
+        description='Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged).',
+        title='Content',
+    )
 
 
 class DraftMessage(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    content: (
-        str
-        | list[ContentPart1 | ContentPart2 | ContentPart3 | ContentPart4 | ContentPart5]
-        | None
-    ) = None
+    content: Content | None = None
     id: str | None = None
     name: str | None = None
     role: Role
@@ -733,7 +890,7 @@ class LlmRequest(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    max_completion_tokens: Annotated[int | None, Field(ge=0)] = None
+    max_completion_tokens: conint(ge=0) | None = None
     messages: list[DraftMessage]
     model: str
     reasoning: ReasoningConfig | None = None
@@ -746,31 +903,24 @@ class LlmResponse(BaseModel):
         extra='forbid',
     )
     content: str | None = None
-    cost: Annotated[
-        str | None,
-        Field(
-            description='Cost in dollars for this call, if the provider reports it. A decimal\nstring on the wire.',
-            pattern='^-?\\d+(\\.\\d+)?$',
-        ),
-    ] = None
+    cost: constr(pattern=r'^-?\d+(\.\d+)?$') | None = Field(
+        None,
+        description='Cost in dollars for this call, if the provider reports it. A decimal\nstring on the wire.',
+    )
     finish_reason: str | None = None
-    images: Annotated[
-        list[ResponseImage] | None, Field(description='Images generated by the model.')
-    ] = None
+    images: list[ResponseImage] | None = Field(
+        None, description='Images generated by the model.'
+    )
     model: str
     tool_calls: list[ToolCall] | None = None
-    usage: Any | None = None
+    usage: Usage | None = None
 
 
 class Message(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    content: (
-        str
-        | list[ContentPart1 | ContentPart2 | ContentPart3 | ContentPart4 | ContentPart5]
-        | None
-    ) = None
+    content: Content | None = None
     id: str
     name: str | None = None
     role: Role
@@ -800,12 +950,10 @@ class ClientInput1(BaseModel):
     )
     agent_id: str
     message: DraftMessage
-    queue: Annotated[
-        bool | None,
-        Field(
-            description='Hold this message for the next turn instead of refusing it when one\nis already running. Off by default: rejection stays the contract for\na plain submitter, and queuing is declared intent.'
-        ),
-    ] = None
+    queue: bool | None = Field(
+        None,
+        description='Hold this message for the next turn instead of refusing it when one\nis already running. Off by default: rejection stays the contract for\na plain submitter, and queuing is declared intent.',
+    )
     stream: bool | None = None
     turn_id: str | None = None
     type: Literal['client.message']
@@ -830,15 +978,39 @@ class ClientInput3(BaseModel):
     agent_id: str
     client: ClientContext | None = None
     messages: list[DraftMessage]
-    queue: Annotated[
-        bool | None,
-        Field(
-            description='Hold this batch for the next turn instead of refusing it when one is\nalready running. Off by default: rejection stays the contract for a\nplain submitter, and queuing is declared intent.'
-        ),
-    ] = None
+    queue: bool | None = Field(
+        None,
+        description='Hold this batch for the next turn instead of refusing it when one is\nalready running. Off by default: rejection stays the contract for a\nplain submitter, and queuing is declared intent.',
+    )
     stream: bool | None = None
     turn_id: str | None = None
     type: Literal['client.append']
+
+
+class ClientInput(
+    RootModel[
+        ClientInput1
+        | ClientInput2
+        | ClientInput3
+        | ClientInput4
+        | ClientInput5
+        | ClientInput6
+        | ClientInput7
+    ]
+):
+    root: (
+        ClientInput1
+        | ClientInput2
+        | ClientInput3
+        | ClientInput4
+        | ClientInput5
+        | ClientInput6
+        | ClientInput7
+    ) = Field(
+        ...,
+        description='Everything a client can send on the input surface: submit a message / a full view / an\nappend batch / a named action, resume an interrupt, or settle a client tool. A flat,\ninternally-tagged union — its seven tags produce serde\'s "unknown variant, expected one\nof …" error for free. `Runtime::handle_client_input` is the single seam that dispatches\nit (mirroring `resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the four submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit\'s body rebuilds a [`ClientPayload`] at the seam.',
+        title='ClientInput',
+    )
 
 
 class ClientPayload1(BaseModel):
@@ -870,26 +1042,58 @@ class ClientPayload3(BaseModel):
     type: Literal['client.append']
 
 
+class ClientPayload(
+    RootModel[ClientPayload1 | ClientPayload2 | ClientPayload3 | ClientPayload4]
+):
+    root: ClientPayload1 | ClientPayload2 | ClientPayload3 | ClientPayload4 = Field(
+        ...,
+        description='The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, an append batch, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.',
+        title='ClientPayload',
+    )
+
+
 class DecisionAction1(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
     id: str | None = None
-    llm: Annotated[
-        str | None,
-        Field(
-            description="The `[llm.*]` block this call runs on; omitted ⇒ the merge source\nconfig's `llm`. Naming a different block moves one call to another\nvenue or vendor."
-        ),
-    ] = None
-    max_completion_tokens: Annotated[int | None, Field(ge=0)] = None
+    llm: str | None = Field(
+        None,
+        description="The `[llm.*]` block this call runs on; omitted ⇒ the merge source\nconfig's `llm`. Naming a different block moves one call to another\nvenue or vendor.",
+    )
+    max_completion_tokens: conint(ge=0) | None = None
     messages: list[DraftMessage] | None = None
     model: str | None = None
     reasoning: ReasoningConfig | None = None
-    retry: RetryPolicy | None = None
+    retry: RetryOverride | None = Field(
+        None,
+        description="Layered over the agent config's `llm` policy, else over the engine's\ndefault.",
+    )
     stream: bool | None = None
     temperature: float | None = None
     tools: list[LlmTool] | None = None
     type: Literal['llm.call']
+
+
+class DecisionAction7(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    agent_id: str
+    message: DraftMessage | None = Field(
+        None,
+        description="The child's opening message. It travels with the spawn, so it\ncannot race the creation of the session it opens.",
+    )
+    retry: RetryOverride | None = Field(
+        None,
+        description="Layered over the agent config's `sub_agent` policy, else over the\nengine's default.",
+    )
+    session_id: str
+    tool_call_id: str = Field(
+        ...,
+        description='The model tool-call this delegation answers — always required.',
+    )
+    type: Literal['sub_agent.spawn']
 
 
 class DecisionAction8(BaseModel):
@@ -901,52 +1105,71 @@ class DecisionAction8(BaseModel):
     type: Literal['message.send']
 
 
+class DecisionAction(
+    RootModel[
+        DecisionAction1
+        | DecisionAction2
+        | DecisionAction3
+        | DecisionAction4
+        | DecisionAction5
+        | DecisionAction6
+        | DecisionAction7
+        | DecisionAction8
+        | DecisionAction9
+        | DecisionAction10
+        | DecisionAction11
+        | DecisionAction12
+    ]
+):
+    root: (
+        DecisionAction1
+        | DecisionAction2
+        | DecisionAction3
+        | DecisionAction4
+        | DecisionAction5
+        | DecisionAction6
+        | DecisionAction7
+        | DecisionAction8
+        | DecisionAction9
+        | DecisionAction10
+        | DecisionAction11
+        | DecisionAction12
+    ) = Field(
+        ...,
+        description="The action a worker authors on the wire. Mirrors the internal `Action`, but a\nsettle's effect id may be omitted: on the sync/pull paths the answered\n`*.execute` trigger names it, so echoing it is redundant. `resolve_response`\n(`runtime::session::wire`) turns this into the internal `Action` (id always\npresent) at the transport boundary.",
+        title='DecisionAction',
+    )
+
+
 class DecisionResponse(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    actions: (
-        list[
-            DecisionAction1
-            | DecisionAction2
-            | DecisionAction3
-            | DecisionAction4
-            | DecisionAction5
-            | DecisionAction6
-            | DecisionAction7
-            | DecisionAction8
-            | DecisionAction9
-            | DecisionAction10
-        ]
-        | None
-    ) = None
-    agent: Annotated[
-        AgentConfig | None,
-        Field(
-            description='A new agent config write; omitted keeps the current config.'
-        ),
-    ] = None
+    actions: list[DecisionAction] | None = None
+    agent: AgentConfig | None = Field(
+        None, description='A new agent config write; omitted keeps the current config.'
+    )
+    channels: dict[str, Any] | None = Field(
+        None,
+        description='How each channel shows this decision, keyed by channel kind (e.g.\n`slack`). Opaque to the engine.',
+    )
     messages: list[DraftMessage] | None = None
-    state: Annotated[
-        Any,
-        Field(
-            description='Omitted or `null` keeps the current state; clear with a non-null empty value.'
-        ),
-    ] = None
+    state: WorkerState | None = Field(
+        None,
+        description='Omitted or `null` keeps the current state; clear with a non-null empty value.',
+    )
 
 
 class DecisionTrigger2(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    client: Annotated[
-        ClientContext,
-        Field(
-            description='Inputs the client declared on its run; the engine layers `client.tools`\nonto the proposed config by default.'
-        ),
-    ]
+    client: ClientContext = Field(
+        ...,
+        description='Inputs the client declared on its run; the engine layers `client.tools`\nonto the proposed config by default.',
+    )
     messages: list[DraftMessage]
-    new_from: Annotated[int, Field(ge=0)]
+    new_from: conint(ge=0)
     type: Literal['client.messages']
 
 
@@ -954,56 +1177,18 @@ class DecisionTrigger7(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    code: ErrorCode | None = None
-    cost: Annotated[str | None, Field(pattern='^-?\\d+(\\.\\d+)?$')] = None
-    detail: Any | None = None
-    error: str | None = None
+    cost: constr(pattern=r'^-?\d+(\.\d+)?$') | None = None
+    error: ErrorInfo | None = None
     id: str
     message: DraftMessage | None = None
     ok: bool
     truncated: bool
     type: Literal['llm.finished']
-    usage: Any | None = None
+    usage: Usage | None = None
 
 
-class DecisionRequest(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    agent: Annotated[
-        AgentConfig | None,
-        Field(
-            description='The agent config resolved for the active path (`null` when none is set).'
-        ),
-    ] = None
-    agent_id: str
-    ancestry: list[str]
-    attempts: Annotated[int, Field(ge=0)]
-    calls: list[Effect]
-    deadline: AwareDatetime | None = None
-    decision_id: str
-    identity: WorkerIdentity
-    message_tree: MessageTree
-    messages: list[Message]
-    pending_calls: Annotated[
-        int,
-        Field(description='Count of in-flight `tool_call`/`sub_agent` calls.', ge=0),
-    ]
-    proposed: Annotated[
-        DecisionResponse,
-        Field(
-            description="The engine's default continuation for `trigger` (empty when it needs\nworker knowledge). Advisory: accept by echoing it as the decision."
-        ),
-    ]
-    session_id: str
-    state: Annotated[
-        Any,
-        Field(
-            description='Opaque worker state: JSON the engine stores but never interprets.',
-            title='WorkerState',
-        ),
-    ]
-    trigger: Annotated[
+class DecisionTrigger(
+    RootModel[
         DecisionTrigger1
         | DecisionTrigger2
         | DecisionTrigger3
@@ -1013,37 +1198,60 @@ class DecisionRequest(BaseModel):
         | DecisionTrigger7
         | DecisionTrigger8
         | DecisionTrigger9
-        | DecisionTrigger10,
-        Field(
-            description="The trigger a worker sees on the wire — the materialized projection of the\nengine's internal decision trigger. It has no `ClientMessage`: a bare client\nmessage is always materialized to `ClientTranscript` by `to_wire_trigger`\n(`runtime::session::wire`) before delivery, so an unmaterialized message can\nnever reach a worker.",
-            title='DecisionTrigger',
-        ),
+        | DecisionTrigger10
     ]
+):
+    root: (
+        DecisionTrigger1
+        | DecisionTrigger2
+        | DecisionTrigger3
+        | DecisionTrigger4
+        | DecisionTrigger5
+        | DecisionTrigger6
+        | DecisionTrigger7
+        | DecisionTrigger8
+        | DecisionTrigger9
+        | DecisionTrigger10
+    ) = Field(
+        ...,
+        description="The trigger a worker sees on the wire — the materialized projection of the\nengine's internal decision trigger. It has no `ClientMessage`: a bare client\nmessage is always materialized to `ClientTranscript` by `to_wire_trigger`\n(`runtime::session::wire`) before delivery, so an unmaterialized message can\nnever reach a worker.",
+        title='DecisionTrigger',
+    )
+
+
+class DecisionRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    agent: AgentConfig | None = Field(
+        None,
+        description='The agent config resolved for the active path (`null` when none is set).',
+    )
+    agent_id: str
+    ancestry: list[str]
+    attempts: conint(ge=0)
+    calls: list[Effect]
+    deadline: AwareDatetime | None = None
+    decision_id: str
+    identity: WorkerIdentity
+    message_tree: MessageTree
+    messages: list[Message]
+    pending_calls: conint(ge=0) = Field(
+        ..., description='Count of in-flight `tool_call`/`sub_agent` calls.'
+    )
+    proposed: DecisionResponse = Field(
+        ...,
+        description="The engine's default continuation for `trigger` (empty when it needs\nworker knowledge). Advisory: accept by echoing it as the decision.",
+    )
+    session_id: str
+    state: WorkerState
+    trigger: DecisionTrigger
     turn_id: str | None = None
 
 
 class SubstructureProtocol(BaseModel):
-    client_input: Annotated[
-        ClientInput1
-        | ClientInput2
-        | ClientInput3
-        | ClientInput4
-        | ClientInput5
-        | ClientInput6
-        | ClientInput7
-        | None,
-        Field(
-            description='Everything a client can send on the input surface: submit a message / a full view / an\nappend batch / a named action, resume an interrupt, or settle a client tool. A flat,\ninternally-tagged union — its seven tags produce serde\'s "unknown variant, expected one\nof …" error for free. `Runtime::handle_client_input` is the single seam that dispatches\nit (mirroring `resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the four submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit\'s body rebuilds a [`ClientPayload`] at the seam.',
-            title='ClientInput',
-        ),
-    ] = None
-    client_payload: Annotated[
-        ClientPayload1 | ClientPayload2 | ClientPayload3 | ClientPayload4 | None,
-        Field(
-            description='The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, an append batch, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.',
-            title='ClientPayload',
-        ),
-    ] = None
+    client_input: ClientInput | None = None
+    client_payload: ClientPayload | None = None
     decision_request: DecisionRequest | None = None
     decision_response: DecisionResponse | None = None
     interrupt_payload: InterruptPayload | None = None

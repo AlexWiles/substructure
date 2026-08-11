@@ -11,7 +11,7 @@ use crate::runtime::span::SpanContext;
 
 use super::command::{CommandPayload, SessionError, Working};
 use super::events::EventPayload;
-use super::state::{ApplyContext, EventMeta, SessionState};
+use super::state::{waiting_on_client, ApplyContext, EventMeta, SessionState};
 
 pub struct CommitContext {
     pub span: SpanContext,
@@ -42,6 +42,19 @@ impl SessionEvent {
             .ok()
             .and_then(|v| v.get("type")?.as_str().map(str::to_owned))
             .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Whether the engine has nothing more to send until the caller acts. The
+    /// turn is not always over: a client tool parks it, and the same turn
+    /// resumes when the result arrives.
+    pub fn ends_run(&self) -> bool {
+        match &self.payload {
+            EventPayload::TurnCompleted(_)
+            | EventPayload::SessionInterrupted(_)
+            | EventPayload::SessionCancelled => true,
+            EventPayload::LlmCallErrored(e) => !e.retryable,
+            _ => waiting_on_client(&self.meta.calls),
+        }
     }
 }
 
@@ -280,5 +293,123 @@ pub async fn execute(
             }
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod ends_run_tests {
+    use super::*;
+    use crate::protocol::{Effect, EffectKind, EffectStatus, Handler};
+    use crate::runtime::session::events::DecisionQueued;
+    use crate::runtime::session::state::{EventMeta, SessionStatus};
+
+    fn call(id: &str, handler: Handler) -> Effect {
+        Effect {
+            id: id.into(),
+            kind: EffectKind::ToolCall,
+            status: EffectStatus::Pending,
+            attempt: 0,
+            deadline: None,
+            anchor: None,
+            name: None,
+            arguments: None,
+            handler: Some(handler),
+            stream: None,
+            agent_id: None,
+            tool_call_id: None,
+        }
+    }
+
+    fn event(payload: EventPayload, calls: Vec<Effect>) -> SessionEvent {
+        let at = chrono::DateTime::UNIX_EPOCH;
+        SessionEvent {
+            id: Uuid::nil(),
+            tenant_id: "t".into(),
+            session_id: "s".into(),
+            seq: 1,
+            span: SpanContext::root(),
+            occurred_at: at,
+            payload,
+            meta: EventMeta {
+                status: SessionStatus::Idle,
+                wake_at: None,
+                owner: None,
+                agent_id: None,
+                ancestry: Vec::new(),
+                turn_id: None,
+                cost: Default::default(),
+                sub_agent_cost: Default::default(),
+                head_id: None,
+                calls,
+                decisions: Vec::new(),
+            },
+            start_time: at,
+            end_time: at,
+        }
+    }
+
+    fn queued(calls: Vec<Effect>) -> SessionEvent {
+        event(
+            EventPayload::DecisionQueued(DecisionQueued {
+                id: "d1".into(),
+                trigger: crate::runtime::session::decision::Trigger::SessionStart,
+            }),
+            calls,
+        )
+    }
+
+    #[test]
+    fn a_completed_turn_ends_the_run() {
+        let done = event(
+            EventPayload::TurnCompleted(crate::runtime::session::events::TurnCompleted {
+                turn_id: "t1".into(),
+                data: serde_json::Value::Null,
+                turn_cost: Default::default(),
+                turn_token_usage: Default::default(),
+                error: None,
+            }),
+            vec![call("c", Handler::Client)],
+        );
+        assert!(done.ends_run());
+    }
+
+    #[test]
+    fn an_outstanding_client_call_ends_the_run() {
+        assert!(queued(vec![call("c", Handler::Client)]).ends_run());
+    }
+
+    #[test]
+    fn a_worker_call_alongside_it_does_not() {
+        assert!(!queued(vec![call("c", Handler::Client), call("w", Handler::Worker)]).ends_run());
+    }
+
+    #[test]
+    fn a_sub_agent_names_no_handler_so_it_holds_the_run() {
+        let mut sub = call("s", Handler::Client);
+        sub.kind = EffectKind::SubAgent;
+        sub.handler = None;
+        assert!(!queued(vec![call("c", Handler::Client), sub]).ends_run());
+    }
+
+    #[test]
+    fn nothing_outstanding_is_not_an_ending() {
+        assert!(!queued(Vec::new()).ends_run());
+    }
+
+    #[test]
+    fn a_retryable_llm_error_keeps_the_run() {
+        let payload = |retryable: bool| {
+            EventPayload::LlmCallErrored(crate::runtime::session::events::LlmCallErrored {
+                id: "l".into(),
+                attempt: 0,
+                error: crate::protocol::ErrorInfo::new(
+                    crate::protocol::ErrorCode::Internal,
+                    "boom",
+                ),
+                retryable,
+            })
+        };
+        assert!(!event(payload(true), Vec::new()).ends_run());
+        assert!(event(payload(false), Vec::new()).ends_run());
     }
 }

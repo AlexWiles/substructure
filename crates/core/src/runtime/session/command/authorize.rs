@@ -1,8 +1,6 @@
 //! Who may do what. Every command passes through here before it writes.
 //!
-//! Three callers, in descending privilege: [`Caller::System`] is the engine
-//! itself, [`Caller::Machine`] a worker, [`Caller::Frontend`] an end user. A
-//! check that names a caller lives here; a check that names an effect's own
+//! A check that names a caller lives here. A check that names an effect's own
 //! handler is the kind's, in [`effects`](super::super::effects).
 
 use super::SessionError;
@@ -21,11 +19,24 @@ impl SessionState {
         }
     }
 
-    pub(in crate::runtime::session) fn ensure_machine_or_system(
+    /// The engine, or a worker answering what it was handed.
+    pub(in crate::runtime::session) fn ensure_worker_or_system(
         caller: &Caller,
     ) -> Result<(), SessionError> {
         match caller {
-            Caller::System { .. } | Caller::Machine { .. } => Ok(()),
+            Caller::System { .. } | Caller::ApiKey { .. } => Ok(()),
+            Caller::Admin { .. } | Caller::Frontend { .. } => {
+                Err(SessionError::SessionAccessDenied)
+            }
+        }
+    }
+
+    /// For operations on a session rather than in it.
+    pub(in crate::runtime::session) fn ensure_operator_or_system(
+        caller: &Caller,
+    ) -> Result<(), SessionError> {
+        match caller {
+            Caller::System { .. } | Caller::ApiKey { .. } | Caller::Admin { .. } => Ok(()),
             Caller::Frontend { .. } => Err(SessionError::SessionAccessDenied),
         }
     }
@@ -36,7 +47,11 @@ impl SessionState {
     ) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } => Ok(()),
-            Caller::Machine {
+            Caller::ApiKey {
+                tenant_id: caller_tenant,
+                ..
+            }
+            | Caller::Admin {
                 tenant_id: caller_tenant,
                 ..
             }
@@ -55,23 +70,24 @@ impl SessionState {
     pub(super) fn caller_interrupt_origin(caller: &Caller) -> InterruptOrigin {
         match caller {
             Caller::System { .. } => InterruptOrigin::System,
-            Caller::Machine { .. } => InterruptOrigin::Machine,
+            Caller::Admin { .. } => InterruptOrigin::Admin,
+            Caller::ApiKey { .. } => InterruptOrigin::Machine,
             Caller::Frontend { .. } => InterruptOrigin::Frontend,
         }
     }
 
     pub(super) fn ensure_owns_session(&self, caller: &Caller) -> Result<(), SessionError> {
         match caller {
-            Caller::System { .. } | Caller::Machine { .. } => Ok(()),
-            Caller::Frontend { user_id, .. } => {
+            Caller::System { .. } | Caller::ApiKey { .. } | Caller::Admin { .. } => Ok(()),
+            Caller::Frontend { .. } => {
                 let owner = self
                     .owner
                     .as_ref()
                     .ok_or(SessionError::SessionAccessDenied)?;
-                if owner.id.as_deref() != Some(user_id.as_str()) {
-                    return Err(SessionError::SessionAccessDenied);
+                match caller.owns(owner) {
+                    true => Ok(()),
+                    false => Err(SessionError::SessionAccessDenied),
                 }
-                Ok(())
             }
         }
     }
@@ -89,7 +105,7 @@ impl SessionState {
         Ok(())
     }
 
-    /// A worker may answer only the calls it was handed; a frontend, none.
+    /// A worker answers only the calls it was handed. Nobody else answers one.
     pub(in crate::runtime::session) fn check_llm_call_caller(
         &self,
         call: Option<&LlmCallState>,
@@ -97,8 +113,8 @@ impl SessionState {
     ) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } => Ok(()),
-            Caller::Frontend { .. } => Err(SessionError::EffectWrongHandler),
-            Caller::Machine { .. } => match call {
+            Caller::Admin { .. } | Caller::Frontend { .. } => Err(SessionError::EffectWrongHandler),
+            Caller::ApiKey { .. } => match call {
                 Some(c) if c.handler == LlmHandler::Worker => Ok(()),
                 Some(_) => Err(SessionError::EffectWrongHandler),
                 None => Err(SessionError::EffectNotFound),

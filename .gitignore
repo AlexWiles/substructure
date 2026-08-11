@@ -26,6 +26,3 @@ subs.toml
 .pnpm-store
 
 .expert/
-
-# Go example build output
-examples/go-chat-with-tools/go-chat-with-tools

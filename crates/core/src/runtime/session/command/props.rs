@@ -24,7 +24,7 @@ use super::super::events::EventPayload;
 use super::super::state::ApplyContext;
 use super::*;
 use crate::protocol::{
-    AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, McpServer, Role,
+    AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, McpServer, OwnerKind, Role,
 };
 use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
@@ -190,6 +190,7 @@ impl World {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
+                    kind: OwnerKind::Frontend,
                     tenant_id: TENANT.to_string(),
                     id: Some(USER.to_string()),
                     metadata: HashMap::new(),

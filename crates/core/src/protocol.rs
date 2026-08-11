@@ -164,6 +164,7 @@ pub struct NewMessage {
 #[schemars(title = "InterruptOrigin")]
 pub enum InterruptOrigin {
     System,
+    Admin,
     Machine,
     Frontend,
 }
@@ -273,23 +274,39 @@ pub struct RetryConfig {
 
 // ── Identity ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// What kind of caller owns a session. Part of the identity: only `frontend` is
+/// an end user, and an ownership check grants access to no other kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "OwnerKind")]
+pub enum OwnerKind {
+    #[default]
+    Frontend,
+    Admin,
+    ApiKey,
+    System,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOwner {
     pub tenant_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(default)]
+    pub kind: OwnerKind,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
 }
 
-/// The owner as delivered to the worker on `DecisionRequest.identity`: the
-/// subject and its metadata, without the tenant. The tenant scopes the session
-/// internally but is not sent to the worker.
+/// The owner as delivered to the worker on `DecisionRequest.identity`, without
+/// the tenant. Read `kind` with `id`: only `frontend` is an end user.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "WorkerIdentity")]
 pub struct WorkerIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(default)]
+    pub kind: OwnerKind,
     pub metadata: HashMap<String, String>,
 }
 

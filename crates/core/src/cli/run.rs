@@ -1,21 +1,23 @@
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
 use clap::{Args, ValueEnum};
 use uuid::Uuid;
 
 use super::cloud::project_config;
 use super::env::{EnvVars, OutputFormat};
-use super::pretty::PrettyPrinter;
+use super::pretty::{self, write_json, Renderer};
+use super::run_remote;
+use super::target::target;
 use super::{local, DEFAULT_TENANT};
 use crate::event_store::Seq;
-use crate::protocol::{ClientInput, Content, DraftMessage, Role, SessionOwner};
+use crate::protocol::{ClientInput, Content, DraftMessage, OwnerKind, Role, SessionOwner};
 use crate::providers::sqlite::SqliteDb;
 use crate::session::events::EventPayload;
+use crate::session::index::SessionFilter;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::span::SpanContext;
-use crate::transport::ag_ui::events::AgUiEvent;
 use crate::transport::ag_ui::translator::AgUiTranslator;
-use crate::{Caller, HandleClientInput};
+use crate::{Caller, HandleClientInput, Runtime};
 
 #[derive(Args)]
 pub struct RunArgs {
@@ -45,39 +47,16 @@ pub struct RunArgs {
     /// `substructure.toml`).
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
+    /// Run the turn on the deployment at this URL. Point it at a `subs serve`
+    /// to use the engine that runs there.
+    #[arg(long)]
+    url: Option<String>,
     /// SQLite dev database path. [default: substructure.db]
     #[arg(long)]
     db: Option<String>,
     /// Output mode. (Engine logs go to stderr at error level; set RUST_LOG=info for more.)
     #[arg(long, short = 'o', value_enum)]
     output: Option<OutputFormat>,
-}
-
-/// Where translated AG-UI events go. `Jsonl` renders nothing here — its raw
-/// engine events are written straight to stdout in the run loop instead.
-enum Renderer {
-    AgUi,
-    Jsonl,
-    Pretty(PrettyPrinter),
-}
-
-impl Renderer {
-    fn emit(&mut self, stdout: &mut std::io::Stdout, events: Vec<AgUiEvent>) -> anyhow::Result<()> {
-        match self {
-            Renderer::AgUi => {
-                for ev in events {
-                    write_json(stdout, &ev)?;
-                }
-            }
-            Renderer::Pretty(printer) => {
-                for ev in &events {
-                    printer.render(stdout, ev)?;
-                }
-            }
-            Renderer::Jsonl => {}
-        }
-        Ok(())
-    }
 }
 
 /// Parse `--input`, splicing `--agent` in as `agent_id` when the JSON didn't carry one.
@@ -135,13 +114,6 @@ fn select_agent(
     Ok(agent_id)
 }
 
-fn write_json<T: serde::Serialize>(stdout: &mut std::io::Stdout, value: &T) -> anyhow::Result<()> {
-    serde_json::to_writer(&mut *stdout, value)?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()?;
-    Ok(())
-}
-
 impl RunArgs {
     pub fn config_path(&self) -> Option<&std::path::Path> {
         self.config.as_deref()
@@ -163,9 +135,6 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     // Captured for the resume hint printed at the end, before the args are consumed.
     let agent = agent_id.clone();
-    let output = output_mode
-        .to_possible_value()
-        .map(|v| v.get_name().to_string());
 
     let input = match (args.message, args.input) {
         (Some(message), _) => message_input(message, agent_id),
@@ -174,6 +143,23 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
             anyhow::bail!("nothing to send. Pass a message, or `--input` for a non-message input.")
         }
     };
+
+    // With a `[remote]`, no engine, database, or key is necessary here.
+    let globals = super::cloud::CloudGlobals {
+        config: args.config.clone(),
+        url: args.url.clone(),
+        ..Default::default()
+    };
+    if target(&globals)?.here().is_none() {
+        return run_remote::run(run_remote::Run {
+            globals,
+            session_id: args.session,
+            input,
+            output: output_mode,
+            agent,
+        })
+        .await;
+    }
 
     // `run` exposes no server, so no client/worker auth env is required.
     let env = match EnvVars::load(cfg.provider_bindings(), false) {
@@ -198,6 +184,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     let owner = SessionOwner {
         tenant_id: DEFAULT_TENANT.to_string(),
         id: Some("dev".to_string()),
+        kind: OwnerKind::Frontend,
         metadata: Default::default(),
     };
 
@@ -241,12 +228,8 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     // yield, or an interrupt — which is exactly when this invocation should stop.
     let mut translator = AgUiTranslator::new(session_id.clone(), turn_id);
     let mut stdout = std::io::stdout();
-    let raw = matches!(output_mode, OutputFormat::Jsonl);
-    let mut renderer = match output_mode {
-        OutputFormat::AgUi => Renderer::AgUi,
-        OutputFormat::Jsonl => Renderer::Jsonl,
-        OutputFormat::Pretty => Renderer::Pretty(PrettyPrinter::new(stdout.is_terminal())),
-    };
+    let mut renderer = Renderer::new(output_mode, pretty::color());
+    let raw = renderer.is_raw();
 
     let evs = translator.start();
     renderer.emit(&mut stdout, evs)?;
@@ -259,6 +242,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                 if raw {
                     write_json(&mut stdout, &event)?;
                 }
+                let ends_run = event.ends_run();
                 let payload = event.payload;
                 // Drain queued deltas before `llm.call.completed` so no closing
                 // event outruns its last streamed fragment.
@@ -268,9 +252,9 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
                         renderer.emit(&mut stdout, evs)?;
                     }
                 }
-                let evs = translator.on_event(payload);
+                let evs = translator.on_event(payload, ends_run);
                 renderer.emit(&mut stdout, evs)?;
-                if translator.terminated {
+                if translator.terminated() {
                     break;
                 }
             }
@@ -286,27 +270,68 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         }
     }
 
-    if translator.terminated {
-        let hint = format!(
-            "continue this session with:\n  {}",
-            resume_command(
-                &program_name(),
-                &session_id,
-                &agent,
-                output.as_deref(),
-                &db_path,
-            )
-        );
-        // Faint so the hint reads as secondary; plain when piped.
-        if std::io::stderr().is_terminal() {
-            eprintln!("\n\x1b[2m{hint}\x1b[0m");
-        } else {
-            eprintln!("\n{hint}");
-        }
+    if translator.terminated() {
+        await_indexed(&rt, &session_id).await;
+        print_resume_hint(&session_id, &agent, output_mode, Some(&db_path));
         Ok(())
     } else {
         anyhow::bail!("event stream ended before the run finished")
     }
+}
+
+/// `db` is the database a run here wrote. A remote run gives none.
+pub(crate) fn print_resume_hint(
+    session_id: &str,
+    agent: &str,
+    output: OutputFormat,
+    db: Option<&str>,
+) {
+    let output = output.to_possible_value().map(|v| v.get_name().to_string());
+    let hint = format!(
+        "continue this session with:\n  {}",
+        resume_command(
+            &program_name(),
+            session_id,
+            agent,
+            output.as_deref(),
+            db.unwrap_or(project_config::DEFAULT_DB),
+        )
+    );
+    // Faint so the hint reads as secondary; plain when piped.
+    if std::io::stderr().is_terminal() {
+        eprintln!("\n\x1b[2m{hint}\x1b[0m");
+    } else {
+        eprintln!("\n{hint}");
+    }
+}
+
+/// Waits for the session index to read this turn, so `subs sessions list`
+/// shows it. The index polls, and nothing runs after this process stops.
+///
+/// Best effort. The next run reads what this one leaves.
+async fn await_indexed(rt: &Runtime, session_id: &str) {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+    let Ok(session) = rt.get_session(DEFAULT_TENANT, session_id).await else {
+        return;
+    };
+    let filter = SessionFilter {
+        tenant_id: Some(DEFAULT_TENANT.to_string()),
+        session_id: Some(session_id.to_string()),
+        ..Default::default()
+    };
+
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(page) = rt.list_sessions(&filter).await {
+            if page.items.iter().any(|s| s.seq >= session.seq) {
+                return;
+            }
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    tracing::debug!(session_id, "session index did not catch up before exit");
 }
 
 /// The running binary's name, read from the executable itself so a future rename of

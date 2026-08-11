@@ -6,6 +6,9 @@ pub mod local;
 pub mod mcp;
 mod pretty;
 pub mod run;
+pub mod run_remote;
+pub mod sessions;
+pub mod target;
 
 use clap::Subcommand;
 
@@ -110,11 +113,12 @@ pub enum Command {
         #[command(subcommand)]
         command: cloud::keys::KeysCommand,
     },
-    /// Inspect sessions for a project (list, stream events).
+    /// Inspect sessions (list, stream events). Reads the deployment the
+    /// `[remote]` names, or the database an engine here writes.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Sessions {
         #[command(subcommand)]
-        command: cloud::sessions::SessionsCommand,
+        command: sessions::SessionsCommand,
     },
     /// Open a project's admin page in your browser.
     Open {
@@ -179,7 +183,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         Command::Agents { command } => cloud::agents::run(command).await,
         Command::Llm { command } => cloud::llm::run(command).await,
         Command::Keys { command } => cloud::keys::run(command).await,
-        Command::Sessions { command } => cloud::sessions::run(command).await,
+        Command::Sessions { command } => sessions::run(command).await,
         Command::Open {
             project_id,
             no_browser,
@@ -200,8 +204,8 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
 fn command_path(cmd: &Command) -> &'static str {
     use cloud::agents::AgentsCommand;
     use cloud::llm::LlmCommand;
-    use cloud::sessions::SessionsCommand;
     use cloud::{keys::KeysCommand, orgs::OrgsCommand, projects::ProjectsCommand};
+    use sessions::SessionsCommand;
     match cmd {
         Command::Serve(_) => "serve",
         Command::Run(_) => "run",
