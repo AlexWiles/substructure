@@ -12,6 +12,7 @@ together at the same version.
 ### Changed
 
 - Improve MCP auth failure handling.
+- Standardize usage reporting.
 
 ### Added
 

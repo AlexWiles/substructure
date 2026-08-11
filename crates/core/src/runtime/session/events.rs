@@ -9,7 +9,7 @@ pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, ConnectorToolKind, DeferToolsStrategy, DraftMessage, ErrorInfo, InterruptOrigin,
     LlmFormat, LlmRequest, LlmResponse, Message, MessageTree, NewMessage, RetryPolicy,
-    SessionOwner, WorkerState,
+    SessionOwner, Usage, WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,8 +391,8 @@ pub struct TurnCompleted {
     pub data: serde_json::Value,
     #[serde(default)]
     pub turn_cost: Decimal,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub turn_token_usage: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub turn_token_usage: Usage,
     /// Set when the run failed. The turn terminal is the only event every
     /// consumer watches, so this is where a renderer decides how a failure
     /// reads — by its `code`, not by matching on the sentence.
@@ -436,8 +436,8 @@ pub struct SubAgentTurnCompleted {
     pub id: String,
     #[serde(default)]
     pub cost: Decimal,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub token_usage: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub token_usage: Usage,
     /// The child's turn result.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,

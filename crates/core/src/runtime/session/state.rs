@@ -96,7 +96,7 @@ pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, DraftMessage, Effect, EffectStatus, InterruptOrigin, LlmFormat, LlmRequest,
     LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryConfig, RetryPolicy, Role,
-    SessionOwner, WorkerState,
+    SessionOwner, Usage, WorkerState,
 };
 use crate::runtime::retry::RetryState;
 
@@ -682,8 +682,8 @@ pub struct TurnEnd {
     pub data: serde_json::Value,
     #[serde(default)]
     pub cost: Decimal,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub usage: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub usage: Usage,
 }
 
 /// Where the session is in a turn.
@@ -856,7 +856,8 @@ pub struct SessionState {
     pub status: SessionStatus,
     pub agent_id: Option<String>,
     pub owner: Option<SessionOwner>,
-    pub token_usage: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub token_usage: Usage,
 
     /// Accumulated cost across all LLM calls in this session.
     #[serde(default)]
@@ -871,12 +872,12 @@ pub struct SessionState {
     pub turn_cost: Decimal,
 
     /// Token usage accumulated in the current turn only.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub turn_token_usage: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub turn_token_usage: Usage,
 
     /// Token usage accumulated from sub-agent sessions.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sub_agent_token_usage: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub sub_agent_token_usage: Usage,
 
     #[serde(default)]
     pub state_versions: Vec<Logged<StateVersion>>,
@@ -951,12 +952,12 @@ impl SessionState {
             status: SessionStatus::Done,
             agent_id: None,
             owner: None,
-            token_usage: BTreeMap::new(),
+            token_usage: Usage::default(),
             cost: Decimal::ZERO,
             sub_agent_cost: Decimal::ZERO,
             turn_cost: Decimal::ZERO,
-            turn_token_usage: BTreeMap::new(),
-            sub_agent_token_usage: BTreeMap::new(),
+            turn_token_usage: Usage::default(),
+            sub_agent_token_usage: Usage::default(),
             state_versions: Vec::new(),
             agent_versions: Vec::new(),
             ancestry: Vec::new(),
@@ -1503,10 +1504,8 @@ impl SessionState {
             EventPayload::SubAgentTurnCompleted(payload) => {
                 self.sub_agent_cost += payload.cost;
                 self.turn_cost += payload.cost;
-                for (k, v) in &payload.token_usage {
-                    *self.sub_agent_token_usage.entry(k.clone()).or_insert(0) += v;
-                    *self.turn_token_usage.entry(k.clone()).or_insert(0) += v;
-                }
+                self.sub_agent_token_usage.add(&payload.token_usage);
+                self.turn_token_usage.add(&payload.token_usage);
                 if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
                     if let Some(sa) = e.sub_agent_mut() {
                         sa.result = Some(json_to_string(&payload.data));
@@ -1525,7 +1524,7 @@ impl SessionState {
                 };
                 self.turn_started_seq = Some(ctx.sequence);
                 self.turn_cost = Decimal::ZERO;
-                self.turn_token_usage.clear();
+                self.turn_token_usage = Usage::default();
             }
             EventPayload::TurnCompleted(payload) => {
                 // The event names the turn it ends, and every emitter builds it
@@ -1533,7 +1532,7 @@ impl SessionState {
                 self.completed_turn_ids.push(payload.turn_id.clone());
                 self.data = payload.data.clone();
                 self.turn_cost = Decimal::ZERO;
-                self.turn_token_usage.clear();
+                self.turn_token_usage = Usage::default();
                 self.phase = TurnPhase::Idle;
                 self.turn_started_seq = None;
                 self.dequeue(EffectKind::TurnEnd, &payload.turn_id);
@@ -2269,27 +2268,15 @@ impl SessionState {
         self
     }
 
-    fn track_usage(&mut self, usage: &Option<serde_json::Value>) {
-        let obj = match usage.as_ref().and_then(|v| v.as_object()) {
-            Some(o) => o,
-            None => return,
-        };
-        for (k, v) in obj {
-            if let Some(n) = v.as_u64() {
-                *self.token_usage.entry(k.clone()).or_insert(0) += n;
-            }
+    fn track_usage(&mut self, usage: &Option<Usage>) {
+        if let Some(u) = usage {
+            self.token_usage.add(u);
         }
     }
 
-    fn track_turn_usage(&mut self, usage: &Option<serde_json::Value>) {
-        let obj = match usage.as_ref().and_then(|v| v.as_object()) {
-            Some(o) => o,
-            None => return,
-        };
-        for (k, v) in obj {
-            if let Some(n) = v.as_u64() {
-                *self.turn_token_usage.entry(k.clone()).or_insert(0) += n;
-            }
+    fn track_turn_usage(&mut self, usage: &Option<Usage>) {
+        if let Some(u) = usage {
+            self.turn_token_usage.add(u);
         }
     }
 }

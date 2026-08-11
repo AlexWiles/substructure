@@ -10,7 +10,7 @@ use tokio_stream::StreamExt;
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
     DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningEffort, SessionOwner,
-    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
+    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -167,6 +167,47 @@ struct ChatCompletionResponse {
     usage: Option<serde_json::Value>,
 }
 
+/// The counts the API reports, where `prompt_tokens` is the whole prompt and
+/// the cached part of it is one level down.
+#[derive(Debug, Default, Deserialize)]
+struct ChatUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: PromptTokensDetails,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+    /// OpenRouter only: an upstream that bills for the write reports it here.
+    #[serde(default)]
+    cache_write_tokens: u64,
+}
+
+/// The counts of one Chat Completions response, or nothing where the provider
+/// reported none. Shared with OpenRouter, which answers the same shape.
+pub(crate) fn usage_from_value(raw: Option<serde_json::Value>) -> Option<Usage> {
+    let raw = raw?;
+    let counts: ChatUsage = serde_json::from_value(raw.clone()).unwrap_or_default();
+    let cache_read = counts.prompt_tokens_details.cached_tokens;
+    let cache_write = counts.prompt_tokens_details.cache_write_tokens;
+    Some(
+        Usage::new(
+            counts
+                .prompt_tokens
+                .saturating_sub(cache_read + cache_write),
+            cache_read,
+            cache_write,
+            counts.completion_tokens,
+        )
+        .with_provider(raw),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ChoiceMessage,
@@ -219,7 +260,7 @@ impl ChatCompletionResponse {
                 .map(|tcs| tcs.iter().map(|tc| tc.clone().into()).collect())
                 .unwrap_or_default(),
             finish_reason: choice.and_then(|c| c.finish_reason),
-            usage: self.usage,
+            usage: usage_from_value(self.usage),
             cost: None,
             images: Vec::new(),
         }
@@ -401,7 +442,7 @@ impl StreamParser {
                 })
                 .collect(),
             finish_reason: self.finish_reason,
-            usage: self.usage,
+            usage: usage_from_value(self.usage),
             cost: None,
             images: Vec::new(),
         }
@@ -703,6 +744,31 @@ mod tests {
         assert_eq!(v["prompt_cache_key"], "sess_1");
         assert_eq!(v["prompt_cache_retention"], "24h");
         assert_eq!(v["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn the_counts_of_a_response_read_the_same_as_any_other_provider() {
+        let usage = usage_from_value(Some(serde_json::json!({
+            "prompt_tokens": 10000,
+            "completion_tokens": 200,
+            "prompt_tokens_details": { "cached_tokens": 9000 }
+        })))
+        .expect("usage");
+        // The vendor counts the cached part inside `prompt_tokens`, so the
+        // uncached part is what is left of it.
+        assert_eq!(usage.input, 10000);
+        assert_eq!(usage.uncached_input, 1000);
+        assert_eq!(usage.cache_read, 9000);
+        assert_eq!(usage.cache_write, 0);
+        assert_eq!(usage.output, 200);
+        assert_eq!(usage.total, 10200);
+    }
+
+    #[test]
+    fn a_response_that_counts_nothing_still_reads() {
+        assert_eq!(usage_from_value(None), None);
+        let usage = usage_from_value(Some(serde_json::json!({}))).expect("usage");
+        assert_eq!(usage.total, 0);
     }
 
     #[test]

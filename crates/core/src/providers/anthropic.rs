@@ -19,7 +19,7 @@ use tokio_stream::StreamExt;
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
     Content, ContentPart, DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, ReasoningEffort,
-    Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
+    Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -401,6 +401,39 @@ struct MessagesResponse {
     usage: Option<serde_json::Value>,
 }
 
+/// The counts the API reports, where `input_tokens` is the part of the prompt
+/// it did not read from the cache.
+#[derive(Debug, Default, Deserialize)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+}
+
+impl AnthropicUsage {
+    fn normalize(&self, raw: serde_json::Value) -> Usage {
+        Usage::new(
+            self.input_tokens,
+            self.cache_read_input_tokens,
+            self.cache_creation_input_tokens,
+            self.output_tokens,
+        )
+        .with_provider(raw)
+    }
+}
+
+/// The counts of one response, or nothing where the provider reported none.
+fn usage_from_value(raw: Option<serde_json::Value>) -> Option<Usage> {
+    let raw = raw?;
+    let counts: AnthropicUsage = serde_json::from_value(raw.clone()).unwrap_or_default();
+    Some(counts.normalize(raw))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResponseBlock {
@@ -439,7 +472,7 @@ impl MessagesResponse {
             content: (!content.is_empty()).then_some(content),
             tool_calls,
             finish_reason: self.stop_reason.as_deref().map(map_stop_reason),
-            usage: self.usage,
+            usage: usage_from_value(self.usage),
             cost: None,
             images: Vec::new(),
         }
@@ -490,7 +523,7 @@ enum StreamEvent {
     MessageDelta {
         delta: StreamMessageDelta,
         #[serde(default)]
-        usage: Option<StreamUsage>,
+        usage: Option<serde_json::Value>,
     },
     MessageStop {},
     Ping {},
@@ -506,7 +539,7 @@ struct StreamMessageStart {
     #[serde(default)]
     model: String,
     #[serde(default)]
-    usage: Option<StreamUsage>,
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -542,65 +575,26 @@ struct StreamMessageDelta {
     stop_reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct StreamUsage {
-    #[serde(default)]
-    input_tokens: Option<u64>,
-    #[serde(default)]
-    output_tokens: Option<u64>,
-    #[serde(default)]
-    cache_read_input_tokens: Option<u64>,
-    #[serde(default)]
-    cache_creation_input_tokens: Option<u64>,
-}
-
 /// What the stream said about tokens. `message_start` reports the input and
-/// what the cache did with it, `message_delta` the output, so the response
-/// keeps each field from whichever event carried it. Without the cache counts a
-/// streamed call reports only the part of the prompt that was not cached, which
-/// reads as a small prompt rather than a cache hit.
+/// what the cache did with it, `message_delta` the output, so the counts of one
+/// call arrive in two events. The later event wins each field it names.
 #[derive(Default)]
 struct UsageAccum {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
+    raw: serde_json::Map<String, serde_json::Value>,
 }
 
 impl UsageAccum {
-    fn merge(&mut self, u: StreamUsage) {
-        self.input_tokens = u.input_tokens.or(self.input_tokens);
-        self.output_tokens = u.output_tokens.or(self.output_tokens);
-        self.cache_read_input_tokens = u.cache_read_input_tokens.or(self.cache_read_input_tokens);
-        self.cache_creation_input_tokens = u
-            .cache_creation_input_tokens
-            .or(self.cache_creation_input_tokens);
+    fn merge(&mut self, reported: serde_json::Value) {
+        if let serde_json::Value::Object(obj) = reported {
+            self.raw.extend(obj);
+        }
     }
 
-    fn to_value(&self) -> Option<serde_json::Value> {
-        let fields = [
-            ("input_tokens", self.input_tokens),
-            ("output_tokens", self.output_tokens),
-            ("cache_read_input_tokens", self.cache_read_input_tokens),
-            (
-                "cache_creation_input_tokens",
-                self.cache_creation_input_tokens,
-            ),
-        ];
-        if fields.iter().all(|(_, v)| v.is_none()) {
-            return None;
+    fn into_usage(self) -> Option<Usage> {
+        match self.raw.is_empty() {
+            true => None,
+            false => usage_from_value(Some(serde_json::Value::Object(self.raw))),
         }
-        let mut usage = serde_json::Map::new();
-        // The token counts stay whatever the events reported, null included, so
-        // a reader can tell a zero from a count the stream never sent.
-        usage.insert("input_tokens".into(), self.input_tokens.into());
-        usage.insert("output_tokens".into(), self.output_tokens.into());
-        for (name, value) in &fields[2..] {
-            if let Some(v) = value {
-                usage.insert((*name).into(), (*v).into());
-            }
-        }
-        Some(serde_json::Value::Object(usage))
     }
 }
 
@@ -763,7 +757,7 @@ impl StreamParser {
             content: (!self.content.is_empty()).then_some(self.content),
             tool_calls,
             finish_reason: self.finish_reason,
-            usage: self.usage.to_value(),
+            usage: self.usage.into_usage(),
             cost: None,
             images: Vec::new(),
         }
@@ -1262,10 +1256,43 @@ mod tests {
             .into_response("claude-opus-4-8")
             .usage
             .expect("usage");
-        assert_eq!(usage["input_tokens"], 12);
-        assert_eq!(usage["output_tokens"], 7);
-        assert_eq!(usage["cache_read_input_tokens"], 9000);
-        assert_eq!(usage["cache_creation_input_tokens"], 300);
+        assert_eq!(usage.uncached_input, 12);
+        assert_eq!(usage.cache_read, 9000);
+        assert_eq!(usage.cache_write, 300);
+        assert_eq!(usage.output, 7);
+        assert_eq!(usage.input, 9312, "every input token, cached or not");
+        assert_eq!(usage.total, 9319);
+        // The counts the provider sent stay whole, nested fields included.
+        let raw = usage.provider.expect("the provider report");
+        assert_eq!(raw["cache_read_input_tokens"], 9000);
+    }
+
+    /// The counts of two vendors add up only because the adapter states them
+    /// the same way. Anthropic reports the uncached part of the prompt, OpenAI
+    /// reports the whole prompt, and a tree that uses both adds them together.
+    #[test]
+    fn the_counts_of_two_vendors_add_up() {
+        let anthropic = usage_from_value(Some(json!({
+            "input_tokens": 1000,
+            "cache_read_input_tokens": 9000,
+            "output_tokens": 200
+        })))
+        .expect("usage");
+        let openai = crate::providers::openai::usage_from_value(Some(json!({
+            "prompt_tokens": 10000,
+            "completion_tokens": 200,
+            "prompt_tokens_details": { "cached_tokens": 9000 }
+        })))
+        .expect("usage");
+        assert_eq!(anthropic.input, openai.input, "the same prompt");
+        assert_eq!(anthropic.cache_read, openai.cache_read);
+
+        let mut total = anthropic.clone();
+        total.add(&openai);
+        assert_eq!(total.input, 20000);
+        assert_eq!(total.cache_read, 18000);
+        assert_eq!(total.output, 400);
+        assert!(total.provider.is_none(), "a sum reports for no one call");
     }
 
     #[test]
@@ -1363,7 +1390,13 @@ mod tests {
             serde_json::from_str(&resp.tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["city"], "NYC");
         assert_eq!(resp.finish_reason.as_deref(), Some("tool_calls"));
-        assert_eq!(resp.usage.unwrap()["input_tokens"], 10);
+        let usage = resp.usage.expect("usage");
+        assert_eq!(usage.uncached_input, 10);
+        assert_eq!(
+            usage.input, 10,
+            "nothing was cached, so the input is the whole prompt"
+        );
+        assert_eq!(usage.output, 5);
     }
 
     #[test]
@@ -1411,7 +1444,7 @@ mod tests {
         match msg_delta {
             StreamEvent::MessageDelta { delta, usage } => {
                 assert_eq!(delta.stop_reason.as_deref(), Some("tool_use"));
-                assert_eq!(usage.unwrap().output_tokens, Some(7));
+                assert_eq!(usage.unwrap()["output_tokens"], 7);
             }
             _ => panic!("expected message_delta"),
         }

@@ -188,7 +188,7 @@ impl ChatCompletionResponse {
                 .map(|tcs| tcs.iter().map(|tc| tc.clone().into()).collect())
                 .unwrap_or_default(),
             finish_reason: choice.and_then(|c| c.finish_reason),
-            usage: self.usage,
+            usage: super::openai::usage_from_value(self.usage),
             cost,
             images,
         }
@@ -550,7 +550,7 @@ impl LlmCallable for OpenRouterClient {
                 })
                 .collect(),
             finish_reason,
-            usage,
+            usage: super::openai::usage_from_value(usage),
             cost,
             images,
         })
