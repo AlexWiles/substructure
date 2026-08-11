@@ -351,15 +351,29 @@ impl CloudClient {
     /// Open an SSE stream and invoke `on_line` for each non-empty line
     /// (caller decides which lines to keep — e.g. `data:` payloads).
     /// Runs until the server closes the stream or the caller hits Ctrl-C.
-    pub async fn stream_sse<F>(&self, path: &str, mut on_line: F) -> Result<()>
+    pub async fn stream_sse<F>(&self, path: &str, on_line: F) -> Result<()>
+    where
+        F: FnMut(&str),
+    {
+        self.stream(self.request(Method::GET, path), on_line).await
+    }
+
+    /// The same, for a stream a request body opens: a run is submitted and
+    /// watched by one call, so nothing can happen between the two.
+    pub async fn post_sse<B: Serialize, F>(&self, path: &str, body: &B, on_line: F) -> Result<()>
+    where
+        F: FnMut(&str),
+    {
+        self.stream(self.request(Method::POST, path).json(body), on_line)
+            .await
+    }
+
+    async fn stream<F>(&self, req: reqwest::RequestBuilder, mut on_line: F) -> Result<()>
     where
         F: FnMut(&str),
     {
         let res = self
-            .send(
-                self.request(Method::GET, path)
-                    .header(header::ACCEPT, "text/event-stream"),
-            )
+            .send(req.header(header::ACCEPT, "text/event-stream"))
             .await?;
         let res = check_status(&self.base_url, res).await?;
 

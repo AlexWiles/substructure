@@ -8,6 +8,7 @@ pub mod index;
 pub mod message;
 pub mod prompt_context;
 pub mod propose;
+pub mod read;
 pub mod reconcile;
 pub mod schedule;
 pub mod state;

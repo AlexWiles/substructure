@@ -31,5 +31,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    cli::run(cli.command).await
+    match cli::run(cli.command).await {
+        Err(e) if is_broken_pipe(&e) => Ok(()),
+        result => result,
+    }
+}
+
+/// Whether the reader went away — `subs sessions events … | head`, or a pager
+/// someone quit. Nothing failed, so nothing is reported: the output ends where
+/// the reader stopped reading.
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+    })
 }

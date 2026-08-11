@@ -100,7 +100,15 @@ impl Context {
         Ok((ctx, org))
     }
 
+    /// A context over the project a deployment holds.
+    ///
+    /// Every command that acts on one comes through here, so this is where the
+    /// rule is enforced: a file naming no `[remote]` describes an engine you
+    /// run here, and a command that only a deployment can answer says so rather
+    /// than reaching for the default server and asking you to log in to it. A
+    /// command with something to say about both branches before this.
     pub async fn from_project(scope: &ProjectScope) -> Result<(Self, String)> {
+        crate::cli::target::require_deployment(&scope.globals, "this command")?;
         let ctx = Self::load(&scope.globals)?;
 
         // If we already have a project id (flag or pinned), skip org resolution

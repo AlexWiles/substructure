@@ -7,12 +7,23 @@ use axum::extract::{FromRef, Path, Query, State};
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
+use futures_util::StreamExt;
+use serde::Deserialize;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 
-use crate::api::v1::{ApiError, Meta, Org, Project};
-use crate::Caller;
+use crate::api::v1::{ApiError, Meta, Org, Project, RunFormat, RunRequest};
+use crate::protocol::SessionOwner;
+use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
+use crate::session::SessionEvent;
+use crate::transport::ag_ui::translator::{run_ag_ui_translation, AgUiTranslator};
+use crate::transport::http::runtime_error_response;
+use crate::{Caller, HandleClientInput};
 
 use super::routes::{self, SessionEventsParams};
 use super::{machine_auth_middleware, AdminHttpState};
@@ -53,6 +64,7 @@ pub fn router(admin: AdminHttpState) -> Router {
             "/api/v1/projects/{project}/sessions/{session_id}/events/stream",
             get(stream_session_events),
         )
+        .route("/api/v1/projects/{project}/run", post(run))
         .route("/api/v1/orgs", get(list_orgs))
         .route("/api/v1/orgs/{org}/projects", get(list_projects))
         .route("/api/v1/projects/{project}", get(get_project))
@@ -99,6 +111,138 @@ async fn advertise_defaults(
         HeaderValue::from_static(LOCAL_PROJECT),
     );
     res
+}
+
+/// Run one turn and stream it back.
+///
+/// An operator's own way in: the CLI already authenticates here, so a turn run
+/// from a terminal needs the credential `subs login` stored and nothing else —
+/// no API key, and no client token minted for an identity nobody has.
+///
+/// That is also what the turn *is*. A client token carries a person, and a
+/// session opened with one belongs to them; this caller is a machine, so the
+/// session it opens has no end user behind it and is not scoped to one. An
+/// operator session, which is what `subs run` has always made. To reproduce a
+/// real user's session instead, mint a client token for them and use the
+/// client surface.
+///
+/// Submitting and streaming are one call because they cannot be two: a client
+/// that submits and then subscribes has already missed the start of its turn.
+async fn run(
+    State(state): State<V1State>,
+    Extension(caller): Extension<Caller>,
+    Path(_project): Path<String>,
+    Query(params): Query<RunParams>,
+    Json(req): Json<RunRequest>,
+) -> Response {
+    let state = state.admin;
+    let session_id = req
+        .session_id
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    let owner = SessionOwner {
+        tenant_id: caller.tenant_id().to_string(),
+        id: None,
+        metadata: Default::default(),
+    };
+
+    // Subscribed before the input is handled, so the turn's first events cannot
+    // land before anything is listening.
+    let spec = SessionSubscriptionSpec {
+        scope: SubscriptionScope::All,
+        caller: caller.clone(),
+        session_id: session_id.clone(),
+    };
+    let event_rx = match state.runtime.stream(spec, None).await {
+        Ok(rx) => rx,
+        Err(e) => return runtime_error_response(e),
+    };
+    let delta_rx = state
+        .runtime
+        .subscribe_token_deltas(&caller, &session_id)
+        .await;
+
+    let turn = state
+        .runtime
+        .handle_client_input(HandleClientInput {
+            session_id: session_id.clone(),
+            caller,
+            owner,
+            // The tagged union carries its own addressing — a submit's
+            // `agent_id`, a settle's effect id — so the route needs none.
+            input: req.input,
+            span: crate::span::SpanContext::root().child("v1_run"),
+        })
+        .await;
+    let turn_id = match turn {
+        Ok(output) => output.turn_id,
+        Err(e) => return runtime_error_response(e),
+    };
+
+    match params.format {
+        RunFormat::AgUi => {
+            let out = run_ag_ui_translation(
+                event_rx,
+                delta_rx,
+                session_id,
+                turn_id,
+                state.shutdown.clone(),
+            );
+            Sse::new(ReceiverStream::new(out).map(Ok::<_, std::convert::Infallible>))
+                .keep_alive(KeepAlive::default())
+                .into_response()
+        }
+        RunFormat::Events => {
+            let out = run_raw_events(event_rx, session_id, turn_id, state.shutdown.clone());
+            Sse::new(ReceiverStream::new(out).map(Ok::<_, std::convert::Infallible>))
+                .keep_alive(KeepAlive::default())
+                .into_response()
+        }
+    }
+}
+
+/// The engine's own events, as `subs run -o jsonl` prints them.
+///
+/// A translator runs alongside purely as the oracle for the end: `terminated`
+/// flips on the turn's last event — completion, a client-tool yield, or an
+/// interrupt — so a raw stream ends exactly where a translated one would, and
+/// `-o jsonl` does not hang on a turn that parked. The event is sent before it
+/// is judged, so the one that ends the turn is in the output.
+fn run_raw_events(
+    mut event_rx: mpsc::Receiver<SessionEvent>,
+    thread_id: String,
+    run_id: String,
+    shutdown: CancellationToken,
+) -> mpsc::Receiver<SseEvent> {
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        let mut oracle = AgUiTranslator::new(thread_id, run_id);
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                event = event_rx.recv() => {
+                    let Some(event) = event else { return };
+                    let sse = SseEvent::default()
+                        .id(event.seq.to_string())
+                        .event(event.payload_type())
+                        .data(serde_json::to_string(&event).unwrap_or_default());
+                    if tx.send(sse).await.is_err() {
+                        return;
+                    }
+                    oracle.on_event(event.payload);
+                    if oracle.terminated {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    rx
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RunParams {
+    #[serde(default)]
+    format: RunFormat,
 }
 
 async fn get_session(

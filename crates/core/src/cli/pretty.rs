@@ -1,7 +1,73 @@
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
+use super::env::OutputFormat;
 use crate::transport::ag_ui::events::{AgUiEvent, RunOutcome};
+
+/// Where translated AG-UI events go. `Jsonl` renders nothing here — its raw
+/// engine events are written straight to stdout by the caller instead, which is
+/// the one thing a translation cannot say.
+pub(crate) enum Renderer {
+    AgUi,
+    Jsonl,
+    Pretty(PrettyPrinter),
+}
+
+impl Renderer {
+    /// `color` is the caller's answer to "is stdout a terminal", which only
+    /// `Pretty` has any use for.
+    pub(crate) fn new(output: OutputFormat, color: bool) -> Self {
+        match output {
+            OutputFormat::AgUi => Renderer::AgUi,
+            OutputFormat::Jsonl => Renderer::Jsonl,
+            OutputFormat::Pretty => Renderer::Pretty(PrettyPrinter::new(color)),
+        }
+    }
+
+    /// Whether the caller writes the raw engine events itself.
+    pub(crate) fn is_raw(&self) -> bool {
+        matches!(self, Renderer::Jsonl)
+    }
+
+    pub(crate) fn emit(
+        &mut self,
+        stdout: &mut std::io::Stdout,
+        events: Vec<AgUiEvent>,
+    ) -> anyhow::Result<()> {
+        match self {
+            Renderer::AgUi => {
+                for ev in events {
+                    write_json(stdout, &ev)?;
+                }
+            }
+            Renderer::Pretty(printer) => {
+                for ev in &events {
+                    printer.render(stdout, ev)?;
+                }
+            }
+            Renderer::Jsonl => {}
+        }
+        Ok(())
+    }
+}
+
+/// Serialized first, written second, so a reader that went away surfaces as the
+/// `io::Error` it is rather than as a serialization failure wrapping one.
+pub(crate) fn write_json<T: serde::Serialize>(
+    stdout: &mut std::io::Stdout,
+    value: &T,
+) -> anyhow::Result<()> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    stdout.write_all(&line)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Whether styling belongs in this output: only when stdout is a terminal.
+pub(crate) fn color() -> bool {
+    std::io::stdout().is_terminal()
+}
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";

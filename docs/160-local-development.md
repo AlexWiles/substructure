@@ -68,6 +68,29 @@ subs run --session <session-id> "what was my first question?"
 The agent remembers. The engine saves the whole session in `substructure.db`.
 Stop everything, come back tomorrow, and the session continues.
 
+## Read what happened
+
+```sh
+subs sessions list
+subs sessions events <session-id>
+```
+
+These read `substructure.db` directly, so they work with nothing running. A
+file naming a `[remote]` asks the deployment instead; `--db <path>` reads a
+file whatever the config says.
+
+`-o pretty` replays the session as text instead of printing its events.
+
+```sh
+subs sessions events <session-id> -o pretty
+```
+
+With `subs serve` running beside it, `--stream` follows the file live.
+
+```sh
+subs sessions events <session-id> --stream
+```
+
 ## Run a server
 
 ```sh

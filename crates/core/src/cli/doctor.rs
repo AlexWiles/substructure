@@ -15,6 +15,7 @@ use crate::cli::mcp::Needs;
 use super::cloud::context::Context as CloudContext;
 use super::cloud::project_config::{self, Found};
 use super::cloud::{notices, print, slack, ProjectScope};
+use super::target::target;
 use super::{env_value, mcp};
 
 /// The two variables a bot answering over Socket Mode reads, with an example of
@@ -25,10 +26,11 @@ const SLACK_TOKENS: [(&str, &str); 2] = [
 ];
 
 pub async fn run(scope: ProjectScope) -> Result<()> {
+    // Read for the local branch's sake; the rule itself is `target`'s.
     let found = project_config::resolve(scope.globals.config.as_deref())?
         .context("no substructure.toml found. Write one, or pass -c.")?;
 
-    let notices = match found.config.remote.is_none() {
+    let notices = match target(&scope.globals)?.here().is_some() {
         true => here(&found).await?,
         false => deployed(&scope).await?,
     };

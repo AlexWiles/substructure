@@ -1,18 +1,27 @@
-//! `subs agents`: what the deployment holds for each agent the file declares.
+//! `subs agents`: what each agent the file declares looks like where it runs.
 //!
 //! Read-only but for rotation — an agent exists because `substructure.toml`
 //! declares it, so there is nothing to create here. Printing a signing secret
 //! is its own command: no other output carries one, so a secret reaches a
 //! terminal or a pipe only where that was the point.
+//!
+//! An engine here holds no secret to print or rotate. The file *names* the
+//! variable a decision is signed with, and this machine's environment holds it,
+//! so those two commands say where the secret is rather than reaching for a
+//! deployment that would have one.
 
 use anyhow::Result;
 use clap::Subcommand;
 use serde::Serialize;
 
 use crate::api::v1::{Agent, AgentSecret};
+use crate::cli::env_value;
+use crate::cli::target::target;
+use crate::manifest::AgentSection;
 
 use super::context::Context;
 use super::print;
+use super::project_config::ProjectConfig;
 use super::ProjectScope;
 
 #[derive(Subcommand)]
@@ -54,11 +63,161 @@ struct Rotated<'a> {
 
 pub async fn run(command: AgentsCommand) -> Result<()> {
     match command {
-        AgentsCommand::List { scope } => list(scope).await,
-        AgentsCommand::Show { agent_id, scope } => show(agent_id, scope).await,
-        AgentsCommand::Secret { agent_id, scope } => secret(agent_id, scope).await,
-        AgentsCommand::RotateSecret { agent_id, scope } => rotate(agent_id, scope).await,
+        AgentsCommand::List { scope } => match target(&scope.globals)?.here() {
+            Some(config) => list_here(&config, &scope),
+            None => list(scope).await,
+        },
+        AgentsCommand::Show { agent_id, scope } => match target(&scope.globals)?.here() {
+            Some(config) => show_here(&agent_id, &config, &scope),
+            None => show(agent_id, scope).await,
+        },
+        AgentsCommand::Secret { agent_id, scope } => match target(&scope.globals)?.here() {
+            Some(config) => secret_here(&agent_id, &config),
+            None => secret(agent_id, scope).await,
+        },
+        AgentsCommand::RotateSecret { agent_id, scope } => match target(&scope.globals)?.here() {
+            Some(config) => rotate_here(&agent_id, &config),
+            None => rotate(agent_id, scope).await,
+        },
     }
+}
+
+// ---------------------------------------------------------------------------
+// An engine here: the file declares the agents, and this machine's environment
+// holds what signs their decisions.
+// ---------------------------------------------------------------------------
+
+/// One declared agent, as this machine can answer for it. The same columns the
+/// deployment answers with, filled in from the file rather than asked for.
+fn declared<'a>(id: &'a str, section: &'a AgentSection) -> [String; 5] {
+    let hosting = section
+        .worker
+        .clone()
+        .unwrap_or_else(|| "engine".to_string());
+    // A secret is "set" when the variable the file names holds something. An
+    // agent naming none sends decisions unsigned, which is a dash rather than
+    // a missing key.
+    let secret = match &section.signing_secret_env {
+        None => "-".to_string(),
+        Some(var) => match env_value(var).is_some() {
+            true => format!("${var}"),
+            false => format!("${var} (not set)"),
+        },
+    };
+    [
+        id.to_string(),
+        section.llm.clone().unwrap_or_else(|| "-".into()),
+        section.model.clone().unwrap_or_else(|| "-".into()),
+        hosting,
+        secret,
+    ]
+}
+
+fn section<'a>(agent_id: &str, config: &'a ProjectConfig) -> Result<&'a AgentSection> {
+    config.agent.get(agent_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no [agent.{agent_id}] in substructure.toml. Declared: {}",
+            crate::worker::directory::declared(&config.agent_ids())
+        )
+    })
+}
+
+fn list_here(config: &ProjectConfig, scope: &ProjectScope) -> Result<()> {
+    if scope.globals.json {
+        let agents: Vec<serde_json::Value> = config
+            .agent
+            .iter()
+            .map(|(id, section)| {
+                let [id, llm, model, hosting, secret] = declared(id, section);
+                serde_json::json!({
+                    "id": id,
+                    "llm": llm,
+                    "model": model,
+                    "hosting": hosting,
+                    "secret": secret,
+                })
+            })
+            .collect();
+        return print::json(&agents);
+    }
+
+    let columns = [
+        print::Column::left("ID"),
+        print::Column::left("LLM"),
+        print::Column::left("MODEL"),
+        print::Column::left("HOSTING"),
+        print::Column::left("SECRET"),
+    ];
+    let rows: Vec<Vec<String>> = config
+        .agent
+        .iter()
+        .map(|(id, section)| declared(id, section).to_vec())
+        .collect();
+    print::table(&columns, &rows);
+    Ok(())
+}
+
+fn show_here(agent_id: &str, config: &ProjectConfig, scope: &ProjectScope) -> Result<()> {
+    let section = section(agent_id, config)?;
+    let [id, llm, model, hosting, secret] = declared(agent_id, section);
+
+    if scope.globals.json {
+        return print::json(&serde_json::json!({
+            "id": id,
+            "llm": llm,
+            "model": model,
+            "hosting": hosting,
+            "secret": secret,
+        }));
+    }
+
+    println!("id:       {id}");
+    println!("hosting:  {hosting}");
+    if section.llm.is_some() {
+        println!("llm:      {llm}");
+    }
+    if section.model.is_some() {
+        println!("model:    {model}");
+    }
+    println!("secret:   {secret}");
+    Ok(())
+}
+
+/// An engine here signs with a variable this machine holds, so there is nothing
+/// for this command to fetch. It says where the secret is instead — including
+/// when the answer is "nowhere", which is the reason a worker rejects a
+/// decision.
+fn secret_here(agent_id: &str, config: &ProjectConfig) -> Result<()> {
+    let section = section(agent_id, config)?;
+    let Some(var) = &section.signing_secret_env else {
+        anyhow::bail!(
+            "[agent.{agent_id}] names no `signing_secret_env`, so an engine here sends its \
+             decisions unsigned. Name a variable to sign them."
+        );
+    };
+    match env_value(var) {
+        Some(_) => anyhow::bail!(
+            "an engine here signs [agent.{agent_id}] with ${var}, which this machine's \
+             environment holds — this command does not print it.\n  echo ${var}"
+        ),
+        None => anyhow::bail!(
+            "[agent.{agent_id}] signs with ${var}, which holds nothing.\n  export {var}=..."
+        ),
+    }
+}
+
+fn rotate_here(agent_id: &str, config: &ProjectConfig) -> Result<()> {
+    let section = section(agent_id, config)?;
+    let Some(var) = &section.signing_secret_env else {
+        anyhow::bail!(
+            "[agent.{agent_id}] names no `signing_secret_env`, so an engine here sends its \
+             decisions unsigned. There is nothing to rotate."
+        );
+    };
+    anyhow::bail!(
+        "there is no secret here to rotate: an engine here signs [agent.{agent_id}] with \
+         ${var}, so rotating it means setting a new value and restarting.\n  export {var}=..."
+    )
 }
 
 async fn list(scope: ProjectScope) -> Result<()> {
@@ -171,4 +330,65 @@ async fn rotate(agent_id: String, scope: ProjectScope) -> Result<()> {
     println!("  {secret}");
     println!("Update your worker before its next decision.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(body: &str) -> ProjectConfig {
+        toml::from_str(body).unwrap()
+    }
+
+    const WORKER_AGENT: &str = "[llm.byo]\ntype = \"worker\"\n\
+         [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n\
+         signing_secret_env = \"NOT_SET_SECRET\"\n";
+
+    /// The columns the deployment answers with, filled in from the file: an
+    /// agent's hosting and its signing are properties of the declaration.
+    #[test]
+    fn an_agent_here_reads_its_row_off_the_file() {
+        let config = config(WORKER_AGENT);
+        let [id, llm, model, hosting, secret] =
+            declared("support", config.agent.get("support").unwrap());
+        assert_eq!(id, "support");
+        assert_eq!(llm, "byo");
+        assert_eq!(model, "m");
+        assert_eq!(hosting, "https://w.test");
+        // Named but empty: the variable is the answer, and so is its emptiness.
+        assert_eq!(secret, "$NOT_SET_SECRET (not set)");
+    }
+
+    /// An engine-hosted agent has no worker to sign for.
+    #[test]
+    fn an_engine_hosted_agent_reports_no_secret() {
+        let config =
+            config("[llm.l]\ntype = \"anthropic\"\n[agent.a]\nllm = \"l\"\nmodel = \"m\"\n");
+        let [_, _, _, hosting, secret] = declared("a", config.agent.get("a").unwrap());
+        assert_eq!(hosting, "engine");
+        assert_eq!(secret, "-");
+    }
+
+    /// There is no secret here to print: the file names a variable, and saying
+    /// which one is the useful answer.
+    #[test]
+    fn the_secret_here_is_named_not_printed() {
+        let config = config(WORKER_AGENT);
+        let err = secret_here("support", &config).unwrap_err().to_string();
+        assert!(err.contains("$NOT_SET_SECRET"), "{err}");
+        assert!(err.contains("export NOT_SET_SECRET"), "{err}");
+
+        let err = rotate_here("support", &config).unwrap_err().to_string();
+        assert!(err.contains("no secret here to rotate"), "{err}");
+        assert!(err.contains("$NOT_SET_SECRET"), "{err}");
+    }
+
+    /// A typo names the agents that were declared, as every other command does.
+    #[test]
+    fn an_undeclared_agent_lists_the_declared_ones() {
+        let config = config(WORKER_AGENT);
+        let err = section("suport", &config).unwrap_err().to_string();
+        assert!(err.contains("no [agent.suport]"), "{err}");
+        assert!(err.contains("support"), "{err}");
+    }
 }

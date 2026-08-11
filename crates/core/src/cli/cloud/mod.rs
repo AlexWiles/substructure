@@ -15,7 +15,6 @@ pub(crate) mod pickers;
 pub(crate) mod print;
 pub(crate) mod project_config;
 pub mod projects;
-pub mod sessions;
 pub mod slack;
 pub mod telemetry;
 pub mod whoami;

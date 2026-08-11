@@ -3,7 +3,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use base64::Engine;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
@@ -42,7 +41,7 @@ pub async fn list_sessions(
 ) -> impl IntoResponse {
     let tenant_id = caller.tenant_id().to_string();
     let cursor = match params.cursor {
-        Some(ref encoded) => match decode_cursor(encoded) {
+        Some(ref encoded) => match SessionCursor::decode(encoded) {
             Ok(c) => Some(c),
             Err(e) => {
                 return (
@@ -67,10 +66,7 @@ pub async fn list_sessions(
 
     match state.runtime.list_sessions(&filter).await {
         Ok(page) => {
-            let next_cursor = page
-                .next_cursor
-                .as_ref()
-                .and_then(|c| encode_cursor(c).ok());
+            let next_cursor = page.next_cursor.as_ref().and_then(|c| c.encode().ok());
             Json(serde_json::json!({
                 "items": page.items,
                 "next_cursor": next_cursor,
@@ -83,18 +79,6 @@ pub async fn list_sessions(
         )
             .into_response(),
     }
-}
-
-fn encode_cursor(cursor: &SessionCursor) -> Result<String, String> {
-    let json = serde_json::to_string(cursor).map_err(|e| e.to_string())?;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes()))
-}
-
-fn decode_cursor(encoded: &str) -> Result<SessionCursor, String> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|e| format!("invalid cursor encoding: {e}"))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("invalid cursor: {e}"))
 }
 
 pub async fn get_session(

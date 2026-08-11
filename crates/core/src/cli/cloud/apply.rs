@@ -314,6 +314,9 @@ pub async fn config(command: ConfigCommand) -> Result<()> {
 }
 
 async fn log(cursor: Option<String>, limit: usize, globals: CloudGlobals) -> Result<()> {
+    // A deployment records who changed its configuration. A file is its own
+    // history, and `git log` is the command for that one.
+    crate::cli::target::require_deployment(&globals, "subs config log")?;
     let ctx = Context::load(&globals)?;
     let project = ctx
         .pinned_project(None)

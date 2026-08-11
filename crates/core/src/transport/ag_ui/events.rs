@@ -1,10 +1,25 @@
 use axum::response::sse::Event as SseEvent;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::protocol::ToolCall;
 
-#[derive(Debug, Clone, Serialize)]
+/// A `role` on the wire is a constant the client's schema requires, not data.
+/// Reading one back would borrow from the input, so each is skipped on the way
+/// in and restored from the constant it was written from.
+fn assistant() -> &'static str {
+    "assistant"
+}
+
+fn tool() -> &'static str {
+    "tool"
+}
+
+fn reasoning() -> &'static str {
+    "reasoning"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AgUiEvent {
     #[serde(rename = "RUN_STARTED", rename_all = "camelCase")]
@@ -14,9 +29,9 @@ pub enum AgUiEvent {
     RunFinished {
         thread_id: String,
         run_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<RunOutcome>,
     },
 
@@ -29,6 +44,7 @@ pub enum AgUiEvent {
     #[serde(rename = "TEXT_MESSAGE_START", rename_all = "camelCase")]
     TextMessageStart {
         message_id: String,
+        #[serde(skip_deserializing, default = "assistant")]
         role: &'static str,
     },
 
@@ -42,7 +58,7 @@ pub enum AgUiEvent {
     ToolCallStart {
         tool_call_id: String,
         tool_call_name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_message_id: Option<String>,
     },
 
@@ -57,6 +73,7 @@ pub enum AgUiEvent {
         message_id: String,
         tool_call_id: String,
         content: String,
+        #[serde(skip_deserializing, default = "tool")]
         role: &'static str,
     },
 
@@ -68,6 +85,7 @@ pub enum AgUiEvent {
         message_id: String,
         /// Must be the literal `"reasoning"` — the client's Zod schema rejects
         /// the event otherwise.
+        #[serde(skip_deserializing, default = "reasoning")]
         role: &'static str,
     },
 
@@ -83,27 +101,27 @@ pub enum AgUiEvent {
 
 /// `RUN_FINISHED.outcome` per the AG-UI interrupt-aware run lifecycle.
 /// Omitted entirely for legacy normal completion.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RunOutcome {
     Success,
     Interrupt { interrupts: Vec<AgUiInterrupt> },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgUiInterrupt {
     pub id: String,
     pub reason: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
 
@@ -134,7 +152,7 @@ impl AgUiInterrupt {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum SnapshotMessage {
     System {
@@ -148,9 +166,9 @@ pub enum SnapshotMessage {
     #[serde(rename_all = "camelCase")]
     Assistant {
         id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<String>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCall>,
     },
     #[serde(rename_all = "camelCase")]
@@ -186,5 +204,104 @@ impl AgUiEvent {
     pub fn to_sse(&self) -> SseEvent {
         let data = serde_json::to_string(self).unwrap_or_default();
         SseEvent::default().event(self.type_name()).data(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The CLI reads this protocol as well as the server writes it: `subs run`
+    /// against a deployment renders the events it is sent. Every variant has to
+    /// survive the trip, including the ones whose optional fields are omitted
+    /// on the way out.
+    #[test]
+    fn every_event_survives_the_round_trip() {
+        let events = vec![
+            AgUiEvent::RunStarted {
+                thread_id: "s".into(),
+                run_id: "r".into(),
+            },
+            AgUiEvent::RunFinished {
+                thread_id: "s".into(),
+                run_id: "r".into(),
+                result: None,
+                outcome: None,
+            },
+            AgUiEvent::RunError {
+                message: "no".into(),
+            },
+            AgUiEvent::TextMessageStart {
+                message_id: "m".into(),
+                role: "assistant",
+            },
+            AgUiEvent::TextMessageContent {
+                message_id: "m".into(),
+                delta: "hi".into(),
+            },
+            AgUiEvent::TextMessageEnd {
+                message_id: "m".into(),
+            },
+            AgUiEvent::ToolCallStart {
+                tool_call_id: "t".into(),
+                tool_call_name: "search".into(),
+                parent_message_id: None,
+            },
+            AgUiEvent::ToolCallArgs {
+                tool_call_id: "t".into(),
+                delta: "{}".into(),
+            },
+            AgUiEvent::ToolCallEnd {
+                tool_call_id: "t".into(),
+            },
+            AgUiEvent::ToolCallResult {
+                message_id: "m".into(),
+                tool_call_id: "t".into(),
+                content: "ok".into(),
+                role: "tool",
+            },
+            AgUiEvent::ReasoningMessageStart {
+                message_id: "m".into(),
+                role: "reasoning",
+            },
+        ];
+
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let back: AgUiEvent = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{} did not survive: {e}\n{json}", event.type_name()));
+            assert_eq!(
+                back.type_name(),
+                event.type_name(),
+                "came back as a different event: {json}"
+            );
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                json,
+                "re-serialized differently"
+            );
+        }
+    }
+
+    /// A `role` is a constant the client's schema requires, and it is skipped
+    /// on the way in — so it has to come back as the same constant rather than
+    /// as an empty string.
+    #[test]
+    fn a_skipped_role_comes_back_as_its_constant() {
+        let json = r#"{"type":"TEXT_MESSAGE_START","messageId":"m","role":"assistant"}"#;
+        match serde_json::from_str::<AgUiEvent>(json).unwrap() {
+            AgUiEvent::TextMessageStart { role, .. } => assert_eq!(role, "assistant"),
+            other => panic!("expected TEXT_MESSAGE_START, got {}", other.type_name()),
+        }
+
+        // Even absent, since it is not read from the input at all.
+        let json = r#"{"type":"REASONING_MESSAGE_START","messageId":"m"}"#;
+        match serde_json::from_str::<AgUiEvent>(json).unwrap() {
+            AgUiEvent::ReasoningMessageStart { role, .. } => assert_eq!(role, "reasoning"),
+            other => panic!(
+                "expected REASONING_MESSAGE_START, got {}",
+                other.type_name()
+            ),
+        }
     }
 }

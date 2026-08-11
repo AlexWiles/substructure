@@ -15,6 +15,17 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    /// The `type` the file writes. What a message about a block should call it,
+    /// so the name a reader is given is the one they would grep for.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Openrouter => "openrouter",
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Worker => "worker",
+        }
+    }
+
     /// The variable a key is read from when the file names none. Named here
     /// rather than at each use so every command tells you the same name the
     /// engine will look for.
