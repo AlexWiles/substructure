@@ -166,6 +166,11 @@ pub struct ProviderSpec {
     /// `type = "worker"`; absent ⇒ the engine's neutral format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<LlmFormat>,
+    /// How long the vendor holds a cached prompt prefix. Each vendor spells
+    /// its own lives, so [`check_llm`] reads this against the block's `type`.
+    /// Absent ⇒ the vendor default, which suits a session that turns often.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ttl: Option<String>,
 }
 
 impl ProviderSpec {
@@ -519,6 +524,9 @@ pub fn check_llm(id: &str, spec: &ProviderSpec) -> Result<()> {
                      leaves your worker"
                 );
             }
+            if spec.cache_ttl.is_some() {
+                bail!("a `worker` block needs no `cache_ttl`: the call never leaves your worker");
+            }
         }
         _ => {
             if spec.format.is_some() {
@@ -527,9 +535,32 @@ pub fn check_llm(id: &str, spec: &ProviderSpec) -> Result<()> {
                      `type = \"worker\"`"
                 );
             }
+            if let Some(ttl) = &spec.cache_ttl {
+                let allowed = cache_ttls(spec.kind);
+                if !allowed.contains(&ttl.as_str()) {
+                    bail!(
+                        "`cache_ttl = \"{ttl}\"` is not a life {} holds a prompt for. Use {}.",
+                        spec.kind.as_str(),
+                        allowed
+                            .iter()
+                            .map(|t| format!("`{t}`"))
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    );
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// The lives one vendor spells for a cached prefix.
+pub fn cache_ttls(kind: ProviderKind) -> &'static [&'static str] {
+    match kind {
+        ProviderKind::Anthropic | ProviderKind::Openrouter => &["5m", "1h"],
+        ProviderKind::Openai => &["in_memory", "24h"],
+        ProviderKind::Worker => &[],
+    }
 }
 
 /// Every name an agent uses is declared in this same document, so a typo is
@@ -787,6 +818,47 @@ mod tests {
         // Everything else survives: only the bindings are local.
         assert_eq!(wire.agent["support"].worker, m.agent["support"].worker);
         assert_eq!(wire.llm["claude"].kind, ProviderKind::Anthropic);
+    }
+
+    #[test]
+    fn a_cache_life_is_read_against_the_block_it_sits_on() {
+        let ok = manifest(
+            r#"
+            [llm.claude]
+            type = "anthropic"
+            cache_ttl = "1h"
+
+            [llm.gpt]
+            type = "openai"
+            cache_ttl = "24h"
+
+            [llm.router]
+            type = "openrouter"
+            cache_ttl = "5m"
+            "#,
+        );
+        ok.validate().unwrap();
+
+        let wrong_vendor = manifest(
+            r#"
+            [llm.gpt]
+            type = "openai"
+            cache_ttl = "1h"
+            "#,
+        );
+        let err = wrong_vendor.validate().unwrap_err().to_string();
+        assert!(err.contains("[llm.gpt]"), "{err}");
+        assert!(err.contains("`in_memory` or `24h`"), "{err}");
+
+        let on_a_worker = manifest(
+            r#"
+            [llm.mine]
+            type = "worker"
+            cache_ttl = "1h"
+            "#,
+        );
+        let err = on_a_worker.validate().unwrap_err().to_string();
+        assert!(err.contains("never leaves your worker"), "{err}");
     }
 
     #[test]

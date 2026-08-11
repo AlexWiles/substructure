@@ -99,6 +99,7 @@ format = "anthropic"
 | `api_key_env` | string | the vendor's own variable | The variable holding the key. For an engine you run. |
 | `base_url` | url | the vendor's own | Where to send the call. |
 | `format` | `openai`, `anthropic` | the engine's own shape | The wire shape of the `llm.execute` a worker answers. `type = "worker"` only. |
+| `cache_ttl` | `5m`, `1h` (`anthropic`, `openrouter`); `in_memory`, `24h` (`openai`) | the vendor's own | How long the vendor holds a cached prompt prefix. |
 
 There is no default block and no fallback. An agent names a block, or its calls
 fail. See [LLMs](./70-llms.md).

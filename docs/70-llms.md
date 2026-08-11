@@ -165,7 +165,22 @@ type = "anthropic" | "openai" | "openrouter" | "worker"
 api_key_env = "…"                  # engine-run types. local only
 base_url = "…"                     # engine-run types
 format = "openai" | "anthropic"    # `worker` only
+cache_ttl = "5m" | "1h"            # `anthropic`, `openrouter`
+cache_ttl = "in_memory" | "24h"    # `openai`
 ```
+
+## Prompt caching
+
+Every engine-run call asks the vendor to cache the prompt: the tools, the system
+prompt, and the transcript as it grows. A turn that hits the cache pays a
+fraction of the input price, and the engine holds the front of the prompt still
+so the cache keeps hitting.
+
+A cached prefix lives about five minutes by default, and each hit resets the
+clock. A session that turns faster than that never needs `cache_ttl`. Set it
+where a session waits on a person or a slow job between turns, and the prompt
+would otherwise be read again in full: the longer life costs more to write, and
+pays for itself from about the third turn that reads it.
 
 ```typescript
 type LlmExecute = {

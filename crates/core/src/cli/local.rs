@@ -326,12 +326,14 @@ fn client(p: ProviderEnv) -> Arc<dyn LlmProviderTrait> {
         ProviderKind::Openrouter => Arc::new(OpenRouterProvider::new(OpenRouterConfig {
             base_url: base_url.unwrap_or_else(|| "https://openrouter.ai/api".to_string()),
             api_key: p.api_key,
+            cache_ttl: p.cache_ttl,
         })),
         ProviderKind::Anthropic => {
             let mut config = AnthropicConfig::new(p.api_key);
             if let Some(base_url) = base_url {
                 config.base_url = base_url;
             }
+            config.cache_ttl = p.cache_ttl;
             Arc::new(AnthropicProvider::new(config))
         }
         ProviderKind::Openai => {
@@ -341,6 +343,7 @@ fn client(p: ProviderEnv) -> Arc<dyn LlmProviderTrait> {
             }
             config.organization = std::env::var("OPENAI_ORG_ID").ok();
             config.project = std::env::var("OPENAI_PROJECT_ID").ok();
+            config.cache_retention = p.cache_ttl;
             Arc::new(OpenAiProvider::new(config))
         }
         // Never reached: `provider_bindings` keeps worker blocks out of the

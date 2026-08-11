@@ -17,7 +17,9 @@ together at the same version.
 
 - Slackbot prompts for MCP reauth by default. Overrideable in config.
 - Engine driven deferred tool definition support.
-- Calls to Anthropic now set cache breakpoints.
+- Calls to Anthropic, OpenAI, and OpenRouter now cache the prompt.
+- Streamed calls now report their token counts, and the cached part of the prompt.
+- Support cache_ttl on llm config blocks in the manifest.
 
 ## [0.3.1] - 2026-08-07
 

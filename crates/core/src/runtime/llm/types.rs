@@ -108,6 +108,20 @@ pub struct CallContext<'a> {
     pub defer_tools_strategy: DeferToolsStrategy,
 }
 
+impl CallContext<'_> {
+    /// The root of this session's chain, or this session where it is the root.
+    ///
+    /// A router that pins a session to one endpoint forgets it once it goes
+    /// quiet, and a parent makes no calls while its delegation runs. One name
+    /// for the whole tree holds the endpoint for all of it.
+    pub fn root_session_id(&self) -> &str {
+        self.ancestry
+            .last()
+            .map(String::as_str)
+            .unwrap_or(self.session_id)
+    }
+}
+
 /// Trait for calling an LLM (single call or streaming).
 #[async_trait]
 pub trait LlmCallable: Send + Sync + 'static {
