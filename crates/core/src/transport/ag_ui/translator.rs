@@ -436,6 +436,7 @@ pub fn run_ag_ui_translation(
                     }
                     return;
                 }
+                _ = out_tx.closed() => return,
                 ev = event_rx.recv() => match ev {
                     Some(event) => {
                         let ends_run = event.ends_run();

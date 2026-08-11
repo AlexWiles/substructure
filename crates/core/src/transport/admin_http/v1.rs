@@ -8,21 +8,19 @@ use axum::extract::{FromRef, Path, Query, State};
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
 use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::sync::CancellationToken;
 
-use crate::api::v1::{ApiError, Meta, Org, Project, RunFormat, RunRequest, RUN_DONE_EVENT};
+use crate::api::v1::{ApiError, Meta, Org, Project, RunFormat, RunRequest};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
-use crate::session::SessionEvent;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
 use crate::transport::http::runtime_error_response;
+use crate::transport::session_sse::run_event_stream;
 use crate::{Caller, HandleClientInput};
 
 use super::routes::{self, SessionEventsParams};
@@ -175,43 +173,11 @@ async fn run(
     let shutdown = state.shutdown.clone();
     let out = match delta_rx {
         Some(delta_rx) => run_ag_ui_translation(event_rx, delta_rx, session_id, turn_id, shutdown),
-        None => run_raw_events(event_rx, shutdown),
+        None => run_event_stream(event_rx, shutdown),
     };
     Sse::new(ReceiverStream::new(out).map(Ok::<_, std::convert::Infallible>))
         .keep_alive(KeepAlive::default())
         .into_response()
-}
-
-/// Stored engine events, as `subs run -o jsonl` prints them. Ends with
-/// [`RUN_DONE_EVENT`] when the turn does, and with nothing when the server
-/// stops first.
-fn run_raw_events(
-    mut event_rx: mpsc::Receiver<SessionEvent>,
-    shutdown: CancellationToken,
-) -> mpsc::Receiver<SseEvent> {
-    let (tx, rx) = mpsc::channel(64);
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                event = event_rx.recv() => {
-                    let Some(event) = event else { return };
-                    let sse = SseEvent::default()
-                        .id(event.seq.to_string())
-                        .event(event.payload_type())
-                        .data(serde_json::to_string(&event).unwrap_or_default());
-                    if tx.send(sse).await.is_err() {
-                        return;
-                    }
-                    if event.ends_run() {
-                        let _ = tx.send(SseEvent::default().event(RUN_DONE_EVENT).data("")).await;
-                        return;
-                    }
-                }
-            }
-        }
-    });
-    rx
 }
 
 #[derive(Debug, Default, Deserialize)]

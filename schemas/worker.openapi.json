@@ -1751,7 +1751,7 @@
         "description": "What kind of caller owns a session. Part of the identity: only `frontend` is\nan end user, and an ownership check grants access to no other kind.",
         "enum": [
           "frontend",
-          "admin",
+          "operator",
           "api_key",
           "system"
         ],
@@ -2152,7 +2152,7 @@
       "url": "https://fsl.software"
     },
     "title": "Substructure worker",
-    "version": "0.3.1"
+    "version": "0.4.0"
   },
   "openapi": "3.1.0",
   "paths": {

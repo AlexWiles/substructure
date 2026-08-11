@@ -13,7 +13,7 @@ pub enum Caller {
         tenant_id: String,
         key_id: String,
     },
-    Admin {
+    Operator {
         tenant_id: String,
         user_id: String,
     },
@@ -29,7 +29,7 @@ impl Caller {
         match self {
             Caller::System { tenant_id }
             | Caller::ApiKey { tenant_id, .. }
-            | Caller::Admin { tenant_id, .. }
+            | Caller::Operator { tenant_id, .. }
             | Caller::Frontend { tenant_id, .. } => tenant_id,
         }
     }
@@ -38,7 +38,7 @@ impl Caller {
         match self {
             Caller::System { .. } => None,
             Caller::ApiKey { key_id, .. } => Some(key_id),
-            Caller::Admin { user_id, .. } | Caller::Frontend { user_id, .. } => Some(user_id),
+            Caller::Operator { user_id, .. } | Caller::Frontend { user_id, .. } => Some(user_id),
         }
     }
 
@@ -46,7 +46,7 @@ impl Caller {
         match self {
             Caller::System { .. } => OwnerKind::System,
             Caller::ApiKey { .. } => OwnerKind::ApiKey,
-            Caller::Admin { .. } => OwnerKind::Admin,
+            Caller::Operator { .. } => OwnerKind::Operator,
             Caller::Frontend { .. } => OwnerKind::Frontend,
         }
     }
@@ -99,20 +99,20 @@ mod tests {
     fn one_kind_of_owner_does_not_match_another() {
         let name = "alex@example.test";
         assert!(frontend(name).owns(&owner(OwnerKind::Frontend, name)));
-        assert!(!frontend(name).owns(&owner(OwnerKind::Admin, name)));
+        assert!(!frontend(name).owns(&owner(OwnerKind::Operator, name)));
         assert!(!frontend(name).owns(&owner(OwnerKind::ApiKey, name)));
         assert!(!frontend(name).owns(&owner(OwnerKind::System, name)));
     }
 
     #[test]
-    fn an_admin_owns_only_its_own_sessions() {
-        let admin = Caller::Admin {
+    fn an_operator_owns_only_its_own_sessions() {
+        let operator = Caller::Operator {
             tenant_id: "tenant-a".to_string(),
             user_id: "alex".to_string(),
         };
-        assert!(admin.owns(&owner(OwnerKind::Admin, "alex")));
-        assert!(!admin.owns(&owner(OwnerKind::Admin, "sam")));
-        assert!(!admin.owns(&owner(OwnerKind::Frontend, "alex")));
+        assert!(operator.owns(&owner(OwnerKind::Operator, "alex")));
+        assert!(!operator.owns(&owner(OwnerKind::Operator, "sam")));
+        assert!(!operator.owns(&owner(OwnerKind::Frontend, "alex")));
     }
 
     #[test]
@@ -127,7 +127,7 @@ mod tests {
     fn a_caller_owns_the_sessions_it_starts() {
         for caller in [
             frontend("alex"),
-            Caller::Admin {
+            Caller::Operator {
                 tenant_id: "tenant-a".to_string(),
                 user_id: "alex".to_string(),
             },

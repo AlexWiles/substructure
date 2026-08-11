@@ -504,7 +504,7 @@ export interface WorkerIdentity {
  * What kind of caller owns a session. Part of the identity: only `frontend` is
  * an end user, and an ownership check grants access to no other kind.
  */
-export type OwnerKind = "frontend" | "admin" | "api_key" | "system";
+export type OwnerKind = "frontend" | "operator" | "api_key" | "system";
 
 export interface MessageTree {
     head_id?: null | string;

@@ -143,6 +143,17 @@ mod tests {
                 serde_json::from_value(serde_json::json!(format.as_query())).unwrap();
             assert_eq!(parsed, format, "{} did not parse back", format.as_query());
         }
+        assert!(
+            serde_json::from_value::<RunFormat>(serde_json::json!("ag_ui")).is_err(),
+            "a near miss is a miss"
+        );
+    }
+
+    #[test]
+    fn an_unknown_format_is_refused() {
+        let parsed: Result<RunFormat, _> =
+            serde_json::from_value(serde_json::json!("something-new"));
+        assert!(parsed.is_err());
     }
 
     #[test]

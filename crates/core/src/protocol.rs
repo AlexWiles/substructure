@@ -164,7 +164,7 @@ pub struct NewMessage {
 #[schemars(title = "InterruptOrigin")]
 pub enum InterruptOrigin {
     System,
-    Admin,
+    Operator,
     Machine,
     Frontend,
 }
@@ -282,7 +282,7 @@ pub struct RetryConfig {
 pub enum OwnerKind {
     #[default]
     Frontend,
-    Admin,
+    Operator,
     ApiKey,
     System,
 }

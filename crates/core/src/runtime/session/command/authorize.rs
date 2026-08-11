@@ -25,7 +25,7 @@ impl SessionState {
     ) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } | Caller::ApiKey { .. } => Ok(()),
-            Caller::Admin { .. } | Caller::Frontend { .. } => {
+            Caller::Operator { .. } | Caller::Frontend { .. } => {
                 Err(SessionError::SessionAccessDenied)
             }
         }
@@ -36,7 +36,7 @@ impl SessionState {
         caller: &Caller,
     ) -> Result<(), SessionError> {
         match caller {
-            Caller::System { .. } | Caller::ApiKey { .. } | Caller::Admin { .. } => Ok(()),
+            Caller::System { .. } | Caller::ApiKey { .. } | Caller::Operator { .. } => Ok(()),
             Caller::Frontend { .. } => Err(SessionError::SessionAccessDenied),
         }
     }
@@ -51,7 +51,7 @@ impl SessionState {
                 tenant_id: caller_tenant,
                 ..
             }
-            | Caller::Admin {
+            | Caller::Operator {
                 tenant_id: caller_tenant,
                 ..
             }
@@ -70,7 +70,7 @@ impl SessionState {
     pub(super) fn caller_interrupt_origin(caller: &Caller) -> InterruptOrigin {
         match caller {
             Caller::System { .. } => InterruptOrigin::System,
-            Caller::Admin { .. } => InterruptOrigin::Admin,
+            Caller::Operator { .. } => InterruptOrigin::Operator,
             Caller::ApiKey { .. } => InterruptOrigin::Machine,
             Caller::Frontend { .. } => InterruptOrigin::Frontend,
         }
@@ -78,7 +78,7 @@ impl SessionState {
 
     pub(super) fn ensure_owns_session(&self, caller: &Caller) -> Result<(), SessionError> {
         match caller {
-            Caller::System { .. } | Caller::ApiKey { .. } | Caller::Admin { .. } => Ok(()),
+            Caller::System { .. } | Caller::ApiKey { .. } | Caller::Operator { .. } => Ok(()),
             Caller::Frontend { .. } => {
                 let owner = self
                     .owner
@@ -113,7 +113,9 @@ impl SessionState {
     ) -> Result<(), SessionError> {
         match caller {
             Caller::System { .. } => Ok(()),
-            Caller::Admin { .. } | Caller::Frontend { .. } => Err(SessionError::EffectWrongHandler),
+            Caller::Operator { .. } | Caller::Frontend { .. } => {
+                Err(SessionError::EffectWrongHandler)
+            }
             Caller::ApiKey { .. } => match call {
                 Some(c) if c.handler == LlmHandler::Worker => Ok(()),
                 Some(_) => Err(SessionError::EffectWrongHandler),

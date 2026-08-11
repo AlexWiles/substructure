@@ -64,7 +64,7 @@ The worker receives that owner as `DecisionRequest.identity`. It holds the id,
 the kind, and the metadata, not the tenant.
 
 ```typescript
-type OwnerKind = "frontend" | "admin" | "api_key" | "system"
+type OwnerKind = "frontend" | "operator" | "api_key" | "system"
 type WorkerIdentity = {
     id?: string
     kind: OwnerKind
@@ -76,7 +76,7 @@ The engine sets this once and vouches for it. Read it without verifying it. It
 is the owner, not the caller of this request.
 
 `kind` is part of the identity. Only `frontend` is an end user: an operator who
-runs a turn owns the session as `admin` or `api_key`. Two owners with the same
+runs a turn owns the session as `operator` or `api_key`. Two owners with the same
 `id` and different kinds are different owners.
 
 ## Patterns

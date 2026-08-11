@@ -311,7 +311,7 @@ impl InterruptOrigin {
     pub fn privilege(self) -> u8 {
         match self {
             InterruptOrigin::System => 3,
-            InterruptOrigin::Admin => 2,
+            InterruptOrigin::Operator => 2,
             InterruptOrigin::Machine => 1,
             InterruptOrigin::Frontend => 0,
         }

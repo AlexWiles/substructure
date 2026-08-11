@@ -74,6 +74,10 @@ fi
 
 echo "Bumping $CURRENT -> $VERSION"
 
+BUMPED="packages/cli/package.json crates/core/Cargo.toml Cargo.lock CHANGELOG.md schemas"
+# shellcheck disable=SC2064
+trap "echo >&2; echo 'Release aborted with a partial bump in the tree. Undo with:' >&2; echo '  git checkout -- $BUMPED' >&2" ERR
+
 npm --prefix packages/cli version "$VERSION" --no-git-tag-version --allow-same-version >/dev/null
 
 # Keep the Rust crate version in lockstep — `env!("CARGO_PKG_VERSION")`
@@ -98,9 +102,16 @@ node -e "
   fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');
 " "$VERSION"
 
-git add packages/cli/package.json crates/core/Cargo.toml Cargo.lock CHANGELOG.md
+echo "Regenerating committed schemas (a stale one fails this run and is rewritten)"
+cargo test --test protocol_schema || true
+echo "Running tests"
+cargo test --all
+
+# shellcheck disable=SC2086
+git add $BUMPED
 git commit -m "release $TAG"
 git tag -a "$TAG" -m "$TAG"
+trap - ERR
 
 echo
 echo "Created commit and tag $TAG. Review with:"

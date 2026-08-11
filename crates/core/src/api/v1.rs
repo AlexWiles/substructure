@@ -245,8 +245,6 @@ pub enum RunFormat {
 pub const RUN_DONE_EVENT: &str = "done";
 
 impl RunFormat {
-    /// The `format` query value: the serde name. A mismatch is silent, and
-    /// takes the default.
     pub fn as_query(self) -> &'static str {
         match self {
             RunFormat::AgUi => "ag-ui",

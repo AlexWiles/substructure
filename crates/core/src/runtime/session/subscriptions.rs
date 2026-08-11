@@ -67,7 +67,14 @@ impl SessionSubscriptions {
         let (tx, event_rx) = mpsc::channel::<SessionEvent>(64);
 
         tokio::spawn(async move {
-            while let Some(batch) = rx.recv().await {
+            loop {
+                let batch = tokio::select! {
+                    _ = tx.closed() => return,
+                    batch = rx.recv() => match batch {
+                        Some(batch) => batch,
+                        None => return,
+                    },
+                };
                 for event in batch.iter() {
                     if event.tenant_id != spec.caller.tenant_id() {
                         continue;
@@ -125,7 +132,14 @@ impl SessionSubscriptions {
                 }
             }
             let mut live = live_rx;
-            while let Some(event) = live.recv().await {
+            loop {
+                let event = tokio::select! {
+                    _ = tx.closed() => return,
+                    event = live.recv() => match event {
+                        Some(event) => event,
+                        None => return,
+                    },
+                };
                 if event.seq <= max_seq {
                     continue;
                 }
@@ -165,4 +179,96 @@ fn filter_by_spec(events: Vec<SessionEvent>, spec: &SessionSubscriptionSpec) -> 
                 && spec.include(event)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::event_store::{AppendInput, EventFilter, EventTap, StoreError, TapSource};
+    use crate::runtime::session::SessionAggregate;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    struct Bus {
+        tx: broadcast::Sender<Arc<Vec<SessionEvent>>>,
+    }
+
+    struct Tap(broadcast::Receiver<Arc<Vec<SessionEvent>>>);
+
+    #[async_trait]
+    impl TapSource for Tap {
+        async fn recv(&mut self) -> Option<Arc<Vec<SessionEvent>>> {
+            self.0.recv().await.ok()
+        }
+    }
+
+    #[async_trait]
+    impl EventStore for Bus {
+        async fn append(&self, _input: AppendInput) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn load(
+            &self,
+            _tenant_id: &str,
+            _session_id: &str,
+        ) -> Result<SessionAggregate, StoreError> {
+            Err(StoreError::StreamNotFound)
+        }
+        async fn query_events(
+            &self,
+            _filter: &EventFilter,
+        ) -> Result<Vec<SessionEvent>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn subscribe(&self) -> EventTap {
+            EventTap::new(Tap(self.tx.subscribe()))
+        }
+    }
+
+    fn spec() -> SessionSubscriptionSpec {
+        SessionSubscriptionSpec {
+            session_id: "s1".to_string(),
+            caller: Caller::System {
+                tenant_id: "t1".to_string(),
+            },
+            scope: SubscriptionScope::All,
+        }
+    }
+
+    async fn settle() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_the_stream_releases_its_hold_on_the_bus() {
+        let (tx, _) = broadcast::channel(16);
+        let bus = Arc::new(Bus { tx: tx.clone() });
+        let subs = SessionSubscriptions::new(bus);
+
+        let rx = subs.stream(spec(), None).await;
+        settle().await;
+        assert_eq!(tx.receiver_count(), 1, "the stream should be listening");
+
+        drop(rx);
+        settle().await;
+        assert_eq!(
+            tx.receiver_count(),
+            0,
+            "a dropped stream must not keep filtering every event in the deployment"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_nobody_reads_does_not_wait_for_an_event_to_notice() {
+        let (tx, _) = broadcast::channel(16);
+        let bus = Arc::new(Bus { tx: tx.clone() });
+        let subs = SessionSubscriptions::new(bus);
+
+        drop(subs.stream(spec(), None).await);
+        settle().await;
+        assert_eq!(tx.receiver_count(), 0);
+    }
 }

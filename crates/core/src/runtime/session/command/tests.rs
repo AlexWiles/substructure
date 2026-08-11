@@ -2969,7 +2969,7 @@ fn frontend() -> Caller {
 }
 
 fn admin() -> Caller {
-    Caller::Admin {
+    Caller::Operator {
         tenant_id: "tenant-a".to_string(),
         user_id: "alex@example.test".to_string(),
     }
@@ -10817,9 +10817,9 @@ fn an_admin_does_not_answer_to_a_session_owner() {
 #[test]
 fn an_admin_outranks_a_machine_and_answers_to_the_engine() {
     use crate::protocol::InterruptOrigin;
-    assert!(InterruptOrigin::Admin.privilege() > InterruptOrigin::Machine.privilege());
-    assert!(InterruptOrigin::Admin.privilege() > InterruptOrigin::Frontend.privilege());
-    assert!(InterruptOrigin::Admin.privilege() < InterruptOrigin::System.privilege());
+    assert!(InterruptOrigin::Operator.privilege() > InterruptOrigin::Machine.privilege());
+    assert!(InterruptOrigin::Operator.privilege() > InterruptOrigin::Frontend.privilege());
+    assert!(InterruptOrigin::Operator.privilege() < InterruptOrigin::System.privilege());
 }
 
 #[test]
@@ -10827,7 +10827,7 @@ fn an_admin_caller_raises_an_admin_interrupt() {
     use crate::protocol::InterruptOrigin;
     assert!(matches!(
         SessionState::caller_interrupt_origin(&admin()),
-        InterruptOrigin::Admin
+        InterruptOrigin::Operator
     ));
     assert!(matches!(
         SessionState::caller_interrupt_origin(&machine()),

@@ -9,6 +9,14 @@ together at the same version.
 
 ## [Unreleased]
 
+### Changed
+
+- Admin caller renamed to Operator.
+
+### Fixed
+
+- Session streams release their subscription when the reader goes away
+
 ## [0.4.0] - 2026-08-11
 
 ### Changed

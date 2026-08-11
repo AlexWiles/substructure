@@ -38,7 +38,7 @@ impl AuthPrincipal {
     pub fn operator_caller(&self) -> Option<Caller> {
         let subject = self.named_subject()?;
         Some(match self.source {
-            SOURCE_USER => Caller::Admin {
+            SOURCE_USER => Caller::Operator {
                 tenant_id: self.tenant_id.clone(),
                 user_id: subject,
             },
@@ -107,7 +107,7 @@ mod tests {
         let user = principal(SOURCE_USER, Some("alex@example.test"));
         assert!(matches!(
             user.operator_caller(),
-            Some(Caller::Admin { user_id, .. }) if user_id == "alex@example.test"
+            Some(Caller::Operator { user_id, .. }) if user_id == "alex@example.test"
         ));
 
         let key = principal(SOURCE_API_KEY, Some("key-1"));

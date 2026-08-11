@@ -3,6 +3,7 @@ use axum::response::sse::Event as SseEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::api::v1::RUN_DONE_EVENT;
 use crate::event_store::Seq;
 use crate::protocol::TokenDelta;
 use crate::session::SessionEvent;
@@ -17,6 +18,37 @@ pub fn resume_cursor(headers: &HeaderMap, after_seq: Option<u64>) -> Option<Seq>
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok());
     last_event_id.or(after_seq).map(Seq)
+}
+
+pub fn run_event_stream(
+    mut event_rx: mpsc::Receiver<SessionEvent>,
+    shutdown: CancellationToken,
+) -> mpsc::Receiver<SseEvent> {
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tx.closed() => return,
+                event = event_rx.recv() => {
+                    let Some(event) = event else { return };
+                    let ends = event.ends_run();
+                    let sse = SseEvent::default()
+                        .id(event.seq.to_string())
+                        .event(event.payload_type())
+                        .data(serde_json::to_string(&event).unwrap_or_default());
+                    if tx.send(sse).await.is_err() {
+                        return;
+                    }
+                    if ends {
+                        let _ = tx.send(SseEvent::default().event(RUN_DONE_EVENT).data("")).await;
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    rx
 }
 
 /// Terminates when `event_rx` closes (Turn scopes auto-close on
@@ -34,6 +66,7 @@ pub fn merge_session_stream(
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => return,
+                _ = out_tx.closed() => return,
                 ev = event_rx.recv() => match ev {
                     Some(event) => {
                         let event_type = event.payload_type();

@@ -1898,7 +1898,7 @@
       "description": "Privilege level of the caller that issued an interrupt. Derived from the\nauthenticated `Caller`, never from request data; resuming requires a\ncaller at or above the origin's privilege.",
       "enum": [
         "system",
-        "admin",
+        "operator",
         "machine",
         "frontend"
       ],
@@ -2308,7 +2308,7 @@
       "description": "What kind of caller owns a session. Part of the identity: only `frontend` is\nan end user, and an ownership check grants access to no other kind.",
       "enum": [
         "frontend",
-        "admin",
+        "operator",
         "api_key",
         "system"
       ],
