@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Fixed
+
+- Streamed calls now read `data:` lines that have no space after the colon.
+
 ## [0.4.1] - 2026-08-11
 
 ### Changed

@@ -440,7 +440,7 @@ impl LlmCallable for OpenRouterClient {
                     continue;
                 }
 
-                let data = match line.strip_prefix("data: ") {
+                let data = match crate::providers::sse_data(&line) {
                     Some(d) => d,
                     None => continue,
                 };
