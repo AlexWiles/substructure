@@ -328,6 +328,7 @@ impl World {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -401,6 +402,7 @@ impl World {
             }],
             defer_tools: None,
             announce_mcp: Default::default(),
+            effort: None,
         }
     }
 
@@ -487,6 +489,7 @@ impl World {
                             usage: None,
                             cost: None,
                             images: vec![],
+                            reasoning: None,
                         })),
                     )
                 } else {

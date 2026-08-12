@@ -2312,6 +2312,7 @@ mod open_llm_calls_tests {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -2330,6 +2331,7 @@ mod open_llm_calls_tests {
             }],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -2341,6 +2343,7 @@ mod open_llm_calls_tests {
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.to_string()),
             name: None,
+            reasoning: None,
         }
     }
 
@@ -2409,6 +2412,7 @@ mod state_version_tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 parent_id: parent_id.map(str::to_string),
             },
@@ -2522,6 +2526,7 @@ mod state_version_tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 parent_id: parent.map(str::to_string),
             })
@@ -2562,6 +2567,7 @@ mod agent_version_tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 parent_id: parent_id.map(str::to_string),
             },
@@ -2589,6 +2595,7 @@ mod agent_version_tests {
             mcp: Vec::new(),
             defer_tools: None,
             announce_mcp: Default::default(),
+            effort: None,
         }
     }
 

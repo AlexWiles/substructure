@@ -674,7 +674,7 @@ impl Runtime {
                 Outcome::Tool { result }
             }
             EffectSettlement::Result(EffectResultPayload::LlmCall { response }) => {
-                Outcome::Llm(Box::new(response))
+                Outcome::Llm(response)
             }
             // Worker- and client-authored: flat on the wire, and it may
             // classify itself or not. Unclassified is a handler failure — the

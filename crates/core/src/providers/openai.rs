@@ -9,8 +9,9 @@ use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningEffort, SessionOwner,
-    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction, Usage,
+    Content, DeferToolsStrategy, DraftMessage, ErrorCode, LlmRequest, LlmResponse, LlmTool,
+    Reasoning, ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta, ToolCall,
+    ToolCallChunk, ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -48,7 +49,7 @@ impl From<&LlmTool> for WireTool {
 #[derive(Serialize)]
 struct WireBody<'a> {
     model: &'a str,
-    messages: &'a [crate::protocol::DraftMessage],
+    messages: Vec<WireMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,6 +74,35 @@ struct WireBody<'a> {
 #[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,
+}
+
+/// A transcript message as Chat Completions takes it. Built rather than
+/// serializing a `DraftMessage` straight through, because the engine's own
+/// fields — the node `id`, the reasoning it holds for a provider that wants it
+/// back — are not part of this API, and a strict server rejects an unknown key.
+#[derive(Serialize)]
+struct WireMessage<'a> {
+    role: &'a Role,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a Content>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<&'a Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a String>,
+}
+
+impl<'a> From<&'a DraftMessage> for WireMessage<'a> {
+    fn from(m: &'a DraftMessage) -> Self {
+        WireMessage {
+            role: &m.role,
+            content: m.content.as_ref(),
+            tool_calls: m.tool_calls.as_ref(),
+            tool_call_id: m.tool_call_id.as_ref(),
+            name: m.name.as_ref(),
+        }
+    }
 }
 
 /// What the caller knows about caching this call: the session the prompt
@@ -142,7 +172,7 @@ impl<'a> WireBody<'a> {
 
         WireBody {
             model: &request.model,
-            messages: &request.messages,
+            messages: request.messages.iter().map(WireMessage::from).collect(),
             tools: request
                 .offered_tools(search)
                 .map(|ts| ts.into_iter().map(WireTool::from).collect()),
@@ -217,6 +247,8 @@ struct Choice {
 #[derive(Debug, Deserialize)]
 struct ChoiceMessage {
     content: Option<String>,
+    #[serde(default, alias = "reasoning_content")]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<WireToolCall>>,
 }
@@ -254,6 +286,13 @@ impl ChatCompletionResponse {
         LlmResponse {
             model: self.model,
             content: choice.as_ref().and_then(|c| c.message.content.clone()),
+            // No blocks: Chat Completions wants no reasoning back, so this is
+            // for a reader only.
+            reasoning: Reasoning::new(
+                ReasoningProvider::Openai,
+                choice.as_ref().and_then(|c| c.message.reasoning.clone()),
+                Vec::new(),
+            ),
             tool_calls: choice
                 .as_ref()
                 .and_then(|c| c.message.tool_calls.as_ref())
@@ -288,6 +327,10 @@ struct StreamChunkChoice {
 struct StreamChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    /// `reasoning` is what OpenRouter and Hetzner send; `reasoning_content` is
+    /// what vLLM and DeepSeek send. Same field, two names in the wild.
+    #[serde(default, alias = "reasoning_content")]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -341,6 +384,7 @@ pub(crate) fn response_from_wire(value: serde_json::Value) -> Result<LlmResponse
 #[derive(Default)]
 pub(crate) struct StreamParser {
     content: String,
+    reasoning: String,
     tool_calls: Vec<ToolCallAccum>,
     finish_reason: Option<String>,
     model: Option<String>,
@@ -379,6 +423,16 @@ impl StreamParser {
                     text: Some(text.clone()),
                     ..Default::default()
                 });
+            }
+
+            if let Some(ref thinking) = choice.delta.reasoning {
+                if !thinking.is_empty() {
+                    self.reasoning.push_str(thinking);
+                    deltas.push(StreamDelta {
+                        reasoning: Some(thinking.clone()),
+                        ..Default::default()
+                    });
+                }
             }
 
             if let Some(tc_deltas) = choice.delta.tool_calls {
@@ -428,6 +482,11 @@ impl StreamParser {
         LlmResponse {
             model: self.model.unwrap_or_else(|| fallback_model.to_string()),
             content: (!self.content.is_empty()).then_some(self.content),
+            reasoning: Reasoning::new(
+                ReasoningProvider::Openai,
+                (!self.reasoning.is_empty()).then_some(self.reasoning),
+                Vec::new(),
+            ),
             tool_calls: self
                 .tool_calls
                 .into_iter()
@@ -672,12 +731,78 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                reasoning: None,
             }],
             tools: None,
             temperature: Some(0.7),
             max_completion_tokens: Some(500),
             reasoning: None,
         }
+    }
+
+    #[test]
+    fn a_thought_response_reads_under_either_field_name() {
+        for field in ["reasoning", "reasoning_content"] {
+            let parsed = response_from_wire(serde_json::json!({
+                "model": "m",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "hi", field: "thought" },
+                    "finish_reason": "stop",
+                }],
+            }))
+            .expect("parses");
+            let reasoning = parsed.reasoning.expect(field);
+            assert_eq!(reasoning.provider, ReasoningProvider::Openai);
+            assert_eq!(reasoning.text.as_deref(), Some("thought"));
+            // Chat Completions takes none back, so there is nothing to hold.
+            assert!(reasoning.blocks.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_streamed_thought_accumulates_and_streams_out() {
+        let mut parser = StreamParser::new();
+        let deltas: Vec<_> = ["think", "ing"]
+            .iter()
+            .flat_map(|piece| {
+                parser.parse_data(
+                    &serde_json::json!({
+                        "choices": [{ "delta": { "reasoning": piece } }],
+                    })
+                    .to_string(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            deltas
+                .iter()
+                .filter_map(|d| d.reasoning.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["think", "ing"]
+        );
+        let response = parser.into_response("m");
+        assert_eq!(
+            response.reasoning.expect("reasoning").text.as_deref(),
+            Some("thinking")
+        );
+    }
+
+    #[test]
+    fn the_engines_own_message_fields_stay_out_of_the_request() {
+        let mut request = req("gpt-4o");
+        request.messages[0].id = Some("msg_1".to_string());
+        request.messages[0].reasoning = Reasoning::new(
+            ReasoningProvider::Openai,
+            Some("thought".to_string()),
+            Vec::new(),
+        );
+        let body = request_to_wire(&request, DeferToolsStrategy::Search);
+
+        let sent = &body["messages"][0];
+        assert!(sent.get("reasoning").is_none(), "internal field leaked");
+        assert!(sent.get("id").is_none(), "node id leaked");
+        assert_eq!(sent["content"], "hi");
     }
 
     #[test]

@@ -605,6 +605,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -619,6 +620,7 @@ mod tests {
             mcp: Vec::new(),
             defer_tools: None,
             announce_mcp: Default::default(),
+            effort: None,
         }
     }
 
@@ -710,6 +712,7 @@ mod tests {
                                 tool_calls: None,
                                 tool_call_id: None,
                                 name: None,
+                                reasoning: None,
                             },
                             DraftMessage {
                                 id: Some("m1".to_string()),
@@ -718,6 +721,7 @@ mod tests {
                                 tool_calls: None,
                                 tool_call_id: None,
                                 name: None,
+                                reasoning: None,
                             },
                         ],
                         tools: None,

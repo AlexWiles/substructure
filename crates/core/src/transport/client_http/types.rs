@@ -181,6 +181,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 parent_id: parent.map(str::to_string),
             },

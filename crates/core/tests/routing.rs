@@ -76,6 +76,7 @@ impl LlmCallable for StubModel {
                 usage: None,
                 cost: None,
                 images: vec![],
+                reasoning: None,
             });
         }
         Ok(LlmResponse {
@@ -86,6 +87,7 @@ impl LlmCallable for StubModel {
             usage: None,
             cost: None,
             images: vec![],
+            reasoning: None,
         })
     }
 }
@@ -124,6 +126,7 @@ fn config(llm: &str) -> AgentConfig {
         mcp: Vec::new(),
         defer_tools: None,
         announce_mcp: Default::default(),
+        effort: None,
     }
 }
 
@@ -289,6 +292,7 @@ async fn drain(
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
                 queue: false,

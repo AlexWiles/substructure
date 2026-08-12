@@ -111,6 +111,61 @@ pub enum Content {
     Parts(Vec<ContentPart>),
 }
 
+/// Which provider wrote a [`Reasoning`]'s blocks. They ride back only to it:
+/// another provider reads them as noise, and Anthropic rejects blocks it did
+/// not sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "ReasoningProvider")]
+pub enum ReasoningProvider {
+    Anthropic,
+    Openai,
+    Openrouter,
+}
+
+/// What the model thought before it answered. `text` is for a reader; `blocks`
+/// are the provider's own, held verbatim because Anthropic requires the
+/// thinking that precedes a tool call back unmodified, signature included.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "Reasoning")]
+pub struct Reasoning {
+    pub provider: ReasoningProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<serde_json::Value>,
+}
+
+impl Reasoning {
+    /// The reasoning of one response, or nothing where it thought in the open
+    /// and left no blocks to return.
+    /// Boxed: a response carrying one is passed by value through every effect
+    /// and event, and the blocks are dead weight on the paths that never read
+    /// them.
+    pub fn new(
+        provider: ReasoningProvider,
+        text: Option<String>,
+        blocks: Vec<serde_json::Value>,
+    ) -> Option<Box<Self>> {
+        (text.is_some() || !blocks.is_empty()).then(|| {
+            Box::new(Self {
+                provider,
+                text,
+                blocks,
+            })
+        })
+    }
+
+    /// The blocks, for the provider that wrote them and no other.
+    pub fn blocks_for(&self, provider: ReasoningProvider) -> &[serde_json::Value] {
+        if self.provider == provider {
+            &self.blocks
+        } else {
+            &[]
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "Message")]
 pub struct Message {
@@ -124,6 +179,8 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Box<Reasoning>>,
 }
 
 /// The wire form of a [`Message`]: `id` is optional because a client-submitted or
@@ -144,6 +201,8 @@ pub struct DraftMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Box<Reasoning>>,
 }
 
 // ── Message tree ─────────────────────────────────────────────────────────
@@ -336,6 +395,11 @@ pub struct AgentConfig {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// How hard the model thinks, carried on the agent because it pairs with
+    /// the model. Unset sends no reasoning config and leaves the provider its
+    /// own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
     /// Boxed: five per-kind overrides is a lot of bytes to carry inline
     /// through every command that holds a config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -397,6 +461,15 @@ impl Announce {
 }
 
 impl AgentConfig {
+    /// The reasoning this agent's calls carry, or nothing where it named no
+    /// effort and the provider's default stands.
+    pub fn reasoning(&self) -> Option<ReasoningConfig> {
+        self.effort.map(|effort| ReasoningConfig {
+            effort: Some(effort),
+            ..Default::default()
+        })
+    }
+
     /// Whether this agent defers its own tools. A connection's own `defer`
     /// still overrides this either way.
     pub fn defers_tools(&self) -> bool {
@@ -759,7 +832,7 @@ impl DeferToolsStrategy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "ReasoningConfig")]
 pub struct ReasoningConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -860,6 +933,8 @@ pub struct LlmResponse {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Box<Reasoning>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

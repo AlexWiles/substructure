@@ -90,6 +90,7 @@ impl RunAgentInput {
                     tool_calls: m.tool_calls.clone(),
                     tool_call_id: m.tool_call_id.clone(),
                     name: None,
+                    reasoning: None,
                 })
             })
             .collect()

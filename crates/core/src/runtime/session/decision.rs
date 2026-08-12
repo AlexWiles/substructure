@@ -296,8 +296,14 @@ pub enum WorkKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectResultPayload {
-    ToolCall { result: String },
-    LlmCall { response: LlmResponse },
+    ToolCall {
+        result: String,
+    },
+    /// Boxed, like [`Outcome::Llm`]: a response dwarfs a tool result, and this
+    /// enum is passed by value on every settle.
+    LlmCall {
+        response: Box<LlmResponse>,
+    },
 }
 
 /// Resolved worker action — the internal, engine-facing form. Every effect id is

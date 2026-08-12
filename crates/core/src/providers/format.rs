@@ -72,6 +72,7 @@ mod tests {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 DraftMessage {
                     id: None,
@@ -80,6 +81,7 @@ mod tests {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
             ],
             tools: None,

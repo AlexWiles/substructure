@@ -138,5 +138,6 @@ fn message(call_id: &str, context: &str, role: Role, content: &str) -> Message {
         tool_calls: Vec::new(),
         tool_call_id: None,
         name: None,
+        reasoning: None,
     }
 }

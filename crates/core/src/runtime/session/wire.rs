@@ -44,6 +44,7 @@ impl From<Message> for DraftMessage {
             tool_calls: (!m.tool_calls.is_empty()).then_some(m.tool_calls),
             tool_call_id: m.tool_call_id,
             name: m.name,
+            reasoning: m.reasoning,
         }
     }
 }
@@ -58,6 +59,7 @@ impl DraftMessage {
             tool_calls: self.tool_calls.unwrap_or_default(),
             tool_call_id: self.tool_call_id,
             name: self.name,
+            reasoning: self.reasoning,
         }
     }
 
@@ -70,6 +72,7 @@ impl DraftMessage {
             tool_calls: self.tool_calls.unwrap_or_default(),
             tool_call_id: self.tool_call_id,
             name: self.name,
+            reasoning: self.reasoning,
         }
     }
 }
@@ -974,6 +977,7 @@ mod tests {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 user_wire("hi"),
             ],
@@ -1116,6 +1120,7 @@ mod tests {
             mcp: Vec::new(),
             defer_tools: None,
             announce_mcp: Default::default(),
+            effort: None,
         }
     }
 
@@ -1127,6 +1132,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -1271,6 +1277,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -1442,6 +1449,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: None,
         };
         let view = vec![idless("hi"), idless("more")];
 
@@ -1518,6 +1526,7 @@ mod tests {
             }],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         };
         let call = EffectState::new(
             "call-1",

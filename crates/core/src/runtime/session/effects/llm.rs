@@ -246,6 +246,7 @@ fn assistant_message(call_id: &str, response: &LlmResponse) -> DraftMessage {
         role: Role::Assistant,
         content,
         tool_calls,
+        reasoning: response.reasoning.clone(),
         tool_call_id: None,
         name: None,
     }
