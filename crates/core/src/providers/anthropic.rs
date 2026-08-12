@@ -73,6 +73,9 @@ struct SystemBlock {
 struct AnthropicBody {
     model: String,
     max_tokens: u64,
+    /// Only for the models that still read it: Opus 4.7 and later refuse it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<Vec<SystemBlock>>,
     messages: Vec<AnthropicMessage>,
@@ -182,6 +185,8 @@ enum ImageSource {
 struct Thinking {
     #[serde(rename = "type")]
     thinking_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_tokens: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -189,14 +194,200 @@ struct OutputConfig {
     effort: &'static str,
 }
 
-fn anthropic_effort(e: ReasoningEffort) -> &'static str {
+/// What one model reads of the reasoning surface. Each field is a 400 when it
+/// is wrong: an effort level the model does not know, an adaptive `thinking`
+/// block it predates, an explicit `disabled` it refuses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Capabilities {
+    /// `temperature` and the other sampling parameters. Newer models refuse
+    /// them outright.
+    sampling: bool,
+    /// `output_config.effort`.
+    effort: bool,
+    /// `xhigh` among the effort levels.
+    xhigh: bool,
+    /// `thinking: {"type": "adaptive"}`. Models before it take a token budget.
+    adaptive: bool,
+    /// Thinks when the request omits `thinking`, so not thinking is a request.
+    thinks_unasked: bool,
+    /// Always thinks: `disabled` comes back a 400.
+    thinks_always: bool,
+}
+
+impl Capabilities {
+    //                      sampling  effort  xhigh  adaptive  unasked  always
+    /// Fable and Mythos, which think whatever the request says.
+    const ALWAYS: Self = Self::new(false, true, true, true, true, true);
+    /// Opus 5 and Sonnet 5, which think until told not to.
+    const DEFAULT_ON: Self = Self::new(false, true, true, true, true, false);
+    /// The current surface: every reasoning field, and no sampling.
+    const CURRENT: Self = Self::new(false, true, true, true, false, false);
+    /// Before `xhigh`, which arrived with Opus 4.7. Sampling went at the same
+    /// time.
+    const NO_XHIGH: Self = Self::new(true, true, false, true, false, false);
+    /// Before adaptive thinking, which arrived with Opus 4.6.
+    const EFFORT_ONLY: Self = Self::new(true, true, false, false, false, false);
+    /// Before the reasoning fields: a token budget, and nothing else.
+    const LEGACY: Self = Self::new(true, false, false, false, false, false);
+
+    const fn new(
+        sampling: bool,
+        effort: bool,
+        xhigh: bool,
+        adaptive: bool,
+        thinks_unasked: bool,
+        thinks_always: bool,
+    ) -> Self {
+        Self {
+            sampling,
+            effort,
+            xhigh,
+            adaptive,
+            thinks_unasked,
+            thinks_always,
+        }
+    }
+}
+
+/// One generation: every model in `family` at or above `since` reads `caps`
+/// and writes at most `output` tokens.
+struct Generation {
+    family: &'static str,
+    since: (u32, u32),
+    output: u64,
+    caps: Capabilities,
+}
+
+/// What each generation reads and writes. The first row a model matches wins,
+/// so a family's rows run newest first and end at `(0, 0)`, which is everything
+/// older. A name in no family at all is not in the table: see `generation`.
+#[rustfmt::skip]
+const GENERATIONS: &[Generation] = &[
+    Generation { family: "fable",  since: (0, 0), output: 128_000, caps: Capabilities::ALWAYS },
+    Generation { family: "mythos", since: (0, 0), output: 128_000, caps: Capabilities::ALWAYS },
+    Generation { family: "opus",   since: (5, 0), output: 128_000, caps: Capabilities::DEFAULT_ON },
+    Generation { family: "opus",   since: (4, 7), output: 128_000, caps: Capabilities::CURRENT },
+    Generation { family: "opus",   since: (4, 6), output: 128_000, caps: Capabilities::NO_XHIGH },
+    Generation { family: "opus",   since: (4, 5), output:  64_000, caps: Capabilities::EFFORT_ONLY },
+    Generation { family: "opus",   since: (4, 1), output:  32_000, caps: Capabilities::LEGACY },
+    Generation { family: "opus",   since: (0, 0), output:  32_000, caps: Capabilities::LEGACY },
+    Generation { family: "sonnet", since: (5, 0), output: 128_000, caps: Capabilities::DEFAULT_ON },
+    Generation { family: "sonnet", since: (4, 6), output: 128_000, caps: Capabilities::NO_XHIGH },
+    Generation { family: "sonnet", since: (0, 0), output:  64_000, caps: Capabilities::LEGACY },
+    Generation { family: "haiku",  since: (4, 5), output:  64_000, caps: Capabilities::LEGACY },
+    Generation { family: "haiku",  since: (0, 0), output:   4_096, caps: Capabilities::LEGACY },
+];
+
+/// The row a model sits on, or nothing for a name the table does not place: a
+/// new family, an alias, a gateway's own spelling.
+fn generation(model: &str) -> Option<&'static Generation> {
+    GENERATIONS
+        .iter()
+        .find(|g| version(model, g.family).is_some_and(|v| v >= g.since))
+}
+
+/// The reasoning fields a model reads.
+///
+/// An unplaced name reads as the current generation: the fields a newer model
+/// would refuse are the ones it is too new to refuse. `thinks_unasked` stays
+/// off there, because sending `disabled` to a model that rejects the word is a
+/// 400 and an unplaced name gives no way to tell.
+fn capabilities(model: &str) -> Capabilities {
+    generation(model).map_or(Capabilities::CURRENT, |g| g.caps)
+}
+
+/// What the request asks to write, held to what the model can. A ceiling the
+/// model would refuse is a 400, and a session that switches model should not
+/// have to carry the smallest one everywhere. An unplaced name has no known
+/// ceiling and keeps what it asked for.
+fn output_tokens(model: &str, asked: u64) -> u64 {
+    match generation(model) {
+        Some(g) => asked.min(g.output),
+        None => asked,
+    }
+}
+
+/// The `<major>, <minor>` of a `claude-<family>-<major>[-<minor>]` name, or
+/// nothing for another family. A run of more than two digits is a date stamp,
+/// not a minor: `claude-opus-4-20250514` is 4.0, and reading it as 4.20250514
+/// would hand an Opus 4.0 the whole current surface.
+fn version(model: &str, family: &str) -> Option<(u32, u32)> {
+    const MAX_MINOR_DIGITS: usize = 2;
+
+    let prefix = format!("claude-{family}-");
+    let at = model.find(&prefix)?;
+    let mut parts = model[at + prefix.len()..].split('-');
+    let major = parts.next()?.parse().ok()?;
+    let minor = match parts.next() {
+        Some(p) if p.len() <= MAX_MINOR_DIGITS => p.parse().unwrap_or(0),
+        _ => 0,
+    };
+    Some((major, minor))
+}
+
+fn anthropic_effort(e: ReasoningEffort, xhigh: bool) -> &'static str {
     match e {
-        ReasoningEffort::Xhigh => "xhigh",
-        ReasoningEffort::High => "high",
+        ReasoningEffort::Xhigh if xhigh => "xhigh",
+        // A model that predates `xhigh` reads the level below it.
+        ReasoningEffort::Xhigh | ReasoningEffort::High => "high",
         ReasoningEffort::Medium => "medium",
         // Anthropic has no `minimal`/`none`; `low` is the nearest floor.
         ReasoningEffort::Low | ReasoningEffort::Minimal | ReasoningEffort::None => "low",
     }
+}
+
+/// Legacy thinking asks for a token budget where effort asks for a word. The
+/// budget comes out of `max_tokens` and the answer needs what is left, so a
+/// budget that would starve the answer is no thinking at all.
+fn legacy_budget(e: ReasoningEffort, max_tokens: u64) -> Option<u64> {
+    /// The floor the API accepts, and the room the answer keeps.
+    const MIN_BUDGET: u64 = 1024;
+
+    let want = match e {
+        ReasoningEffort::Xhigh | ReasoningEffort::High => 24_000,
+        ReasoningEffort::Medium => 8_000,
+        ReasoningEffort::Low | ReasoningEffort::Minimal | ReasoningEffort::None => MIN_BUDGET,
+    };
+    let ceiling = max_tokens.saturating_sub(MIN_BUDGET);
+    (ceiling >= MIN_BUDGET).then(|| want.min(ceiling))
+}
+
+/// The `thinking` and `output_config` a request carries, for what this model
+/// reads.
+fn reasoning_fields(
+    model: &str,
+    effort: Option<ReasoningEffort>,
+    max_tokens: u64,
+) -> (Option<Thinking>, Option<OutputConfig>) {
+    let caps = capabilities(model);
+    let effort = match effort {
+        // Off is the default everywhere but the models that think unasked, and
+        // asking a model that always thinks to stop is a 400.
+        None | Some(ReasoningEffort::None) => {
+            let thinking = (caps.thinks_unasked && !caps.thinks_always).then_some(Thinking {
+                thinking_type: "disabled",
+                budget_tokens: None,
+            });
+            return (thinking, None);
+        }
+        Some(e) => e,
+    };
+
+    let output_config = caps.effort.then(|| OutputConfig {
+        effort: anthropic_effort(effort, caps.xhigh),
+    });
+    let thinking = if caps.adaptive {
+        Some(Thinking {
+            thinking_type: "adaptive",
+            budget_tokens: None,
+        })
+    } else {
+        legacy_budget(effort, max_tokens).map(|budget| Thinking {
+            thinking_type: "enabled",
+            budget_tokens: Some(budget),
+        })
+    };
+    (thinking, output_config)
 }
 
 /// Map an OpenAI-style role message's content into Anthropic content blocks.
@@ -402,21 +593,23 @@ fn build_body(
         }
     }
 
-    let (thinking, output_config) = match request.reasoning.as_ref().and_then(|r| r.effort) {
-        None | Some(ReasoningEffort::None) => (None, None),
-        Some(e) => (
-            Some(Thinking {
-                thinking_type: "adaptive",
-            }),
-            Some(OutputConfig {
-                effort: anthropic_effort(e),
-            }),
-        ),
-    };
+    let max_tokens = output_tokens(
+        &request.model,
+        request.max_completion_tokens.unwrap_or(default_max_tokens),
+    );
+    let (thinking, output_config) = reasoning_fields(
+        &request.model,
+        request.reasoning.as_ref().and_then(|r| r.effort),
+        max_tokens,
+    );
 
     AnthropicBody {
         model: request.model.clone(),
-        max_tokens: request.max_completion_tokens.unwrap_or(default_max_tokens),
+        max_tokens,
+        temperature: capabilities(&request.model)
+            .sampling
+            .then_some(request.temperature)
+            .flatten(),
         system,
         messages: turns,
         tools,
@@ -1595,6 +1788,187 @@ mod tests {
         assert_eq!(v["stream"], true);
         // system omitted when absent
         assert!(v.get("system").is_none());
+    }
+
+    /// `(thinking, output_config)` as JSON, where an omitted field is null.
+    fn reasoning(
+        model: &str,
+        effort: Option<ReasoningEffort>,
+        max_tokens: u64,
+    ) -> (serde_json::Value, serde_json::Value) {
+        let (thinking, output_config) = reasoning_fields(model, effort, max_tokens);
+        (
+            serde_json::to_value(thinking).unwrap(),
+            serde_json::to_value(output_config).unwrap(),
+        )
+    }
+
+    const HIGH: Option<ReasoningEffort> = Some(ReasoningEffort::High);
+    const XHIGH: Option<ReasoningEffort> = Some(ReasoningEffort::Xhigh);
+
+    #[test]
+    fn a_model_this_build_does_not_know_reads_as_the_current_generation() {
+        let (thinking, config) = reasoning("claude-next-ultra", XHIGH, 64_000);
+        assert_eq!(thinking["type"], "adaptive");
+        assert_eq!(config["effort"], "xhigh");
+
+        // Off stays off: `disabled` would be a 400 on a model that refuses it.
+        let (thinking, config) = reasoning("claude-next-ultra", None, 64_000);
+        assert!(thinking.is_null());
+        assert!(config.is_null());
+    }
+
+    #[test]
+    fn a_model_that_thinks_unasked_is_asked_to_stop() {
+        for model in ["claude-opus-5", "claude-sonnet-5"] {
+            let (thinking, config) = reasoning(model, None, 64_000);
+            assert_eq!(thinking["type"], "disabled", "{model}");
+            // No effort with it: `disabled` above `high` is a 400, and an
+            // absent effort leaves the model on its own default.
+            assert!(config.is_null(), "{model}");
+        }
+    }
+
+    #[test]
+    fn a_model_that_always_thinks_is_never_asked_to_stop() {
+        for model in ["claude-fable-5", "claude-mythos-5"] {
+            let (thinking, _) = reasoning(model, None, 64_000);
+            assert!(thinking.is_null(), "{model} rejects an explicit disabled");
+        }
+    }
+
+    #[test]
+    fn xhigh_falls_to_high_on_a_model_that_predates_it() {
+        assert_eq!(
+            reasoning("claude-opus-4-8", XHIGH, 64_000).1["effort"],
+            "xhigh"
+        );
+        assert_eq!(
+            reasoning("claude-opus-4-7", XHIGH, 64_000).1["effort"],
+            "xhigh"
+        );
+        assert_eq!(
+            reasoning("claude-opus-4-6", XHIGH, 64_000).1["effort"],
+            "high"
+        );
+        assert_eq!(
+            reasoning("claude-sonnet-4-6", XHIGH, 64_000).1["effort"],
+            "high"
+        );
+    }
+
+    #[test]
+    fn a_model_before_adaptive_thinking_takes_a_budget() {
+        // Sonnet 4.5 reads neither effort nor adaptive.
+        let (thinking, config) = reasoning("claude-sonnet-4-5", HIGH, 64_000);
+        assert_eq!(thinking["type"], "enabled");
+        assert_eq!(thinking["budget_tokens"], 24_000);
+        assert!(config.is_null());
+
+        // Opus 4.5 reads effort, and still thinks by budget.
+        let (thinking, config) = reasoning("claude-opus-4-5", HIGH, 64_000);
+        assert_eq!(thinking["type"], "enabled");
+        assert_eq!(config["effort"], "high");
+
+        // Haiku 4.5 is the same generation as Sonnet 4.5, not Opus 4.5.
+        let (_, config) = reasoning("claude-haiku-4-5", HIGH, 64_000);
+        assert!(config.is_null());
+    }
+
+    #[test]
+    fn a_budget_leaves_the_answer_room() {
+        // The budget comes out of max_tokens.
+        let (thinking, _) = reasoning("claude-sonnet-4-5", HIGH, 4096);
+        assert_eq!(thinking["budget_tokens"], 3072);
+
+        // Below the floor there is no budget that leaves an answer.
+        let (thinking, _) = reasoning("claude-sonnet-4-5", HIGH, 2000);
+        assert!(thinking.is_null());
+    }
+
+    #[test]
+    fn only_a_model_that_reads_temperature_is_sent_one() {
+        let body = |model: &str| {
+            let mut r = req(vec![msg(Role::User, Some("hi"))]);
+            r.model = model.to_string();
+            r.temperature = Some(0.7);
+            serde_json::to_value(build_body(
+                &r,
+                4096,
+                DeferToolsStrategy::Search,
+                None,
+                CacheControl::EPHEMERAL,
+            ))
+            .unwrap()
+        };
+
+        // Opus 4.7 and later refuse it, so it stays off the request.
+        for model in ["claude-opus-5", "claude-opus-4-8", "claude-fable-5"] {
+            assert!(body(model).get("temperature").is_none(), "{model}");
+        }
+        // Older models read it, and a request that set one meant it.
+        for model in ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-6"] {
+            assert_eq!(body(model)["temperature"], 0.7, "{model}");
+        }
+    }
+
+    #[test]
+    fn a_model_writes_no_more_than_it_can() {
+        // Asking a model for more than its ceiling is a 400, so the ask is
+        // held to the ceiling.
+        assert_eq!(output_tokens("claude-opus-5", 128_000), 128_000);
+        assert_eq!(output_tokens("claude-haiku-4-5", 128_000), 64_000);
+        assert_eq!(output_tokens("claude-opus-4-1", 128_000), 32_000);
+        // A smaller ask is the ask.
+        assert_eq!(output_tokens("claude-opus-5", 4_096), 4_096);
+        // An unplaced name has no known ceiling to hold it to.
+        assert_eq!(output_tokens("claude-next-ultra", 200_000), 200_000);
+    }
+
+    #[test]
+    fn a_held_ceiling_is_what_the_budget_comes_out_of() {
+        let mut r = req(vec![msg(Role::User, Some("hi"))]);
+        r.model = "claude-haiku-4-5".to_string();
+        r.max_completion_tokens = Some(128_000);
+        r.reasoning = Some(ReasoningConfig {
+            effort: Some(ReasoningEffort::High),
+            max_tokens: None,
+            exclude: None,
+            enabled: None,
+        });
+        let v = serde_json::to_value(build_body(
+            &r,
+            4096,
+            DeferToolsStrategy::Search,
+            None,
+            CacheControl::EPHEMERAL,
+        ))
+        .unwrap();
+        assert_eq!(v["max_tokens"], 64_000);
+        // Haiku 4.5 predates adaptive thinking, and its budget has to fit the
+        // held ceiling rather than the ask.
+        assert_eq!(v["thinking"]["type"], "enabled");
+        assert_eq!(v["thinking"]["budget_tokens"], 24_000);
+    }
+
+    #[test]
+    fn a_date_stamp_is_not_a_minor_version() {
+        assert_eq!(version("claude-opus-4-20250514", "opus"), Some((4, 0)));
+        assert_eq!(version("claude-opus-4-8", "opus"), Some((4, 8)));
+        assert_eq!(version("claude-opus-5", "opus"), Some((5, 0)));
+        assert_eq!(version("claude-opus-4-6-latest", "opus"), Some((4, 6)));
+        assert_eq!(version("claude-sonnet-4-6", "opus"), None);
+        assert_eq!(
+            version("anthropic/claude-opus-4-8", "opus"),
+            Some((4, 8)),
+            "a gateway prefix does not hide the version"
+        );
+
+        // Opus 4.0 predates every reasoning field, and a date stamp read as a
+        // minor would have handed it all of them.
+        let (thinking, config) = reasoning("claude-opus-4-20250514", HIGH, 64_000);
+        assert_eq!(thinking["type"], "enabled");
+        assert!(config.is_null());
     }
 
     #[test]

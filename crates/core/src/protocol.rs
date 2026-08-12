@@ -1530,6 +1530,11 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<DraftMessage>,
         truncated: bool,
+        /// True when the model declined the request rather than answering it.
+        /// A refusal reads as a turn that stopped well and said nothing, so
+        /// without this the run continues from a blank answer.
+        #[serde(default)]
+        refused: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

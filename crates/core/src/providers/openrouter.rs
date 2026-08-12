@@ -10,9 +10,9 @@ use rust_decimal::Decimal;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    Content, DraftMessage, ErrorCode, LlmRequest, LlmResponse, LlmTool, Reasoning, ReasoningConfig,
-    ReasoningProvider, ResponseImage, Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk,
-    ToolCallFunction,
+    Content, DeferToolsStrategy, DraftMessage, ErrorCode, LlmRequest, LlmResponse, LlmTool,
+    Reasoning, ReasoningConfig, ReasoningProvider, ResponseImage, Role, SessionOwner, StreamDelta,
+    ToolCall, ToolCallChunk, ToolCallFunction,
 };
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field
@@ -394,7 +394,13 @@ impl OpenRouterClient {
     /// likes.
     const SESSION_ID_MAX_CHARS: usize = 256;
 
-    fn body<'a>(&self, request: &'a LlmRequest, stream: bool, session_id: &'a str) -> WireBody<'a> {
+    fn body<'a>(
+        &self,
+        request: &'a LlmRequest,
+        search: DeferToolsStrategy,
+        stream: bool,
+        session_id: &'a str,
+    ) -> WireBody<'a> {
         let session_id = match session_id.char_indices().nth(Self::SESSION_ID_MAX_CHARS) {
             Some((end, _)) => &session_id[..end],
             None => session_id,
@@ -403,9 +409,8 @@ impl OpenRouterClient {
             model: &request.model,
             messages: request.messages.iter().map(WireMessage::from).collect(),
             tools: request
-                .tools
-                .as_ref()
-                .map(|ts| ts.iter().map(WireTool::from).collect()),
+                .offered_tools(search)
+                .map(|ts| ts.into_iter().map(WireTool::from).collect()),
             temperature: request.temperature,
             max_completion_tokens: request.max_completion_tokens,
             reasoning: request.reasoning.as_ref(),
@@ -418,10 +423,11 @@ impl OpenRouterClient {
     async fn post_chat_completion(
         &self,
         request: &LlmRequest,
+        search: DeferToolsStrategy,
         stream: bool,
         session_id: &str,
     ) -> Result<reqwest::Response, LlmCallError> {
-        let wire = self.body(request, stream, session_id);
+        let wire = self.body(request, search, stream, session_id);
 
         let url = format!(
             "{}/v1/chat/completions",
@@ -473,7 +479,12 @@ impl LlmCallable for OpenRouterClient {
         ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self
-            .post_chat_completion(request, false, ctx.root_session_id())
+            .post_chat_completion(
+                request,
+                ctx.defer_tools_strategy,
+                false,
+                ctx.root_session_id(),
+            )
             .await?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| {
@@ -498,7 +509,12 @@ impl LlmCallable for OpenRouterClient {
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self
-            .post_chat_completion(request, true, ctx.root_session_id())
+            .post_chat_completion(
+                request,
+                ctx.defer_tools_strategy,
+                true,
+                ctx.root_session_id(),
+            )
             .await?;
         let status = resp.status();
 
@@ -774,7 +790,9 @@ mod tests {
             api_key: "k".to_string(),
             cache_ttl: None,
         });
-        let body = serde_json::to_value(client.body(&request, false, "s")).unwrap();
+        let body =
+            serde_json::to_value(client.body(&request, DeferToolsStrategy::Search, false, "s"))
+                .unwrap();
 
         let sent = &body["messages"][1];
         assert_eq!(sent["reasoning_details"], serde_json::json!([detail]));
@@ -803,7 +821,9 @@ mod tests {
             api_key: "k".to_string(),
             cache_ttl: None,
         });
-        let body = serde_json::to_value(client.body(&request, false, "s")).unwrap();
+        let body =
+            serde_json::to_value(client.body(&request, DeferToolsStrategy::Search, false, "s"))
+                .unwrap();
 
         assert!(body["messages"][1].get("reasoning_details").is_none());
     }
@@ -814,7 +834,8 @@ mod tests {
             api_key: "k".to_string(),
             cache_ttl: cache_ttl.map(str::to_string),
         });
-        serde_json::to_value(client.body(&req(), false, session_id)).unwrap()
+        serde_json::to_value(client.body(&req(), DeferToolsStrategy::Search, false, session_id))
+            .unwrap()
     }
 
     #[test]
@@ -838,6 +859,45 @@ mod tests {
         assert!(body(Some("5m"), "sess_1")["cache_control"]
             .get("ttl")
             .is_none());
+    }
+
+    #[test]
+    fn a_deferred_tool_is_not_offered_to_the_router() {
+        let mut request = req();
+        request.tools = Some(vec![
+            LlmTool {
+                name: "open".to_string(),
+                description: "d".to_string(),
+                input: None,
+                output: None,
+                defer: false,
+            },
+            LlmTool {
+                name: "hidden".to_string(),
+                description: "d".to_string(),
+                input: None,
+                output: None,
+                defer: true,
+            },
+        ]);
+        let client = OpenRouterClient::from_config(OpenRouterConfig {
+            base_url: "https://openrouter.ai/api".to_string(),
+            api_key: "k".to_string(),
+            cache_ttl: None,
+        });
+        let v = serde_json::to_value(client.body(&request, DeferToolsStrategy::Search, false, "s"))
+            .unwrap();
+        let offered: Vec<&str> = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            offered,
+            vec!["open"],
+            "an agent that defers a tool asked for it to stay out of the request"
+        );
     }
 
     #[test]

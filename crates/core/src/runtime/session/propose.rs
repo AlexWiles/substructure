@@ -59,15 +59,23 @@ pub fn propose(
             ok: true,
             message: Some(message),
             truncated: false,
+            refused: false,
             ..
         } => Some(llm_finished(message, transcript, config, decision_id)),
         DecisionTrigger::LlmFinished {
             id,
             ok,
             truncated,
+            refused,
             error,
             ..
-        } if !*ok || *truncated => Some(llm_failed(id, error.as_ref(), *truncated, transcript)),
+        } if !*ok || *truncated || *refused => Some(llm_failed(
+            id,
+            error.as_ref(),
+            *truncated,
+            *refused,
+            transcript,
+        )),
         DecisionTrigger::ToolFinished {
             id,
             ok,
@@ -319,11 +327,15 @@ fn llm_failed(
     id: &str,
     error: Option<&ErrorInfo>,
     truncated: bool,
+    refused: bool,
     transcript: &[Message],
 ) -> DecisionResponse {
     let reason = match error {
         Some(error) => format!("llm call failed: {error}"),
         None if truncated => "llm call truncated".to_string(),
+        // The model answered, and the answer was no. Repeating the same
+        // request asks the same question, so the run stops for a person.
+        None if refused => "llm call refused".to_string(),
         None => "llm call failed".to_string(),
     };
     DecisionResponse {
@@ -336,6 +348,7 @@ fn llm_failed(
                 "id": id,
                 "error": error,
                 "truncated": truncated,
+                "refused": refused,
             }),
         }],
         ..Default::default()
@@ -521,12 +534,48 @@ mod tests {
         )
     }
 
+    fn refused_trigger(message: DraftMessage) -> DecisionTrigger {
+        let mut trigger = llm_finished_trigger(message, true, false);
+        if let DecisionTrigger::LlmFinished { refused, .. } = &mut trigger {
+            *refused = true;
+        }
+        trigger
+    }
+
+    #[test]
+    fn a_refused_call_stops_the_run_rather_than_answering_with_nothing() {
+        // A refusal is a 200 with an empty turn: without its own name it reads
+        // as an answer, and the run carries on from a blank one.
+        let transcript = vec![msg("u1", Role::User, "hi")];
+        let empty = DraftMessage::from(msg("call-1", Role::Assistant, ""));
+        let p = propose(
+            &refused_trigger(empty),
+            &transcript,
+            &HashMap::new(),
+            0,
+            None,
+            "d0",
+        )
+        .expect("proposes");
+        match &p.actions[..] {
+            [DecisionAction::Interrupt {
+                reason, payload, ..
+            }] => {
+                assert!(reason.starts_with("llm call refused"), "got {reason:?}");
+                assert_eq!(payload["refused"], serde_json::json!(true));
+                assert_eq!(payload["truncated"], serde_json::json!(false));
+            }
+            other => panic!("expected an interrupt; got {other:?}"),
+        }
+    }
+
     fn llm_finished_trigger(message: DraftMessage, ok: bool, truncated: bool) -> DecisionTrigger {
         DecisionTrigger::LlmFinished {
             id: "call-1".to_string(),
             ok,
             message: Some(message),
             truncated,
+            refused: false,
             usage: None,
             cost: None,
             error: None,
@@ -711,6 +760,7 @@ mod tests {
             ok: false,
             message: None,
             truncated: false,
+            refused: false,
             usage: None,
             cost: None,
             error: Some(ErrorInfo::new(ErrorCode::RateLimited, "rate limited")),

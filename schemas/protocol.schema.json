@@ -1435,6 +1435,10 @@
             "ok": {
               "type": "boolean"
             },
+            "refused": {
+              "description": "True when the model declined the request rather than answering it.\nA refusal reads as a turn that stopped well and said nothing, so\nwithout this the run continues from a blank answer.",
+              "type": "boolean"
+            },
             "truncated": {
               "type": "boolean"
             },

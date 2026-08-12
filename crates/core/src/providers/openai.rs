@@ -140,12 +140,69 @@ fn effort_str(e: ReasoningEffort) -> &'static str {
     }
 }
 
-/// Reasoning models (GPT-5 family, o-series) reject sampling params like
-/// `temperature`. Detect them by id prefix so we strip it even when the
-/// request doesn't set an explicit effort.
+/// The leading run of digits, and what follows it.
+fn digits(s: &str) -> (&str, &str) {
+    s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()))
+}
+
+/// The `<major>` of an `o<major>[-...]` name: the o-series reasoning models,
+/// however far the series runs.
+fn o_series(model: &str) -> Option<u32> {
+    let (major, rest) = digits(model.strip_prefix('o')?);
+    if !rest.is_empty() && !rest.starts_with('-') {
+        return None;
+    }
+    major.parse().ok()
+}
+
+/// A `gpt-<major>[.<minor>][-<variant>]` name in pieces. Anchored at the front,
+/// so a fine-tune or a gateway's own spelling — `ft:gpt-9:org:custom:abc`,
+/// `acme-gpt-9-proxy` — is not a GPT name and keeps the careful defaults.
+struct GptName<'a> {
+    major: u32,
+    minor: Option<u32>,
+    variant: Option<&'a str>,
+}
+
+fn gpt_name(model: &str) -> Option<GptName<'_>> {
+    let (major, rest) = digits(model.strip_prefix("gpt-")?);
+    let major = major.parse().ok()?;
+    let (minor, rest) = match rest.strip_prefix('.') {
+        Some(after_dot) => {
+            let (minor, rest) = digits(after_dot);
+            (Some(minor.parse().ok()?), rest)
+        }
+        None => (None, rest),
+    };
+    let variant = match rest {
+        "" => None,
+        // What follows the version is a variant only after a dash, so `gpt-4o`
+        // is its own name and not GPT 4.
+        rest => Some(rest.strip_prefix('-')?),
+    };
+    Some(GptName {
+        major,
+        minor,
+        variant,
+    })
+}
+
+/// Reasoning models — the o-series, and GPT-5 and later — refuse the sampling
+/// parameters. `gpt-5-chat-latest` is the exception: a chat model wearing a
+/// GPT-5 name, which it is only while it carries no minor version.
 fn is_reasoning_model(model: &str) -> bool {
-    const PREFIXES: &[&str] = &["gpt-5", "o1", "o3", "o4"];
-    PREFIXES.iter().any(|p| model.starts_with(p))
+    if o_series(model).is_some() {
+        return true;
+    }
+    gpt_name(model).is_some_and(|g| {
+        let chat = g.minor.is_none() && g.variant.is_some_and(|v| v.starts_with("chat"));
+        g.major >= 5 && !chat
+    })
+}
+
+/// GPT-5.1 and later read `temperature` again, but only at effort `none`.
+fn reads_sampling_at_no_effort(model: &str) -> bool {
+    gpt_name(model).is_some_and(|g| (g.major, g.minor.unwrap_or(0)) >= (5, 1))
 }
 
 impl<'a> WireBody<'a> {
@@ -163,8 +220,14 @@ impl<'a> WireBody<'a> {
             .and_then(|r| r.effort)
             .map(effort_str);
 
-        // Omit temperature for reasoning models — they 400 on it.
-        let temperature = if reasoning_effort.is_some() || is_reasoning_model(&request.model) {
+        // Omit temperature for reasoning models — they 400 on it. An explicit
+        // effort says the caller means a reasoning model even where the name
+        // does not say so, and GPT-5.1 and later take temperature back at
+        // effort `none`.
+        let reasoning = reasoning_effort.is_some() || is_reasoning_model(&request.model);
+        let sampling_back =
+            reasoning_effort == Some("none") && reads_sampling_at_no_effort(&request.model);
+        let temperature = if reasoning && !sampling_back {
             None
         } else {
             request.temperature
@@ -838,6 +901,90 @@ mod tests {
         .unwrap();
         assert!(v.get("temperature").is_none());
         assert!(v.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn a_reasoning_name_is_read_whole_and_not_by_its_first_letters() {
+        // The o-series runs as far as it runs, and GPT 5 and later reason.
+        for model in [
+            "o1",
+            "o3-mini",
+            "o4-mini-2025-04-16",
+            "o9",
+            "o99-2099-01-01",
+        ] {
+            assert!(is_reasoning_model(model), "{model}");
+        }
+        for model in ["gpt-5", "gpt-5-mini", "gpt-5.4-nano-2026-03-17", "gpt-9"] {
+            assert!(is_reasoning_model(model), "{model}");
+        }
+
+        // A chat model wearing a GPT-5 name is still a chat model, and takes
+        // the temperature it is given.
+        assert!(!is_reasoning_model("gpt-5-chat-latest"));
+        // It is the chat model only without a minor version.
+        assert!(is_reasoning_model("gpt-5.4-chat-latest"));
+
+        for model in ["gpt-4o", "gpt-4.1-mini", "gpt-3.5-turbo", "o"] {
+            assert!(!is_reasoning_model(model), "{model}");
+        }
+
+        // A name that only carries a reasoning name inside it is another
+        // model, and keeps the careful defaults.
+        for model in ["ft:gpt-9:acme:custom:abc123", "acme-gpt-9-proxy"] {
+            assert!(!is_reasoning_model(model), "{model}");
+        }
+    }
+
+    #[test]
+    fn a_chat_model_named_for_gpt_5_keeps_its_temperature() {
+        let v = serde_json::to_value(WireBody::build(
+            &req("gpt-5-chat-latest"),
+            DeferToolsStrategy::Search,
+            Some(false),
+            CacheOpts::default(),
+        ))
+        .unwrap();
+        assert_eq!(v["temperature"], 0.7);
+    }
+
+    #[test]
+    fn no_effort_hands_temperature_back_where_the_model_reads_it() {
+        let mut r = req("gpt-5.1");
+        r.reasoning = Some(ReasoningConfig {
+            effort: Some(ReasoningEffort::None),
+            max_tokens: None,
+            exclude: None,
+            enabled: None,
+        });
+        let v = serde_json::to_value(WireBody::build(
+            &r,
+            DeferToolsStrategy::Search,
+            Some(false),
+            CacheOpts::default(),
+        ))
+        .unwrap();
+        assert_eq!(v["reasoning_effort"], "none");
+        assert_eq!(v["temperature"], 0.7, "GPT-5.1 reads it again at no effort");
+
+        // GPT-5.0 does not, and neither does the o-series.
+        for model in ["gpt-5", "o3"] {
+            let mut r = req(model);
+            r.reasoning = Some(ReasoningConfig {
+                effort: Some(ReasoningEffort::None),
+                max_tokens: None,
+                exclude: None,
+                enabled: None,
+            });
+            let v = serde_json::to_value(WireBody::build(
+                &r,
+                DeferToolsStrategy::Search,
+                Some(false),
+                CacheOpts::default(),
+            ))
+            .unwrap();
+            assert!(v.get("temperature").is_none(), "{model}");
+        }
     }
 
     #[test]
