@@ -97,6 +97,7 @@ fn user_message(text: &str) -> DraftMessage {
         tool_calls: None,
         tool_call_id: None,
         name: None,
+        reasoning: None,
     }
 }
 
@@ -120,6 +121,7 @@ fn llm_response(tool_calls: Vec<ToolCall>) -> LlmResponse {
         usage: None,
         cost: None,
         images: vec![],
+        reasoning: None,
     }
 }
 
@@ -145,6 +147,7 @@ fn config() -> AgentConfig {
         mcp: Vec::new(),
         defer_tools: None,
         announce_mcp: Default::default(),
+        effort: None,
     }
 }
 
@@ -445,6 +448,7 @@ fn flow_full_loop() -> Trace {
         tool_calls: Some(vec![tool_call("tc-1", "get_weather")]),
         tool_call_id: None,
         name: None,
+        reasoning: None,
     };
     t.decide_appending(assistant, vec![call_tool("tc-1", "get_weather")]);
 
@@ -471,6 +475,7 @@ fn flow_full_loop() -> Trace {
         tool_calls: None,
         tool_call_id: Some("tc-1".to_string()),
         name: None,
+        reasoning: None,
     };
     t.decide_appending(
         tool_answer,
@@ -1068,6 +1073,7 @@ fn flow_fork_voids_stranded_work() -> Trace {
         tool_calls: Some(vec![tool_call("tc-1", "a")]),
         tool_call_id: None,
         name: None,
+        reasoning: None,
     };
     t.decide_appending(assistant, vec![call_tool("tc-1", "a")]);
 

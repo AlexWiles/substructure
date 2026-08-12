@@ -17,6 +17,7 @@ use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
+use crate::protocol::ReasoningEffort;
 use crate::protocol::{
     AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, DeferTools, Handler, LlmFormat,
     McpServer, McpTools, RetryConfig, SubAgent,
@@ -221,6 +222,10 @@ pub struct AgentSection {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
+    /// How hard the model thinks. Unset leaves the provider's own default,
+    /// which on the newest models is to think.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -273,6 +278,7 @@ impl AgentSection {
             llm: self.llm.clone(),
             model: self.model.clone()?,
             system: self.system.clone(),
+            effort: self.effort,
             retry: self.retry.clone().map(Box::new),
             tools: self.tools.clone(),
             sub_agents: self.to_sub_agents(manifest),
@@ -1020,6 +1026,46 @@ mod tests {
             .to_string();
         assert!(err.contains("tool"), "{err}");
         assert!(err.contains("unknown field"), "names the field: {err}");
+    }
+
+    #[test]
+    fn effort_is_read_from_the_agent_and_becomes_its_reasoning() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+effort = "high"
+"#,
+        )
+        .unwrap();
+        m.validate().unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert_eq!(config.effort, Some(ReasoningEffort::High));
+        assert_eq!(
+            config.reasoning().and_then(|r| r.effort),
+            Some(ReasoningEffort::High)
+        );
+    }
+
+    #[test]
+    fn an_agent_that_names_no_effort_sends_no_reasoning() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[agent.support]
+llm = "claude"
+model = "m"
+"#,
+        )
+        .unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert!(config.reasoning().is_none());
     }
 
     #[test]

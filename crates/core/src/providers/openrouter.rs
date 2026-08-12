@@ -10,8 +10,9 @@ use rust_decimal::Decimal;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    ErrorCode, LlmRequest, LlmResponse, LlmTool, ReasoningConfig, ResponseImage, SessionOwner,
-    StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
+    Content, DraftMessage, ErrorCode, LlmRequest, LlmResponse, LlmTool, Reasoning, ReasoningConfig,
+    ReasoningProvider, ResponseImage, Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk,
+    ToolCallFunction,
 };
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field
@@ -43,11 +44,89 @@ impl From<&LlmTool> for WireTool {
     }
 }
 
+/// A transcript message as the router takes it. Built rather than serializing a
+/// `DraftMessage` straight through: the engine's own fields are not part of
+/// this API, and `reasoning_details` has to go back under the router's name for
+/// it rather than ours.
+#[derive(Serialize)]
+struct WireMessage<'a> {
+    role: &'a Role,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a Content>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<&'a Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a String>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    reasoning_details: &'a [serde_json::Value],
+}
+
+impl<'a> From<&'a DraftMessage> for WireMessage<'a> {
+    fn from(m: &'a DraftMessage) -> Self {
+        WireMessage {
+            role: &m.role,
+            content: m.content.as_ref(),
+            tool_calls: m.tool_calls.as_ref(),
+            tool_call_id: m.tool_call_id.as_ref(),
+            name: m.name.as_ref(),
+            reasoning_details: m
+                .reasoning
+                .as_ref()
+                .map(|r| r.blocks_for(ReasoningProvider::Openrouter))
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Folds streamed `reasoning_details`. They arrive as fragments that share an
+/// `index` — the text in pieces, the signature last — and the router wants back
+/// the whole blocks the model produced, not the pieces it sent.
+#[derive(Default)]
+struct ReasoningAccum {
+    blocks: Vec<serde_json::Value>,
+}
+
+impl ReasoningAccum {
+    fn merge(&mut self, detail: serde_json::Value) {
+        let Some(fields) = detail.as_object() else {
+            return;
+        };
+        let key = (detail.get("index").cloned(), detail.get("type").cloned());
+        let found = self
+            .blocks
+            .iter_mut()
+            .find(|b| (b.get("index").cloned(), b.get("type").cloned()) == key);
+        let Some(block) = found else {
+            self.blocks.push(detail.clone());
+            return;
+        };
+        let Some(target) = block.as_object_mut() else {
+            return;
+        };
+        for (name, value) in fields {
+            let piecewise = matches!(name.as_str(), "text" | "summary" | "data");
+            match target.get_mut(name) {
+                Some(serde_json::Value::String(held)) if piecewise => {
+                    if let serde_json::Value::String(next) = value {
+                        held.push_str(next);
+                    }
+                }
+                _ if !value.is_null() => {
+                    target.insert(name.clone(), value.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Wire-format request body.
 #[derive(Serialize)]
 struct WireBody<'a> {
     model: &'a str,
-    messages: &'a [crate::protocol::DraftMessage],
+    messages: Vec<WireMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +199,12 @@ struct WireImageUrl {
 #[derive(Debug, Deserialize)]
 struct ChoiceMessage {
     content: Option<String>,
+    #[serde(default, alias = "reasoning_content")]
+    reasoning: Option<String>,
+    /// The router's own reasoning record. Held verbatim: a model behind it that
+    /// signs its thinking wants these back, and only the router can read them.
+    #[serde(default)]
+    reasoning_details: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     tool_calls: Option<Vec<WireToolCall>>,
     #[serde(default)]
@@ -182,6 +267,14 @@ impl ChatCompletionResponse {
         LlmResponse {
             model: self.model,
             content: choice.as_ref().and_then(|c| c.message.content.clone()),
+            reasoning: Reasoning::new(
+                ReasoningProvider::Openrouter,
+                choice.as_ref().and_then(|c| c.message.reasoning.clone()),
+                choice
+                    .as_ref()
+                    .and_then(|c| c.message.reasoning_details.clone())
+                    .unwrap_or_default(),
+            ),
             tool_calls: choice
                 .as_ref()
                 .and_then(|c| c.message.tool_calls.as_ref())
@@ -230,8 +323,10 @@ struct StreamChunkChoice {
 struct StreamChunkDelta {
     #[serde(default)]
     content: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "reasoning_content")]
     reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_details: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
     #[serde(default)]
@@ -306,7 +401,7 @@ impl OpenRouterClient {
         };
         WireBody {
             model: &request.model,
-            messages: &request.messages,
+            messages: request.messages.iter().map(WireMessage::from).collect(),
             tools: request
                 .tools
                 .as_ref()
@@ -415,6 +510,8 @@ impl LlmCallable for OpenRouterClient {
         }
 
         let mut content = String::new();
+        let mut thought = String::new();
+        let mut reasoning_details = ReasoningAccum::default();
         let mut tool_calls: Vec<ToolCallAccum> = Vec::new();
         let mut images: Vec<ResponseImage> = Vec::new();
         let mut finish_reason: Option<String> = None;
@@ -470,8 +567,15 @@ impl LlmCallable for OpenRouterClient {
                         });
                     }
 
+                    if let Some(details) = choice.delta.reasoning_details {
+                        for detail in details {
+                            reasoning_details.merge(detail);
+                        }
+                    }
+
                     if let Some(ref reasoning) = choice.delta.reasoning {
                         if !reasoning.is_empty() {
+                            thought.push_str(reasoning);
                             let _ = chunk_tx.send(StreamDelta {
                                 reasoning: Some(reasoning.clone()),
                                 ..Default::default()
@@ -553,6 +657,11 @@ impl LlmCallable for OpenRouterClient {
             usage: super::openai::usage_from_value(usage),
             cost,
             images,
+            reasoning: Reasoning::new(
+                ReasoningProvider::Openrouter,
+                (!thought.is_empty()).then_some(thought),
+                reasoning_details.blocks,
+            ),
         })
     }
 }
@@ -591,12 +700,112 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                reasoning: None,
             }],
             tools: None,
             temperature: None,
             max_completion_tokens: None,
             reasoning: None,
         }
+    }
+
+    #[test]
+    fn streamed_reasoning_fragments_fold_back_into_one_block() {
+        let mut accum = ReasoningAccum::default();
+        // The shape a router stream sends: text in pieces, signature last.
+        for fragment in [
+            serde_json::json!({"type": "reasoning.text", "index": 0,
+                               "format": "anthropic-claude-v1", "text": "Let"}),
+            serde_json::json!({"type": "reasoning.text", "index": 0,
+                               "format": "anthropic-claude-v1", "text": " me check."}),
+            serde_json::json!({"type": "reasoning.text", "index": 0,
+                               "format": "anthropic-claude-v1", "signature": "sig-abc"}),
+        ] {
+            accum.merge(fragment);
+        }
+
+        assert_eq!(
+            accum.blocks,
+            vec![serde_json::json!({
+                "type": "reasoning.text",
+                "index": 0,
+                "format": "anthropic-claude-v1",
+                "text": "Let me check.",
+                "signature": "sig-abc",
+            })]
+        );
+    }
+
+    #[test]
+    fn reasoning_blocks_at_different_indexes_stay_apart() {
+        let mut accum = ReasoningAccum::default();
+        for fragment in [
+            serde_json::json!({"type": "reasoning.text", "index": 0, "text": "first"}),
+            serde_json::json!({"type": "reasoning.text", "index": 1, "text": "second"}),
+            serde_json::json!({"type": "reasoning.text", "index": 0, "text": "!"}),
+        ] {
+            accum.merge(fragment);
+        }
+
+        assert_eq!(accum.blocks.len(), 2);
+        assert_eq!(accum.blocks[0]["text"], "first!");
+        assert_eq!(accum.blocks[1]["text"], "second");
+    }
+
+    #[test]
+    fn the_routers_reasoning_record_goes_back_to_the_router() {
+        let detail = serde_json::json!({ "type": "reasoning.text", "text": "thought" });
+        let mut request = req();
+        request.messages.push(DraftMessage {
+            id: Some("msg_1".to_string()),
+            role: Role::Assistant,
+            content: Some(Content::Text("hi".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning: Reasoning::new(
+                ReasoningProvider::Openrouter,
+                Some("thought".to_string()),
+                vec![detail.clone()],
+            ),
+        });
+        let client = OpenRouterClient::from_config(OpenRouterConfig {
+            base_url: "https://openrouter.ai/api".to_string(),
+            api_key: "k".to_string(),
+            cache_ttl: None,
+        });
+        let body = serde_json::to_value(client.body(&request, false, "s")).unwrap();
+
+        let sent = &body["messages"][1];
+        assert_eq!(sent["reasoning_details"], serde_json::json!([detail]));
+        assert!(sent.get("reasoning").is_none(), "internal field leaked");
+        assert!(sent.get("id").is_none(), "node id leaked");
+    }
+
+    #[test]
+    fn thinking_from_another_provider_is_not_offered_to_the_router() {
+        let mut request = req();
+        request.messages.push(DraftMessage {
+            id: None,
+            role: Role::Assistant,
+            content: Some(Content::Text("hi".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning: Reasoning::new(
+                ReasoningProvider::Anthropic,
+                Some("thought".to_string()),
+                vec![serde_json::json!({ "type": "thinking", "signature": "s" })],
+            ),
+        });
+        let client = OpenRouterClient::from_config(OpenRouterConfig {
+            base_url: "https://openrouter.ai/api".to_string(),
+            api_key: "k".to_string(),
+            cache_ttl: None,
+        });
+        let body = serde_json::to_value(client.body(&request, false, "s")).unwrap();
+
+        assert!(body["messages"][1].get("reasoning_details").is_none());
     }
 
     fn body(cache_ttl: Option<&str>, session_id: &str) -> serde_json::Value {

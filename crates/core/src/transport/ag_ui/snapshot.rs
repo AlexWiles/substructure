@@ -128,6 +128,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -146,6 +147,7 @@ mod tests {
             }],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -157,6 +159,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: Some(call_id.into()),
             name: Some("get_weather".into()),
+            reasoning: None,
         }
     }
 
@@ -168,6 +171,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 

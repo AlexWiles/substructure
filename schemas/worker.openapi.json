@@ -20,6 +20,17 @@
             ],
             "description": "Defer every tool this agent offers, from any source, unless the tool or\nthe connection says otherwise. Absent ⇒ the agent defers nothing of its\nown; a connection may still defer on its own account.\n\nPresence is the switch, so an agent cannot carry settings that do\nnothing. Declared on the agent because an agent can hold this opinion\nbefore it names a connection: one that sets it gets the search tools\nfrom its first turn, so a connection added later costs no cache."
           },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How hard the model thinks, carried on the agent because it pairs with\nthe model. Unset sends no reasoning config and leaves the provider its\nown default."
+          },
           "llm": {
             "description": "The `[llm.*]` block this agent's calls run on.",
             "type": [
@@ -1294,6 +1305,16 @@
               "null"
             ]
           },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Reasoning"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "role": {
             "$ref": "#/components/schemas/Role"
           },
@@ -1687,6 +1708,16 @@
               "null"
             ]
           },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Reasoning"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "role": {
             "$ref": "#/components/schemas/Role"
           },
@@ -1758,6 +1789,30 @@
         "title": "OwnerKind",
         "type": "string"
       },
+      "Reasoning": {
+        "additionalProperties": false,
+        "description": "What the model thought before it answered. `text` is for a reader; `blocks`\nare the provider's own, held verbatim because Anthropic requires the\nthinking that precedes a tool call back unmodified, signature included.",
+        "properties": {
+          "blocks": {
+            "items": {},
+            "type": "array"
+          },
+          "provider": {
+            "$ref": "#/components/schemas/ReasoningProvider"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "Reasoning",
+        "type": "object"
+      },
       "ReasoningConfig": {
         "additionalProperties": false,
         "properties": {
@@ -1805,6 +1860,16 @@
           "none"
         ],
         "title": "ReasoningEffort",
+        "type": "string"
+      },
+      "ReasoningProvider": {
+        "description": "Which provider wrote a [`Reasoning`]'s blocks. They ride back only to it:\nanother provider reads them as noise, and Anthropic rejects blocks it did\nnot sign.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "openrouter"
+        ],
+        "title": "ReasoningProvider",
         "type": "string"
       },
       "RetryConfig": {

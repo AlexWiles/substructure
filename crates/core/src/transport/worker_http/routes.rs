@@ -155,7 +155,9 @@ pub async fn settle_effect(
             WorkKind::LlmCall,
             id,
             attempt,
-            EffectSettlement::Result(EffectResultPayload::LlmCall { response }),
+            EffectSettlement::Result(EffectResultPayload::LlmCall {
+                response: Box::new(response),
+            }),
         ),
         SettleEffectRequest::ToolError {
             id,

@@ -544,6 +544,7 @@ mod tests {
             }],
             defer_tools: None,
             announce_mcp: Default::default(),
+            effort: None,
         }
     }
 
@@ -660,6 +661,7 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 parent_id: None,
             },

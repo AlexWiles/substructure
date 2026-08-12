@@ -334,6 +334,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -351,6 +352,7 @@ mod tests {
             mcp: Vec::new(),
             defer_tools: None,
             announce_mcp: Default::default(),
+            effort: None,
         }
     }
 

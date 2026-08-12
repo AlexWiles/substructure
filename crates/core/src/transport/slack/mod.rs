@@ -215,6 +215,7 @@ fn draft(id: &str, role: Role, content: String) -> DraftMessage {
         tool_calls: None,
         tool_call_id: None,
         name: None,
+        reasoning: None,
     }
 }
 
@@ -533,6 +534,7 @@ mod tests {
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 

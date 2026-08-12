@@ -407,6 +407,7 @@ mod tests {
                         mcp: vec![],
                         defer_tools: None,
                         announce_mcp: Default::default(),
+                        effort: None,
                     }
                 },
                 anchor: None,

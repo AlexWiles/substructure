@@ -148,6 +148,7 @@ mod tests {
             mcp: Vec::new(),
             defer_tools: None,
             announce_mcp: Default::default(),
+            effort: None,
         }
     }
 

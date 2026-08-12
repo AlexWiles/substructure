@@ -84,6 +84,7 @@ fn message_input(message: String, agent_id: String) -> ClientInput {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: None,
         },
         stream: true,
         queue: false,

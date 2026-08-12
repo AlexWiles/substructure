@@ -144,7 +144,7 @@ fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionResponse {
             tools: config.tools_as_llm(),
             temperature: None,
             max_completion_tokens: None,
-            reasoning: None,
+            reasoning: config.reasoning(),
             stream: None,
             // Omitted on purpose: the seam resolves it against the config.
             retry: None,
@@ -224,6 +224,7 @@ fn delegation_message(arguments: &str) -> DraftMessage {
         tool_calls: None,
         tool_call_id: None,
         name: None,
+        reasoning: None,
     }
 }
 
@@ -269,7 +270,7 @@ fn client_turn(
             tools: effective.tools_as_llm(),
             temperature: None,
             max_completion_tokens: None,
-            reasoning: None,
+            reasoning: effective.reasoning(),
             stream: None,
             // Omitted on purpose: the seam resolves it against the config.
             retry: None,
@@ -379,6 +380,7 @@ fn tool_finished(
         tool_calls: None,
         tool_call_id: Some(id.to_string()),
         name: Some(name.to_string()),
+        reasoning: None,
     };
     let actions = if pending_calls > 0 {
         Vec::new()
@@ -469,6 +471,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -490,6 +493,7 @@ mod tests {
                 .collect(),
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -993,6 +997,7 @@ mod tests {
             mcp: Vec::new(),
             defer_tools: None,
             announce_mcp: Default::default(),
+            effort: None,
         }
     }
 

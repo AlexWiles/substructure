@@ -287,6 +287,7 @@ mod tests {
                     usage: None,
                     cost: None,
                     images: Vec::new(),
+                    reasoning: None,
                 },
             }),
         )

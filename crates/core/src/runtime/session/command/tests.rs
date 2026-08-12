@@ -319,6 +319,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
                 usage: None,
                 cost: None,
                 images: vec![],
+                reasoning: None,
             })),
         ),
         &system(),
@@ -342,6 +343,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
                 tool_calls: Some(vec![tool_call]),
                 tool_call_id: None,
                 name: None,
+                reasoning: None,
             }],
             actions: vec![Action::CallTool {
                 id: "tc-1".to_string(),
@@ -667,6 +669,7 @@ fn submit_client_payload_with_active_turn_id_is_rejected() {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: None,
         },
         stream: false,
     });
@@ -716,6 +719,7 @@ fn submit_worker_decision_dispatches_action_and_completes_decision() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -786,6 +790,7 @@ fn duplicate_submit_worker_decision_is_no_op() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -871,6 +876,7 @@ fn user_message_rejected_while_session_interrupted() {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: None,
         },
         stream: false,
     });
@@ -937,6 +943,7 @@ fn send_message_wakes_a_decision() {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                reasoning: None,
             },
             stream: false,
             turn_id: None,
@@ -1191,6 +1198,7 @@ fn node_msg(id: &str, role: Role, content: &str) -> DraftMessage {
         tool_calls: None,
         tool_call_id: None,
         name: None,
+        reasoning: None,
     }
 }
 
@@ -1381,6 +1389,7 @@ fn tool_msg(tool_call_id: &str, content: &str) -> DraftMessage {
         tool_calls: None,
         tool_call_id: Some(tool_call_id.into()),
         name: None,
+        reasoning: None,
     }
 }
 
@@ -2112,6 +2121,7 @@ fn complete_llm_call_emits_completed() {
                 usage: None,
                 cost: None,
                 images: vec![],
+                reasoning: None,
             })),
         ),
         &Caller::System {
@@ -2537,6 +2547,7 @@ fn return_llm_result_completes_worker_handled_call() {
                     usage: None,
                     cost: None,
                     images: vec![],
+                    reasoning: None,
                 },
             }],
             state: None,
@@ -2708,6 +2719,7 @@ fn request_sub_agent_holds_the_opening_message() {
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
+                reasoning: None,
             }),
             retry: RetryPolicy::no_retry(),
         },
@@ -3098,6 +3110,7 @@ fn worker_tool_fires_tool_result_in_the_completion_commit() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -3231,6 +3244,7 @@ fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -4068,6 +4082,7 @@ fn a_failed_action_decision_does_not_end_the_running_turn() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -4158,6 +4173,7 @@ fn cancel_voids_pending_effects() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -4323,6 +4339,7 @@ fn interrupt_voids_pending_worker_decision() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -4417,6 +4434,7 @@ fn tool_result_during_interrupt_queues_until_resume() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -4560,6 +4578,7 @@ fn worker_interrupt_action_pauses_session_and_resume_carries_payload() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -4651,6 +4670,7 @@ fn fail_worker_decision_emits_errored() {
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
+                    reasoning: None,
                 },
                 stream: false,
             }),
@@ -5246,6 +5266,7 @@ fn llm_response(content: &str) -> LlmResponse {
         usage: None,
         cost: None,
         images: vec![],
+        reasoning: None,
     }
 }
 
@@ -6402,6 +6423,7 @@ fn agent_config(model: &str) -> AgentConfig {
         mcp: Vec::new(),
         defer_tools: None,
         announce_mcp: Default::default(),
+        effort: None,
     }
 }
 

@@ -9,9 +9,15 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Agents can set `effort` in the manifest.
+
 ### Fixed
 
 - Streamed calls now read `data:` lines that have no space after the colon.
+- Responses keep the model's reasoning, and Anthropic and OpenRouter calls send it back.
+- Calls to OpenAI-compatible providers no longer send engine-internal message fields.
 
 ## [0.4.1] - 2026-08-11
 

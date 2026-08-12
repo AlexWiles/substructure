@@ -13,13 +13,15 @@ use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    Content, ContentPart, DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, ReasoningEffort,
-    Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction, Usage,
+    Content, ContentPart, DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, Reasoning,
+    ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk,
+    ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -101,7 +103,33 @@ struct AnthropicTool {
 #[derive(Serialize)]
 struct AnthropicMessage {
     role: &'static str,
-    content: Vec<RequestBlock>,
+    content: Vec<Block>,
+}
+
+/// One block of a turn: built from the transcript, or held verbatim. Anthropic
+/// signs a thinking block and rejects one that comes back edited, so a thinking
+/// block goes out as the bytes it arrived as.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Block {
+    Raw(serde_json::Value),
+    Built(RequestBlock),
+}
+
+impl Block {
+    fn cache(&mut self, control: CacheControl) {
+        match self {
+            Block::Built(b) => b.cache(control),
+            // A mark would edit a signed block.
+            Block::Raw(_) => {}
+        }
+    }
+}
+
+impl From<RequestBlock> for Block {
+    fn from(b: RequestBlock) -> Self {
+        Block::Built(b)
+    }
 }
 
 #[derive(Serialize)]
@@ -224,7 +252,7 @@ fn image_block(url: &str) -> RequestBlock {
 
 /// Append blocks to the last turn if it shares the role, else open a new turn.
 /// Anthropic requires strictly alternating user/assistant turns.
-fn push_turn(turns: &mut Vec<AnthropicMessage>, role: &'static str, blocks: Vec<RequestBlock>) {
+fn push_turn(turns: &mut Vec<AnthropicMessage>, role: &'static str, blocks: Vec<Block>) {
     if blocks.is_empty() {
         return;
     }
@@ -263,29 +291,50 @@ fn build_body(
                 }
             }
             Role::User => {
-                push_turn(&mut turns, "user", content_to_blocks(msg.content.as_ref()));
+                push_turn(
+                    &mut turns,
+                    "user",
+                    content_to_blocks(msg.content.as_ref())
+                        .into_iter()
+                        .map(Block::Built)
+                        .collect(),
+                );
             }
             Role::Assistant => {
-                let mut blocks = Vec::new();
+                // Thinking leads the turn: the API requires the blocks that
+                // preceded a tool call back with it, ahead of what they led to.
+                let mut blocks: Vec<Block> = msg
+                    .reasoning
+                    .iter()
+                    .flat_map(|r| r.blocks_for(ReasoningProvider::Anthropic))
+                    .cloned()
+                    .map(Block::Raw)
+                    .collect();
                 if let Some(c) = &msg.content {
                     let text = c.text_owned();
                     if !text.is_empty() {
-                        blocks.push(RequestBlock::Text {
-                            text,
-                            cache_control: None,
-                        });
+                        blocks.push(
+                            RequestBlock::Text {
+                                text,
+                                cache_control: None,
+                            }
+                            .into(),
+                        );
                     }
                 }
                 if let Some(tcs) = &msg.tool_calls {
                     for tc in tcs {
                         let input = serde_json::from_str(&tc.function.arguments)
                             .unwrap_or_else(|_| serde_json::json!({}));
-                        blocks.push(RequestBlock::ToolUse {
-                            id: tc.id.clone(),
-                            name: tc.function.name.clone(),
-                            input,
-                            cache_control: None,
-                        });
+                        blocks.push(
+                            RequestBlock::ToolUse {
+                                id: tc.id.clone(),
+                                name: tc.function.name.clone(),
+                                input,
+                                cache_control: None,
+                            }
+                            .into(),
+                        );
                     }
                 }
                 push_turn(&mut turns, "assistant", blocks);
@@ -304,7 +353,8 @@ fn build_body(
                         tool_use_id,
                         content,
                         cache_control: None,
-                    }],
+                    }
+                    .into()],
                 );
             }
         }
@@ -393,8 +443,10 @@ fn map_stop_reason(reason: &str) -> String {
 #[derive(Debug, Deserialize)]
 struct MessagesResponse {
     model: String,
+    /// Raw, because a thinking block has to go back exactly as it arrived and
+    /// a typed round-trip would drop whatever the API adds to one next.
     #[serde(default)]
-    content: Vec<ResponseBlock>,
+    content: Vec<serde_json::Value>,
     #[serde(default)]
     stop_reason: Option<String>,
     #[serde(default)]
@@ -434,42 +486,56 @@ fn usage_from_value(raw: Option<serde_json::Value>) -> Option<Usage> {
     Some(counts.normalize(raw))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ResponseBlock {
-    Text {
-        text: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-    #[serde(other)]
-    Other,
+/// Whether a response block is one the API signs and wants back untouched.
+fn is_thinking(kind: &str) -> bool {
+    matches!(kind, "thinking" | "redacted_thinking")
 }
 
 impl MessagesResponse {
     fn into_llm_response(self) -> LlmResponse {
         let mut content = String::new();
+        let mut thought = String::new();
         let mut tool_calls = Vec::new();
+        let mut blocks = Vec::new();
         for block in self.content {
-            match block {
-                ResponseBlock::Text { text } => content.push_str(&text),
-                ResponseBlock::ToolUse { id, name, input } => tool_calls.push(ToolCall {
-                    id,
-                    call_type: "function".to_string(),
-                    function: ToolCallFunction {
-                        name,
-                        arguments: input.to_string(),
-                    },
-                }),
-                ResponseBlock::Other => {}
+            match block
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+            {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        content.push_str(text);
+                    }
+                }
+                "tool_use" => {
+                    let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                    tool_calls.push(ToolCall {
+                        id: str_field(&block, "id"),
+                        call_type: "function".to_string(),
+                        function: ToolCallFunction {
+                            name: str_field(&block, "name"),
+                            arguments: input.to_string(),
+                        },
+                    });
+                }
+                kind if is_thinking(kind) => {
+                    if let Some(text) = block.get("thinking").and_then(|t| t.as_str()) {
+                        thought.push_str(text);
+                    }
+                    blocks.push(block);
+                }
+                _ => {}
             }
         }
         LlmResponse {
             model: self.model,
             content: (!content.is_empty()).then_some(content),
+            reasoning: Reasoning::new(
+                ReasoningProvider::Anthropic,
+                (!thought.is_empty()).then_some(thought),
+                blocks,
+            ),
             tool_calls,
             finish_reason: self.stop_reason.as_deref().map(map_stop_reason),
             usage: usage_from_value(self.usage),
@@ -477,6 +543,14 @@ impl MessagesResponse {
             images: Vec::new(),
         }
     }
+}
+
+fn str_field(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 // ── Worker-format seam ───────────────────────────────────────────────────
@@ -549,6 +623,11 @@ enum StreamContentBlock {
         id: String,
         name: String,
     },
+    Thinking {},
+    RedactedThinking {
+        #[serde(default)]
+        data: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -561,6 +640,9 @@ enum StreamBlockDelta {
     },
     ThinkingDelta {
         thinking: String,
+    },
+    SignatureDelta {
+        signature: String,
     },
     InputJsonDelta {
         partial_json: String,
@@ -607,12 +689,20 @@ struct StreamError {
 
 /// Per-content-block streaming accumulator.
 enum BlockAccum {
-    /// Text or thinking — streamed out, not retained past the delta.
+    /// Text — streamed out, not retained past the delta.
     Passthrough,
     ToolUse {
         id: String,
         name: String,
         arguments: String,
+    },
+    /// Reassembled because the turn that follows it has to carry it back.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
     },
 }
 
@@ -667,6 +757,13 @@ impl StreamParser {
                         name,
                         arguments: String::new(),
                     },
+                    StreamContentBlock::Thinking {} => BlockAccum::Thinking {
+                        thinking: String::new(),
+                        signature: String::new(),
+                    },
+                    StreamContentBlock::RedactedThinking { data } => {
+                        BlockAccum::RedactedThinking { data }
+                    }
                     StreamContentBlock::Other => BlockAccum::Passthrough,
                 };
                 Ok(None)
@@ -680,10 +777,22 @@ impl StreamParser {
                     })
                 }
                 StreamBlockDelta::ThinkingDelta { thinking } => {
+                    if let Some(BlockAccum::Thinking { thinking: acc, .. }) =
+                        self.blocks.get_mut(index)
+                    {
+                        acc.push_str(&thinking);
+                    }
                     (!thinking.is_empty()).then(|| StreamDelta {
                         reasoning: Some(thinking),
                         ..Default::default()
                     })
+                }
+                StreamBlockDelta::SignatureDelta { signature: sig } => {
+                    if let Some(BlockAccum::Thinking { signature, .. }) = self.blocks.get_mut(index)
+                    {
+                        signature.push_str(&sig);
+                    }
+                    None
                 }
                 StreamBlockDelta::InputJsonDelta { partial_json } => {
                     if let Some(BlockAccum::ToolUse {
@@ -736,25 +845,47 @@ impl StreamParser {
     }
 
     fn into_response(self, fallback_model: &str) -> LlmResponse {
-        let tool_calls = self
-            .blocks
-            .into_iter()
-            .filter_map(|b| match b {
+        let mut tool_calls = Vec::new();
+        let mut thought = String::new();
+        let mut thinking_blocks = Vec::new();
+        // In index order, which is the order the API sent them and the order it
+        // wants them back.
+        for block in self.blocks {
+            match block {
                 BlockAccum::ToolUse {
                     id,
                     name,
                     arguments,
-                } if !id.is_empty() => Some(ToolCall {
+                } if !id.is_empty() => tool_calls.push(ToolCall {
                     id,
                     call_type: "function".to_string(),
                     function: ToolCallFunction { name, arguments },
                 }),
-                _ => None,
-            })
-            .collect();
+                BlockAccum::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    thought.push_str(&thinking);
+                    thinking_blocks.push(json!({
+                        "type": "thinking",
+                        "thinking": thinking,
+                        "signature": signature,
+                    }));
+                }
+                BlockAccum::RedactedThinking { data } => {
+                    thinking_blocks.push(json!({ "type": "redacted_thinking", "data": data }));
+                }
+                _ => {}
+            }
+        }
         LlmResponse {
             model: self.model.unwrap_or_else(|| fallback_model.to_string()),
             content: (!self.content.is_empty()).then_some(self.content),
+            reasoning: Reasoning::new(
+                ReasoningProvider::Anthropic,
+                (!thought.is_empty()).then_some(thought),
+                thinking_blocks,
+            ),
             tool_calls,
             finish_reason: self.finish_reason,
             usage: self.usage.into_usage(),
@@ -990,6 +1121,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: None,
         }
     }
 
@@ -1013,6 +1145,107 @@ mod tests {
             max_completion_tokens: None,
             reasoning: None,
         }
+    }
+
+    fn thinking_block() -> serde_json::Value {
+        json!({ "type": "thinking", "thinking": "let me check", "signature": "sig-abc" })
+    }
+
+    #[test]
+    fn a_thought_response_keeps_the_blocks_and_reads_the_text() {
+        let parsed = response_from_wire(json!({
+            "model": "claude-opus-5",
+            "content": [
+                thinking_block(),
+                { "type": "redacted_thinking", "data": "opaque" },
+                { "type": "text", "text": "done" },
+            ],
+            "stop_reason": "end_turn",
+        }))
+        .expect("parses");
+
+        let reasoning = parsed.reasoning.expect("reasoning");
+        assert_eq!(reasoning.provider, ReasoningProvider::Anthropic);
+        assert_eq!(reasoning.text.as_deref(), Some("let me check"));
+        assert_eq!(
+            reasoning.blocks,
+            vec![
+                thinking_block(),
+                json!({ "type": "redacted_thinking", "data": "opaque" }),
+            ]
+        );
+        assert_eq!(parsed.content.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn a_response_that_did_not_think_carries_no_reasoning() {
+        let parsed = response_from_wire(json!({
+            "model": "claude-opus-5",
+            "content": [{ "type": "text", "text": "hi" }],
+        }))
+        .expect("parses");
+        assert!(parsed.reasoning.is_none());
+    }
+
+    #[test]
+    fn thinking_leads_the_turn_it_thought_for() {
+        let mut assistant = msg(Role::Assistant, Some("checking"));
+        assistant.tool_calls = Some(vec![tool_call("t1", "lookup", "{}")]);
+        assistant.reasoning = Reasoning::new(
+            ReasoningProvider::Anthropic,
+            Some("let me check".to_string()),
+            vec![thinking_block()],
+        );
+        let body = request_to_wire(
+            &req(vec![msg(Role::User, Some("go")), assistant]),
+            DeferToolsStrategy::Search,
+        );
+
+        let blocks = &body["messages"][1]["content"];
+        assert_eq!(blocks[0], thinking_block(), "thinking comes first");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn another_providers_thinking_does_not_ride_along() {
+        let mut assistant = msg(Role::Assistant, Some("hi"));
+        assistant.reasoning = Reasoning::new(
+            ReasoningProvider::Openrouter,
+            Some("thought".to_string()),
+            vec![json!({ "type": "reasoning.text", "text": "thought" })],
+        );
+        let body = request_to_wire(
+            &req(vec![msg(Role::User, Some("go")), assistant]),
+            DeferToolsStrategy::Search,
+        );
+
+        let blocks = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+    }
+
+    #[test]
+    fn a_streamed_thought_is_reassembled_with_its_signature() {
+        let mut parser = StreamParser::new();
+        for event in [
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "thinking", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "thinking_delta", "thinking": "let me "}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "thinking_delta", "thinking": "check"}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "signature_delta", "signature": "sig-abc"}}),
+            json!({"type": "content_block_stop"}),
+        ] {
+            parser.parse_data(&event.to_string());
+        }
+
+        let response = parser.into_response("claude-opus-5");
+        let reasoning = response.reasoning.expect("reasoning");
+        assert_eq!(reasoning.text.as_deref(), Some("let me check"));
+        assert_eq!(reasoning.blocks, vec![thinking_block()]);
     }
 
     #[test]
