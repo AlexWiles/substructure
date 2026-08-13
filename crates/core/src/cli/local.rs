@@ -13,13 +13,12 @@ use crate::connectors::registry::{Connections, LocalRegistry};
 use crate::llm::{LlmProviderRegistry, LlmProviderTrait, LlmTask};
 use crate::manifest;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
-use crate::providers::disk_blob::DiskBlobStore;
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
-    SqliteCredentialStore, SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore,
-    SqliteWakeStore, SqliteWorkerQueue,
+    SqliteBlobStore, SqliteCredentialStore, SqliteCursorStore, SqliteDb, SqliteEventStore,
+    SqliteSessionIndexStore, SqliteWakeStore, SqliteWorkerQueue,
 };
 use crate::runtime::blob::{BlobResolvingLlm, BlobStore};
 use crate::runtime::connector::ConnectorTask;
@@ -126,7 +125,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         None => std::process::exit(2),
     };
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
-    let blobs: Arc<dyn BlobStore> = Arc::new(DiskBlobStore::new(blobs_path(&db_path)));
+    let blobs: Arc<dyn BlobStore> = Arc::new(SqliteBlobStore::new(db.clone()));
     let slack = match slack_routing {
         Some(routing) => {
             let store = StreamStore::new(db.clone())?;
@@ -226,11 +225,6 @@ fn announce_agents(cfg: &ProjectConfig) {
             None => tracing::info!(agent = %id, "agent hosted by the engine"),
         }
     }
-}
-
-/// The image store beside the database.
-pub(crate) fn blobs_path(db_path: &str) -> String {
-    format!("{db_path}.blobs")
 }
 
 /// Open the SQLite-backed stores, start the in-process engine, and build a

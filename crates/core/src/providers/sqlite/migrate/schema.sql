@@ -22,6 +22,17 @@ CREATE INDEX idx_snapshots_wake_at ON snapshots (wake_at);
 
 CREATE INDEX idx_wake_schedule_wake_at ON wake_schedule (wake_at);
 
+CREATE TABLE blobs (
+    tenant_id  TEXT NOT NULL,
+    id         TEXT NOT NULL,
+    mime       TEXT NOT NULL,
+    name       TEXT,
+    size       INTEGER NOT NULL,
+    bytes      BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, id)
+);
+
 CREATE TABLE connector_credentials (
     tenant_id     TEXT NOT NULL,
     connection_id TEXT NOT NULL,

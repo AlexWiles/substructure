@@ -8,6 +8,7 @@
 
 mod m001_baseline;
 mod m002_slack_files;
+mod m003_blobs;
 
 use chrono::Utc;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -35,6 +36,11 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "slack_files",
         up: m002_slack_files::up,
+    },
+    Migration {
+        version: 3,
+        name: "blobs",
+        up: m003_blobs::up,
     },
 ];
 

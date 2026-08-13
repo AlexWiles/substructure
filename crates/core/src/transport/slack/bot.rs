@@ -14,8 +14,10 @@ use super::{
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
-use crate::protocol::{ClientInput, Content, ContentPart, OwnerKind, Role, SessionOwner};
-use crate::runtime::blob::{BlobError, BlobRef, BlobStore, NewBlob};
+use crate::protocol::{
+    ClientInput, Content, ContentPart, FileData, ImageUrl, OwnerKind, Role, SessionOwner,
+};
+use crate::runtime::blob::{text_like, BlobError, BlobRef, BlobStore, NewBlob};
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
 use crate::session::state::SessionStatus;
@@ -253,7 +255,7 @@ fn attachment_cap(mime: &str) -> Option<u64> {
         Some(MAX_IMAGE_BYTES)
     } else if mime == "application/pdf" {
         Some(MAX_PDF_BYTES)
-    } else if crate::runtime::blob::text_like(mime) {
+    } else if text_like(mime) {
         Some(MAX_TEXT_BYTES)
     } else {
         None
@@ -264,11 +266,11 @@ fn attachment_cap(mime: &str) -> Option<u64> {
 fn attachment_part(r: &BlobRef) -> ContentPart {
     if r.mime.starts_with("image/") {
         ContentPart::ImageUrl {
-            image_url: crate::protocol::ImageUrl { url: r.uri() },
+            image_url: ImageUrl { url: r.uri() },
         }
     } else {
         ContentPart::File {
-            file: crate::protocol::FileData {
+            file: FileData {
                 filename: r.name.clone().unwrap_or_else(|| "file".to_string()),
                 file_data: r.uri(),
             },
@@ -2544,10 +2546,9 @@ mod tests {
             std::time::Duration::from_secs(5),
         )
         .unwrap();
-        let store = StreamStore::new(db).unwrap();
-        let blobs: Arc<dyn BlobStore> = Arc::new(crate::providers::disk_blob::DiskBlobStore::new(
-            dir.join("blobs"),
-        ));
+        let store = StreamStore::new(db.clone()).unwrap();
+        let blobs: Arc<dyn BlobStore> =
+            Arc::new(crate::providers::sqlite::SqliteBlobStore::new(db));
         let bot = SlackBot::new(
             Arc::new(OneWorkspace(ws.clone())),
             api_base,

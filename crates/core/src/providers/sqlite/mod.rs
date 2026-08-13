@@ -1,3 +1,4 @@
+pub mod blob;
 pub mod connector_credentials;
 pub mod cursor;
 pub mod event_store;
@@ -14,6 +15,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::event_store::StoreError;
 
+pub use blob::SqliteBlobStore;
 pub use connector_credentials::SqliteCredentialStore;
 pub use cursor::SqliteCursorStore;
 pub use event_store::SqliteEventStore;

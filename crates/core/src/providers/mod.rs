@@ -1,5 +1,4 @@
 pub mod anthropic;
-pub mod disk_blob;
 pub mod format;
 pub mod memory_queue;
 pub mod openai;

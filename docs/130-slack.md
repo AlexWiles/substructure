@@ -227,7 +227,7 @@ appends the new message alone, with a note that context may be missing.
 ## Attachments
 
 A file uploaded with a message reaches the agent. The bot downloads it with
-the bot token, stores it beside the database, and the prompt carries a
+the bot token, stores it in the database, and the prompt carries a
 reference; the bytes go to the model at the call. This needs `files:read`.
 
 What the model receives depends on the type. Images (PNG, JPEG, GIF, WebP, to

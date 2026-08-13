@@ -46,8 +46,8 @@ The engine writes to a store you can replace. The CLI uses SQLite at the path
 db = "/var/lib/substructure/engine.db"
 ```
 
-The database holds the event log, the sessions, and the connector credentials.
-Back it up. See [Durability](./200-durability.md).
+The database holds the event log, the sessions, the connector credentials, and
+the attachment bytes. Back it up. See [Durability](./200-durability.md).
 
 ## Authentication
 

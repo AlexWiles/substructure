@@ -14,7 +14,7 @@ together at the same version.
 - Agents can set `effort` in the manifest.
 - Slack messages with images, PDFs, and text files reach the model.
 - Slack replies carry the images the model makes.
-- Add a blob store for message attachments and generated images, with a disk implementation.
+- Add a blob store for message attachments and generated images. The local engine keeps the bytes in its database.
 - Add a client endpoint that serves stored blobs.
 
 ### Fixed

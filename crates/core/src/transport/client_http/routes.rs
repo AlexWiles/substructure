@@ -1,5 +1,6 @@
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -114,15 +115,13 @@ pub async fn get_blob(
             let mime = r
                 .mime
                 .parse()
-                .unwrap_or(axum::http::HeaderValue::from_static(
-                    "application/octet-stream",
-                ));
+                .unwrap_or(HeaderValue::from_static("application/octet-stream"));
             let mut headers = HeaderMap::new();
-            headers.insert(axum::http::header::CONTENT_TYPE, mime);
+            headers.insert(CONTENT_TYPE, mime);
             // An id names one immutable object; cache hard, never shared.
             headers.insert(
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
+                CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=31536000, immutable"),
             );
             (headers, bytes).into_response()
         }
