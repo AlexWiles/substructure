@@ -869,6 +869,28 @@ mod tests {
     }
 
     #[test]
+    fn image_parts_serialize_in_the_openai_wire_shape() {
+        let mut request = req("gpt-4o");
+        request.messages[0].content = Some(Content::Parts(vec![
+            crate::protocol::ContentPart::Text {
+                text: "look".into(),
+            },
+            crate::protocol::ContentPart::ImageUrl {
+                image_url: crate::protocol::ImageUrl {
+                    url: "data:image/png;base64,AQID".into(),
+                },
+            },
+        ]));
+        let body = request_to_wire(&request, DeferToolsStrategy::Search);
+
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "look");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AQID");
+    }
+
+    #[test]
     fn reasoning_model_strips_temperature_and_maps_effort() {
         let mut r = req("gpt-5.5");
         r.reasoning = Some(ReasoningConfig {

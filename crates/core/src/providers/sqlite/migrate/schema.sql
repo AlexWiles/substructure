@@ -112,6 +112,14 @@ CREATE TABLE session_versions (
     PRIMARY KEY (tenant_id, session_id, kind, seq)
 );
 
+CREATE TABLE slack_files (
+    tenant_id  TEXT NOT NULL,
+    blob_id    TEXT NOT NULL,
+    file_id    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, blob_id)
+);
+
 CREATE TABLE slack_turn_streams (
     tenant_id  TEXT NOT NULL,
     session_id TEXT NOT NULL,

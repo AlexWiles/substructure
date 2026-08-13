@@ -12,6 +12,7 @@ use crate::connectors::credential::StoredCredentials;
 use crate::connectors::registry::{Connections, LocalRegistry};
 use crate::llm::{LlmProviderRegistry, LlmProviderTrait, LlmTask};
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
+use crate::providers::disk_blob::DiskBlobStore;
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
@@ -19,6 +20,7 @@ use crate::providers::sqlite::{
     SqliteCredentialStore, SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore,
     SqliteWakeStore, SqliteWorkerQueue,
 };
+use crate::runtime::blob::{BlobResolvingLlm, BlobStore};
 use crate::runtime::connector::ConnectorTask;
 use crate::sub_agent::SubAgentTask;
 use crate::transport::admin_http::{self, AdminHttpState};
@@ -117,10 +119,16 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         None => std::process::exit(2),
     };
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
+    let blobs: Arc<dyn BlobStore> = Arc::new(DiskBlobStore::new(blobs_path(&db_path)));
     let slack = match slack_routing {
         Some(routing) => {
             let store = StreamStore::new(db.clone())?;
-            match SlackChannel::from_env(routing, DEFAULT_TENANT.to_string(), Some(store)) {
+            match SlackChannel::from_env(
+                routing,
+                DEFAULT_TENANT.to_string(),
+                Some(store),
+                Some(blobs.clone()),
+            ) {
                 Ok(s) => Some(s),
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -132,7 +140,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     };
 
     // Held for the process's life: dropping it aborts the decision loops.
-    let (rt, _adapter) = start_engine(db, env.providers, &cfg).await?;
+    let (rt, _adapter) = start_engine(db, blobs.clone(), env.providers, &cfg).await?;
     announce_agents(&cfg);
 
     let auth = match env.auth {
@@ -163,6 +171,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         runtime: rt.clone(),
         auth: auth.client.clone(),
         shutdown: shutdown.clone(),
+        blobs: Some(blobs.clone()),
     });
     let worker_routes = worker_http::router(WorkerHttpState {
         runtime: rt.clone(),
@@ -212,11 +221,17 @@ fn announce_agents(cfg: &ProjectConfig) {
     }
 }
 
+/// The image store beside the database.
+pub(crate) fn blobs_path(db_path: &str) -> String {
+    format!("{db_path}.blobs")
+}
+
 /// Open the SQLite-backed stores, start the in-process engine, and build a
 /// started push adapter. Shared by `serve` (which then mounts HTTP routers) and
 /// `run` (which drives a single turn without any HTTP server).
 pub(crate) async fn start_engine(
     db: SqliteDb,
+    blobs: Arc<dyn BlobStore>,
     providers: Vec<ProviderEnv>,
     cfg: &ProjectConfig,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
@@ -269,11 +284,15 @@ pub(crate) async fn start_engine(
             "no engine-run [llm.*] block declared; every model call belongs to a worker"
         );
     }
-    let llm_providers = Arc::new(LlmProviderRegistry::new(
-        providers
-            .into_iter()
-            .map(|p| (p.name.clone(), client(p)))
-            .collect(),
+    // Prompts persist `blob://` refs; the wrapper inlines the bytes at the call.
+    let llm_providers = Arc::new(BlobResolvingLlm::new(
+        Arc::new(LlmProviderRegistry::new(
+            providers
+                .into_iter()
+                .map(|p| (p.name.clone(), client(p)))
+                .collect(),
+        )),
+        blobs,
     ));
 
     let agents = Arc::new(StaticAgentDirectory::new(

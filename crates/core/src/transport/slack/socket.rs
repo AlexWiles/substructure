@@ -6,6 +6,7 @@ use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
+use crate::runtime::blob::BlobStore;
 use crate::transport::channel::{Channel, ChannelContext};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -60,7 +61,7 @@ impl WorkspaceResolver for StaticResolver {
 
 impl SlackChannel {
     /// `store` holds durable stream state so a restart resumes open
-    /// streaming messages.
+    /// streaming messages. `blobs` holds uploaded images.
     pub fn new(
         routing: Routing,
         app_token: String,
@@ -68,6 +69,7 @@ impl SlackChannel {
         tenant_id: String,
         api_base: String,
         store: Option<super::StreamStore>,
+        blobs: Option<Arc<dyn BlobStore>>,
     ) -> Self {
         let workspace = Arc::new(Workspace::new(bot_token, tenant_id, routing.clone()));
         Self {
@@ -75,7 +77,7 @@ impl SlackChannel {
             app_token,
             api_base: api_base.clone(),
             http: reqwest::Client::new(),
-            bot: SlackBot::new(Arc::new(StaticResolver(workspace)), api_base, store),
+            bot: SlackBot::new(Arc::new(StaticResolver(workspace)), api_base, store, blobs),
         }
     }
 
@@ -89,6 +91,7 @@ impl SlackChannel {
         routing: Routing,
         tenant_id: String,
         store: Option<super::StreamStore>,
+        blobs: Option<Arc<dyn BlobStore>>,
     ) -> Result<Self, MissingEnv> {
         let mut missing = Vec::new();
         let mut var = |name: &'static str, desc: &'static str| {
@@ -103,7 +106,7 @@ impl SlackChannel {
         );
         let bot_token = var(
             "SLACK_BOT_TOKEN",
-            "Bot token with app_mentions:read, chat:write, channels:history, im:history (xoxb-…)",
+            "Bot token with app_mentions:read, chat:write, channels:history, im:history, files:read, files:write (xoxb-…)",
         );
         if !missing.is_empty() {
             return Err(MissingEnv(missing));
@@ -111,7 +114,7 @@ impl SlackChannel {
         let api_base =
             std::env::var("SLACK_API_BASE").unwrap_or_else(|_| "https://slack.com/api".to_string());
         Ok(Self::new(
-            routing, app_token, bot_token, tenant_id, api_base, store,
+            routing, app_token, bot_token, tenant_id, api_base, store, blobs,
         ))
     }
 

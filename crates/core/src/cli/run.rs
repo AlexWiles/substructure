@@ -175,7 +175,10 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     }
 
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
-    let (rt, _adapter) = local::start_engine(db, env.providers, &cfg).await?;
+    let blobs = std::sync::Arc::new(crate::providers::disk_blob::DiskBlobStore::new(
+        local::blobs_path(&db_path),
+    ));
+    let (rt, _adapter) = local::start_engine(db, blobs, env.providers, &cfg).await?;
 
     let session_id = args.session.unwrap_or_else(|| Uuid::now_v7().to_string());
 

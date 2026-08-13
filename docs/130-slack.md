@@ -224,6 +224,21 @@ the next mention. Users appear as `<@U…>: text`.
 The bot needs `channels:history` and `im:history` to do this. Without them it
 appends the new message alone, with a note that context may be missing.
 
+## Attachments
+
+A file uploaded with a message reaches the agent. The bot downloads it with
+the bot token, stores it beside the database, and the prompt carries a
+reference; the bytes go to the model at the call. This needs `files:read`.
+
+What the model receives depends on the type. Images (PNG, JPEG, GIF, WebP, to
+5 MB) go as images. PDFs (to 10 MB) go as documents. Text files — CSV, JSON,
+Markdown, code, logs (to 1 MB) — inline into the message. Any other type
+becomes a note naming the file, so the agent can say what it cannot read.
+
+An image the agent produces goes back the other way. The bot uploads it to
+Slack once per workspace and the reply embeds it. This needs `files:write`.
+An image Slack refuses becomes a note in the reply; the text always arrives.
+
 ## Pointing a session at a thread
 
 A session belongs to Slack because of the `slack_channel` and `slack_thread_ts`

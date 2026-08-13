@@ -216,6 +216,56 @@ impl StreamStore {
         .map_err(spawn_err)?
     }
 
+    /// The Slack file this workspace already holds for a blob.
+    pub(super) async fn slack_file(
+        &self,
+        tenant_id: &str,
+        blob_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let (tenant_id, blob_id) = (tenant_id.to_string(), blob_id.to_string());
+        let reader = self.db.reader.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = reader.open()?;
+            conn.query_row(
+                "SELECT file_id FROM slack_files WHERE tenant_id = ?1 AND blob_id = ?2",
+                rusqlite::params![tenant_id, blob_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| StoreError::Internal(e.to_string()))
+        })
+        .await
+        .map_err(spawn_err)?
+    }
+
+    pub(super) async fn record_slack_file(
+        &self,
+        tenant_id: &str,
+        blob_id: &str,
+        file_id: &str,
+    ) -> Result<(), StoreError> {
+        let (tenant_id, blob_id, file_id) = (
+            tenant_id.to_string(),
+            blob_id.to_string(),
+            file_id.to_string(),
+        );
+        let writer = self.db.writer.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = writer
+                .lock()
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+            conn.execute(
+                "INSERT OR IGNORE INTO slack_files (tenant_id, blob_id, file_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![tenant_id, blob_id, file_id, Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(spawn_err)?
+    }
+
     /// Remove every turn's row: a cancel ends them all.
     pub(super) async fn clear(&self, tenant_id: &str, session_id: &str) -> Result<(), StoreError> {
         let (tenant_id, session_id) = (tenant_id.to_string(), session_id.to_string());

@@ -3,7 +3,9 @@ title: Local development
 group: Running it
 ---
 
-Run the engine on your machine. Iterate on an agent before it goes live.
+Run the engine on your machine. Iterate on an agent before it goes live. The
+[local quick start](./15-quick-start-local.md) is the five-minute version of
+the first two sections.
 
 Everything works locally: Slack, MCP connections, workers, and sub-agents. The
 engine keeps its state in a SQLite file beside your config.

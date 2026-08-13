@@ -161,6 +161,11 @@ enum RequestBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    Document {
+        source: ImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
 }
 
 impl RequestBlock {
@@ -169,7 +174,8 @@ impl RequestBlock {
             RequestBlock::Text { cache_control, .. }
             | RequestBlock::Image { cache_control, .. }
             | RequestBlock::ToolUse { cache_control, .. }
-            | RequestBlock::ToolResult { cache_control, .. } => *cache_control = Some(control),
+            | RequestBlock::ToolResult { cache_control, .. }
+            | RequestBlock::Document { cache_control, .. } => *cache_control = Some(control),
         }
     }
 }
@@ -415,9 +421,28 @@ fn part_to_block(part: &ContentPart) -> Option<RequestBlock> {
             cache_control: None,
         }),
         ContentPart::ImageUrl { image_url } => Some(image_block(&image_url.url)),
-        // Audio/video/file parts have no direct Messages API equivalent here.
+        ContentPart::File { file } => document_block(&file.file_data),
+        // Audio/video parts have no Messages API equivalent here.
         _ => None,
     }
+}
+
+/// A PDF as a `document` block. Other file payloads have no Messages API
+/// shape and are dropped; text files become text parts before this layer.
+fn document_block(file_data: &str) -> Option<RequestBlock> {
+    let rest = file_data.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let media_type = meta.split(';').next().unwrap_or_default();
+    if media_type != "application/pdf" {
+        return None;
+    }
+    Some(RequestBlock::Document {
+        source: ImageSource::Base64 {
+            media_type: media_type.to_string(),
+            data: data.to_string(),
+        },
+        cache_control: None,
+    })
 }
 
 fn image_block(url: &str) -> RequestBlock {
@@ -1342,6 +1367,32 @@ mod tests {
 
     fn thinking_block() -> serde_json::Value {
         json!({ "type": "thinking", "thinking": "let me check", "signature": "sig-abc" })
+    }
+
+    #[test]
+    fn a_pdf_file_part_becomes_a_document_block() {
+        let parts = vec![
+            ContentPart::File {
+                file: crate::protocol::FileData {
+                    filename: "q3.pdf".into(),
+                    file_data: "data:application/pdf;base64,AQID".into(),
+                },
+            },
+            // Not a Messages API shape: dropped rather than sent broken.
+            ContentPart::File {
+                file: crate::protocol::FileData {
+                    filename: "deck.pptx".into(),
+                    file_data: "data:application/vnd.ms-powerpoint;base64,AQID".into(),
+                },
+            },
+        ];
+        let blocks = content_to_blocks(Some(&Content::Parts(parts)));
+        assert_eq!(blocks.len(), 1);
+        let v = serde_json::to_value(&blocks[0]).unwrap();
+        assert_eq!(v["type"], "document");
+        assert_eq!(v["source"]["type"], "base64");
+        assert_eq!(v["source"]["media_type"], "application/pdf");
+        assert_eq!(v["source"]["data"], "AQID");
     }
 
     #[test]

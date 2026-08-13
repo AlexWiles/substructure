@@ -100,6 +100,8 @@ oauth_config:
       - channels:history
       - chat:write
       - assistant:write
+      - files:read
+      - files:write
   pkce_enabled: false
 settings:
   event_subscriptions:
