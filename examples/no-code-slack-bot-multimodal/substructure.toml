@@ -1,0 +1,17 @@
+name = "example"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.assistant]
+llm = "openrouter"
+model = "qwen/qwen3.7-flash"
+system = """You are a helpful assistant."""
+
+[slack]
+dm = "assistant"
+mentions = "assistant"
+
+[serve]
+auth = false
+

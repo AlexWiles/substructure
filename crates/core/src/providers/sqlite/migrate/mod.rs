@@ -7,6 +7,8 @@
 //! Never edit an applied migration — append a new one.
 
 mod m001_baseline;
+mod m002_slack_files;
+mod m003_blobs;
 
 use chrono::Utc;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -24,11 +26,23 @@ pub struct Migration {
     pub up: fn(&Connection) -> rusqlite::Result<()>,
 }
 
-pub const CORE_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "baseline",
-    up: m001_baseline::up,
-}];
+pub const CORE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "baseline",
+        up: m001_baseline::up,
+    },
+    Migration {
+        version: 2,
+        name: "slack_files",
+        up: m002_slack_files::up,
+    },
+    Migration {
+        version: 3,
+        name: "blobs",
+        up: m003_blobs::up,
+    },
+];
 
 /// Applies every pending migration and returns the resulting schema version.
 pub fn run(db: &SqliteDb, ledger: &str, migrations: &[Migration]) -> Result<i64, StoreError> {
@@ -249,7 +263,10 @@ mod tests {
 
         let t = test_db();
         assert_eq!(run(&t.db, "host_migrations", HOST).unwrap(), 1);
-        assert_eq!(run(&t.db, CORE_LEDGER, CORE_MIGRATIONS).unwrap(), 1);
+        assert_eq!(
+            run(&t.db, CORE_LEDGER, CORE_MIGRATIONS).unwrap(),
+            CORE_MIGRATIONS.last().unwrap().version
+        );
 
         let conn = t.db.writer.lock().unwrap();
         for (ledger, expected) in [

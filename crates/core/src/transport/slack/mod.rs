@@ -15,9 +15,13 @@ pub use socket::{MissingEnv, SlackChannel};
 pub use state::StreamStore;
 pub use webhook::webhook_router;
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
-use crate::protocol::{Content, DraftMessage, InterruptOption, InterruptPayload, Role};
+use crate::protocol::{
+    Content, ContentPart, DraftMessage, InterruptOption, InterruptPayload, Role,
+};
 
 /// A message the bot must answer: a mention or a DM.
 #[derive(Debug, PartialEq)]
@@ -31,6 +35,35 @@ struct Inbound {
     /// The asker's workspace (their own for a Slack Connect guest).
     team: Option<String>,
     text: String,
+    files: Vec<SlackFile>,
+}
+
+/// An attachment on a Slack message.
+#[derive(Debug, Clone, PartialEq)]
+struct SlackFile {
+    id: String,
+    name: Option<String>,
+    mimetype: String,
+    url_private: String,
+    size: u64,
+}
+
+fn files_of(event: &Value) -> Vec<SlackFile> {
+    let Some(files) = event["files"].as_array() else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .filter_map(|f| {
+            Some(SlackFile {
+                id: f["id"].as_str()?.to_string(),
+                name: f["name"].as_str().map(str::to_string),
+                mimetype: f["mimetype"].as_str()?.to_string(),
+                url_private: f["url_private"].as_str()?.to_string(),
+                size: f["size"].as_u64().unwrap_or(0),
+            })
+        })
+        .collect()
 }
 
 /// A usable `app_mention`. A DM mention also arrives as `message.im`;
@@ -52,6 +85,7 @@ fn app_mention(payload: &Value) -> Option<Inbound> {
         user: event["user"].as_str()?.to_string(),
         team: asker_team(payload),
         text: event["text"].as_str()?.to_string(),
+        files: files_of(event),
     })
 }
 
@@ -64,24 +98,38 @@ fn asker_team(payload: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// A user's DM. Bot echoes and subtyped messages are `None`.
+/// An upload arrives as `file_share`; every other subtype is not conversation.
+fn subtype_ok(m: &Value) -> bool {
+    match m["subtype"].as_str() {
+        None => true,
+        Some(subtype) => subtype == "file_share",
+    }
+}
+
+/// A user's DM. Bot echoes and subtyped messages (uploads aside) are `None`.
 fn dm_message(payload: &Value) -> Option<Inbound> {
     let event = &payload["event"];
     if event["type"].as_str() != Some("message")
         || event["channel_type"].as_str() != Some("im")
-        || event["subtype"].is_string()
+        || !subtype_ok(event)
         || event["bot_id"].is_string()
     {
         return None;
     }
     let ts = event["ts"].as_str()?;
+    let files = files_of(event);
+    let text = event["text"].as_str().unwrap_or_default();
+    if text.is_empty() && files.is_empty() {
+        return None;
+    }
     Some(Inbound {
         channel: event["channel"].as_str()?.to_string(),
         thread_ts: event["thread_ts"].as_str().unwrap_or(ts).to_string(),
         ts: ts.to_string(),
         user: event["user"].as_str()?.to_string(),
         team: asker_team(payload),
-        text: event["text"].as_str()?.to_string(),
+        text: text.to_string(),
+        files,
     })
 }
 
@@ -108,6 +156,7 @@ struct SlackMsg {
     meta: Option<ReplyMeta>,
     text: String,
     blocks: Vec<Value>,
+    files: Vec<SlackFile>,
 }
 
 /// The last message of ours in `resp` with no reply stamp: an open stream's
@@ -129,7 +178,8 @@ fn unstamped_ours(resp: &Value, ours: &[String]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Thread messages. Drops subtyped messages and our own unstamped posts.
+/// Thread messages. Drops subtyped messages (uploads aside) and our own
+/// unstamped posts.
 fn parse_replies(resp: &Value, mine: &[String]) -> Vec<SlackMsg> {
     let Some(messages) = resp["messages"].as_array() else {
         return Vec::new();
@@ -137,7 +187,7 @@ fn parse_replies(resp: &Value, mine: &[String]) -> Vec<SlackMsg> {
     messages
         .iter()
         .filter_map(|m| {
-            if m["type"].as_str() != Some("message") || m["subtype"].is_string() {
+            if m["type"].as_str() != Some("message") || !subtype_ok(m) {
                 return None;
             }
             let meta: Option<ReplyMeta> = (m["metadata"]["event_type"].as_str()
@@ -160,6 +210,7 @@ fn parse_replies(resp: &Value, mine: &[String]) -> Vec<SlackMsg> {
                 meta,
                 text: m["text"].as_str().unwrap_or_default().to_string(),
                 blocks: m["blocks"].as_array().cloned().unwrap_or_default(),
+                files: files_of(m),
             })
         })
         .collect()
@@ -167,21 +218,22 @@ fn parse_replies(resp: &Value, mine: &[String]) -> Vec<SlackMsg> {
 
 /// The blocks with the buttons removed and the outcome added.
 /// The unseen thread delta as drafts. Our stamped replies map to their
-/// recorded assistant nodes.
+/// recorded assistant nodes. `uploads` maps a file id to its stored blob uri.
 fn build_batch(
     path: &[crate::protocol::Message],
     thread: &[SlackMsg],
     inbound: &Inbound,
+    uploads: &HashMap<String, ContentPart>,
 ) -> Vec<DraftMessage> {
     let mut batch = Vec::new();
     let mut seen: std::collections::HashSet<String> = path.iter().map(|m| m.id.clone()).collect();
     let mut thread: Vec<&SlackMsg> = thread.iter().collect();
     thread.sort_by(|a, b| a.ts.cmp(&b.ts));
     for msg in thread {
-        let (id, role, text) = match &msg.meta {
+        let (id, role, content) = match &msg.meta {
             // A stamp with no message id is skipped.
             Some(meta) => match &meta.message_id {
-                Some(id) => (id.clone(), Role::Assistant, msg.text.clone()),
+                Some(id) => (id.clone(), Role::Assistant, Content::Text(msg.text.clone())),
                 None => continue,
             },
             None => {
@@ -189,11 +241,12 @@ fn build_batch(
                     Some(author) => format!("<@{author}>: {}", msg.text),
                     None => msg.text.clone(),
                 };
-                (format!("slack:{}", msg.ts), Role::User, text)
+                let content = with_attachments(text, &msg.files, uploads);
+                (format!("slack:{}", msg.ts), Role::User, content)
             }
         };
         if seen.insert(id.clone()) {
-            batch.push(draft(&id, role, text));
+            batch.push(draft(&id, role, content));
         }
     }
     let inbound_id = format!("slack:{}", inbound.ts);
@@ -201,17 +254,53 @@ fn build_batch(
         batch.push(draft(
             &inbound_id,
             Role::User,
-            format!("<@{}>: {}", inbound.user, inbound.text),
+            with_attachments(
+                format!("<@{}>: {}", inbound.user, inbound.text),
+                &inbound.files,
+                uploads,
+            ),
         ));
     }
     batch
 }
 
-fn draft(id: &str, role: Role, content: String) -> DraftMessage {
+/// The text plus the message's stored attachments. A file with no stored
+/// part (unreadable type, too big, or the store failed) becomes a note, so
+/// the model knows the attachment exists.
+fn with_attachments(
+    text: String,
+    files: &[SlackFile],
+    uploads: &HashMap<String, ContentPart>,
+) -> Content {
+    let mut attached = Vec::new();
+    let mut notes = Vec::new();
+    for f in files {
+        match uploads.get(&f.id) {
+            Some(part) => attached.push(part.clone()),
+            None => notes.push(format!(
+                "{} ({})",
+                f.name.as_deref().unwrap_or("attachment"),
+                f.mimetype
+            )),
+        }
+    }
+    let mut text = text;
+    if !notes.is_empty() {
+        text.push_str(&format!("\n[unreadable attachments: {}]", notes.join(", ")));
+    }
+    if attached.is_empty() {
+        return Content::Text(text);
+    }
+    let mut parts = vec![ContentPart::Text { text }];
+    parts.extend(attached);
+    Content::Parts(parts)
+}
+
+fn draft(id: &str, role: Role, content: Content) -> DraftMessage {
     DraftMessage {
         id: Some(id.to_string()),
         role,
-        content: Some(Content::Text(content)),
+        content: Some(content),
         tool_calls: None,
         tool_call_id: None,
         name: None,
@@ -400,6 +489,7 @@ mod tests {
                 user: "U1".into(),
                 team: None,
                 text: "<@UBOT> what is up".into(),
+                files: Vec::new(),
             })
         );
     }
@@ -435,6 +525,7 @@ mod tests {
                 user: "U1".into(),
                 team: None,
                 text: "hi there".into(),
+                files: Vec::new(),
             })
         );
     }
@@ -483,6 +574,180 @@ mod tests {
             "channel": "C1",
         }));
         assert_eq!(dm_message(&channel_msg), None);
+    }
+
+    fn file_json(id: &str, mimetype: &str) -> Value {
+        serde_json::json!({
+            "id": id,
+            "name": "shot.png",
+            "mimetype": mimetype,
+            "url_private": format!("https://files.slack.com/{id}"),
+            "size": 1234,
+        })
+    }
+
+    #[test]
+    fn dm_file_share_keeps_its_files() {
+        let payload = envelope_payload(serde_json::json!({
+            "type": "message",
+            "channel_type": "im",
+            "subtype": "file_share",
+            "user": "U1",
+            "text": "look at this",
+            "ts": "5.0",
+            "channel": "D1",
+            "files": [file_json("F1", "image/png")],
+        }));
+        let inbound = dm_message(&payload).unwrap();
+        assert_eq!(
+            inbound.files,
+            vec![SlackFile {
+                id: "F1".into(),
+                name: Some("shot.png".into()),
+                mimetype: "image/png".into(),
+                url_private: "https://files.slack.com/F1".into(),
+                size: 1234,
+            }]
+        );
+    }
+
+    #[test]
+    fn image_only_dm_is_still_a_message() {
+        let payload = envelope_payload(serde_json::json!({
+            "type": "message",
+            "channel_type": "im",
+            "subtype": "file_share",
+            "user": "U1",
+            "text": "",
+            "ts": "5.0",
+            "channel": "D1",
+            "files": [file_json("F1", "image/png")],
+        }));
+        assert!(dm_message(&payload).is_some());
+        // No text and no files is still nothing to answer.
+        let empty = envelope_payload(serde_json::json!({
+            "type": "message",
+            "channel_type": "im",
+            "user": "U1",
+            "text": "",
+            "ts": "6.0",
+            "channel": "D1",
+        }));
+        assert_eq!(dm_message(&empty), None);
+    }
+
+    #[test]
+    fn mention_keeps_its_files() {
+        let payload = envelope_payload(serde_json::json!({
+            "type": "app_mention",
+            "user": "U1",
+            "text": "<@UBOT> see attached",
+            "ts": "2.0",
+            "channel": "C1",
+            "files": [file_json("F2", "image/jpeg")],
+        }));
+        assert_eq!(app_mention(&payload).unwrap().files.len(), 1);
+    }
+
+    #[test]
+    fn replies_keep_file_share_messages_and_their_files() {
+        let resp = serde_json::json!({ "ok": true, "messages": [
+            { "type": "message", "subtype": "file_share", "user": "U1", "text": "here",
+              "ts": "1.0", "files": [file_json("F1", "image/png")] },
+            { "type": "message", "subtype": "channel_join", "user": "U2", "text": "joined", "ts": "2.0" },
+        ]});
+        let msgs = parse_replies(&resp, &[]);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].files[0].id, "F1");
+    }
+
+    #[test]
+    fn batch_attaches_stored_images_and_skips_unstored_files() {
+        let mut msg = slack_msg("1.0", "U1", "here");
+        msg.files = vec![
+            SlackFile {
+                id: "F1".into(),
+                name: None,
+                mimetype: "image/png".into(),
+                url_private: "https://files.slack.com/F1".into(),
+                size: 10,
+            },
+            SlackFile {
+                id: "F2".into(),
+                name: None,
+                mimetype: "application/pdf".into(),
+                url_private: "https://files.slack.com/F2".into(),
+                size: 10,
+            },
+        ];
+        let uploads = HashMap::from_iter([(
+            "F1".to_string(),
+            ContentPart::ImageUrl {
+                image_url: crate::protocol::ImageUrl {
+                    url: "blob://t/ab?mime=image%2Fpng&size=10".to_string(),
+                },
+            },
+        )]);
+        let batch = build_batch(&[], &[msg], &mention_at("3.0"), &uploads);
+        match batch[0].content.as_ref().unwrap() {
+            Content::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                // The unstored pdf becomes a note the model can act on.
+                assert!(matches!(
+                    &parts[0],
+                    ContentPart::Text { text }
+                        if text == "<@U1>: here\n[unreadable attachments: attachment (application/pdf)]"
+                ));
+                assert!(matches!(
+                    &parts[1],
+                    ContentPart::ImageUrl { image_url } if image_url.url.starts_with("blob://")
+                ));
+            }
+            _ => panic!("expected parts"),
+        }
+        // No files at all: plain text, as before.
+        let batch = build_batch(
+            &[],
+            &[slack_msg("1.0", "U1", "here")],
+            &mention_at("3.0"),
+            &uploads,
+        );
+        assert!(matches!(
+            batch[0].content.as_ref().unwrap(),
+            Content::Text(_)
+        ));
+    }
+
+    #[test]
+    fn a_stored_pdf_rides_as_a_file_part() {
+        let mut msg = slack_msg("1.0", "U1", "read this");
+        msg.files = vec![SlackFile {
+            id: "F9".into(),
+            name: Some("q3.pdf".into()),
+            mimetype: "application/pdf".into(),
+            url_private: "https://files.slack.com/F9".into(),
+            size: 10,
+        }];
+        let uploads = HashMap::from_iter([(
+            "F9".to_string(),
+            ContentPart::File {
+                file: crate::protocol::FileData {
+                    filename: "q3.pdf".into(),
+                    file_data: "blob://t/ab?mime=application%2Fpdf&size=10".into(),
+                },
+            },
+        )]);
+        let batch = build_batch(&[], &[msg], &mention_at("3.0"), &uploads);
+        match batch[0].content.as_ref().unwrap() {
+            Content::Parts(parts) => {
+                assert!(matches!(
+                    &parts[1],
+                    ContentPart::File { file }
+                        if file.filename == "q3.pdf" && file.file_data.starts_with("blob://")
+                ));
+            }
+            _ => panic!("expected parts"),
+        }
     }
 
     #[test]
@@ -545,6 +810,7 @@ mod tests {
             meta: None,
             text: text.into(),
             blocks: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -560,6 +826,7 @@ mod tests {
             }),
             text: text.into(),
             blocks: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -571,7 +838,12 @@ mod tests {
             user: "U2".into(),
             team: None,
             text: "<@UBOT> go".into(),
+            files: Vec::new(),
         }
+    }
+
+    fn no_uploads() -> HashMap<String, ContentPart> {
+        HashMap::new()
     }
 
     #[test]
@@ -638,7 +910,7 @@ mod tests {
             ours_msg("2.5", "uuid-a1", "how about: subs"),
             slack_msg("1.0", "U1", "we need a slogan"),
         ];
-        let batch = build_batch(&path, &thread, &mention_at("3.0"));
+        let batch = build_batch(&path, &thread, &mention_at("3.0"), &no_uploads());
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].id.as_deref(), Some("slack:3.0"));
         assert_eq!(text_of(&batch[0]), "<@U2>: <@UBOT> go");
@@ -651,7 +923,7 @@ mod tests {
             ours_msg("2.5", "uuid-a1", "how about: subs"),
             slack_msg("3.0", "U2", "<@UBOT> go"),
         ];
-        let batch = build_batch(&[], &thread, &mention_at("3.0"));
+        let batch = build_batch(&[], &thread, &mention_at("3.0"), &no_uploads());
         assert_eq!(
             batch
                 .iter()
@@ -672,6 +944,7 @@ mod tests {
             meta: Some(ReplyMeta::default()),
             text: "reply".into(),
             blocks: Vec::new(),
+            files: Vec::new(),
         };
         // A double post with the same id becomes one node.
         let thread = vec![
@@ -679,7 +952,7 @@ mod tests {
             ours_msg("2.6", "uuid-a1", "how about: subs"),
             ours_msg("2.7", "uuid-a1", "how about: subs"),
         ];
-        let batch = build_batch(&[], &thread, &mention_at("3.0"));
+        let batch = build_batch(&[], &thread, &mention_at("3.0"), &no_uploads());
         assert_eq!(
             batch
                 .iter()
@@ -691,13 +964,13 @@ mod tests {
 
     #[test]
     fn mention_missing_from_fetch_is_appended_once() {
-        let batch = build_batch(&[], &[], &mention_at("9.0"));
+        let batch = build_batch(&[], &[], &mention_at("9.0"), &no_uploads());
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].id.as_deref(), Some("slack:9.0"));
         assert_eq!(text_of(&batch[0]), "<@U2>: <@UBOT> go");
 
         let path = vec![message("slack:9.0", Role::User, "<@U2>: <@UBOT> go")];
-        let batch = build_batch(&path, &[], &mention_at("9.0"));
+        let batch = build_batch(&path, &[], &mention_at("9.0"), &no_uploads());
         assert!(batch.is_empty());
     }
 
@@ -895,8 +1168,9 @@ mod tests {
             }),
             text: "Run it?".into(),
             blocks: Vec::new(),
+            files: Vec::new(),
         };
-        let batch = build_batch(&[], &[prompt_post], &mention_at("9.0"));
+        let batch = build_batch(&[], &[prompt_post], &mention_at("9.0"), &no_uploads());
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].id.as_deref(), Some("slack:9.0"));
     }

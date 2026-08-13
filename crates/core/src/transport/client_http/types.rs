@@ -100,6 +100,11 @@ pub fn session_response(session_id: String, session: &SessionState) -> ClientSes
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GetBlobParams {
+    pub uri: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct StreamSessionEventsParams {
     #[serde(default)]
     pub turn_id: Option<String>,

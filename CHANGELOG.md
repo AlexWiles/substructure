@@ -12,9 +12,14 @@ together at the same version.
 ### Added
 
 - Agents can set `effort` in the manifest.
+- Slack messages with images, PDFs, and text files reach the model.
+- Slack replies carry the images the model makes.
+- Add a blob store for message attachments and generated images. The local engine keeps the bytes in its database.
+- Add a client endpoint that serves stored blobs.
 
 ### Fixed
 
+- `subs serve --slack-agent` stops at startup if the name is not a declared agent.
 - A model that refuses a request stops the run, instead of answering it with nothing.
 - Anthropic calls send the reasoning fields, the output limit, and the sampling that the model reads.
 - OpenAI calls read the whole model name, and keep `temperature` for chat models and at no effort.
@@ -23,6 +28,7 @@ together at the same version.
 - Streamed calls now read `data:` lines that have no space after the colon.
 - Responses keep the model's reasoning, and Anthropic and OpenRouter calls send it back.
 - Calls to OpenAI-compatible providers no longer send engine-internal message fields.
+- Engine context added inline keeps a message's image parts.
 
 ## [0.4.1] - 2026-08-11
 

@@ -46,8 +46,8 @@ The engine writes to a store you can replace. The CLI uses SQLite at the path
 db = "/var/lib/substructure/engine.db"
 ```
 
-The database holds the event log, the sessions, and the connector credentials.
-Back it up. See [Durability](./200-durability.md).
+The database holds the event log, the sessions, the connector credentials, and
+the attachment bytes. Back it up. See [Durability](./200-durability.md).
 
 ## Authentication
 
@@ -92,6 +92,9 @@ features:
     display_name: substructure.ai
     always_online: true
   agent_view: {}
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
 oauth_config:
   scopes:
     bot:
@@ -100,6 +103,8 @@ oauth_config:
       - channels:history
       - chat:write
       - assistant:write
+      - files:read
+      - files:write
   pkce_enabled: false
 settings:
   event_subscriptions:
@@ -116,6 +121,10 @@ settings:
 
 `agent_view` turns on the Agents tab in app settings. That adds
 `assistant:write`, which the bot needs to stream a turn's progress.
+
+`app_home` opens the Messages tab. Without it Slack says "Sending messages to
+this app has been turned off" and a person cannot DM the bot, whatever the
+scopes say.
 
 Then get the app token and the bot token, and run the server.
 

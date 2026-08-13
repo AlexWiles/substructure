@@ -11,14 +11,16 @@ use crate::cli::DEFAULT_TENANT;
 use crate::connectors::credential::StoredCredentials;
 use crate::connectors::registry::{Connections, LocalRegistry};
 use crate::llm::{LlmProviderRegistry, LlmProviderTrait, LlmTask};
+use crate::manifest;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
-    SqliteCredentialStore, SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore,
-    SqliteWakeStore, SqliteWorkerQueue,
+    SqliteBlobStore, SqliteCredentialStore, SqliteCursorStore, SqliteDb, SqliteEventStore,
+    SqliteSessionIndexStore, SqliteWakeStore, SqliteWorkerQueue,
 };
+use crate::runtime::blob::{BlobResolvingLlm, BlobStore};
 use crate::runtime::connector::ConnectorTask;
 use crate::sub_agent::SubAgentTask;
 use crate::transport::admin_http::{self, AdminHttpState};
@@ -70,8 +72,14 @@ impl ServeArgs {
 ///
 /// `--slack-agent` is the one-flag way to serve a whole workspace, so it sets
 /// both DMs and unnamed channels; the file's channel table still stands, and
-/// `off` on a channel still wins.
-fn slack_routing(cfg: &ProjectConfig, flag: Option<String>) -> Option<Routing> {
+/// `off` on a channel still wins. The file's own names are checked when it
+/// loads; the flag is checked here, so a typo is an error at startup rather
+/// than a bot that connects and answers nowhere.
+fn slack_routing(cfg: &ProjectConfig, flag: Option<String>) -> anyhow::Result<Option<Routing>> {
+    if let Some(agent) = &flag {
+        manifest::check_slack_agent(agent, &cfg.manifest())
+            .map_err(|e| anyhow::anyhow!("--slack-agent: {e}"))?;
+    }
     let slack = cfg.slack.clone().unwrap_or_default();
     let mut routing = Routing::new()
         .dm(flag.clone().or(slack.dm))
@@ -79,7 +87,7 @@ fn slack_routing(cfg: &ProjectConfig, flag: Option<String>) -> Option<Routing> {
     for (id, channel) in &slack.channel {
         routing = routing.channel(id, channel.agent().map(str::to_string));
     }
-    (!routing.is_empty()).then_some(routing)
+    Ok((!routing.is_empty()).then_some(routing))
 }
 
 /// The dashboard page a person authorizes a connection on. The API's own
@@ -101,7 +109,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     // flag > environment > file > default, applied one field at a time.
     let cfg = project_config::load(args.config.as_deref())?;
 
-    let slack_routing = slack_routing(&cfg, args.slack_agent);
+    let slack_routing = slack_routing(&cfg, args.slack_agent)?;
     let server = cfg.serve.clone().unwrap_or_default();
 
     let host = args
@@ -117,10 +125,16 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         None => std::process::exit(2),
     };
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
+    let blobs: Arc<dyn BlobStore> = Arc::new(SqliteBlobStore::new(db.clone()));
     let slack = match slack_routing {
         Some(routing) => {
             let store = StreamStore::new(db.clone())?;
-            match SlackChannel::from_env(routing, DEFAULT_TENANT.to_string(), Some(store)) {
+            match SlackChannel::from_env(
+                routing,
+                DEFAULT_TENANT.to_string(),
+                Some(store),
+                Some(blobs.clone()),
+            ) {
                 Ok(s) => Some(s),
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -132,7 +146,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     };
 
     // Held for the process's life: dropping it aborts the decision loops.
-    let (rt, _adapter) = start_engine(db, env.providers, &cfg).await?;
+    let (rt, _adapter) = start_engine(db, blobs.clone(), env.providers, &cfg).await?;
     announce_agents(&cfg);
 
     let auth = match env.auth {
@@ -163,6 +177,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         runtime: rt.clone(),
         auth: auth.client.clone(),
         shutdown: shutdown.clone(),
+        blobs: Some(blobs.clone()),
     });
     let worker_routes = worker_http::router(WorkerHttpState {
         runtime: rt.clone(),
@@ -217,6 +232,7 @@ fn announce_agents(cfg: &ProjectConfig) {
 /// `run` (which drives a single turn without any HTTP server).
 pub(crate) async fn start_engine(
     db: SqliteDb,
+    blobs: Arc<dyn BlobStore>,
     providers: Vec<ProviderEnv>,
     cfg: &ProjectConfig,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
@@ -269,11 +285,15 @@ pub(crate) async fn start_engine(
             "no engine-run [llm.*] block declared; every model call belongs to a worker"
         );
     }
-    let llm_providers = Arc::new(LlmProviderRegistry::new(
-        providers
-            .into_iter()
-            .map(|p| (p.name.clone(), client(p)))
-            .collect(),
+    // Prompts persist `blob://` refs; the wrapper inlines the bytes at the call.
+    let llm_providers = Arc::new(BlobResolvingLlm::new(
+        Arc::new(LlmProviderRegistry::new(
+            providers
+                .into_iter()
+                .map(|p| (p.name.clone(), client(p)))
+                .collect(),
+        )),
+        blobs,
     ));
 
     let agents = Arc::new(StaticAgentDirectory::new(
@@ -349,5 +369,36 @@ fn client(p: ProviderEnv) -> Arc<dyn LlmProviderTrait> {
         // Never reached: `provider_bindings` keeps worker blocks out of the
         // registry, since the engine never calls one.
         ProviderKind::Worker => unreachable!("a worker block has no engine-side client"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ProjectConfig {
+        ProjectConfig::parse(
+            "name = \"t\"\n[llm.o]\ntype = \"openrouter\"\n\
+             [agent.assistant]\nllm = \"o\"\nmodel = \"m\"\n",
+            std::path::Path::new("substructure.toml"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_flag_must_name_a_declared_agent() {
+        let err = slack_routing(&config(), Some("assistants".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--slack-agent"), "got {err}");
+        assert!(err.contains("Declared: assistant"), "got {err}");
+    }
+
+    #[test]
+    fn a_declared_agent_routes_dms_and_mentions() {
+        let routing = slack_routing(&config(), Some("assistant".into()))
+            .unwrap()
+            .expect("routing");
+        assert_eq!(routing.to_string(), "dm→assistant, mentions→assistant");
     }
 }

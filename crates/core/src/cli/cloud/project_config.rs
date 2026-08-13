@@ -224,7 +224,7 @@ impl ProjectConfig {
         self.remote.get_or_insert_with(Remote::default)
     }
 
-    fn parse(s: &str, path: &Path) -> Result<Self> {
+    pub(crate) fn parse(s: &str, path: &Path) -> Result<Self> {
         let at = path.display();
         let value: toml::Value = toml::from_str(s).map_err(|e| anyhow!("parsing {at}: {e}"))?;
         moved_keys(&value, &at)?;

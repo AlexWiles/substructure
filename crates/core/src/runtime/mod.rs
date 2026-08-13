@@ -40,6 +40,7 @@ use worker::{
     AgentDirectory, DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest, WorkerQueue,
 };
 
+pub mod blob;
 mod caller;
 pub mod connector;
 pub mod event_store;

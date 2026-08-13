@@ -9,18 +9,30 @@ use super::render::{self, PromptView, Rendered};
 use super::state::StreamStore;
 use super::{
     app_mention, block_action, build_batch, clip, display_of, dm_message, draft, prompt_options,
-    resolution_text, section_block, unstamped_ours, Click, Inbound, ReplyMeta, MAX_FALLBACK,
-    MAX_MARKDOWN, REPLY_EVENT_TYPE,
+    resolution_text, section_block, unstamped_ours, with_attachments, Click, Inbound, ReplyMeta,
+    SlackFile, MAX_FALLBACK, MAX_MARKDOWN, REPLY_EVENT_TYPE,
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
-use crate::protocol::{ClientInput, OwnerKind, Role, SessionOwner};
+use crate::protocol::{
+    ClientInput, Content, ContentPart, FileData, ImageUrl, OwnerKind, Role, SessionOwner,
+};
+use crate::runtime::blob::{text_like, BlobError, BlobRef, BlobStore, NewBlob};
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
 use crate::session::state::SessionStatus;
 use crate::session::SessionEvent;
 use crate::transport::channel::ChannelContext;
 use crate::{Caller, HandleClientInput, RuntimeError};
+
+/// Anthropic's own cap; a larger image fails the call anyway.
+const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+/// Under provider request caps with room for base64 growth.
+const MAX_PDF_BYTES: u64 = 10 * 1024 * 1024;
+/// Text inlines into the prompt, so a little goes a long way.
+const MAX_TEXT_BYTES: u64 = 1024 * 1024;
+const IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const IMAGE_NOT_ATTACHED: &str = "_an image could not be attached_";
 
 /// Slack limits the rate of `chat.appendStream`.
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
@@ -236,6 +248,50 @@ fn owner_thread(meta: &crate::session::state::EventMeta) -> Option<Thread> {
 }
 
 /// A poisoned lock guards only bookkeeping; keep serving.
+/// How large each attachment type may be, or `None` for a type no model
+/// reads. Text files inline into the prompt, so their cap is the tightest.
+fn attachment_cap(mime: &str) -> Option<u64> {
+    if IMAGE_MIMES.contains(&mime) {
+        Some(MAX_IMAGE_BYTES)
+    } else if mime == "application/pdf" {
+        Some(MAX_PDF_BYTES)
+    } else if text_like(mime) {
+        Some(MAX_TEXT_BYTES)
+    } else {
+        None
+    }
+}
+
+/// A stored attachment as the message part its kind rides in.
+fn attachment_part(r: &BlobRef) -> ContentPart {
+    if r.mime.starts_with("image/") {
+        ContentPart::ImageUrl {
+            image_url: ImageUrl { url: r.uri() },
+        }
+    } else {
+        ContentPart::File {
+            file: FileData {
+                filename: r.name.clone().unwrap_or_else(|| "file".to_string()),
+                file_data: r.uri(),
+            },
+        }
+    }
+}
+
+/// The blocks with the image blocks replaced by a note, or `None` when there
+/// is nothing to strip.
+fn without_images(blocks: &[Value]) -> Option<Vec<Value>> {
+    let mut kept: Vec<Value> = blocks
+        .iter()
+        .filter(|b| b["type"] != "image")
+        .cloned()
+        .collect();
+    (kept.len() != blocks.len()).then(|| {
+        kept.push(render::context_block(IMAGE_NOT_ATTACHED));
+        kept
+    })
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -460,15 +516,18 @@ pub struct SlackBot {
     ctx: Arc<OnceLock<ChannelContext>>,
     streams: Arc<Streams>,
     store: Option<Arc<StreamStore>>,
+    blobs: Option<Arc<dyn BlobStore>>,
 }
 
 impl SlackBot {
     /// `store` holds durable stream state: a restart resumes open streaming
     /// messages in place. Without one a restart orphans them.
+    /// `blobs` holds uploaded images; without one attachments are dropped.
     pub fn new(
         resolver: Arc<dyn WorkspaceResolver>,
         api_base: String,
         store: Option<StreamStore>,
+        blobs: Option<Arc<dyn BlobStore>>,
     ) -> Self {
         Self {
             resolver,
@@ -477,6 +536,7 @@ impl SlackBot {
             ctx: Arc::new(OnceLock::new()),
             streams: Arc::new(Streams::default()),
             store: store.map(Arc::new),
+            blobs,
         }
     }
 
@@ -663,6 +723,213 @@ impl SlackBot {
         Ok(resp)
     }
 
+    /// The stored part for each attachment, by file id. A file that cannot be
+    /// stored (type, size, or a failure) is absent, and its message carries a
+    /// note instead.
+    async fn store_attachments(
+        &self,
+        ws: &Workspace,
+        files: impl Iterator<Item = SlackFile>,
+    ) -> HashMap<String, ContentPart> {
+        let Some(blobs) = &self.blobs else {
+            return HashMap::new();
+        };
+        let mut out = HashMap::new();
+        for f in files {
+            let Some(cap) = attachment_cap(&f.mimetype) else {
+                continue;
+            };
+            if f.size > cap {
+                tracing::warn!(file = %f.id, size = f.size, "slack: attachment over size cap; skipped");
+                continue;
+            }
+            let bytes = match self.download_file(ws, &f.url_private).await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    tracing::warn!(error = %e, file = %f.id, "slack: file download failed (bot token lacks files:read?)");
+                    continue;
+                }
+            };
+            let stored = blobs
+                .put(NewBlob {
+                    tenant_id: ws.tenant_id.clone(),
+                    mime: f.mimetype.clone(),
+                    name: f.name.clone(),
+                    bytes,
+                })
+                .await;
+            match stored {
+                Ok(r) => {
+                    out.insert(f.id, attachment_part(&r));
+                }
+                Err(e) => tracing::warn!(error = %e, file = %f.id, "slack: blob put failed"),
+            }
+        }
+        out
+    }
+
+    /// `url_private` needs the bot token. Without `files:read` Slack answers
+    /// 200 with an HTML login page, so the content type is the check.
+    async fn download_file(&self, ws: &Workspace, url: &str) -> Result<Vec<u8>, Error> {
+        let resp = self
+            .http
+            .get(url)
+            .bearer_auth(&ws.bot_token)
+            .send()
+            .await
+            .map_err(Error::retryable)?;
+        if !resp.status().is_success() {
+            return Err(Error::Terminal(format!("http {}", resp.status())));
+        }
+        let html = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/html"));
+        if html {
+            return Err(Error::Terminal("got html, not the file".to_string()));
+        }
+        Ok(resp.bytes().await.map_err(Error::retryable)?.to_vec())
+    }
+
+    /// Blocks for the images on the turn's reply. Each blob uploads to Slack
+    /// once per workspace; the block embeds the Slack file. A file that cannot
+    /// be delivered becomes a note instead of sinking the reply.
+    async fn turn_image_blocks(&self, ws: &Workspace, session_id: &str) -> Vec<Value> {
+        if self.blobs.is_none() {
+            return Vec::new();
+        }
+        let path = self.session_path(ws, session_id).await;
+        let Some(message) = path.last().filter(|m| matches!(m.role, Role::Assistant)) else {
+            return Vec::new();
+        };
+        let Some(Content::Parts(parts)) = &message.content else {
+            return Vec::new();
+        };
+        let mut blocks = Vec::new();
+        for part in parts {
+            let ContentPart::ImageUrl { image_url } = part else {
+                continue;
+            };
+            match self.slack_image_block(ws, &image_url.url).await {
+                Ok(Some(block)) => blocks.push(block),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, %session_id, "slack: image not attached");
+                    blocks.push(render::context_block(IMAGE_NOT_ATTACHED));
+                }
+            }
+        }
+        blocks
+    }
+
+    /// One image part as a block: an https url embeds directly; a blob ref
+    /// uploads (or reuses the workspace's upload) and embeds the Slack file.
+    async fn slack_image_block(&self, ws: &Workspace, url: &str) -> Result<Option<Value>, Error> {
+        if url.starts_with("https://") {
+            return Ok(Some(serde_json::json!({
+                "type": "image", "image_url": url, "alt_text": "image",
+            })));
+        }
+        let Some(r) = BlobRef::parse(url) else {
+            return Ok(None);
+        };
+        if r.tenant_id != ws.tenant_id || !r.mime.starts_with("image/") {
+            return Ok(None);
+        }
+        let file_id = self.slack_file_for(ws, &r).await?;
+        Ok(Some(serde_json::json!({
+            "type": "image",
+            "slack_file": { "id": file_id },
+            "alt_text": r.name.as_deref().unwrap_or("image"),
+        })))
+    }
+
+    async fn slack_file_for(&self, ws: &Workspace, r: &BlobRef) -> Result<String, Error> {
+        if let Some(store) = self.store.as_deref() {
+            if let Ok(Some(id)) = store.slack_file(&ws.tenant_id, &r.id).await {
+                return Ok(id);
+            }
+        }
+        let blobs = self
+            .blobs
+            .as_ref()
+            .ok_or_else(|| Error::Terminal("no blob store".to_string()))?;
+        let bytes = blobs.get(r).await.map_err(|e| match e {
+            BlobError::Io(m) => Error::Retryable(m),
+            e => Error::Terminal(e.to_string()),
+        })?;
+        let name = r
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("image.{}", r.mime.strip_prefix("image/").unwrap_or("bin")));
+        let file_id = self.upload_file(ws, &name, bytes).await?;
+        if let Some(store) = self.store.as_deref() {
+            if let Err(e) = store
+                .record_slack_file(&ws.tenant_id, &r.id, &file_id)
+                .await
+            {
+                tracing::warn!(error = %e, "slack: uploaded file not recorded");
+            }
+        }
+        Ok(file_id)
+    }
+
+    /// The external upload dance: get a one-time url, put the bytes, complete.
+    /// The file stays unshared; the stamped reply embeds it by id.
+    async fn upload_file(
+        &self,
+        ws: &Workspace,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String, Error> {
+        // This method takes form or query args, not JSON.
+        let query =
+            serde_urlencoded::to_string([("filename", name), ("length", &bytes.len().to_string())])
+                .map_err(Error::retryable)?;
+        let resp: Value = self
+            .http
+            .get(format!(
+                "{}/files.getUploadURLExternal?{query}",
+                self.api_base
+            ))
+            .bearer_auth(&ws.bot_token)
+            .send()
+            .await
+            .map_err(Error::retryable)?
+            .json()
+            .await
+            .map_err(Error::retryable)?;
+        if resp["ok"].as_bool() != Some(true) {
+            return Err(Error::from_response(&resp));
+        }
+        let (Some(upload_url), Some(file_id)) =
+            (resp["upload_url"].as_str(), resp["file_id"].as_str())
+        else {
+            return Err(Error::Terminal(
+                "upload url response incomplete".to_string(),
+            ));
+        };
+        let put = self
+            .http
+            .post(upload_url)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(Error::retryable)?;
+        if !put.status().is_success() {
+            return Err(Error::Retryable(format!("upload http {}", put.status())));
+        }
+        let file_id = file_id.to_string();
+        self.api_call(
+            ws,
+            "files.completeUploadExternal",
+            serde_json::json!({ "files": [{ "id": file_id, "title": name }] }),
+        )
+        .await?;
+        Ok(file_id)
+    }
+
     /// The session's active path, or empty.
     async fn session_path(
         &self,
@@ -743,12 +1010,32 @@ impl SlackBot {
 
         let fetched = self.fetch_thread(ws, &thread, cursor).await;
 
+        // Store the unseen images before drafting, so the drafts hold refs.
+        let uploads = {
+            let seen: HashSet<&str> = path.iter().map(|m| m.id.as_str()).collect();
+            let mut unseen: HashMap<String, SlackFile> = HashMap::new();
+            let mut collect = |ts: &str, files: &[SlackFile]| {
+                if !seen.contains(format!("slack:{ts}").as_str()) {
+                    for f in files {
+                        unseen.insert(f.id.clone(), f.clone());
+                    }
+                }
+            };
+            if let Ok(replies) = &fetched {
+                for msg in replies.iter().filter(|m| m.meta.is_none()) {
+                    collect(&msg.ts, &msg.files);
+                }
+            }
+            collect(&inbound.ts, &inbound.files);
+            self.store_attachments(ws, unseen.into_values()).await
+        };
+
         // If the fetch fails, append the message alone with a note.
         let input = match fetched {
             Ok(replies) => ClientInput::Append {
                 agent_id: agent_id.clone(),
                 turn_id: turn_id.clone(),
-                messages: build_batch(&path, &replies, &inbound),
+                messages: build_batch(&path, &replies, &inbound, &uploads),
                 stream: false,
                 client: Default::default(),
                 // A mention that lands mid-turn is a question, not a mistake:
@@ -770,10 +1057,14 @@ impl SlackBot {
                     message: draft(
                         &format!("slack:{}", inbound.ts),
                         Role::User,
-                        format!(
-                            "<@{}>: {}\n\n[note: the Slack conversation could not be fetched — \
-                             earlier messages may be missing from your context]",
-                            inbound.user, inbound.text
+                        with_attachments(
+                            format!(
+                                "<@{}>: {}\n\n[note: the Slack conversation could not be fetched — \
+                                 earlier messages may be missing from your context]",
+                                inbound.user, inbound.text
+                            ),
+                            &inbound.files,
+                            &uploads,
                         ),
                     ),
                     stream: false,
@@ -848,9 +1139,7 @@ impl SlackBot {
         blocks: Vec<Value>,
         meta: &ReplyMeta,
     ) -> Result<(), Error> {
-        self.api_call(
-            ws,
-            "chat.postMessage",
+        let body = |blocks: &[Value]| {
             serde_json::json!({
                 "channel": thread.channel,
                 "thread_ts": thread.ts,
@@ -862,10 +1151,20 @@ impl SlackBot {
                     "event_type": REPLY_EVENT_TYPE,
                     "event_payload": meta,
                 },
-            }),
-        )
-        .await
-        .map(|_| ())
+            })
+        };
+        match self.api_call(ws, "chat.postMessage", body(&blocks)).await {
+            // Images degrade rather than sink the reply.
+            Err(e) if e.code() == "invalid_blocks" => {
+                let Some(stripped) = without_images(&blocks) else {
+                    return Err(e);
+                };
+                self.api_call(ws, "chat.postMessage", body(&stripped))
+                    .await
+                    .map(|_| ())
+            }
+            r => r.map(|_| ()),
+        }
     }
 
     async fn update(
@@ -877,9 +1176,7 @@ impl SlackBot {
         blocks: Vec<Value>,
         meta: &ReplyMeta,
     ) -> Result<(), Error> {
-        self.api_call(
-            ws,
-            "chat.update",
+        let body = |blocks: &[Value]| {
             serde_json::json!({
                 "channel": channel,
                 "ts": ts,
@@ -889,10 +1186,19 @@ impl SlackBot {
                     "event_type": REPLY_EVENT_TYPE,
                     "event_payload": meta,
                 },
-            }),
-        )
-        .await
-        .map(|_| ())
+            })
+        };
+        match self.api_call(ws, "chat.update", body(&blocks)).await {
+            Err(e) if e.code() == "invalid_blocks" => {
+                let Some(stripped) = without_images(&blocks) else {
+                    return Err(e);
+                };
+                self.api_call(ws, "chat.update", body(&stripped))
+                    .await
+                    .map(|_| ())
+            }
+            r => r.map(|_| ()),
+        }
     }
 
     /// Whether the event is a running turn's work. A session names its last
@@ -1231,6 +1537,14 @@ impl SlackBot {
             }
             (None, _) => render::render_turn(t, elapsed),
         };
+        let mut rendered = rendered;
+        // A failed turn has no new reply message to take images from.
+        if t.error.is_none() {
+            rendered
+                .blocks
+                .extend(self.turn_image_blocks(ws, session_id).await);
+        }
+        let rendered = rendered;
         let since = live.as_ref().map(|s| s.started_at);
         let Some(ts) = live.as_ref().and_then(|s| s.ts.clone()) else {
             return self
@@ -2088,6 +2402,8 @@ mod tests {
         use axum::routing::post;
         use axum::{Json, Router};
 
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let calls = Calls::default();
         let route = |app: Router, method: &'static str, answer: Value| {
             let calls = calls.clone();
@@ -2124,9 +2440,45 @@ mod tests {
             "assistant.threads.setStatus",
             serde_json::json!({"ok": true}),
         );
+        let app = {
+            let calls = calls.clone();
+            app.route(
+                "/files.getUploadURLExternal",
+                axum::routing::get(move |axum::extract::RawQuery(q): axum::extract::RawQuery| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.record(
+                            "files.getUploadURLExternal",
+                            serde_json::json!({"query": q}),
+                        );
+                        Json(serde_json::json!({
+                            "ok": true,
+                            "upload_url": format!("http://{addr}/upload"),
+                            "file_id": "F123",
+                        }))
+                    }
+                }),
+            )
+        };
+        let app = {
+            let calls = calls.clone();
+            app.route(
+                "/upload",
+                post(move |body: axum::body::Bytes| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.record("upload", serde_json::json!({"len": body.len()}));
+                        "OK"
+                    }
+                }),
+            )
+        };
+        let app = route(
+            app,
+            "files.completeUploadExternal",
+            serde_json::json!({"ok": true, "files": [{"id": "F123"}]}),
+        );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
@@ -2175,8 +2527,122 @@ mod tests {
             "t".into(),
             Routing::new().dm(Some("a".into())),
         ));
-        let bot = SlackBot::new(Arc::new(OneWorkspace(ws.clone())), api_base, None);
+        let bot = SlackBot::new(Arc::new(OneWorkspace(ws.clone())), api_base, None, None);
         (bot, ws)
+    }
+
+    /// The bot with a durable store and a blob store, for the upload paths.
+    async fn bot_with_blobs(
+        api_base: String,
+        dir: &std::path::Path,
+    ) -> (SlackBot, Arc<Workspace>, Arc<dyn BlobStore>) {
+        let ws = Arc::new(Workspace::new(
+            "xoxb-test".into(),
+            "t".into(),
+            Routing::new().dm(Some("a".into())),
+        ));
+        let db = crate::providers::sqlite::SqliteDb::open(
+            dir.join("test.db").to_str().unwrap(),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        let store = StreamStore::new(db.clone()).unwrap();
+        let blobs: Arc<dyn BlobStore> =
+            Arc::new(crate::providers::sqlite::SqliteBlobStore::new(db));
+        let bot = SlackBot::new(
+            Arc::new(OneWorkspace(ws.clone())),
+            api_base,
+            Some(store),
+            Some(blobs.clone()),
+        );
+        (bot, ws, blobs)
+    }
+
+    #[tokio::test]
+    async fn a_stored_image_uploads_once_and_embeds_the_slack_file() {
+        let (api_base, calls) = fake_slack().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (bot, ws, blobs) = bot_with_blobs(api_base, dir.path()).await;
+        let r = blobs
+            .put(NewBlob {
+                tenant_id: "t".into(),
+                mime: "image/png".into(),
+                name: Some("chart.png".into()),
+                bytes: vec![1, 2, 3],
+            })
+            .await
+            .unwrap();
+
+        let block = bot.slack_image_block(&ws, &r.uri()).await.unwrap().unwrap();
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["slack_file"]["id"], "F123");
+        assert_eq!(block["alt_text"], "chart.png");
+        assert_eq!(calls.to("upload").len(), 1);
+        assert_eq!(calls.to("files.completeUploadExternal").len(), 1);
+
+        // The second embed reuses the recorded upload.
+        let again = bot.slack_image_block(&ws, &r.uri()).await.unwrap().unwrap();
+        assert_eq!(again["slack_file"]["id"], "F123");
+        assert_eq!(calls.to("upload").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn foreign_and_non_image_refs_do_not_embed() {
+        let (api_base, calls) = fake_slack().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (bot, ws, blobs) = bot_with_blobs(api_base, dir.path()).await;
+        let foreign = blobs
+            .put(NewBlob {
+                tenant_id: "other".into(),
+                mime: "image/png".into(),
+                name: None,
+                bytes: vec![1],
+            })
+            .await
+            .unwrap();
+        let pdf = blobs
+            .put(NewBlob {
+                tenant_id: "t".into(),
+                mime: "application/pdf".into(),
+                name: None,
+                bytes: vec![1],
+            })
+            .await
+            .unwrap();
+        assert!(bot
+            .slack_image_block(&ws, &foreign.uri())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(bot
+            .slack_image_block(&ws, &pdf.uri())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(calls.to("upload").is_empty());
+
+        // A plain https url embeds without an upload.
+        let block = bot
+            .slack_image_block(&ws, "https://example.com/a.png")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(block["image_url"], "https://example.com/a.png");
+        assert!(calls.to("upload").is_empty());
+    }
+
+    #[test]
+    fn stripping_images_leaves_a_note_and_only_fires_when_needed() {
+        let blocks = vec![
+            section_block("answer"),
+            serde_json::json!({"type": "image", "slack_file": {"id": "F1"}, "alt_text": "x"}),
+        ];
+        let stripped = without_images(&blocks).unwrap();
+        assert_eq!(stripped.len(), 2);
+        assert_eq!(stripped[0]["type"], "section");
+        assert_eq!(stripped[1]["type"], "context");
+        // Nothing to strip: the error was not the images' fault.
+        assert!(without_images(&[section_block("answer")]).is_none());
     }
 
     fn thread() -> Thread {
@@ -2455,7 +2921,12 @@ mod tests {
             "t".into(),
             Routing::new().dm(Some("a".into())),
         ));
-        let bot = SlackBot::new(Arc::new(OneWorkspace(ws.clone())), api_base, Some(store));
+        let bot = SlackBot::new(
+            Arc::new(OneWorkspace(ws.clone())),
+            api_base,
+            Some(store),
+            None,
+        );
         bot.streams.insert(stream("turn-1", None));
         bot.streams.set_view(
             key("turn-1"),

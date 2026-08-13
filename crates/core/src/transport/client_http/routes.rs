@@ -1,5 +1,6 @@
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -8,6 +9,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::protocol::SessionOwner;
+use crate::runtime::blob::{BlobError, BlobRef};
 use crate::session::command::SessionError;
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use crate::transport::http::{runtime_error_response, Body};
@@ -91,6 +93,46 @@ pub async fn interrupt_session(
 
 /// The session resource: head-resolved status, open interrupts, and the full
 /// message tree.
+/// Serves a stored blob to its own tenant. `uri` is the `blob://` ref as it
+/// appears in message content; a ref from another tenant reads as absent, so
+/// the endpoint never confirms what exists elsewhere.
+pub async fn get_blob(
+    State(state): State<ClientHttpState>,
+    Extension(caller): Extension<Caller>,
+    Query(params): Query<super::types::GetBlobParams>,
+) -> Response {
+    let Some(blobs) = &state.blobs else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(r) = BlobRef::parse(&params.uri) else {
+        return (StatusCode::BAD_REQUEST, "not a blob uri").into_response();
+    };
+    if r.tenant_id != caller.tenant_id() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match blobs.get(&r).await {
+        Ok(bytes) => {
+            let mime = r
+                .mime
+                .parse()
+                .unwrap_or(HeaderValue::from_static("application/octet-stream"));
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, mime);
+            // An id names one immutable object; cache hard, never shared.
+            headers.insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=31536000, immutable"),
+            );
+            (headers, bytes).into_response()
+        }
+        Err(BlobError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "blob read failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 pub async fn get_session(
     State(state): State<ClientHttpState>,
     Extension(caller): Extension<Caller>,

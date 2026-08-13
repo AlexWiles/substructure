@@ -18,6 +18,7 @@ target/
 *.db
 *.db-shm
 *.db-wal
+*.db.blobs/
 
 # Nx
 .nx

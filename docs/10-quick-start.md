@@ -1,9 +1,13 @@
 ---
-title: Quick start
+title: Quick start (cloud)
 group: Getting started
 ---
 
-Put an agent in Slack. One file, five commands, no server of your own.
+Put an agent in Slack, on the hosted cloud. One file, five commands, no server
+of your own.
+
+To run the engine on your machine instead, with no account and no deployment,
+start with the [local quick start](./15-quick-start-local.md).
 
 ## 1. Install the CLI
 
@@ -76,8 +80,9 @@ The thread is the session. Later mentions continue the conversation.
 
 ## What you have
 
-An agent that answers in Slack. The engine calls the model, saves every step,
-and streams the reply into the thread. You wrote one file and no code.
+An agent that answers in Slack, hosted. The engine calls the model, saves every
+step, and streams the reply into the thread. Your machine runs nothing. You
+wrote one file and no code.
 
 Run `subs doctor` at any time to see what the project still needs.
 
@@ -88,6 +93,6 @@ Add one thing at a time.
 - [Connectors](./40-connectors.md): give the agent the tools of Sentry, GitHub,
   or any MCP server.
 - [Workers](./50-workers.md): run your own code at every step of the loop.
-- [Local development](./160-local-development.md): run the engine on your
+- [Quick start (local)](./15-quick-start-local.md): run the same file on your
   machine.
 - [How it works](./20-how-it-works.md): the words the rest of the docs use.

@@ -705,7 +705,7 @@ pub fn check_slack(slack: &SlackConfig, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn check_slack_agent(agent: &str, manifest: &Manifest) -> Result<()> {
+pub fn check_slack_agent(agent: &str, manifest: &Manifest) -> Result<()> {
     if manifest.agent.contains_key(agent) {
         return Ok(());
     }

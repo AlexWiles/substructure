@@ -119,11 +119,17 @@ fn place(prompt: &mut Vec<Message>, call_id: &str, c: &PromptContext, placement:
             let Some(last) = prompt.last_mut() else {
                 return;
             };
-            let head = match &last.content {
-                Some(Content::Text(t)) => t.clone(),
-                _ => String::new(),
-            };
-            last.content = Some(Content::Text(format!("{head}\n\n{}", c.content)));
+            last.content = Some(match last.content.take() {
+                // Non-text parts stay; the context lands as one more part.
+                Some(Content::Parts(mut parts)) => {
+                    parts.push(crate::protocol::ContentPart::Text {
+                        text: c.content.clone(),
+                    });
+                    Content::Parts(parts)
+                }
+                Some(Content::Text(head)) => Content::Text(format!("{head}\n\n{}", c.content)),
+                None => Content::Text(format!("\n\n{}", c.content)),
+            });
         }
         Placement::Own => prompt.push(message(call_id, &c.id, Role::User, &c.content)),
     }
@@ -139,5 +145,47 @@ fn message(call_id: &str, context: &str, role: Role, content: &str) -> Message {
         tool_call_id: None,
         name: None,
         reasoning: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{ContentPart, ImageUrl};
+
+    #[test]
+    fn inline_context_keeps_image_parts() {
+        let mut prompt = vec![Message {
+            id: "m1".into(),
+            role: Role::User,
+            content: Some(Content::Parts(vec![
+                ContentPart::Text {
+                    text: "look".into(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "blob://t/ab?mime=image%2Fpng&size=1".into(),
+                    },
+                },
+            ])),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+        }];
+        let c = PromptContext {
+            id: "ctx1".into(),
+            placement: Placement::Inline,
+            content: "server up".into(),
+        };
+        place(&mut prompt, "c1", &c, Placement::Inline);
+        match prompt[0].content.as_ref().unwrap() {
+            Content::Parts(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
+                assert!(matches!(&parts[2], ContentPart::Text { text } if text == "server up"));
+            }
+            _ => panic!("expected parts"),
+        }
     }
 }
