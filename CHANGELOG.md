@@ -19,6 +19,7 @@ together at the same version.
 
 ### Fixed
 
+- `subs serve --slack-agent` stops at startup if the name is not a declared agent.
 - A model that refuses a request stops the run, instead of answering it with nothing.
 - Anthropic calls send the reasoning fields, the output limit, and the sampling that the model reads.
 - OpenAI calls read the whole model name, and keep `temperature` for chat models and at no effort.

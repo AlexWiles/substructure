@@ -4,9 +4,7 @@ A multi-modal Slack agent with just a config file.
 
 ## Create the Slack app
 
-Create a [Slack app](https://api.slack.com/apps) from this manifest. The two
-`files:` scopes are what move images in and out.
-
+Create a [Slack app](https://api.slack.com/apps) from this manifest.
 ```yaml
 display_information:
   name: assistant
@@ -15,6 +13,9 @@ features:
     display_name: assistant
     always_online: true
   agent_view: {}
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
 oauth_config:
   scopes:
     bot:

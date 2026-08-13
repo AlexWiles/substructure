@@ -12,5 +12,6 @@ system = """You are a helpful assistant."""
 dm = "assistant"
 mentions = "assistant"
 
-[remote]
-url = "https://api.substructure.ai"
+[serve]
+auth = false
+
