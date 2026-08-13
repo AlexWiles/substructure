@@ -15,6 +15,7 @@ together at the same version.
 
 ### Fixed
 
+- An uauthorized mcp interrupts the session.
 - Streamed calls now read `data:` lines that have no space after the colon.
 - Responses keep the model's reasoning, and Anthropic and OpenRouter calls send it back.
 - Calls to OpenAI-compatible providers no longer send engine-internal message fields.

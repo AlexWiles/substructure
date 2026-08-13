@@ -150,6 +150,9 @@ pub enum RegistryError {
     Unknown(String),
     /// The connection exists but this tenant has no grant for it.
     NotGranted(String),
+    /// The app may use the connection, and nobody has authorized it. Carries
+    /// the need because no credential is ever reached to be refused.
+    NotAuthorized { id: String, need: AuthNeed },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -159,13 +162,28 @@ impl std::fmt::Display for RegistryError {
             RegistryError::NotGranted(id) => {
                 write!(f, "connection `{id}` is not granted to this app")
             }
+            RegistryError::NotAuthorized {
+                id,
+                need: AuthNeed::Reauthorize,
+            } => write!(f, "connection `{id}` needs authorizing again"),
+            RegistryError::NotAuthorized { id, .. } => {
+                write!(f, "connection `{id}` is not authorized")
+            }
         }
     }
 }
 
+/// Only an unauthorized connection asks for a person. A misconfigured one is
+/// caught in the config, not at runtime.
 impl From<RegistryError> for ConnectorError {
     fn from(err: RegistryError) -> Self {
-        ConnectorError::permanent(err.to_string())
+        let message = err.to_string();
+        match err {
+            RegistryError::NotAuthorized { need, .. } => {
+                ConnectorError::unauthorized(need, message)
+            }
+            _ => ConnectorError::permanent(message),
+        }
     }
 }
 
@@ -594,6 +612,23 @@ mod tests {
 
         assert_eq!(err.auth, Some(AuthNeed::Reauthorize));
         assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_unauthorized_connection_asks_for_a_person_and_a_misconfigured_one_does_not() {
+        let asks = ConnectorError::from(RegistryError::NotAuthorized {
+            id: "linear".to_string(),
+            need: AuthNeed::NeverAuthorized,
+        });
+        assert_eq!(asks.auth, Some(AuthNeed::NeverAuthorized));
+        assert!(!asks.retryable, "an attempt does not authorize anything");
+
+        for quiet in [
+            RegistryError::NotGranted("linear".to_string()),
+            RegistryError::Unknown("linear".to_string()),
+        ] {
+            assert_eq!(ConnectorError::from(quiet).auth, None);
+        }
     }
 
     #[tokio::test]
