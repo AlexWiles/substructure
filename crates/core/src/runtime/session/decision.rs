@@ -202,6 +202,9 @@ pub enum Trigger {
         /// True when finish_reason was "length" (output truncated).
         #[serde(default)]
         truncated: bool,
+        /// True when the model declined the request rather than answering it.
+        #[serde(default)]
+        refused: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,6 +246,7 @@ impl Trigger {
         id: String,
         message: DraftMessage,
         truncated: bool,
+        refused: bool,
         usage: Option<Usage>,
         cost: Option<Decimal>,
     ) -> Self {
@@ -251,6 +255,7 @@ impl Trigger {
             ok: true,
             message: Some(message),
             truncated,
+            refused,
             usage,
             cost,
             error: None,
@@ -263,6 +268,7 @@ impl Trigger {
             ok: false,
             message: None,
             truncated: false,
+            refused: false,
             usage: None,
             cost: None,
             error: Some(error),

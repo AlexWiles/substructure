@@ -742,6 +742,7 @@ mod tests {
             ok: false,
             message: None,
             truncated: false,
+            refused: false,
             usage: None,
             cost: None,
             error: None,

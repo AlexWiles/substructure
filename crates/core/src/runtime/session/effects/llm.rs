@@ -141,6 +141,7 @@ fn attempt(state: &SessionState, id: &str) -> u32 {
 fn complete(state: &SessionState, id: &str, response: LlmResponse) -> Vec<EventPayload> {
     let message = assistant_message(id, &response);
     let truncated = response.finish_reason.as_deref() == Some("length");
+    let refused = refused(response.finish_reason.as_deref());
     let usage = response.usage.clone();
     let cost = response.cost;
     vec![
@@ -153,10 +154,18 @@ fn complete(state: &SessionState, id: &str, response: LlmResponse) -> Vec<EventP
             id.to_string(),
             message,
             truncated,
+            refused,
             usage,
             cost,
         )),
     ]
+}
+
+/// Whether the call ended because the model declined it. Each vendor has its
+/// own word for the same answer, and the call carries a 200 and an empty turn
+/// either way.
+fn refused(finish_reason: Option<&str>) -> bool {
+    matches!(finish_reason, Some("refusal") | Some("content_filter"))
 }
 
 /// Issue a call. Idempotent by id: (re-)issue only for a new, `Failed`, or
