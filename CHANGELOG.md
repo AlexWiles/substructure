@@ -19,6 +19,7 @@ together at the same version.
 - Anthropic calls send the reasoning fields, the output limit, and the sampling that the model reads.
 - OpenAI calls read the whole model name, and keep `temperature` for chat models and at no effort.
 - OpenRouter calls keep a deferred tool out of the request, as the other providers do.
+- An uauthorized mcp interrupts the session.
 - Streamed calls now read `data:` lines that have no space after the colon.
 - Responses keep the model's reasoning, and Anthropic and OpenRouter calls send it back.
 - Calls to OpenAI-compatible providers no longer send engine-internal message fields.
