@@ -55,7 +55,7 @@ export interface ClientInput {
     payload?: unknown;
     attempt?: number | null;
     id?: string;
-    result?: unknown;
+    result?: ToolResult;
     error?: string;
     retryable?: boolean;
 }
@@ -113,42 +113,53 @@ export type Handler = "server" | "worker" | "client";
  * [`Message`] (id always present) at recording time.
  */
 export interface DraftMessage {
-    content?: ContentPart[] | null | string;
+    content?: StoredContent[] | null | string;
     id?: null | string;
     name?: null | string;
+    reasoning?: Reasoning | null;
     role: Role;
     tool_call_id?: null | string;
     tool_calls?: ToolCall[] | null;
 }
 
-export interface ContentPart {
+/**
+ * One block of a recorded tool answer. Bytes are never here: they are in the
+ * blob store, and `Blob` names them. Which kind a block was is not lost — the
+ * ref carries the mime, and every reader switches on that anyway.
+ *
+ * A `blob://` ref. It already carries the mime, the size and the name in
+ * its query, so nothing here repeats them — a second copy is only a way
+ * for the two to disagree.
+ *
+ * A resource the tool named rather than sent.
+ */
+export interface StoredContent {
     text?: string;
-    type: ContentPartType;
-    image_url?: ImageURL;
-    file?: FileData;
-    input_audio?: AudioData;
-    video_url?: VideoURL;
+    type: StoredContentType;
+    uri?: string;
+    mimeType?: null | string;
+    name?: null | string;
 }
 
-export interface FileData {
-    file_data: string;
-    filename: string;
+export type StoredContentType = "text" | "blob" | "link";
+
+/**
+ * What the model thought before it answered. `text` is for a reader; `blocks`
+ * are the provider's own, held verbatim because Anthropic requires the
+ * thinking that precedes a tool call back unmodified, signature included.
+ */
+export interface Reasoning {
+    blocks?: unknown[];
+    provider: ReasoningProvider;
+    text?: null | string;
 }
 
-export interface ImageURL {
-    url: string;
-}
-
-export interface AudioData {
-    data: string;
-    format: string;
-}
-
-export type ContentPartType = "text" | "image_url" | "file" | "input_audio" | "video_url";
-
-export interface VideoURL {
-    url: string;
-}
+/**
+ * Which provider wrote a [`Reasoning`]'s blocks. They ride back only to it:
+ * another provider reads them as noise, and Anthropic rejects blocks it did
+ * not sign.
+ */
+export type ReasoningProvider = "anthropic" | "openai" | "openrouter";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -162,6 +173,60 @@ export interface ToolCallFunction {
     arguments: string;
     name: string;
 }
+
+/**
+ * What a tool answered. The shape is MCP's — blocks of content, an optional
+ * structured form, and the tool's own failure signal — because every source
+ * lowers to it: a connection, a worker, or a client submitting a transcript.
+ *
+ * Blocks of content, or a bare JSON value read as one text block.
+ */
+export interface ToolResult {
+    content?: ToolContent[];
+    /**
+     * The tool ran and reported failure. Distinct from a transport fault.
+     */
+    isError?: boolean;
+    /**
+     * Present when the tool declares an output schema. Preferred over the
+     * blocks: it round trips where rendered text would not.
+     */
+    structuredContent?: unknown;
+    [property: string]: unknown;
+}
+
+/**
+ * One block of a tool's answer, as the tool sends it: the shape MCP defines,
+ * with bytes inline under `data`.
+ *
+ * This is an inbound type only. The engine stores the bytes and records a
+ * [`StoredContent`] instead, so nothing downstream can carry them.
+ */
+export interface ToolContent {
+    text?: string;
+    type: ToolContentType;
+    data?: string;
+    mimeType?: null | string;
+    resource?: ResourceContents;
+    name?: null | string;
+    uri?: string;
+}
+
+/**
+ * The body of an embedded resource, as MCP defines it: text inline, or bytes
+ * under `blob`.
+ */
+export interface ResourceContents {
+    /**
+     * Base64 on the way in; a `blob://` ref once the engine has stored it.
+     */
+    blob?: null | string;
+    mimeType?: null | string;
+    text?: null | string;
+    uri: string;
+}
+
+export type ToolContentType = "text" | "image" | "audio" | "resource" | "resource_link";
 
 export type ClientInputType =
     | "client.message"
@@ -264,6 +329,12 @@ export interface AgentConfig {
      */
     defer_tools?: boolean | null | DeferTools;
     /**
+     * How hard the model thinks, carried on the agent because it pairs with
+     * the model. Unset sends no reasoning config and leaves the provider its
+     * own default.
+     */
+    effort?: ReasoningEffort | null;
+    /**
      * The `[llm.*]` block this agent's calls run on.
      */
     llm?: null | string;
@@ -342,6 +413,8 @@ export interface DeferTools {
  * name it cannot then reach.
  */
 export type DeferToolsStrategy = "search";
+
+export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
 
 /**
  * An MCP server the agent draws tools from. `id` resolves against the engine's
@@ -517,9 +590,10 @@ export interface Node {
 }
 
 export interface Message {
-    content?: ContentPart[] | null | string;
+    content?: StoredContent[] | null | string;
     id: string;
     name?: null | string;
+    reasoning?: Reasoning | null;
     role: Role;
     tool_call_id?: null | string;
     tool_calls?: ToolCall[];
@@ -616,7 +690,10 @@ export interface DecisionAction {
     arguments?: unknown;
     name?: string;
     attempt?: number | null;
-    result?: unknown;
+    /**
+     * Blocks of content, or a bare JSON value read as one text block.
+     */
+    result?: ToolResult;
     /**
      * A neutral `LlmResponse`, or the provider's native response when the
      * answered `llm.execute` carried a `format`.
@@ -678,8 +755,6 @@ export interface ReasoningConfig {
     exclude?: boolean | null;
     max_tokens?: number | null;
 }
-
-export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
 
 /**
  * A tool's declared contract: flat on the wire. Providers that need
@@ -772,7 +847,7 @@ export interface DecisionTrigger {
     input?: ToolInput;
     error?: ErrorInfo | null;
     ok?: boolean;
-    result?: null | string;
+    result?: StoredResult | null | string;
     format?: LlmFormat | null;
     /**
      * The neutral `LlmRequest` JSON, or the provider's native request body
@@ -782,6 +857,12 @@ export interface DecisionTrigger {
     stream?: boolean;
     cost?: null | string;
     message?: DraftMessage | null;
+    /**
+     * True when the model declined the request rather than answering it.
+     * A refusal reads as a turn that stopped well and said nothing, so
+     * without this the run continues from a blank answer.
+     */
+    refused?: boolean;
     truncated?: boolean;
     usage?: Usage | null;
     agent_id?: string;
@@ -850,6 +931,16 @@ export interface ToolInput {
 }
 
 export type Status = "valid" | "invalid" | "malformed";
+
+/**
+ * What the engine recorded a tool answering. Distinct from [`ToolResult`]:
+ * that one carries bytes, this one cannot, so no path can persist them.
+ */
+export interface StoredResult {
+    content?: StoredContent[];
+    isError?: boolean;
+    structuredContent?: unknown;
+}
 
 export type DecisionTriggerType =
     | "session.start"

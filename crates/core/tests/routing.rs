@@ -16,8 +16,8 @@ use substructure_core::llm::{
     LlmProviderRegistry, LlmProviderTrait, LlmTask,
 };
 use substructure_core::protocol::{
-    AgentConfig, ClientInput, Content, DraftMessage, ErrorCode, LlmRequest, LlmResponse, OwnerKind,
-    Role, SessionOwner, SubAgent, ToolCall, ToolCallFunction,
+    AgentConfig, ClientInput, Content, DraftMessage, ErrorCode, LlmResponse, OwnerKind,
+    PromptContent, PromptRequest, Role, SessionOwner, SubAgent, ToolCall, ToolCallFunction,
 };
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::sqlite::{
@@ -48,14 +48,14 @@ const TENANT: &str = "default";
 #[derive(Default)]
 struct StubModel {
     reply: String,
-    seen: Mutex<Vec<LlmRequest>>,
+    seen: Mutex<Vec<PromptRequest>>,
 }
 
 #[async_trait]
 impl LlmCallable for StubModel {
     async fn call(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         _ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         self.seen.lock().unwrap().push(request.clone());
@@ -194,7 +194,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
     let config = RuntimeConfig::default();
     let runtime = substructure_core::start(
         RuntimeDeps {
-            blobs: None,
+            blobs: std::sync::Arc::new(substructure_core::runtime::blob::Nowhere),
             store: Arc::new(SqliteEventStore::new(db.clone()).unwrap()),
             agents: directory.clone(),
             llm: Arc::new(providers),
@@ -810,10 +810,12 @@ async fn a_delegation_opens_its_child_with_the_message() {
             .lock()
             .unwrap()
             .iter()
-            .any(|r| r
-                .messages
-                .iter()
-                .any(|m| m.content.as_ref().and_then(Content::text) == Some("do it"))),
+            .any(|r| r.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .map(PromptContent::text_owned)
+                .as_deref()
+                == Some("do it"))),
         "the child is prompted with the delegating message"
     );
 }

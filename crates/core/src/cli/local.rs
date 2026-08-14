@@ -320,7 +320,7 @@ pub(crate) async fn start_engine(
             session_index_store,
             cursor_store,
             wake_store,
-            blobs: Some(blobs),
+            blobs,
             token_delta_transport,
         },
         config,

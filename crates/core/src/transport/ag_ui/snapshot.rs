@@ -1,4 +1,4 @@
-use crate::protocol::{Content, ContentPart, Message, MessageTree, Role};
+use crate::protocol::{Content, Message, MessageTree, Role, StoredContent};
 use crate::session::state::SessionState;
 
 use super::events::{AgUiEvent, AgUiInterrupt, RunOutcome, SnapshotMessage};
@@ -77,7 +77,7 @@ fn content_text(content: Option<Content>) -> Option<String> {
             let text: String = parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    StoredContent::Text { text } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect();

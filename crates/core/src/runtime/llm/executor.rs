@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::protocol::{ErrorCode, ErrorInfo, StreamDelta, TokenDelta};
 use crate::providers::memory_queue::TaskQueue;
+use crate::runtime::blob::BlobStore;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
 use crate::runtime::session::state::EffectKind;
@@ -19,6 +20,7 @@ pub fn spawn_llm_task_executor(
     providers: Arc<dyn LlmResolver>,
     queue: Arc<dyn TaskQueue<LlmTask>>,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
+    blobs: Arc<dyn BlobStore>,
     worker_count: usize,
     cancel: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
@@ -27,6 +29,7 @@ pub fn spawn_llm_task_executor(
     for _ in 0..worker_count {
         let store = store.clone();
         let providers = providers.clone();
+        let blobs = blobs.clone();
         let token_delta_transport = token_delta_transport.clone();
         let mut rx = queue.subscribe();
         let cancel = cancel.clone();
@@ -54,14 +57,27 @@ pub fn spawn_llm_task_executor(
                             ancestry: &task.ancestry,
                             defer_tools_strategy: task.defer_tools_strategy,
                         };
-                        let result = if task.stream {
-                            let (tx, rx) = mpsc::unbounded_channel();
-                            let pump = spawn_delta_pump(&task, token_delta_transport.clone(), rx);
-                            let result = client.call_streaming(&task.request, &ctx, tx).await;
-                            let _ = pump.await;
-                            result
-                        } else {
-                            client.call(&task.request, &ctx).await
+                        // A provider reads the resolved shape, and resolving
+                        // is the only way to build one — so no call can carry
+                        // a ref the provider cannot read. A ref that will not
+                        // resolve fails the call, like any other bad request.
+                        let prompt = crate::runtime::blob::resolve(
+                            &task.request,
+                            blobs.as_ref(),
+                            &task.tenant_id,
+                        )
+                        .await;
+                        let result = match prompt {
+                            Err(err) => Err(err),
+                            Ok(prompt) if task.stream => {
+                                let (tx, rx) = mpsc::unbounded_channel();
+                                let pump =
+                                    spawn_delta_pump(&task, token_delta_transport.clone(), rx);
+                                let result = client.call_streaming(&prompt, &ctx, tx).await;
+                                let _ = pump.await;
+                                result
+                            }
+                            Ok(prompt) => client.call(&prompt, &ctx).await,
                         };
                         let outcome = match result {
                             Ok(response) => Outcome::Llm(Box::new(response)),

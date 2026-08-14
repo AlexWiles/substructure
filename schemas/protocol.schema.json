@@ -361,12 +361,26 @@
                 "null"
               ]
             },
+            "content": {
+              "description": "Blocks of content, in the shape MCP defines.",
+              "items": {
+                "$ref": "#/$defs/ToolContent"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },
-            "result": {
-              "$ref": "#/$defs/ToolResult"
+            "isError": {
+              "type": "boolean"
             },
+            "result": {
+              "description": "A bare JSON value, read as one text block. The common case, and\nexclusive with `content` — two named fields, so nothing has to\nguess which shape it was handed."
+            },
+            "structuredContent": {},
             "type": {
               "const": "tool.result",
               "type": "string"
@@ -521,7 +535,7 @@
         },
         {
           "items": {
-            "$ref": "#/$defs/ContentPart"
+            "$ref": "#/$defs/StoredContent"
           },
           "type": "array"
         }
@@ -764,24 +778,36 @@
                 "null"
               ]
             },
+            "content": {
+              "description": "Blocks of content, in the shape MCP defines.",
+              "items": {
+                "$ref": "#/$defs/ToolContent"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "id": {
               "type": [
                 "string",
                 "null"
               ]
             },
-            "result": {
-              "$ref": "#/$defs/ToolResult",
-              "description": "Blocks of content, or a bare JSON value read as one text block."
+            "isError": {
+              "type": "boolean"
             },
+            "result": {
+              "description": "A bare JSON value, read as one text block. The common case, and\nexclusive with `content` — two named fields, so nothing has to\nguess which shape it was handed."
+            },
+            "structuredContent": {},
             "type": {
               "const": "tool.result",
               "type": "string"
             }
           },
           "required": [
-            "type",
-            "result"
+            "type"
           ],
           "type": "object"
         },
@@ -3114,27 +3140,6 @@
         }
       ],
       "title": "ToolInput"
-    },
-    "ToolResult": {
-      "additionalProperties": false,
-      "description": "What a tool answered. The shape is MCP's — blocks of content, an optional\nstructured form, and the tool's own failure signal — because every source\nlowers to it: a connection, a worker, or a client submitting a transcript.",
-      "properties": {
-        "content": {
-          "items": {
-            "$ref": "#/$defs/ToolContent"
-          },
-          "type": "array"
-        },
-        "isError": {
-          "description": "The tool ran and reported failure. Distinct from a transport fault.",
-          "type": "boolean"
-        },
-        "structuredContent": {
-          "description": "Present when the tool declares an output schema. Preferred over the\nblocks: it round trips where rendered text would not."
-        }
-      },
-      "title": "ToolResult",
-      "type": "object"
     },
     "Usage": {
       "additionalProperties": false,

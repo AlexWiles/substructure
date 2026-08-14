@@ -9,9 +9,9 @@ use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    Content, DeferToolsStrategy, DraftMessage, ErrorCode, LlmRequest, LlmResponse, LlmTool,
-    Reasoning, ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta, ToolCall,
-    ToolCallChunk, ToolCallFunction, Usage,
+    DeferToolsStrategy, ErrorCode, LlmResponse, LlmTool, PromptContent, PromptMessage,
+    PromptRequest, Reasoning, ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta,
+    ToolCall, ToolCallChunk, ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -77,14 +77,14 @@ struct StreamOptions {
 }
 
 /// A transcript message as Chat Completions takes it. Built rather than
-/// serializing a `DraftMessage` straight through, because the engine's own
+/// serializing a `PromptMessage` straight through, because the engine's own
 /// fields — the node `id`, the reasoning it holds for a provider that wants it
 /// back — are not part of this API, and a strict server rejects an unknown key.
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'a Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<&'a Content>,
+    content: Option<&'a PromptContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<&'a Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,8 +93,8 @@ struct WireMessage<'a> {
     name: Option<&'a String>,
 }
 
-impl<'a> From<&'a DraftMessage> for WireMessage<'a> {
-    fn from(m: &'a DraftMessage) -> Self {
+impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
+    fn from(m: &'a PromptMessage) -> Self {
         WireMessage {
             role: &m.role,
             content: m.content.as_ref(),
@@ -209,7 +209,7 @@ impl<'a> WireBody<'a> {
     /// `stream: None` omits the field so the body is valid input for both the
     /// create and stream calls a worker might make.
     fn build(
-        request: &'a LlmRequest,
+        request: &'a PromptRequest,
         search: DeferToolsStrategy,
         stream: Option<bool>,
         cache: CacheOpts<'a>,
@@ -427,7 +427,7 @@ struct ToolCallAccum {
 /// The Chat Completions body for `request`, `stream` omitted. The worker owns
 /// its own call, so the caching fields are the worker's to add.
 pub(crate) fn request_to_wire(
-    request: &LlmRequest,
+    request: &PromptRequest,
     search: DeferToolsStrategy,
 ) -> serde_json::Value {
     serde_json::to_value(WireBody::build(request, search, None, CacheOpts::default()))
@@ -629,7 +629,7 @@ impl OpenAiClient {
 
     async fn post_chat_completion(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         search: DeferToolsStrategy,
         stream: bool,
         session_id: &str,
@@ -680,7 +680,7 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
 impl LlmCallable for OpenAiClient {
     async fn call(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self
@@ -704,7 +704,7 @@ impl LlmCallable for OpenAiClient {
 
     async fn call_streaming(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         ctx: &CallContext<'_>,
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
@@ -782,15 +782,14 @@ impl LlmProviderTrait for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Content, DraftMessage, ReasoningConfig, Role};
+    use crate::protocol::{PromptContent, PromptMessage, ReasoningConfig, Role};
 
-    fn req(model: &str) -> LlmRequest {
-        LlmRequest {
+    fn req(model: &str) -> PromptRequest {
+        PromptRequest {
             model: model.to_string(),
-            messages: vec![DraftMessage {
-                id: None,
+            messages: vec![PromptMessage {
                 role: Role::User,
-                content: Some(Content::Text("hi".to_string())),
+                content: Some(PromptContent::Text("hi".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -854,7 +853,6 @@ mod tests {
     #[test]
     fn the_engines_own_message_fields_stay_out_of_the_request() {
         let mut request = req("gpt-4o");
-        request.messages[0].id = Some("msg_1".to_string());
         request.messages[0].reasoning = Reasoning::new(
             ReasoningProvider::Openai,
             Some("thought".to_string()),
@@ -871,7 +869,7 @@ mod tests {
     #[test]
     fn image_parts_serialize_in_the_openai_wire_shape() {
         let mut request = req("gpt-4o");
-        request.messages[0].content = Some(Content::Parts(vec![
+        request.messages[0].content = Some(PromptContent::Parts(vec![
             crate::protocol::ContentPart::Text {
                 text: "look".into(),
             },

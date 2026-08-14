@@ -10,9 +10,9 @@ use rust_decimal::Decimal;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    Content, DeferToolsStrategy, DraftMessage, ErrorCode, LlmRequest, LlmResponse, LlmTool,
-    Reasoning, ReasoningConfig, ReasoningProvider, ResponseImage, Role, SessionOwner, StreamDelta,
-    ToolCall, ToolCallChunk, ToolCallFunction,
+    DeferToolsStrategy, ErrorCode, LlmResponse, LlmTool, PromptContent, PromptMessage,
+    PromptRequest, Reasoning, ReasoningConfig, ReasoningProvider, ResponseImage, Role,
+    SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
 };
 
 /// Wraps our normalized `LlmTool` with the `"type": "function"` field
@@ -45,14 +45,14 @@ impl From<&LlmTool> for WireTool {
 }
 
 /// A transcript message as the router takes it. Built rather than serializing a
-/// `DraftMessage` straight through: the engine's own fields are not part of
+/// `PromptMessage` straight through: the engine's own fields are not part of
 /// this API, and `reasoning_details` has to go back under the router's name for
 /// it rather than ours.
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'a Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<&'a Content>,
+    content: Option<&'a PromptContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<&'a Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,8 +63,8 @@ struct WireMessage<'a> {
     reasoning_details: &'a [serde_json::Value],
 }
 
-impl<'a> From<&'a DraftMessage> for WireMessage<'a> {
-    fn from(m: &'a DraftMessage) -> Self {
+impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
+    fn from(m: &'a PromptMessage) -> Self {
         WireMessage {
             role: &m.role,
             content: m.content.as_ref(),
@@ -396,7 +396,7 @@ impl OpenRouterClient {
 
     fn body<'a>(
         &self,
-        request: &'a LlmRequest,
+        request: &'a PromptRequest,
         search: DeferToolsStrategy,
         stream: bool,
         session_id: &'a str,
@@ -422,7 +422,7 @@ impl OpenRouterClient {
 
     async fn post_chat_completion(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         search: DeferToolsStrategy,
         stream: bool,
         session_id: &str,
@@ -475,7 +475,7 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
 impl LlmCallable for OpenRouterClient {
     async fn call(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self
@@ -504,7 +504,7 @@ impl LlmCallable for OpenRouterClient {
 
     async fn call_streaming(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         ctx: &CallContext<'_>,
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
@@ -704,15 +704,14 @@ impl LlmProviderTrait for OpenRouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Content, DraftMessage, Role};
+    use crate::protocol::{PromptContent, PromptMessage, Role};
 
-    fn req() -> LlmRequest {
-        LlmRequest {
+    fn req() -> PromptRequest {
+        PromptRequest {
             model: "anthropic/claude-opus-4-8".to_string(),
-            messages: vec![DraftMessage {
-                id: None,
+            messages: vec![PromptMessage {
                 role: Role::User,
-                content: Some(Content::Text("hi".to_string())),
+                content: Some(PromptContent::Text("hi".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -772,10 +771,9 @@ mod tests {
     fn the_routers_reasoning_record_goes_back_to_the_router() {
         let detail = serde_json::json!({ "type": "reasoning.text", "text": "thought" });
         let mut request = req();
-        request.messages.push(DraftMessage {
-            id: Some("msg_1".to_string()),
+        request.messages.push(PromptMessage {
             role: Role::Assistant,
-            content: Some(Content::Text("hi".to_string())),
+            content: Some(PromptContent::Text("hi".to_string())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -803,10 +801,9 @@ mod tests {
     #[test]
     fn thinking_from_another_provider_is_not_offered_to_the_router() {
         let mut request = req();
-        request.messages.push(DraftMessage {
-            id: None,
+        request.messages.push(PromptMessage {
             role: Role::Assistant,
-            content: Some(Content::Text("hi".to_string())),
+            content: Some(PromptContent::Text("hi".to_string())),
             tool_calls: None,
             tool_call_id: None,
             name: None,

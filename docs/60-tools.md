@@ -48,7 +48,12 @@ function decide({ trigger, proposed }) {
     if (trigger.type === "tool.execute") {
         const tool = tools.find((t) => t.name === trigger.name);
         try {
-            return { actions: [{ type: "tool.result", result: tool.exec(trigger.input.value) }] };
+            const text = tool.exec(trigger.input.value);
+            return {
+                actions: [
+                    { type: "tool.result", result: { content: [{ type: "text", text }] } },
+                ],
+            };
         } catch (err) {
             return { actions: [{ type: "tool.error", error: err.message }] };
         }
@@ -158,7 +163,7 @@ other calls are still in flight, `proposed` waits. Return it to continue.
     id: string
     ok: boolean
     name: string
-    result?: string
+    result?: StoredResult       // bytes are stored; blocks name them
     error?: ErrorInfo
 }
 ```
@@ -182,9 +187,56 @@ End a call with a result.
     type: "tool.result"
     id?: string                 // id and attempt default to those of the
     attempt?: number            // tool.execute you answer
-    result: unknown
+    result: ToolResult
 }
 ```
+
+A result is blocks of content, in the shape MCP defines. Text is the common
+case:
+
+```json
+{ "type": "tool.result", "result": { "content": [{ "type": "text", "text": "sunny" }] } }
+```
+
+A tool that answers with an image or a file sends the bytes inline; the engine
+stores them and records a reference, so nothing large enters the log.
+
+```typescript
+type ToolResult = {
+    content: ToolContent[]
+    structuredContent?: unknown   // preferred where the tool declares an output
+    isError?: boolean             // the tool ran and reported failure
+}
+
+// The blocks MCP defines. Bytes ride inline; the engine stores them and
+// records a `blob` in their place.
+type ToolContent =
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }        // data is base64
+    | { type: "audio"; data: string; mimeType: string }        // data is base64
+    | { type: "resource"; resource: ResourceContents }
+    | { type: "resource_link"; uri: string; name?: string; mimeType?: string }
+
+type ResourceContents = {
+    uri: string
+    mimeType?: string
+    text?: string
+    blob?: string                 // base64
+}
+
+// What the engine recorded. Bytes are never here: `blob` names them.
+type StoredContent =
+    | { type: "text"; text: string }
+    | { type: "blob"; uri: string }
+    | { type: "link"; uri: string; name?: string; mimeType?: string }
+
+type StoredResult = {
+    content: StoredContent[]
+    structuredContent?: unknown
+    isError?: boolean
+}
+```
+
 
 ### `tool.error`
 

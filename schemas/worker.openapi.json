@@ -138,23 +138,6 @@
         ],
         "title": "Announce"
       },
-      "AudioData": {
-        "additionalProperties": false,
-        "properties": {
-          "data": {
-            "type": "string"
-          },
-          "format": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "data",
-          "format"
-        ],
-        "title": "AudioData",
-        "type": "object"
-      },
       "AuthFailure": {
         "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
         "oneOf": [
@@ -198,103 +181,13 @@
           },
           {
             "items": {
-              "$ref": "#/components/schemas/ContentPart"
+              "$ref": "#/components/schemas/StoredContent"
             },
             "type": "array"
           }
         ],
         "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged).",
         "title": "Content"
-      },
-      "ContentPart": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "type": {
-                "const": "text",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "text"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "image_url": {
-                "$ref": "#/components/schemas/ImageUrl"
-              },
-              "type": {
-                "const": "image_url",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "image_url"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "file": {
-                "$ref": "#/components/schemas/FileData"
-              },
-              "type": {
-                "const": "file",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "file"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "input_audio": {
-                "$ref": "#/components/schemas/AudioData"
-              },
-              "type": {
-                "const": "input_audio",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "input_audio"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "type": {
-                "const": "video_url",
-                "type": "string"
-              },
-              "video_url": {
-                "$ref": "#/components/schemas/VideoUrl"
-              }
-            },
-            "required": [
-              "type",
-              "video_url"
-            ],
-            "type": "object"
-          }
-        ],
-        "title": "ContentPart"
       },
       "DecisionAction": {
         "description": "The action a worker authors on the wire. Mirrors the internal `Action`, but a\nsettle's effect id may be omitted: on the sync/pull paths the answered\n`*.execute` trigger names it, so echoing it is redundant. `resolve_response`\n(`runtime::session::wire`) turns this into the internal `Action` (id always\npresent) at the transport boundary.",
@@ -441,24 +334,36 @@
                   "null"
                 ]
               },
+              "content": {
+                "description": "Blocks of content, in the shape MCP defines.",
+                "items": {
+                  "$ref": "#/components/schemas/ToolContent"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "id": {
                 "type": [
                   "string",
                   "null"
                 ]
               },
-              "result": {
-                "$ref": "#/components/schemas/ToolResult",
-                "description": "Blocks of content, or a bare JSON value read as one text block."
+              "isError": {
+                "type": "boolean"
               },
+              "result": {
+                "description": "A bare JSON value, read as one text block. The common case, and\nexclusive with `content` — two named fields, so nothing has to\nguess which shape it was handed."
+              },
+              "structuredContent": {},
               "type": {
                 "const": "tool.result",
                 "type": "string"
               }
             },
             "required": [
-              "type",
-              "result"
+              "type"
             ],
             "type": "object"
           },
@@ -1529,23 +1434,6 @@
         "title": "ErrorInfo",
         "type": "object"
       },
-      "FileData": {
-        "additionalProperties": false,
-        "properties": {
-          "file_data": {
-            "type": "string"
-          },
-          "filename": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "filename",
-          "file_data"
-        ],
-        "title": "FileData",
-        "type": "object"
-      },
       "Handler": {
         "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default), `client`, or `server` (set by\nthe engine for connector tools, never declared by a worker). An LLM call has\nno `handler`: where it runs follows from the `[llm.*]` block it names.",
         "oneOf": [
@@ -1566,19 +1454,6 @@
           }
         ],
         "title": "Handler"
-      },
-      "ImageUrl": {
-        "additionalProperties": false,
-        "properties": {
-          "url": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "url"
-        ],
-        "title": "ImageUrl",
-        "type": "object"
       },
       "LlmFormat": {
         "description": "The wire shape of a worker-run LLM call, declared on a `type = \"worker\"`\n`[llm.*]` block. Absent ⇒ the engine's neutral format. Set ⇒ `llm.execute`\ncarries the provider's native request body, and `llm.result`/\n`llm.token.delta` accept the provider's native response and stream events.",
@@ -2347,27 +2222,6 @@
         ],
         "title": "ToolInput"
       },
-      "ToolResult": {
-        "additionalProperties": false,
-        "description": "What a tool answered. The shape is MCP's — blocks of content, an optional\nstructured form, and the tool's own failure signal — because every source\nlowers to it: a connection, a worker, or a client submitting a transcript.",
-        "properties": {
-          "content": {
-            "items": {
-              "$ref": "#/components/schemas/ToolContent"
-            },
-            "type": "array"
-          },
-          "isError": {
-            "description": "The tool ran and reported failure. Distinct from a transport fault.",
-            "type": "boolean"
-          },
-          "structuredContent": {
-            "description": "Present when the tool declares an output schema. Preferred over the\nblocks: it round trips where rendered text would not."
-          }
-        },
-        "title": "ToolResult",
-        "type": "object"
-      },
       "Usage": {
         "additionalProperties": false,
         "description": "What one call read and wrote, in counts every provider means the same way.\n\nEach vendor names and scopes these differently: Anthropic reports the part\nof the prompt it did not read from the cache, OpenAI reports the whole\nprompt including that part. A session that changes model, and a tree whose\nagents name different blocks, add these counts together, so the adapter\nnormalizes them rather than the reader.",
@@ -2420,19 +2274,6 @@
           "total"
         ],
         "title": "Usage",
-        "type": "object"
-      },
-      "VideoUrl": {
-        "additionalProperties": false,
-        "properties": {
-          "url": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "url"
-        ],
-        "title": "VideoUrl",
         "type": "object"
       },
       "WorkerIdentity": {

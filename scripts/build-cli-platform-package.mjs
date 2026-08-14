@@ -88,7 +88,7 @@ if (existsSync(licenseSrc)) copyFileSync(licenseSrc, join(outDir, "LICENSE"));
 
 writeFileSync(
   join(outDir, "README.md"),
-  `# ${pkg.name}\n\nPlatform-specific binary for [@substructure.ai/cli](https://www.npmjs.com/package/@substructure.ai/cli). Do not install directly.\n`,
+  `# ${pkg.name}\n\nPlatform-specific binary for [@substructure.ai/cli](https://www.npmjs.com/package/@substructure.ai/cli). Do not install directly.\n\nSee [substructure.ai](https://substructure.ai).\n`,
 );
 
 console.log(`Built ${pkg.name} at ${outDir}`);

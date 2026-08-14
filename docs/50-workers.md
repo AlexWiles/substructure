@@ -86,7 +86,8 @@ function decide({ trigger, proposed }) {
     // Run the tool when the model calls it.
     if (trigger.type === "tool.execute") {
         const tool = tools.find((t) => t.name === trigger.name);
-        return { actions: [{ type: "tool.result", result: tool.exec() }] };
+        const text = tool.exec();
+        return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: text }] } }] };
     }
 
     return proposed;

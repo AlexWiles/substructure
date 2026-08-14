@@ -14,8 +14,8 @@
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
 use crate::protocol::{
-    Content, ContentPart, DraftMessage, EffectStatus, ErrorCode, ErrorInfo, ImageUrl, LlmFormat,
-    LlmRequest, LlmResponse, RetryPolicy, Role,
+    Content, DraftMessage, EffectStatus, ErrorCode, ErrorInfo, LlmFormat, LlmRequest, LlmResponse,
+    RetryPolicy, Role, StoredContent,
 };
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{LlmHandler, Trigger};
@@ -237,16 +237,26 @@ fn assistant_message(call_id: &str, response: &LlmResponse) -> DraftMessage {
     let content = if response.images.is_empty() {
         response.content.clone().map(Content::Text)
     } else {
-        let mut parts: Vec<ContentPart> = Vec::new();
+        let mut parts: Vec<StoredContent> = Vec::new();
         if let Some(text) = &response.content {
-            parts.push(ContentPart::Text { text: text.clone() });
+            parts.push(StoredContent::Text { text: text.clone() });
         }
+        // A generated image is stored before it lands here, so its url is the
+        // ref. One that could not be stored keeps its data url, and a link is
+        // what carries a url the engine does not own.
         for img in &response.images {
-            parts.push(ContentPart::ImageUrl {
-                image_url: ImageUrl {
-                    url: img.url.clone(),
+            parts.push(
+                match img.url.starts_with(crate::runtime::blob::BLOB_SCHEME) {
+                    true => StoredContent::Blob {
+                        uri: img.url.clone(),
+                    },
+                    false => StoredContent::Link {
+                        uri: img.url.clone(),
+                        name: None,
+                        mime_type: Some("image/png".to_string()),
+                    },
                 },
-            });
+            );
         }
         Some(Content::Parts(parts))
     };

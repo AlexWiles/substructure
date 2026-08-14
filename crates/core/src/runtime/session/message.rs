@@ -1,6 +1,6 @@
 //! Behavior over the protocol message types; the types live in [`crate::protocol`].
 
-use crate::protocol::{Content, ContentPart};
+use crate::protocol::{Content, StoredContent};
 
 impl Content {
     /// Extract the concatenated text from this content, ignoring non-text parts.
@@ -11,7 +11,7 @@ impl Content {
                 // For single-text-part messages, return a direct reference.
                 // For mixed content, callers should use text_owned().
                 if parts.len() == 1 {
-                    if let ContentPart::Text { text } = &parts[0] {
+                    if let StoredContent::Text { text } = &parts[0] {
                         return Some(text.as_str());
                     }
                 }
@@ -27,7 +27,7 @@ impl Content {
             Content::Parts(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    StoredContent::Text { text } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

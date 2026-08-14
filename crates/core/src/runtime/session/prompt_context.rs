@@ -122,7 +122,7 @@ fn place(prompt: &mut Vec<Message>, call_id: &str, c: &PromptContext, placement:
             last.content = Some(match last.content.take() {
                 // Non-text parts stay; the context lands as one more part.
                 Some(Content::Parts(mut parts)) => {
-                    parts.push(crate::protocol::ContentPart::Text {
+                    parts.push(crate::protocol::StoredContent::Text {
                         text: c.content.clone(),
                     });
                     Content::Parts(parts)
@@ -151,7 +151,7 @@ fn message(call_id: &str, context: &str, role: Role, content: &str) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ContentPart, ImageUrl};
+    use crate::protocol::StoredContent;
 
     #[test]
     fn inline_context_keeps_image_parts() {
@@ -159,13 +159,11 @@ mod tests {
             id: "m1".into(),
             role: Role::User,
             content: Some(Content::Parts(vec![
-                ContentPart::Text {
+                StoredContent::Text {
                     text: "look".into(),
                 },
-                ContentPart::ImageUrl {
-                    image_url: ImageUrl {
-                        url: "blob://t/ab?mime=image%2Fpng&size=1".into(),
-                    },
+                StoredContent::Blob {
+                    uri: "blob://t/ab?mime=image%2Fpng&size=1".into(),
                 },
             ])),
             tool_calls: Vec::new(),
@@ -182,8 +180,8 @@ mod tests {
         match prompt[0].content.as_ref().unwrap() {
             Content::Parts(parts) => {
                 assert_eq!(parts.len(), 3);
-                assert!(matches!(&parts[1], ContentPart::ImageUrl { .. }));
-                assert!(matches!(&parts[2], ContentPart::Text { text } if text == "server up"));
+                assert!(matches!(&parts[1], StoredContent::Blob { .. }));
+                assert!(matches!(&parts[2], StoredContent::Text { text } if text == "server up"));
             }
             _ => panic!("expected parts"),
         }

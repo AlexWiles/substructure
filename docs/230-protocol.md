@@ -63,7 +63,7 @@ Run the tool and return its result.
 ```json
 {
   "actions": [
-    { "type": "tool.result", "result": "It is clear in Tokyo." }
+    { "type": "tool.result", "result": { "content": [{ "type": "text", "text": "It is clear in Tokyo." }] } }
   ],
   "state": { "turns": 3 }
 }
@@ -201,7 +201,7 @@ type Trigger =
           id: string
           ok: boolean
           name: string
-          result?: string
+          result?: StoredResult
           error?: ErrorInfo
       }
     | {
@@ -297,7 +297,7 @@ type Action =
           type: "tool.result"
           id?: string             // id and attempt default to those of the
           attempt?: number        // tool.execute you answer
-          result: unknown
+          result: ToolResult
       }
     | {
           type: "tool.error"

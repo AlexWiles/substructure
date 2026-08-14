@@ -35,10 +35,9 @@ use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::StoredContent;
 use crate::protocol::{
-    AgentConfig, ClientContext, Content, ContentPart, DecisionAction, DecisionResponse,
-    DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, StoredResult, ToolCall,
+    AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
+    DraftMessage, ErrorInfo, Message, Role, StoredResult, ToolCall,
 };
-use crate::runtime::blob::{attachment_part, BlobRef};
 
 pub fn propose(
     trigger: &DecisionTrigger,
@@ -399,24 +398,23 @@ fn settled_content(ok: bool, result: &Option<StoredResult>, error: &Option<Error
 /// at the provider call and the model sees an image as an image. A result that
 /// is only text stays text.
 fn tool_content(result: &StoredResult) -> Content {
-    let attachments: Vec<ContentPart> = result
+    // A tool's blocks and a message's parts are the same shape, so what the
+    // tool answered rides into the message as it is.
+    let media: Vec<StoredContent> = result
         .content
         .iter()
-        .filter_map(|block| match block {
-            StoredContent::Blob { uri } => BlobRef::parse(uri).map(|r| attachment_part(&r)),
-            // Text and links read as text; `rendered` already carries them.
-            StoredContent::Text { .. } | StoredContent::Link { .. } => None,
-        })
+        .filter(|block| !matches!(block, StoredContent::Text { .. }))
+        .cloned()
         .collect();
     let text = result.rendered();
-    if attachments.is_empty() {
+    if media.is_empty() {
         return Content::Text(text);
     }
-    let mut parts = Vec::with_capacity(attachments.len() + 1);
+    let mut parts = Vec::with_capacity(media.len() + 1);
     if !text.is_empty() {
-        parts.push(ContentPart::Text { text });
+        parts.push(StoredContent::Text { text });
     }
-    parts.extend(attachments);
+    parts.extend(media);
     Content::Parts(parts)
 }
 
@@ -526,9 +524,9 @@ mod tests {
         };
         match tool_content(&result) {
             Content::Parts(parts) => {
-                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "found 2"));
+                assert!(matches!(&parts[0], StoredContent::Text { text } if text == "found 2"));
                 assert!(
-                    matches!(&parts[1], ContentPart::ImageUrl { image_url } if image_url.url == uri),
+                    matches!(&parts[1], StoredContent::Blob { uri: u } if *u == uri),
                     "the part carries the ref; the blob layer inlines it at the call"
                 );
             }

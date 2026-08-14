@@ -26,12 +26,13 @@ use super::decision::{Action, ToolHandler, Trigger};
 use super::reconcile::news_start;
 use super::state::{new_call_id, new_message_id, EffectState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
+use crate::llm::LlmCallError;
 use crate::protocol::{
     AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
     ErrorInfo, Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message,
     MessageTree, RetryPolicy, WorkerIdentity, WorkerState,
 };
-use crate::runtime::blob::{store, BlobStore};
+use crate::runtime::blob::{resolve, store, BlobStore};
 use crate::runtime::llm::LlmBlocks;
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::worker::WorkerDecisionRequest;
@@ -141,6 +142,8 @@ pub enum ResolveError {
     },
     /// An `llm.result` response that doesn't parse in the call's format.
     InvalidLlmResponse { message: String },
+    /// A `tool.result` that named both shapes of answer.
+    AmbiguousToolResult,
 }
 
 impl ResolveError {
@@ -152,6 +155,7 @@ impl ResolveError {
             ResolveError::MissingLlm { .. } | ResolveError::UnknownLlm { .. } => "llm".to_string(),
             ResolveError::InvalidHandler { .. } => "handler".to_string(),
             ResolveError::InvalidLlmResponse { .. } => "response".to_string(),
+            ResolveError::AmbiguousToolResult => "result".to_string(),
         })
     }
 
@@ -164,6 +168,9 @@ impl ResolveError {
                 serde_json::json!({ "reason": "unresolvable_settle_id", "kind": kind })
             }
             ResolveError::MissingModel => serde_json::json!({ "reason": "missing_model" }),
+            ResolveError::AmbiguousToolResult => {
+                serde_json::json!({ "reason": "ambiguous_tool_result" })
+            }
             ResolveError::MissingLlm { declared } => {
                 serde_json::json!({ "reason": "missing_llm", "declared": declared })
             }
@@ -186,6 +193,10 @@ impl std::fmt::Display for ResolveError {
             ResolveError::UnresolvableSettleId { kind } => write!(
                 f,
                 "{kind}.result/{kind}.error omitted its id, but this decision does not answer a {kind}.execute"
+            ),
+            ResolveError::AmbiguousToolResult => write!(
+                f,
+                "tool.result names both `result` and `content`; send one"
             ),
             ResolveError::MissingModel => write!(
                 f,
@@ -422,14 +433,24 @@ async fn lower_actions(
                     id,
                     attempt,
                     result,
+                    content,
+                    structured_content,
+                    is_error,
                 } => {
                     let (id, attempt) = resolve_settle(id, attempt, trigger, SettleKind::Tool)?;
+                    let answered = crate::protocol::ToolResult::from_action(
+                        result,
+                        content,
+                        structured_content,
+                        is_error,
+                    )
+                    .map_err(|_| ResolveError::AmbiguousToolResult)?;
                     // The bytes go away here: everything past this seam is
                     // synchronous, and the recorded shape cannot hold them.
                     Action::ToolResult {
                         id,
                         attempt,
-                        result: store(result, blobs, tenant_id).await,
+                        result: store(answered, blobs, tenant_id).await,
                     }
                 }
                 DecisionAction::LlmResult {
@@ -549,13 +570,15 @@ pub fn result_to_string(value: Value) -> String {
     }
 }
 
-pub fn to_wire_trigger(
+pub async fn to_wire_trigger(
     trigger: Trigger,
     active_path: &[Message],
     tree: &MessageTree,
     open_llm_calls: &HashMap<String, EffectState>,
-) -> DecisionTrigger {
-    match trigger {
+    blobs: &dyn BlobStore,
+    tenant_id: &str,
+) -> Result<DecisionTrigger, LlmCallError> {
+    Ok(match trigger {
         Trigger::SessionStart => DecisionTrigger::SessionStart,
         // The worker wire has no notion of a deferred turn: by delivery the turn
         // is running, so `turn_id` is dropped here.
@@ -630,9 +653,16 @@ pub fn to_wire_trigger(
             deadline,
         } => DecisionTrigger::LlmExecute {
             id,
-            request: match format {
-                Some(f) => f.request_to_wire(&request, defer_tools_strategy),
-                None => serde_json::to_value(&request).unwrap_or_default(),
+            // A worker makes the provider call, so what it receives is the
+            // resolved shape: refs replaced by what they name. A ref that will
+            // not resolve fails the decision rather than reaching the worker
+            // as a request it cannot read.
+            request: {
+                let prompt = resolve(&request, blobs, tenant_id).await?;
+                match format {
+                    Some(f) => f.request_to_wire(&prompt, defer_tools_strategy),
+                    None => serde_json::to_value(&prompt).unwrap_or_default(),
+                }
             },
             format,
             stream,
@@ -706,7 +736,7 @@ pub fn to_wire_trigger(
             cost,
             usage,
         },
-    }
+    })
 }
 
 #[cfg(test)]
@@ -714,7 +744,7 @@ mod tests {
     use super::*;
     use crate::protocol::{
         AgentTool, ClientContext, ClientInput, ClientPayload, Content, NewMessage, Role,
-        StoredResult, ToolCall, ToolCallFunction, ToolInput, ToolResult,
+        StoredResult, ToolCall, ToolCallFunction, ToolInput,
     };
     use crate::runtime::llm::LlmBlock;
     use crate::runtime::session::decision::LlmHandler;
@@ -860,7 +890,10 @@ mod tests {
             vec![DecisionAction::ToolResult {
                 id: None,
                 attempt: None,
-                result: ToolResult::text("ok"),
+                result: Some(serde_json::json!("ok")),
+                content: None,
+                structured_content: None,
+                is_error: false,
             }],
             Some(&trigger),
         )
@@ -889,7 +922,10 @@ mod tests {
                 vec![DecisionAction::ToolResult {
                     id: None,
                     attempt,
-                    result: ToolResult::text("ok"),
+                    result: Some(serde_json::json!("ok")),
+                    content: None,
+                    structured_content: None,
+                    is_error: false,
                 }],
                 Some(&trigger),
             )
@@ -917,7 +953,10 @@ mod tests {
             vec![DecisionAction::ToolResult {
                 id: Some("eff-1".to_string()),
                 attempt: None,
-                result: ToolResult::text("ok"),
+                result: Some(serde_json::json!("ok")),
+                content: None,
+                structured_content: None,
+                is_error: false,
             }],
             None,
         )
@@ -935,7 +974,10 @@ mod tests {
             vec![DecisionAction::ToolResult {
                 id: None,
                 attempt: None,
-                result: ToolResult::text("ok"),
+                result: Some(serde_json::json!("ok")),
+                content: None,
+                structured_content: None,
+                is_error: false,
             }],
             None,
         )
@@ -997,8 +1039,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_format_execute_carries_the_provider_native_request() {
+    #[tokio::test]
+    async fn a_format_execute_carries_the_provider_native_request() {
         let request = LlmRequest {
             model: "claude-haiku-4-5".to_string(),
             messages: vec![
@@ -1031,7 +1073,11 @@ mod tests {
             &[],
             &MessageTree::default(),
             &HashMap::new(),
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         match wire {
             DecisionTrigger::LlmExecute {
                 request, format, ..
@@ -1061,7 +1107,11 @@ mod tests {
             &[],
             &MessageTree::default(),
             &HashMap::new(),
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         match wire {
             DecisionTrigger::LlmExecute {
                 request: wired,
@@ -1353,24 +1403,30 @@ mod tests {
         messages.iter().cloned().map(DraftMessage::from).collect()
     }
 
-    #[test]
-    fn materializes_a_client_message_onto_the_active_path() {
+    #[tokio::test]
+    async fn materializes_a_client_message_onto_the_active_path() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
         ];
         let tree = linear_tree(&path);
 
-        let (messages, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientMessage {
-                messages: vec![msg("u2", Role::User, "more").into()],
-                client: ClientContext::default(),
-                turn_id: None,
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (messages, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientMessage {
+                    messages: vec![msg("u2", Role::User, "more").into()],
+                    client: ClientContext::default(),
+                    turn_id: None,
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
 
         assert_eq!(
             messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
@@ -1379,8 +1435,8 @@ mod tests {
         assert_eq!(new_from, 2);
     }
 
-    #[test]
-    fn materializes_an_append_batch_dropping_recorded_ids() {
+    #[tokio::test]
+    async fn materializes_an_append_batch_dropping_recorded_ids() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
@@ -1389,20 +1445,26 @@ mod tests {
 
         // "a1" is already recorded: dropped, so the news lands on the head
         // instead of folding back onto its old node.
-        let (messages, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientMessage {
-                messages: vec![
-                    msg("a1", Role::Assistant, "yo").into(),
-                    msg("u2", Role::User, "more").into(),
-                    msg("u3", Role::User, "and more").into(),
-                ],
-                client: ClientContext::default(),
-                turn_id: None,
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (messages, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientMessage {
+                    messages: vec![
+                        msg("a1", Role::Assistant, "yo").into(),
+                        msg("u2", Role::User, "more").into(),
+                        msg("u3", Role::User, "and more").into(),
+                    ],
+                    client: ClientContext::default(),
+                    turn_id: None,
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
 
         assert_eq!(
             messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
@@ -1411,8 +1473,8 @@ mod tests {
         assert_eq!(new_from, 2);
     }
 
-    #[test]
-    fn annotates_an_appending_full_view() {
+    #[tokio::test]
+    async fn annotates_an_appending_full_view() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
@@ -1424,21 +1486,27 @@ mod tests {
             msg("u2", Role::User, "more"),
         ]);
 
-        let (_, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientTranscript {
-                messages: view,
-                new_from: 0,
-                client: ClientContext::default(),
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (_, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientTranscript {
+                    messages: view,
+                    new_from: 0,
+                    client: ClientContext::default(),
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
         assert_eq!(new_from, 2);
     }
 
-    #[test]
-    fn annotates_an_edit_at_its_divergence_point() {
+    #[tokio::test]
+    async fn annotates_an_edit_at_its_divergence_point() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
@@ -1448,42 +1516,54 @@ mod tests {
         // An edit of a1: fresh id, resent up to that point.
         let view = wire_view(&[msg("u1", Role::User, "hi"), msg("e1", Role::User, "edited")]);
 
-        let (_, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientTranscript {
-                messages: view,
-                new_from: 0,
-                client: ClientContext::default(),
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (_, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientTranscript {
+                    messages: view,
+                    new_from: 0,
+                    client: ClientContext::default(),
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
         assert_eq!(new_from, 1);
     }
 
-    #[test]
-    fn annotates_a_no_op_resend_as_all_recorded() {
+    #[tokio::test]
+    async fn annotates_a_no_op_resend_as_all_recorded() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
         ];
         let tree = linear_tree(&path);
 
-        let (_, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientTranscript {
-                messages: wire_view(&path),
-                new_from: 0,
-                client: ClientContext::default(),
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (_, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientTranscript {
+                    messages: wire_view(&path),
+                    new_from: 0,
+                    client: ClientContext::default(),
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
         assert_eq!(new_from, 2, "empty news: nothing to write");
     }
 
-    #[test]
-    fn annotates_an_idless_view_as_all_new() {
+    #[tokio::test]
+    async fn annotates_an_idless_view_as_all_new() {
         let path = vec![msg("u1", Role::User, "hi")];
         let tree = linear_tree(&path);
         let idless = |text: &str| DraftMessage {
@@ -1497,21 +1577,27 @@ mod tests {
         };
         let view = vec![idless("hi"), idless("more")];
 
-        let (_, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientTranscript {
-                messages: view,
-                new_from: 0,
-                client: ClientContext::default(),
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (_, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientTranscript {
+                    messages: view,
+                    new_from: 0,
+                    client: ClientContext::default(),
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
         assert_eq!(new_from, 0);
     }
 
-    #[test]
-    fn passes_non_client_triggers_through() {
+    #[tokio::test]
+    async fn passes_non_client_triggers_through() {
         let tree = MessageTree::default();
         let out = to_wire_trigger(
             Trigger::ToolFinished {
@@ -1524,11 +1610,15 @@ mod tests {
             &[],
             &tree,
             &HashMap::new(),
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         assert!(matches!(out, DecisionTrigger::ToolFinished { .. }));
     }
 
-    fn tool_execute(
+    async fn tool_execute(
         name: &str,
         arguments: &str,
         active_path: &[Message],
@@ -1545,7 +1635,11 @@ mod tests {
             active_path,
             &MessageTree::default(),
             open_llm_calls,
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         match trigger {
             DecisionTrigger::ToolExecute { input, .. } => input,
             t => panic!("expected a tool.execute trigger; got {t:?}"),
@@ -1604,8 +1698,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn tool_arguments_are_classified_against_the_declared_input() {
+    #[tokio::test]
+    async fn tool_arguments_are_classified_against_the_declared_input() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": { "city": { "type": "string" } },
@@ -1614,10 +1708,10 @@ mod tests {
         let (path, calls) = weather_call(schema);
 
         assert!(matches!(
-            tool_execute("get_weather", r#"{"city":"NYC"}"#, &path, &calls),
+            tool_execute("get_weather", r#"{"city":"NYC"}"#, &path, &calls).await,
             ToolInput::Valid { .. }
         ));
-        match tool_execute("get_weather", r#"{"city":5}"#, &path, &calls) {
+        match tool_execute("get_weather", r#"{"city":5}"#, &path, &calls).await {
             ToolInput::Invalid { value, error } => {
                 assert_eq!(
                     value,
@@ -1632,13 +1726,13 @@ mod tests {
             other => panic!("expected invalid; got {other:?}"),
         }
         assert!(matches!(
-            tool_execute("get_weather", "not json", &path, &calls),
+            tool_execute("get_weather", "not json", &path, &calls).await,
             ToolInput::Malformed { .. }
         ));
     }
 
-    #[test]
-    fn the_input_classification_is_always_on_the_wire() {
+    #[tokio::test]
+    async fn the_input_classification_is_always_on_the_wire() {
         let trigger = to_wire_trigger(
             Trigger::ToolExecute {
                 id: "tc-1".to_string(),
@@ -1650,18 +1744,22 @@ mod tests {
             &[],
             &MessageTree::default(),
             &HashMap::new(),
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         let v = serde_json::to_value(&trigger).expect("serializes");
         assert_eq!(v["input"]["status"], "malformed");
         assert!(v["input"]["error"].is_string());
     }
 
-    #[test]
-    fn an_undeclared_tool_is_classified_by_parse_alone() {
+    #[tokio::test]
+    async fn an_undeclared_tool_is_classified_by_parse_alone() {
         let (path, calls) = weather_call(serde_json::json!({"type": "object"}));
         assert!(
             matches!(
-                tool_execute("not_declared", r#"{"anything": true}"#, &path, &calls),
+                tool_execute("not_declared", r#"{"anything": true}"#, &path, &calls).await,
                 ToolInput::Valid { .. }
             ),
             "no declared schema to check against; the proposal carries the unknown-tool default"
@@ -1702,7 +1800,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tool_result_settles_with_any_json_value() {
+    async fn naming_both_shapes_of_answer_is_refused() {
+        let a: DecisionAction = serde_json::from_str(
+            r#"{"type":"tool.result","id":"tc-1","result":"a","content":[{"type":"text","text":"b"}]}"#,
+        )
+        .expect("parses");
+        let err = resolve_test_actions(vec![a], None).await.unwrap_err();
+        assert_eq!(err, ResolveError::AmbiguousToolResult);
+    }
+
+    #[tokio::test]
+    async fn a_tool_result_settles_as_the_blocks_it_carries() {
         let settle = async |json: &str| {
             let a: DecisionAction = serde_json::from_str(json).expect("parses");
             let actions = resolve_test_actions(vec![a], None).await.expect("resolves");
@@ -1711,13 +1819,28 @@ mod tests {
                 other => panic!("expected a tool.result; got {other:?}"),
             }
         };
-        assert_eq!(
-            settle(r#"{"type":"tool.result","id":"tc-1","result":{"temp":71}}"#).await,
-            r#"{"temp":71}"#
-        );
+        // The common case: a bare value, read as one text block.
         assert_eq!(
             settle(r#"{"type":"tool.result","id":"tc-1","result":"plain"}"#).await,
             "plain"
+        );
+        assert_eq!(
+            settle(r#"{"type":"tool.result","id":"tc-1","result":{"temp":71}}"#).await,
+            r#"{"temp":71}"#,
+            "a non-string value is its canonical json"
+        );
+        // Blocks ride under their own name, so neither shape has to be guessed.
+        assert_eq!(
+            settle(
+                r#"{"type":"tool.result","id":"tc-1","content":[{"type":"text","text":"blocks"}]}"#
+            )
+            .await,
+            "blocks"
+        );
+        assert_eq!(
+            settle(r#"{"type":"tool.result","id":"tc-1","structuredContent":{"temp":71}}"#).await,
+            r#"{"temp":71}"#,
+            "a declared output schema round trips as structure, not as text"
         );
     }
 
@@ -1752,7 +1875,7 @@ mod tests {
                 matches!(i, ClientInput::InterruptResume { .. })
             }),
             (
-                r#"{"type":"tool.result","id":"c1","result":{"n":1}}"#,
+                r#"{"type":"tool.result","id":"c1","result":{"content":[{"type":"text","text":"n"}]}}"#,
                 |i| matches!(i, ClientInput::ToolResult { .. }),
             ),
             (
@@ -1786,7 +1909,7 @@ mod tests {
         // A stray `agent_id`/`turn_id` on a settle has no field to land in, so it is
         // ignored rather than mistaken for addressing.
         let input: ClientInput = serde_json::from_str(
-            r#"{"type":"tool.result","id":"c1","result":"ok","agent_id":"bot","turn_id":"t1"}"#,
+            r#"{"type":"tool.result","id":"c1","result":{"content":[]},"agent_id":"bot","turn_id":"t1"}"#,
         )
         .expect("parses; the stray addressing fields are ignored");
         assert!(matches!(input, ClientInput::ToolResult { .. }));

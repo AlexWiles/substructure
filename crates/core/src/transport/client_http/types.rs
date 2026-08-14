@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn client_input_accepts_a_tool_result() {
-        let body = r#"{"input":{"type":"tool.result","id":"tc-1","attempt":0,"result":"x"}}"#;
+        let body = r#"{"input":{"type":"tool.result","id":"tc-1","attempt":0,"result":{"content":[{"type":"text","text":"x"}]}}}"#;
         assert!(serde_json::from_str::<ClientInputRequest>(body).is_ok());
     }
 

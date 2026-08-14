@@ -41,7 +41,7 @@ function weather({ trigger, proposed }) {
 
         case "tool.execute": {
             const { city } = trigger.input.value;
-            return { actions: [{ type: "tool.result", result: { city, tempF: 68, sky: "clear" } }] };
+            return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: JSON.stringify({ city, tempF: 68, sky: "clear" }) }] } }] };
         }
 
         default:

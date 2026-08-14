@@ -20,7 +20,7 @@ function decide({ trigger, proposed }) {
 
     if (trigger.type === "interrupt.resumed") {
         return trigger.payload?.approved
-            ? { actions: [{ type: "tool.result", result: "sent" }] }
+            ? { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: "sent" }] } }] }
             : { actions: [{ type: "tool.error", error: "declined" }] };
     }
 

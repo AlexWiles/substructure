@@ -74,7 +74,7 @@ function decide({ trigger, proposed, state }) {
             };
             return { state, actions: [approvalInterrupt(trigger)] };
         }
-        return { actions: [{ type: "tool.result", result: tool.exec(trigger.input.value) }] };
+        return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: tool.exec(trigger.input.value) }] } }] };
     }
 
     if (trigger.type === "interrupt.resumed") {
@@ -88,13 +88,13 @@ function decide({ trigger, proposed, state }) {
             const by = responder?.user ? ` by <@${responder.user}>` : " by the user";
             return {
                 state,
-                actions: [{ type: "tool.result", id: held.id, result: `Denied${by}.` }]
+                actions: [{ type: "tool.result", id: held.id, result: { content: [{ type: "text", text: `Denied${by}.` }] } }]
             };
         }
         const tool = tools.find((t) => t.name === held.name);
         return {
             state,
-            actions: [{ type: "tool.result", id: held.id, result: tool.exec(held.args) }]
+            actions: [{ type: "tool.result", id: held.id, result: { content: [{ type: "text", text: tool.exec(held.args) }] } }]
         };
     }
 

@@ -14,7 +14,7 @@ together at the same version.
 - Connections speak MCP revision 2026-07-28. The client finds which revision a server speaks, and keeps 2025-11-25 for the servers that use it.
 - Tool calls send the arguments that a server marks with `x-mcp-header` as HTTP headers.
 - A tool result is blocks of content. A tool that answers with an image, audio, or a file keeps the bytes in the blob store, and the model reads them.
-- A worker or a client can answer a tool call with content blocks. A bare value stays permitted, and reads as text.
+- A worker or a client answers a tool call with blocks of content, in the shape MCP defines.
 - Model calls that run on a worker receive the bytes their refs name.
 
 ## [0.5.0] - 2026-08-13

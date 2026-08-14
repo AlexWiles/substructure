@@ -31,7 +31,8 @@ function decide({ trigger, proposed }) {
 
     // A deferred tool arrives here under its own name.
     if (trigger.type === "tool.execute") {
-        return { actions: [{ type: "tool.result", result: run(trigger.name, trigger.input.value) }] };
+        const text = run(trigger.name, trigger.input.value);
+        return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: text }] } }] };
     }
 
     return proposed;

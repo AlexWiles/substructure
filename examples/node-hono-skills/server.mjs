@@ -49,13 +49,13 @@ function decide({ trigger, proposed, state }) {
             return {
                 state,
                 agent: agent(state.loaded),
-                actions: [{ type: "tool.result", result: SKILLS[name].body }]
+                actions: [{ type: "tool.result", result: { content: [{ type: "text", text: SKILLS[name].body }] } }]
             };
         }
         const tool = state.loaded
             .flatMap((name) => SKILLS[name].tools)
             .find((t) => t.name === trigger.name);
-        return { actions: [{ type: "tool.result", result: tool.exec(trigger.input.value) }] };
+        return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: tool.exec(trigger.input.value) }] } }] };
     }
 
     return proposed;

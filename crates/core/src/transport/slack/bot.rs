@@ -14,8 +14,8 @@ use super::{
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
-use crate::protocol::{ClientInput, Content, ContentPart, OwnerKind, Role, SessionOwner};
-use crate::runtime::blob::{attachment_part, text_like, BlobError, BlobRef, BlobStore, NewBlob};
+use crate::protocol::{ClientInput, Content, OwnerKind, Role, SessionOwner, StoredContent};
+use crate::runtime::blob::{text_like, BlobError, BlobRef, BlobStore, NewBlob};
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
 use crate::session::state::SessionStatus;
@@ -712,7 +712,7 @@ impl SlackBot {
         &self,
         ws: &Workspace,
         files: impl Iterator<Item = SlackFile>,
-    ) -> HashMap<String, ContentPart> {
+    ) -> HashMap<String, StoredContent> {
         let Some(blobs) = &self.blobs else {
             return HashMap::new();
         };
@@ -742,7 +742,7 @@ impl SlackBot {
                 .await;
             match stored {
                 Ok(r) => {
-                    out.insert(f.id, attachment_part(&r));
+                    out.insert(f.id, StoredContent::Blob { uri: r.uri() });
                 }
                 Err(e) => tracing::warn!(error = %e, file = %f.id, "slack: blob put failed"),
             }
@@ -790,10 +790,10 @@ impl SlackBot {
         };
         let mut blocks = Vec::new();
         for part in parts {
-            let ContentPart::ImageUrl { image_url } = part else {
+            let StoredContent::Blob { uri } = part else {
                 continue;
             };
-            match self.slack_image_block(ws, &image_url.url).await {
+            match self.slack_image_block(ws, uri).await {
                 Ok(Some(block)) => blocks.push(block),
                 Ok(None) => {}
                 Err(e) => {

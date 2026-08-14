@@ -89,8 +89,9 @@ pub struct Runtime {
     handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     shutdown_timeout: Duration,
     worker_retry_resolver: Arc<dyn WorkerRetryResolver>,
-    /// Where a tool's inline bytes land before the result is persisted.
-    blobs: Option<Arc<dyn BlobStore>>,
+    /// Where a tool's inline bytes land before the result is persisted. A
+    /// deployment that stores nothing passes [`blob::Nowhere`].
+    blobs: Arc<dyn BlobStore>,
 }
 
 pub struct SubmitClientPayload {
@@ -439,7 +440,17 @@ impl Runtime {
                 id,
                 attempt,
                 result,
+                content,
+                structured_content,
+                is_error,
             } => {
+                let answered = crate::protocol::ToolResult::from_action(
+                    result,
+                    content,
+                    structured_content,
+                    is_error,
+                )
+                .map_err(|e| RuntimeError::Internal(e.to_string()))?;
                 return self
                     .settle_client_tool(
                         session_id,
@@ -447,7 +458,9 @@ impl Runtime {
                         span,
                         id,
                         attempt,
-                        EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
+                        EffectSettlement::Result(EffectResultPayload::ToolCall {
+                            result: answered,
+                        }),
                     )
                     .await;
             }
@@ -669,13 +682,9 @@ impl Runtime {
         .map_err(RuntimeError::from)
     }
 
-    /// Where message attachments and tool bytes land. A deployment that
-    /// declares no store names content instead of keeping it.
+    /// Where message attachments and tool bytes land.
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
-        match &self.blobs {
-            Some(blobs) => blobs.as_ref(),
-            None => &blob::NOWHERE,
-        }
+        self.blobs.as_ref()
     }
 
     /// A tool's answer as the engine records it: bytes out of the blocks and
@@ -820,7 +829,7 @@ pub struct RuntimeDeps {
     pub token_delta_transport: Arc<dyn TokenDeltaTransport>,
     /// Where message attachments live. A worker makes its own provider call,
     /// so its dispatch inlines refs from here.
-    pub blobs: Option<Arc<dyn BlobStore>>,
+    pub blobs: Arc<dyn BlobStore>,
 }
 
 pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
@@ -858,6 +867,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
             llm,
             llm_task_queue,
             token_delta_transport.clone(),
+            blobs.clone(),
             config.llm_executor_workers,
             cancel.clone(),
         ));

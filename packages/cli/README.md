@@ -1,6 +1,6 @@
 # @substructure.ai/cli
 
-The CLI for [Substructure](https://github.com/substructureai/substructure), a durable runtime for AI agents. Runs the orchestration server.
+The CLI for [Substructure](https://substructure.ai), a durable runtime for AI agents. Runs the orchestration server.
 
 ## Install
 
@@ -22,6 +22,7 @@ Run `subs --help` for the full command list. Cloud management commands (`apps`, 
 
 ## Links
 
+- [substructure.ai](https://substructure.ai)
 - [Repository and documentation](https://github.com/substructureai/substructure)
 - [SDK (`@substructure.ai/sdk`)](https://www.npmjs.com/package/@substructure.ai/sdk)
 

@@ -19,9 +19,9 @@ use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    Content, ContentPart, DeferToolsStrategy, ErrorCode, LlmRequest, LlmResponse, Reasoning,
-    ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk,
-    ToolCallFunction, Usage,
+    ContentPart, DeferToolsStrategy, ErrorCode, LlmResponse, PromptContent, PromptRequest,
+    Reasoning, ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta, ToolCall,
+    ToolCallChunk, ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -397,10 +397,10 @@ fn reasoning_fields(
 }
 
 /// Map an OpenAI-style role message's content into Anthropic content blocks.
-fn content_to_blocks(content: Option<&Content>) -> Vec<RequestBlock> {
+fn content_to_blocks(content: Option<&PromptContent>) -> Vec<RequestBlock> {
     match content {
         None => Vec::new(),
-        Some(Content::Text(s)) => {
+        Some(PromptContent::Text(s)) => {
             if s.is_empty() {
                 Vec::new()
             } else {
@@ -410,7 +410,7 @@ fn content_to_blocks(content: Option<&Content>) -> Vec<RequestBlock> {
                 }]
             }
         }
-        Some(Content::Parts(parts)) => parts.iter().filter_map(part_to_block).collect(),
+        Some(PromptContent::Parts(parts)) => parts.iter().filter_map(part_to_block).collect(),
     }
 }
 
@@ -487,7 +487,7 @@ fn push_turn(turns: &mut Vec<AnthropicMessage>, role: &'static str, blocks: Vec<
 /// `stream: None` omits the field so the body is valid input for both the
 /// create and stream calls a worker might make.
 fn build_body(
-    request: &LlmRequest,
+    request: &PromptRequest,
     default_max_tokens: u64,
     search: DeferToolsStrategy,
     stream: Option<bool>,
@@ -775,7 +775,7 @@ fn str_field(value: &serde_json::Value, key: &str) -> String {
 
 /// The Messages API body for `request`, `stream` omitted.
 pub(crate) fn request_to_wire(
-    request: &LlmRequest,
+    request: &PromptRequest,
     search: DeferToolsStrategy,
 ) -> serde_json::Value {
     serde_json::to_value(build_body(
@@ -1176,7 +1176,7 @@ impl AnthropicClient {
 
     async fn post_messages(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         search: DeferToolsStrategy,
         stream: bool,
     ) -> Result<reqwest::Response, LlmCallError> {
@@ -1227,7 +1227,7 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
 impl LlmCallable for AnthropicClient {
     async fn call(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         let resp = self
@@ -1251,7 +1251,7 @@ impl LlmCallable for AnthropicClient {
 
     async fn call_streaming(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         ctx: &CallContext<'_>,
         chunk_tx: UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
@@ -1328,14 +1328,13 @@ impl LlmProviderTrait for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{DraftMessage, LlmTool, ReasoningConfig};
+    use crate::protocol::{LlmTool, PromptMessage, ReasoningConfig};
     use serde_json::json;
 
-    fn msg(role: Role, content: Option<&str>) -> DraftMessage {
-        DraftMessage {
-            id: None,
+    fn msg(role: Role, content: Option<&str>) -> PromptMessage {
+        PromptMessage {
             role,
-            content: content.map(|c| Content::Text(c.to_string())),
+            content: content.map(|c| PromptContent::Text(c.to_string())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -1354,8 +1353,8 @@ mod tests {
         }
     }
 
-    fn req(messages: Vec<DraftMessage>) -> LlmRequest {
-        LlmRequest {
+    fn req(messages: Vec<PromptMessage>) -> PromptRequest {
+        PromptRequest {
             model: "claude-opus-4-8".to_string(),
             messages,
             tools: None,
@@ -1386,7 +1385,7 @@ mod tests {
                 },
             },
         ];
-        let blocks = content_to_blocks(Some(&Content::Parts(parts)));
+        let blocks = content_to_blocks(Some(&PromptContent::Parts(parts)));
         assert_eq!(blocks.len(), 1);
         let v = serde_json::to_value(&blocks[0]).unwrap();
         assert_eq!(v["type"], "document");
@@ -1596,18 +1595,18 @@ mod tests {
 
     /// One user message of many blocks, as a transcript reaches the engine
     /// after a run of parallel tool calls.
-    fn wide_message(blocks: usize) -> DraftMessage {
+    fn wide_message(blocks: usize) -> PromptMessage {
         let parts = (0..blocks)
             .map(|i| ContentPart::Text {
                 text: format!("block {i}"),
             })
             .collect();
         let mut m = msg(Role::User, None);
-        m.content = Some(Content::Parts(parts));
+        m.content = Some(PromptContent::Parts(parts));
         m
     }
 
-    fn wide_turn(blocks: usize) -> LlmRequest {
+    fn wide_turn(blocks: usize) -> PromptRequest {
         req(vec![wide_message(blocks)])
     }
 
