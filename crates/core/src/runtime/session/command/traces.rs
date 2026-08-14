@@ -714,6 +714,7 @@ fn flow_interrupt_and_resume() -> Trace {
             Some(0),
             Outcome::Tool {
                 result: "yes".to_string(),
+                attachments: Vec::new(),
             },
         ),
         &frontend(),

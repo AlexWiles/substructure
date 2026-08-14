@@ -145,6 +145,7 @@ fn frontend_can_complete_own_client_handled_tool_call() {
             Some(0),
             Outcome::Tool {
                 result: "ok".to_string(),
+                attachments: Vec::new(),
             },
         ),
         &Caller::Frontend {
@@ -206,6 +207,7 @@ fn frontend_with_mismatched_user_id_is_denied() {
                 Some(0),
                 Outcome::Tool {
                     result: "ok".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
             &caller,
@@ -248,6 +250,7 @@ fn frontend_cannot_complete_worker_handled_tool_call() {
                 Some(0),
                 Outcome::Tool {
                     result: "ok".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
             &caller,
@@ -365,6 +368,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
             Some(0),
             Outcome::Tool {
                 result: result.to_string(),
+                attachments: Vec::new(),
             },
         ),
         &machine(),
@@ -540,6 +544,7 @@ fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
             Some(0),
             Outcome::Tool {
                 result: "ok".to_string(),
+                attachments: Vec::new(),
             },
         ),
         &machine,
@@ -590,6 +595,7 @@ fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() 
             Some(0),
             Outcome::Tool {
                 result: "ok".to_string(),
+                attachments: Vec::new(),
             },
         ),
         &Caller::ApiKey {
@@ -646,6 +652,7 @@ fn complete_tool_call_with_wrong_attempt_fails() {
                 Some(7),
                 Outcome::Tool {
                     result: "ok".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
             &caller,
@@ -917,6 +924,7 @@ fn complete_unknown_tool_call_fails() {
                 Some(0),
                 Outcome::Tool {
                     result: "ok".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
             &caller,
@@ -3035,6 +3043,7 @@ fn complete_tool(agg: &mut SessionAggregate, id: &str, result: &str) -> Vec<Even
             Some(0),
             Outcome::Tool {
                 result: result.to_string(),
+                attachments: Vec::new(),
             },
         ),
         &machine(),
@@ -4488,6 +4497,7 @@ fn tool_result_during_interrupt_queues_until_resume() {
             Some(0),
             Outcome::Tool {
                 result: "done".to_string(),
+                attachments: Vec::new(),
             },
         ),
         &system,
@@ -4745,6 +4755,7 @@ fn machine_caller_from_wrong_tenant_is_denied() {
                 Some(0),
                 Outcome::Tool {
                     result: "ok".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
             &cross_tenant_machine,
@@ -4826,6 +4837,7 @@ fn parallel_tool_results_record_in_completion_order() {
                 Some(0),
                 Outcome::Tool {
                     result: format!("result-{id}"),
+                    attachments: Vec::new(),
                 },
             ),
             &sys,
@@ -9257,6 +9269,7 @@ fn settle_without_attempt_settles_the_current_attempt() {
             None,
             Outcome::Tool {
                 result: "ok".to_string(),
+                attachments: Vec::new(),
             },
         ),
         &machine(),
@@ -9278,6 +9291,7 @@ fn settle_without_attempt_settles_the_current_attempt() {
                 Some(7),
                 Outcome::Tool {
                     result: "ok".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
             &machine(),
@@ -9323,6 +9337,7 @@ fn fork_voids_a_pending_tool_call() {
                 Some(0),
                 Outcome::Tool {
                     result: "ok".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
             &machine(),
@@ -9432,6 +9447,7 @@ fn promoting_submit_drops_a_queued_settle_for_the_branch_it_forked_away() {
             Some(0),
             Outcome::Tool {
                 result: "ok".to_string(),
+                attachments: Vec::new(),
             },
         ),
         &machine(),
@@ -9733,6 +9749,7 @@ fn fork_drops_a_retrying_settle_decision() {
             Some(0),
             Outcome::Tool {
                 result: "ok".to_string(),
+                attachments: Vec::new(),
             },
         ),
         &machine(),

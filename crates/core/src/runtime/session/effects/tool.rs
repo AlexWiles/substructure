@@ -45,7 +45,10 @@ impl KindSpec for ToolSpec {
 
     fn settle(&self, state: &SessionState, id: &str, outcome: Outcome) -> Vec<EventPayload> {
         match outcome {
-            Outcome::Tool { result } => {
+            Outcome::Tool {
+                result,
+                attachments,
+            } => {
                 let name = state
                     .tool_call(id)
                     .map(|t| t.name.clone())
@@ -67,7 +70,7 @@ impl KindSpec for ToolSpec {
                             false,
                         ),
                     ),
-                    None => complete(id.to_string(), name, result),
+                    None => complete(id.to_string(), name, result, attachments),
                 }
             }
             Outcome::Error(e) => fail(self, state, id, &e),
@@ -95,6 +98,7 @@ impl KindSpec for ToolSpec {
             ok: false,
             name: name_of(state, id),
             result: None,
+            attachments: Vec::new(),
             error: Some(e.error.clone()),
         })];
         if let (Some(auth), Some(target)) = (e.auth, connector_target(state, id)) {
@@ -169,18 +173,21 @@ pub(in crate::runtime::session) fn complete(
     id: String,
     name: String,
     result: String,
+    attachments: Vec<String>,
 ) -> Vec<EventPayload> {
     vec![
         EventPayload::ToolCallCompleted(ToolCallCompleted {
             id: id.clone(),
             name: name.clone(),
             result: result.clone(),
+            attachments: attachments.clone(),
         }),
         decision_queued(Trigger::ToolFinished {
             id,
             ok: true,
             name,
             result: Some(result),
+            attachments,
             error: None,
         }),
     ]

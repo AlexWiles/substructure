@@ -14,10 +14,8 @@ use super::{
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
-use crate::protocol::{
-    ClientInput, Content, ContentPart, FileData, ImageUrl, OwnerKind, Role, SessionOwner,
-};
-use crate::runtime::blob::{text_like, BlobError, BlobRef, BlobStore, NewBlob};
+use crate::protocol::{ClientInput, Content, ContentPart, OwnerKind, Role, SessionOwner};
+use crate::runtime::blob::{attachment_part, text_like, BlobError, BlobRef, BlobStore, NewBlob};
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
 use crate::session::state::SessionStatus;
@@ -259,22 +257,6 @@ fn attachment_cap(mime: &str) -> Option<u64> {
         Some(MAX_TEXT_BYTES)
     } else {
         None
-    }
-}
-
-/// A stored attachment as the message part its kind rides in.
-fn attachment_part(r: &BlobRef) -> ContentPart {
-    if r.mime.starts_with("image/") {
-        ContentPart::ImageUrl {
-            image_url: ImageUrl { url: r.uri() },
-        }
-    } else {
-        ContentPart::File {
-            file: FileData {
-                filename: r.name.clone().unwrap_or_else(|| "file".to_string()),
-                file_data: r.uri(),
-            },
-        }
     }
 }
 

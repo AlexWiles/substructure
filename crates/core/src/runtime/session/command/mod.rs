@@ -245,7 +245,10 @@ impl Action {
                 EffectKind::ToolCall,
                 id,
                 attempt,
-                Outcome::Tool { result },
+                Outcome::Tool {
+                    result,
+                    attachments: Vec::new(),
+                },
             )),
             Action::LlmResult {
                 id,

@@ -507,6 +507,7 @@ mod tests {
                     id: "tc1".into(),
                     name: "search_web".into(),
                     result: "found".into(),
+                    attachments: Vec::new(),
                 }),
             ),
         ]
@@ -521,6 +522,7 @@ mod tests {
                 ok: false,
                 name: "sentry__search_issues".to_string(),
                 result: None,
+                attachments: Vec::new(),
                 error: None,
             },
             &state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt),
@@ -715,6 +717,7 @@ mod tests {
             ok: true,
             name: "search_web".to_string(),
             result: Some("found".to_string()),
+            attachments: Vec::new(),
             error: None,
         };
         let proposed = DecisionResponse {

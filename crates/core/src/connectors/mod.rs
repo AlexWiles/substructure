@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::runtime::blob::BlobRef;
+
 pub mod credential;
 pub mod filter;
 pub mod mcp;
@@ -50,6 +52,10 @@ pub struct ToolOutcome {
     pub content: String,
     pub structured: Option<Value>,
     pub is_error: bool,
+    /// What the tool answered with that is not text. The bytes are in the blob
+    /// store and the model reads them as message parts, so nothing large ever
+    /// enters the event log.
+    pub attachments: Vec<BlobRef>,
 }
 
 /// The credential headers for one connection, read for each request. A

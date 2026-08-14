@@ -34,9 +34,10 @@ use uuid::Uuid;
 use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::{
-    AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
-    DraftMessage, ErrorInfo, Message, Role, ToolCall,
+    AgentConfig, ClientContext, Content, ContentPart, DecisionAction, DecisionResponse,
+    DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, ToolCall,
 };
+use crate::runtime::blob::{attachment_part, BlobRef};
 
 pub fn propose(
     trigger: &DecisionTrigger,
@@ -81,11 +82,13 @@ pub fn propose(
             ok,
             name,
             result,
+            attachments,
             error,
         } => tool_finished(
             id,
             name,
             &settled_text(*ok, result, error),
+            attachments,
             transcript,
             llm_calls,
             pending_calls,
@@ -101,6 +104,7 @@ pub fn propose(
             id,
             agent_id,
             &settled_text(*ok, result, error),
+            &[],
             transcript,
             llm_calls,
             pending_calls,
@@ -374,6 +378,27 @@ fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionRespon
     }
 }
 
+/// A tool message. Stored attachments ride as parts, so the blob layer inlines
+/// the bytes at the provider call and the model sees an image as an image. A
+/// result with none is the text it always was.
+fn tool_content(text: &str, attachments: &[String]) -> Content {
+    let refs: Vec<BlobRef> = attachments
+        .iter()
+        .filter_map(|u| BlobRef::parse(u))
+        .collect();
+    if refs.is_empty() {
+        return Content::Text(text.to_string());
+    }
+    let mut parts = Vec::with_capacity(refs.len() + 1);
+    if !text.is_empty() {
+        parts.push(ContentPart::Text {
+            text: text.to_string(),
+        });
+    }
+    parts.extend(refs.iter().map(attachment_part));
+    Content::Parts(parts)
+}
+
 /// Record the tool message (the error text when the call failed, so the model
 /// sees it), then wait for in-flight siblings or re-issue the parent request.
 /// No proposal when the parent call can't be resolved: a half proposal that
@@ -382,6 +407,7 @@ fn tool_finished(
     id: &str,
     name: &str,
     content: &str,
+    attachments: &[String],
     transcript: &[Message],
     llm_calls: &HashMap<String, EffectState>,
     pending_calls: usize,
@@ -389,7 +415,7 @@ fn tool_finished(
     let tool_message = DraftMessage {
         id: None,
         role: Role::Tool,
-        content: Some(Content::Text(content.to_string())),
+        content: Some(tool_content(content, attachments)),
         tool_calls: None,
         tool_call_id: Some(id.to_string()),
         name: Some(name.to_string()),
@@ -588,6 +614,7 @@ mod tests {
             ok: outcome.is_ok(),
             name: name.to_string(),
             result: outcome.ok().map(str::to_string),
+            attachments: Vec::new(),
             error: outcome.err().map(ErrorInfo::handler),
         }
     }

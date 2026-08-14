@@ -1506,6 +1506,8 @@ pub enum DecisionTrigger {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<ErrorInfo>,
     },

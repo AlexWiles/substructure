@@ -9,6 +9,12 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Connections speak MCP revision 2026-07-28. The client finds which revision a server speaks, and keeps 2025-11-25 for the servers that use it.
+- Tool calls send the arguments that a server marks with `x-mcp-header` as HTTP headers.
+- A tool that answers with an image, audio, or a file keeps it in the blob store, and the model reads it as part of the result.
+
 ## [0.5.0] - 2026-08-13
 
 ### Added

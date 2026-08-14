@@ -296,6 +296,9 @@ pub struct ToolCallCompleted {
     pub id: String,
     pub name: String,
     pub result: String,
+    /// `blob://` refs for what the tool answered with that is not text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

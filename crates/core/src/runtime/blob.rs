@@ -13,7 +13,9 @@ use base64::Engine;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmResolver};
-use crate::protocol::{Content, ContentPart, ErrorCode, LlmRequest, LlmResponse, SessionOwner};
+use crate::protocol::{
+    Content, ContentPart, ErrorCode, FileData, ImageUrl, LlmRequest, LlmResponse, SessionOwner,
+};
 
 pub const BLOB_SCHEME: &str = "blob://";
 
@@ -105,6 +107,59 @@ pub struct NewBlob {
 pub trait BlobStore: Send + Sync {
     async fn put(&self, blob: NewBlob) -> Result<BlobRef, BlobError>;
     async fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobError>;
+}
+
+/// An in-memory store for tests in other modules, keyed by minted id.
+#[cfg(test)]
+pub(crate) struct MemoryBlobStore(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+
+#[cfg(test)]
+impl MemoryBlobStore {
+    pub(crate) fn new() -> Self {
+        Self(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl BlobStore for MemoryBlobStore {
+    async fn put(&self, blob: NewBlob) -> Result<BlobRef, BlobError> {
+        let id = uuid::Uuid::now_v7().to_string();
+        let size = blob.bytes.len() as u64;
+        self.0.lock().unwrap().insert(id.clone(), blob.bytes);
+        Ok(BlobRef {
+            tenant_id: blob.tenant_id,
+            id,
+            mime: blob.mime,
+            name: blob.name,
+            size,
+        })
+    }
+
+    async fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobError> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(&r.id)
+            .cloned()
+            .ok_or(BlobError::NotFound)
+    }
+}
+
+/// A stored attachment as the message part its kind rides in.
+pub fn attachment_part(r: &BlobRef) -> ContentPart {
+    if r.mime.starts_with("image/") {
+        ContentPart::ImageUrl {
+            image_url: ImageUrl { url: r.uri() },
+        }
+    } else {
+        ContentPart::File {
+            file: FileData {
+                filename: r.name.clone().unwrap_or_else(|| "file".to_string()),
+                file_data: r.uri(),
+            },
+        }
+    }
 }
 
 /// Mimes that read as text: the file inlines into the prompt as a text part,

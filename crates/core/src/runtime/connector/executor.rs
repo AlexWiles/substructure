@@ -145,7 +145,10 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
                 return;
             };
             let outcome = match answer {
-                LocalAnswer::Result(result) => Outcome::Tool { result },
+                LocalAnswer::Result(result) => Outcome::Tool {
+                    result,
+                    attachments: Vec::new(),
+                },
                 LocalAnswer::Error(message) => {
                     SettleError::new(ErrorInfo::new(ErrorCode::HandlerError, message), false).into()
                 }
@@ -185,6 +188,7 @@ fn settle_call(
                 Some(value) => value.to_string(),
                 None => outcome.content,
             },
+            attachments: outcome.attachments.iter().map(|r| r.uri()).collect(),
         },
         Err(err) => SettleError::new(
             ErrorInfo::new(ErrorCode::HandlerError, err.message),
@@ -242,6 +246,7 @@ mod tests {
             content: content.to_string(),
             structured,
             is_error,
+            attachments: Vec::new(),
         }
     }
 
@@ -293,7 +298,7 @@ mod tests {
         match cmd {
             CommandPayload::SettleEffect {
                 kind: EffectKind::ToolCall,
-                outcome: Outcome::Tool { result },
+                outcome: Outcome::Tool { result, .. },
                 ..
             } => {
                 assert_eq!(
@@ -312,7 +317,7 @@ mod tests {
         match cmd {
             CommandPayload::SettleEffect {
                 kind: EffectKind::ToolCall,
-                outcome: Outcome::Tool { result },
+                outcome: Outcome::Tool { result, .. },
                 ..
             } => assert_eq!(result, "Issue 7"),
             other => panic!("expected a result; got {other:?}"),

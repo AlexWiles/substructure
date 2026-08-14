@@ -365,6 +365,7 @@ mod tests {
                 id: id.into(),
                 name: "tool".into(),
                 result: "ok".into(),
+                attachments: Vec::new(),
             }),
         )
     }
@@ -560,6 +561,7 @@ mod tests {
                     id: "tc1".into(),
                     name: "send_email".into(),
                     result: "   ".into(),
+                    attachments: Vec::new(),
                 }),
             ),
         ];
@@ -656,6 +658,7 @@ mod tests {
                     id,
                     name: "tool".into(),
                     result: big.clone(),
+                    attachments: Vec::new(),
                 }),
             ));
         }

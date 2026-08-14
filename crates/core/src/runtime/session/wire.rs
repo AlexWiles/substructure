@@ -635,12 +635,14 @@ pub fn to_wire_trigger(
             ok,
             name,
             result,
+            attachments,
             error,
         } => DecisionTrigger::ToolFinished {
             id,
             ok,
             name,
             result,
+            attachments,
             error,
         },
         Trigger::SubAgentFinished {
@@ -1477,6 +1479,7 @@ mod tests {
                 ok: true,
                 name: "t".to_string(),
                 result: Some("r".to_string()),
+                attachments: Vec::new(),
                 error: None,
             },
             &[],

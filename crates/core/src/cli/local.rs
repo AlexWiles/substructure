@@ -277,6 +277,7 @@ pub(crate) async fn start_engine(
             Arc::new(Connections::new(
                 Arc::new(LocalRegistry::new(connectors)),
                 Arc::new(StoredCredentials::new(token_store)),
+                blobs.clone(),
             ))
         });
 

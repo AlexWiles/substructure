@@ -39,6 +39,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 serde_path_to_error = "0.1"
 sha2 = "0.10"
+# Names the SSE types in rmcp's client transport trait.
+sse-stream = "0.2"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
@@ -53,6 +55,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 jsonschema = { version = "0.47.0", default-features = false }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
 ctrlc = "3.5.2"
+rmcp = { version = "3.1.2", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 
 [dev-dependencies]
 proptest = "1.11.0"

@@ -1,54 +1,52 @@
-//! A Streamable HTTP MCP client (spec revision 2025-11-25).
+//! MCP connections, over the official SDK.
 //!
-//! One `McpClient` fronts one connection. It initializes lazily, carries the
-//! server's `MCP-Session-Id` for the life of that session, and re-initializes
-//! when the server drops it (404), so a long-lived agent survives a server
-//! restart without the caller knowing.
+//! `rmcp` owns the protocol: both revisions, the `server/discover` probe and its
+//! fallback to the handshake, pagination, response caching, and the request
+//! metadata each revision wants. What is written here is only what the engine
+//! needs on top of it — credentials that are read per request, and failures
+//! lowered to the three answers the registry acts on.
 //!
-//! Only the calls the engine needs are implemented: `initialize`, `tools/list`,
-//! `tools/call`. The server-to-client direction (the optional GET stream) is not
-//! opened — nothing in the engine consumes server-initiated requests.
+//! One `McpClient` fronts one connection and holds one running service, built
+//! on first use and rebuilt if the connection dies.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
-use reqwest::StatusCode;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock,
+    Implementation, ProtocolVersion, ResourceContents, Tool,
+};
+use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService};
+use rmcp::transport::streamable_http_client::{
+    SseError, StreamableHttpClient, StreamableHttpClientTransport,
+    StreamableHttpClientTransportConfig, StreamableHttpError, StreamableHttpPostResponse,
+};
+use rmcp::ServiceError;
+use serde_json::Value;
+use sse_stream::Sse;
 use tokio::sync::Mutex;
+
+use crate::runtime::blob::{text_like, BlobRef, BlobStore, NewBlob};
 
 use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, ToolAnnotations, ToolOutcome};
 
-/// The revision we negotiate. The 2026-07-28 revision drops the handshake and
-/// the session id entirely, so moving to it deletes `SessionState` rather than
-/// changing the call sites.
-const PROTOCOL_VERSION: &str = "2025-11-25";
-
-const SESSION_HEADER: &str = "mcp-session-id";
-const VERSION_HEADER: &str = "mcp-protocol-version";
-
-/// Guards against a server that pages `tools/list` forever.
-const MAX_TOOL_PAGES: usize = 50;
+/// The revisions we accept, best first. The SDK probes for the first and falls
+/// back to the second only when a server proves it speaks the older one.
+const PREFERRED: ProtocolVersion = ProtocolVersion::V_2026_07_28;
+const LEGACY: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 
 pub struct McpClient {
-    http: reqwest::Client,
     endpoint: String,
-    auth: Arc<dyn CredentialSource>,
-    next_id: AtomicU64,
-    session: Mutex<SessionState>,
+    http: Credentialed,
+    blobs: Arc<dyn BlobStore>,
+    tenant_id: String,
+    service: Mutex<Option<Arc<Running>>>,
 }
 
-#[derive(Default)]
-struct SessionState {
-    id: Option<String>,
-    /// The version the server agreed to, echoed on every later request.
-    version: Option<String>,
-    /// What the server said it is for, at the handshake.
-    instructions: Option<String>,
-    ready: bool,
-}
+type Running = RunningService<RoleClient, ClientInfo>;
 
 impl McpClient {
     /// The client reads a token from nowhere else.
@@ -56,41 +54,34 @@ impl McpClient {
         http: reqwest::Client,
         endpoint: impl Into<String>,
         auth: Arc<dyn CredentialSource>,
+        blobs: Arc<dyn BlobStore>,
+        tenant_id: impl Into<String>,
     ) -> Self {
         Self {
-            http,
             endpoint: endpoint.into(),
-            auth,
-            next_id: AtomicU64::new(1),
-            session: Mutex::new(SessionState::default()),
+            http: Credentialed { http, auth },
+            blobs,
+            tenant_id: tenant_id.into(),
+            service: Mutex::new(None),
         }
     }
 
-    /// Every tool the connection offers, following `nextCursor` to the end.
-    /// What the server said it is for. Read after a handshake, else `None`.
+    /// What the server said it is for. Read after a connection, else `None`.
     pub async fn instructions(&self) -> Option<String> {
-        self.session.lock().await.instructions.clone()
+        let service = self.service.lock().await;
+        service
+            .as_ref()
+            .and_then(|s| s.peer_info())
+            .and_then(|info| info.instructions.clone())
     }
 
+    /// Every tool the connection offers, following the pages to the end.
     pub async fn list_tools(&self) -> Result<Vec<RemoteTool>, ConnectorError> {
-        let mut tools = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..MAX_TOOL_PAGES {
-            let params = match &cursor {
-                Some(c) => json!({ "cursor": c }),
-                None => json!({}),
-            };
-            let result = self.request("tools/list", params).await?;
-            let page: ToolsList = parse_result(result)?;
-            tools.extend(page.tools.into_iter().map(RemoteTool::from));
-            match page.next_cursor {
-                Some(next) if !next.is_empty() => cursor = Some(next),
-                _ => return Ok(tools),
-            }
+        let service = self.connect().await?;
+        match service.list_all_tools().await {
+            Ok(tools) => Ok(tools.into_iter().map(remote_tool).collect()),
+            Err(e) => Err(self.lower(e).await),
         }
-        Err(ConnectorError::permanent(format!(
-            "connection paged past {MAX_TOOL_PAGES} tool pages"
-        )))
     }
 
     /// Call `name` with `arguments`. A tool that fails on the far side comes
@@ -101,265 +92,415 @@ impl McpClient {
         name: &str,
         arguments: &Value,
     ) -> Result<ToolOutcome, ConnectorError> {
-        let params = json!({ "name": name, "arguments": arguments });
-        let result = self.request("tools/call", params).await?;
-        let call: CallResult = parse_result(result)?;
-        Ok(ToolOutcome {
-            content: render_content(&call.content),
-            structured: call.structured_content,
-            is_error: call.is_error,
-        })
-    }
-
-    /// One JSON-RPC request, initializing first if needed. A server that has
-    /// forgotten our session (404) gets one fresh handshake and one retry;
-    /// beyond that the failure is real.
-    async fn request(&self, method: &str, params: Value) -> Result<Value, ConnectorError> {
-        self.ensure_ready().await?;
-        match self.request_once(method, &params).await {
-            Err(err) if err.session_expired => {
-                self.session.lock().await.ready = false;
-                self.ensure_ready().await?;
-                self.request_once(method, &params)
-                    .await
-                    .map_err(|e| e.error)
-            }
-            Err(err) => Err(err.error),
-            Ok(value) => Ok(value),
+        let service = self.connect().await?;
+        let mut params = CallToolRequestParams::new(name.to_string());
+        params.arguments = arguments.as_object().cloned();
+        match service.call_tool(params).await {
+            Ok(result) => Ok(self.outcome(result).await),
+            Err(e) => Err(self.lower(e).await),
         }
     }
 
-    async fn request_once(&self, method: &str, params: &Value) -> Result<Value, RequestFailure> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let (session, version) = {
-            let state = self.session.lock().await;
-            (state.id.clone(), state.version.clone())
-        };
-        let response = self
-            .post(&body, session.as_deref(), version.as_deref())
-            .await?;
-        let (status, _, payload) = response;
-        read_rpc_result(status, payload, id).map_err(RequestFailure::from)
-    }
-
-    /// Handshake: `initialize`, then the `notifications/initialized` the server
-    /// waits for before accepting anything else.
-    async fn ensure_ready(&self) -> Result<(), ConnectorError> {
-        let mut state = self.session.lock().await;
-        if state.ready {
-            return Ok(());
-        }
-        state.id = None;
-        state.version = None;
-
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "substructure", "version": env!("CARGO_PKG_VERSION") },
+    /// Text is read into the result; everything else is stored and referenced.
+    /// The model sees a stored block as a message part, so an image comes back
+    /// as an image rather than as a note saying there was one.
+    async fn outcome(&self, result: CallToolResult) -> ToolOutcome {
+        let mut text = Vec::new();
+        let mut attachments = Vec::new();
+        for block in &result.content {
+            match block {
+                ContentBlock::Text(t) => text.push(t.text.clone()),
+                ContentBlock::Image(i) => {
+                    self.keep(&i.data, &i.mime_type, None, &mut text, &mut attachments)
+                        .await
+                }
+                ContentBlock::Audio(a) => {
+                    self.keep(&a.data, &a.mime_type, None, &mut text, &mut attachments)
+                        .await
+                }
+                ContentBlock::Resource(r) => match &r.resource {
+                    ResourceContents::TextResourceContents { text: body, .. } => {
+                        text.push(body.clone())
+                    }
+                    ResourceContents::BlobResourceContents {
+                        blob,
+                        mime_type,
+                        uri,
+                        ..
+                    } => {
+                        let mime = mime_type.as_deref().unwrap_or("application/octet-stream");
+                        self.keep(blob, mime, Some(uri), &mut text, &mut attachments)
+                            .await
+                    }
+                    _ => text.push("[resource content]".to_string()),
+                },
+                // A link is a URL, not bytes: the model can read it as it is.
+                ContentBlock::ResourceLink(r) => text.push(r.uri.clone()),
+                _ => text.push("[content]".to_string()),
             }
-        });
-        let (status, headers, payload) = self.post(&body, None, None).await.map_err(|f| f.error)?;
-        let result = read_rpc_result(status, payload, id)?;
-        let init: InitializeResult = parse_result(result)?;
-
-        state.id = headers
-            .get(SESSION_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        state.version = Some(init.protocol_version);
-        state.instructions = init.instructions;
-
-        let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        self.post(&note, state.id.as_deref(), state.version.as_deref())
-            .await
-            .map_err(|f| f.error)?;
-
-        state.ready = true;
-        Ok(())
+        }
+        ToolOutcome {
+            content: text.join("\n"),
+            structured: result.structured_content,
+            is_error: result.is_error.unwrap_or(false),
+            attachments,
+        }
     }
 
-    async fn post(
+    /// Store one block's bytes. A block that cannot be decoded or stored is
+    /// named instead: losing an image must not fail the call that carried it.
+    async fn keep(
         &self,
-        body: &Value,
-        session: Option<&str>,
-        version: Option<&str>,
-    ) -> Result<(StatusCode, HeaderMap, Payload), RequestFailure> {
-        let mut req = self
-            .http
-            .post(&self.endpoint)
-            .headers(self.auth.headers().await?)
-            // The spec requires both: the server picks one to answer with.
-            .header(ACCEPT, "application/json, text/event-stream")
-            .json(body);
-        if let Some(session) = session {
-            req = req.header(SESSION_HEADER, session);
+        data: &str,
+        mime: &str,
+        uri: Option<&str>,
+        text: &mut Vec<String>,
+        out: &mut Vec<BlobRef>,
+    ) {
+        let kind = mime.split('/').next().unwrap_or("file").to_string();
+        let Ok(bytes) = BASE64.decode(data) else {
+            text.push(format!("[unreadable {kind} content]"));
+            return;
+        };
+        // Text that arrived as bytes belongs in the result, not the store.
+        if text_like(mime) {
+            match String::from_utf8(bytes) {
+                Ok(body) => text.push(body),
+                Err(_) => text.push(format!("[unreadable {kind} content]")),
+            }
+            return;
         }
-        if let Some(version) = version {
-            req = req.header(VERSION_HEADER, version);
+        let blob = NewBlob {
+            tenant_id: self.tenant_id.clone(),
+            mime: mime.to_string(),
+            name: uri.map(|u| u.rsplit('/').next().unwrap_or(u).to_string()),
+            bytes,
+        };
+        match self.blobs.put(blob).await {
+            Ok(r) => out.push(r),
+            Err(e) => {
+                tracing::warn!("keeping {kind} content from a tool failed: {e}");
+                text.push(format!("[{kind} content]"));
+            }
         }
+    }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| ConnectorError::retryable(format!("connection unreachable: {e}")))?;
-
-        let status = response.status();
-        let headers = response.headers().clone();
-
-        if status == StatusCode::NOT_FOUND && session.is_some() {
-            return Err(RequestFailure {
-                error: ConnectorError::retryable("connection session expired"),
-                session_expired: true,
-            });
+    /// The running service, built on first use. Connecting is where the SDK
+    /// settles the revision, so nothing above here knows which one is in play.
+    async fn connect(&self) -> Result<Arc<Running>, ConnectorError> {
+        let mut slot = self.service.lock().await;
+        if let Some(service) = slot.as_ref() {
+            return Ok(service.clone());
         }
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            // The registry knows which credential went out, and corrects this.
-            return Err(ConnectorError::unauthorized(
-                AuthNeed::Reauthorize,
-                format!("connection rejected the credential ({status})"),
+        let transport = StreamableHttpClientTransport::with_client(
+            self.http.clone(),
+            StreamableHttpClientTransportConfig::with_uri(self.endpoint.clone()),
+        );
+        let mut info = ClientInfo::default();
+        info.protocol_version = PREFERRED;
+        info.capabilities = ClientCapabilities::default();
+        info.client_info = Implementation::new("substructure", env!("CARGO_PKG_VERSION"));
+        let service = info
+            .serve_with_lifecycle(
+                transport,
+                ClientLifecycleMode::Auto {
+                    preferred_versions: vec![PREFERRED, LEGACY],
+                    legacy_version: Some(LEGACY),
+                },
             )
-            .into());
-        }
-        // A notification is answered with 202 and no body.
-        if status == StatusCode::ACCEPTED {
-            return Ok((status, headers, Payload::Empty));
-        }
-        if status.is_server_error() {
-            return Err(ConnectorError::retryable(format!("connection failed ({status})")).into());
-        }
-
-        let is_sse = headers
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.starts_with("text/event-stream"));
-
-        let payload = if is_sse {
-            Payload::Stream(collect_sse(response).await?)
-        } else {
-            let text = response
-                .text()
-                .await
-                .map_err(|e| ConnectorError::retryable(format!("unreadable response: {e}")))?;
-            Payload::Json(text)
-        };
-
-        if !status.is_success() {
-            return Err(ConnectorError::permanent(format!(
-                "connection rejected the request ({status})"
-            ))
-            .into());
-        }
-        Ok((status, headers, payload))
+            .await
+            .map_err(initialize_error)?;
+        let service = Arc::new(service);
+        *slot = Some(service.clone());
+        Ok(service)
     }
-}
 
-enum Payload {
-    Json(String),
-    /// The `data` field of every SSE event, in order.
-    Stream(Vec<String>),
-    Empty,
-}
-
-/// A failure plus whether it was specifically a dropped session, which the
-/// caller answers by re-initializing rather than by giving up.
-struct RequestFailure {
-    error: ConnectorError,
-    session_expired: bool,
-}
-
-impl From<ConnectorError> for RequestFailure {
-    fn from(error: ConnectorError) -> Self {
-        Self {
+    /// Lower a service failure, dropping the connection when it is the
+    /// connection that broke: the next call then builds a fresh one rather than
+    /// talking to a service whose task has gone.
+    async fn lower(&self, error: ServiceError) -> ConnectorError {
+        if matches!(
             error,
-            session_expired: false,
+            ServiceError::TransportClosed | ServiceError::TransportSend(_)
+        ) {
+            *self.service.lock().await = None;
         }
+        service_error(error)
     }
 }
 
-/// Read the SSE stream to its end, keeping each event's data. The response to
-/// our request is one of them; the spec allows unrelated server messages first.
-async fn collect_sse(response: reqwest::Response) -> Result<Vec<String>, ConnectorError> {
-    use eventsource_stream::Eventsource;
+// ── Credentials ──────────────────────────────────────────────────────────
 
-    let mut events = response.bytes_stream().eventsource();
-    let mut data = Vec::new();
-    while let Some(event) = events.next().await {
-        match event {
-            Ok(event) if !event.data.is_empty() => data.push(event.data),
-            Ok(_) => {}
-            Err(e) => return Err(ConnectorError::retryable(format!("stream broke: {e}"))),
-        }
-    }
-    Ok(data)
+/// The SDK's HTTP backend, with our credential read on every request rather
+/// than fixed when the transport was built. A token replaced in the store thus
+/// reaches the next request, and the connection stays.
+#[derive(Clone)]
+struct Credentialed {
+    http: reqwest::Client,
+    auth: Arc<dyn CredentialSource>,
 }
 
-/// Pull the JSON-RPC result for `want_id` out of whichever shape the server
-/// answered with.
-fn read_rpc_result(
-    status: StatusCode,
-    payload: Payload,
-    want_id: u64,
-) -> Result<Value, ConnectorError> {
-    let candidates = match payload {
-        Payload::Json(text) => vec![text],
-        Payload::Stream(events) => events,
-        Payload::Empty => {
-            return Err(ConnectorError::permanent(format!(
-                "connection answered {status} with no body"
-            )))
+impl Credentialed {
+    /// The credential as the SDK wants it: a bare bearer token where that is
+    /// what it is, and a header of our own naming otherwise.
+    ///
+    /// `carried` is what the transport already computed — the protocol headers
+    /// this revision requires — so it is added to, never replaced.
+    async fn headers(
+        &self,
+        mut custom: Headers,
+    ) -> Result<(Option<String>, Headers), StreamableHttpError<WireError>> {
+        let headers = self
+            .auth
+            .headers()
+            .await
+            .map_err(|e| StreamableHttpError::Client(WireError::Credential(e)))?;
+        let mut bearer = None;
+        for (name, value) in headers.iter() {
+            let token = (name == AUTHORIZATION)
+                .then(|| value.to_str().ok())
+                .flatten()
+                .and_then(|v| v.strip_prefix("Bearer "));
+            match token {
+                Some(token) => bearer = Some(token.to_string()),
+                None => {
+                    custom.insert(name.clone(), value.clone());
+                }
+            }
         }
-    };
+        Ok((bearer, custom))
+    }
+}
 
-    let mut rpc_error = None;
-    for raw in &candidates {
-        let Ok(message) = serde_json::from_str::<RpcResponse>(raw) else {
-            continue;
+type Headers = HashMap<HeaderName, HeaderValue>;
+
+impl StreamableHttpClient for Credentialed {
+    type Error = WireError;
+
+    async fn post_message(
+        &self,
+        uri: Arc<str>,
+        message: rmcp::model::ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        _auth_header: Option<String>,
+        custom_headers: Headers,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        let (auth, custom) = self.headers(custom_headers).await?;
+        self.http
+            .post_message(uri, message, session_id, auth, custom)
+            .await
+            .map_err(lift)
+    }
+
+    async fn post_message_with_max_sse_event_size(
+        &self,
+        uri: Arc<str>,
+        message: rmcp::model::ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        _auth_header: Option<String>,
+        custom_headers: Headers,
+        max_sse_event_size: usize,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        let (auth, custom) = self.headers(custom_headers).await?;
+        self.http
+            .post_message_with_max_sse_event_size(
+                uri,
+                message,
+                session_id,
+                auth,
+                custom,
+                max_sse_event_size,
+            )
+            .await
+            .map_err(lift)
+    }
+
+    async fn delete_session(
+        &self,
+        uri: Arc<str>,
+        session_id: Arc<str>,
+        _auth_header: Option<String>,
+        custom_headers: Headers,
+    ) -> Result<(), StreamableHttpError<Self::Error>> {
+        let (auth, custom) = self.headers(custom_headers).await?;
+        self.http
+            .delete_session(uri, session_id, auth, custom)
+            .await
+            .map_err(lift)
+    }
+
+    async fn get_stream(
+        &self,
+        uri: Arc<str>,
+        session_id: Option<Arc<str>>,
+        last_event_id: Option<String>,
+        _auth_header: Option<String>,
+        custom_headers: Headers,
+    ) -> Result<
+        futures_util::stream::BoxStream<'static, Result<Sse, SseError>>,
+        StreamableHttpError<Self::Error>,
+    > {
+        let (auth, custom) = self.headers(custom_headers).await?;
+        self.http
+            .get_stream(uri, session_id, last_event_id, auth, custom)
+            .await
+            .map_err(lift)
+    }
+}
+
+/// What can go wrong below the protocol: the credential could not be built, or
+/// the request did not go out.
+#[derive(Debug, thiserror::Error)]
+enum WireError {
+    #[error("{0}")]
+    Credential(ConnectorError),
+    #[error("{0}")]
+    Http(reqwest::Error),
+}
+
+/// Re-wrap the built-in client's failure as ours. Only the innermost variant
+/// differs; every other case is carried through unchanged.
+fn lift(error: StreamableHttpError<reqwest::Error>) -> StreamableHttpError<WireError> {
+    use StreamableHttpError as E;
+    match error {
+        E::Client(e) => E::Client(WireError::Http(e)),
+        E::Sse(e) => E::Sse(e),
+        E::Io(e) => E::Io(e),
+        E::Deserialize(e) => E::Deserialize(e),
+        E::TokioJoinError(e) => E::TokioJoinError(e),
+        E::UnexpectedEndOfStream => E::UnexpectedEndOfStream,
+        E::UnexpectedServerResponse(s) => E::UnexpectedServerResponse(s),
+        E::UnexpectedContentType(s) => E::UnexpectedContentType(s),
+        E::ServerDoesNotSupportSse => E::ServerDoesNotSupportSse,
+        E::ServerDoesNotSupportDeleteSession => E::ServerDoesNotSupportDeleteSession,
+        E::TransportChannelClosed => E::TransportChannelClosed,
+        E::MissingSessionIdInResponse => E::MissingSessionIdInResponse,
+        E::AuthRequired(e) => E::AuthRequired(e),
+        E::InsufficientScope(e) => E::InsufficientScope(e),
+        E::ReservedHeaderConflict(s) => E::ReservedHeaderConflict(s),
+        E::SessionExpired => E::SessionExpired,
+        other => E::UnexpectedServerResponse(other.to_string().into()),
+    }
+}
+
+// ── Lowering failures ────────────────────────────────────────────────────
+
+/// A failure while connecting. The credential is refused here more often than
+/// anywhere else: it is the first request the connection makes.
+fn initialize_error(error: rmcp::service::ClientInitializeError) -> ConnectorError {
+    use rmcp::service::ClientInitializeError;
+    match error {
+        ClientInitializeError::TransportError { error, .. } => {
+            transport_error(error.error.as_ref())
+        }
+        ClientInitializeError::ConnectionClosed(_) => {
+            ConnectorError::retryable("connection closed before it answered")
+        }
+        other => ConnectorError::permanent(format!("connection could not be opened: {other}")),
+    }
+}
+
+fn service_error(error: ServiceError) -> ConnectorError {
+    match error {
+        // The far side answered, and said no. Asking again the same way will
+        // get the same answer.
+        ServiceError::McpError(e) => {
+            ConnectorError::permanent(format!("connection returned an error: {e}"))
+        }
+        ServiceError::TransportSend(e) => transport_error(e.error.as_ref()),
+        ServiceError::TransportClosed => ConnectorError::retryable("connection closed"),
+        ServiceError::Timeout { timeout } => {
+            ConnectorError::retryable(format!("connection did not answer within {timeout:?}"))
+        }
+        ServiceError::InputRequiredRoundsExceeded { .. } => ConnectorError::permanent(
+            "connection asked for input this client does not provide \
+             (sampling, elicitation or roots)",
+        ),
+        other => ConnectorError::permanent(format!("connection failed: {other}")),
+    }
+}
+
+/// Read a boxed transport failure for the two things the registry acts on: a
+/// refused credential, and whether another attempt could work.
+fn transport_error(error: &(dyn std::error::Error + 'static)) -> ConnectorError {
+    if let Some(wire) = error.downcast_ref::<StreamableHttpError<WireError>>() {
+        return match wire {
+            // The registry knows which credential went out, and corrects this.
+            StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_) => {
+                ConnectorError::unauthorized(
+                    AuthNeed::Reauthorize,
+                    "connection rejected the credential",
+                )
+            }
+            StreamableHttpError::Client(WireError::Credential(e)) => e.clone(),
+            // The SDK only names a refusal when the server published a
+            // challenge with it. Servers that publish none are common, and a
+            // bare 401 means the same thing.
+            StreamableHttpError::Client(WireError::Http(e)) => match e.status() {
+                Some(status) if status.as_u16() == 401 || status.as_u16() == 403 => {
+                    ConnectorError::unauthorized(
+                        AuthNeed::Reauthorize,
+                        format!("connection rejected the credential ({status})"),
+                    )
+                }
+                _ => ConnectorError::retryable(format!("connection unreachable: {e}")),
+            },
+            // A revision that has no sessions cannot lose one, and one that has
+            // them re-establishes below us.
+            StreamableHttpError::SessionExpired => {
+                ConnectorError::retryable("connection session expired")
+            }
+            StreamableHttpError::Deserialize(e) => {
+                ConnectorError::permanent(format!("connection sent an unreadable result: {e}"))
+            }
+            // A status the SDK has no variant for arrives stringified. A
+            // refusal is the one we must not lose.
+            StreamableHttpError::UnexpectedServerResponse(message) => match status_of(message) {
+                Some(401 | 403) => ConnectorError::unauthorized(
+                    AuthNeed::Reauthorize,
+                    format!("connection rejected the credential ({message})"),
+                ),
+                Some(code) if code < 500 => {
+                    ConnectorError::permanent(format!("connection rejected the request: {message}"))
+                }
+                _ => ConnectorError::retryable(format!("connection failed: {message}")),
+            },
+            other => ConnectorError::retryable(format!("connection failed: {other}")),
         };
-        if message.id.as_ref().and_then(Value::as_u64) != Some(want_id) {
-            continue;
-        }
-        if let Some(err) = message.error {
-            rpc_error = Some(err);
-            break;
-        }
-        return Ok(message.result.unwrap_or(Value::Null));
     }
-
-    match rpc_error {
-        Some(err) => Err(ConnectorError::permanent(format!(
-            "connection returned an error: {} ({})",
-            err.message, err.code
-        ))),
-        None => Err(ConnectorError::retryable(
-            "connection sent no response to the request",
-        )),
-    }
+    ConnectorError::retryable(format!("connection failed: {error}"))
 }
 
-fn parse_result<T: for<'de> Deserialize<'de>>(result: Value) -> Result<T, ConnectorError> {
-    serde_json::from_value(result).map_err(|e| {
-        ConnectorError::permanent(format!("connection sent an unreadable result: {e}"))
-    })
+/// The status out of the SDK's `HTTP {status}: {body}` report.
+fn status_of(message: &str) -> Option<u16> {
+    message
+        .strip_prefix("HTTP ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
-/// Content blocks flattened for the model. Text passes through; anything else
-/// is named rather than dropped, so a tool answering with an image doesn't look
-/// like it answered with nothing.
-fn render_content(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .map(|b| match (&b.text, b.kind.as_str()) {
-            (Some(text), "text") => text.clone(),
-            (_, kind) => format!("[{kind} content]"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+// ── Lowering the model ───────────────────────────────────────────────────
+
+fn remote_tool(tool: Tool) -> RemoteTool {
+    RemoteTool {
+        name: tool.name.into_owned(),
+        description: tool.description.map(|d| d.into_owned()).unwrap_or_default(),
+        input: Some(Value::Object((*tool.input_schema).clone())),
+        output: tool
+            .output_schema
+            .map(|schema| Value::Object((*schema).clone())),
+        annotations: tool
+            .annotations
+            .map(|a| ToolAnnotations {
+                read_only: a.read_only_hint,
+                destructive: a.destructive_hint,
+                idempotent: a.idempotent_hint,
+                open_world: a.open_world_hint,
+            })
+            .unwrap_or_default(),
+    }
 }
 
 /// Build the credential headers for a connection. `Authorization: Bearer` is the
@@ -381,165 +522,116 @@ pub fn auth_headers(header: Option<&str>, token: &str) -> Result<HeaderMap, Conn
     Ok(headers)
 }
 
-// ── Wire types ───────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct RpcResponse {
-    #[serde(default)]
-    id: Option<Value>,
-    #[serde(default)]
-    result: Option<Value>,
-    #[serde(default)]
-    error: Option<RpcError>,
-}
-
-#[derive(Deserialize)]
-struct RpcError {
-    code: i64,
-    message: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InitializeResult {
-    protocol_version: String,
-    /// The server's own words about itself. Optional in MCP, and the only
-    /// description of a connection that we do not have to write ourselves.
-    #[serde(default)]
-    instructions: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ToolsList {
-    #[serde(default)]
-    tools: Vec<WireTool>,
-    #[serde(default)]
-    next_cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireTool {
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    input_schema: Option<Value>,
-    #[serde(default)]
-    output_schema: Option<Value>,
-    #[serde(default)]
-    annotations: Option<WireAnnotations>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireAnnotations {
-    #[serde(default)]
-    read_only_hint: Option<bool>,
-    #[serde(default)]
-    destructive_hint: Option<bool>,
-    #[serde(default)]
-    idempotent_hint: Option<bool>,
-    #[serde(default)]
-    open_world_hint: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CallResult {
-    #[serde(default)]
-    content: Vec<ContentBlock>,
-    #[serde(default)]
-    structured_content: Option<Value>,
-    #[serde(default)]
-    is_error: bool,
-}
-
-#[derive(Deserialize)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-impl From<WireTool> for RemoteTool {
-    fn from(t: WireTool) -> Self {
-        RemoteTool {
-            name: t.name,
-            description: t.description,
-            input: t.input_schema,
-            output: t.output_schema,
-            annotations: t.annotations.map(ToolAnnotations::from).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<WireAnnotations> for ToolAnnotations {
-    fn from(a: WireAnnotations) -> Self {
-        ToolAnnotations {
-            read_only: a.read_only_hint,
-            destructive: a.destructive_hint,
-            idempotent: a.idempotent_hint,
-            open_world: a.open_world_hint,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::blob::MemoryBlobStore;
     use axum::extract::State;
     use axum::response::{IntoResponse, Response};
     use axum::routing::post;
     use axum::Router;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use reqwest::header::CONTENT_TYPE;
+    use reqwest::StatusCode;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
+
+    const MODERN: &str = "2026-07-28";
+    const OLD: &str = "2025-11-25";
+    const SESSION_HEADER: &str = "mcp-session-id";
+    const VERSION_HEADER: &str = "mcp-protocol-version";
+    const METHOD_HEADER: &str = "mcp-method";
+    const NAME_HEADER: &str = "mcp-name";
+    const METHOD_NOT_FOUND: i64 = -32601;
 
     #[derive(Default)]
     struct Mock {
+        /// Refuse `server/discover` the way a handshake-era server does.
+        legacy: bool,
+        /// Answer `server/discover` with the versions this server allows.
+        offers: Option<Vec<String>>,
         /// Answer with SSE instead of a single JSON body.
         sse: bool,
-        /// Drop the session once, so the client has to re-handshake.
+        /// Shake hands but mint no session id, as a legacy server may.
+        no_session: bool,
+        /// Drop the legacy session once, so the client has to re-handshake.
         expire_once: AtomicBool,
         reject_credential: bool,
         /// Page `tools/list` once before returning the last page.
         paginate: bool,
+        /// Answer `tools/call` by asking for input this client cannot give.
+        wants_input: bool,
+        discovers: AtomicUsize,
         initializes: AtomicUsize,
-        seen: StdMutex<Vec<SeenRequest>>,
+        seen: StdMutex<Vec<Seen>>,
     }
 
-    /// method, session header, protocol-version header
-    type SeenRequest = (String, Option<String>, Option<String>);
+    #[derive(Clone)]
+    struct Seen {
+        method: String,
+        headers: axum::http::HeaderMap,
+        body: Value,
+    }
+
+    impl Seen {
+        fn header(&self, name: &str) -> Option<String> {
+            self.headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        }
+    }
 
     impl Mock {
-        fn record(&self, method: &str, headers: &axum::http::HeaderMap) {
-            let get = |n: &str| {
-                headers
-                    .get(n)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string)
-            };
-            self.seen.lock().unwrap().push((
-                method.to_string(),
-                get(SESSION_HEADER),
-                get(VERSION_HEADER),
-            ));
-        }
-
         fn methods(&self) -> Vec<String> {
             self.seen
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|(m, _, _)| m.clone())
+                .map(|s| s.method.clone())
                 .collect()
+        }
+
+        fn last(&self, method: &str) -> Seen {
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|s| s.method == method)
+                .unwrap_or_else(|| panic!("no {method} was sent, saw {:?}", self.methods()))
+                .clone()
         }
     }
 
-    fn ok_body(id: &Value, result: Value) -> Value {
+    fn ok_body(id: &Value, mut result: Value) -> Value {
+        result["resultType"] = json!("complete");
+        if result.get("tools").is_some() {
+            result["ttlMs"] = json!(0);
+            result["cacheScope"] = json!("private");
+        }
         json!({ "jsonrpc": "2.0", "id": id, "result": result })
+    }
+
+    fn json_ok(body: Value) -> Response {
+        ([(CONTENT_TYPE, "application/json")], body.to_string()).into_response()
+    }
+
+    fn json_status(status: StatusCode, body: Value) -> Response {
+        (
+            status,
+            [(CONTENT_TYPE, "application/json")],
+            body.to_string(),
+        )
+            .into_response()
+    }
+
+    fn rpc_error(id: Option<&Value>, code: i64, data: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id.cloned().unwrap_or(Value::Null),
+            "error": { "code": code, "message": "no", "data": data }
+        })
     }
 
     async fn handle(
@@ -549,33 +641,62 @@ mod tests {
     ) -> Response {
         let req: Value = serde_json::from_str(&body).expect("test sends json");
         let method = req["method"].as_str().unwrap_or_default().to_string();
-        mock.record(&method, &headers);
+        mock.seen.lock().unwrap().push(Seen {
+            method: method.clone(),
+            headers: headers.clone(),
+            body: req.clone(),
+        });
 
         if mock.reject_credential {
             return (StatusCode::UNAUTHORIZED, "nope").into_response();
         }
-        // Notifications get 202 and no body.
         let Some(id) = req.get("id") else {
             return StatusCode::ACCEPTED.into_response();
         };
 
+        if method == "server/discover" {
+            mock.discovers.fetch_add(1, Ordering::Relaxed);
+            if mock.legacy {
+                // A handshake-era server does not know the method.
+                return json_status(
+                    StatusCode::NOT_FOUND,
+                    rpc_error(Some(id), METHOD_NOT_FOUND, json!("server/discover")),
+                );
+            }
+            let offers = mock
+                .offers
+                .clone()
+                .unwrap_or_else(|| vec![MODERN.to_string()]);
+            return json_ok(ok_body(
+                id,
+                json!({
+                    "supportedVersions": offers,
+                    "capabilities": { "tools": {} },
+                    "instructions": "A mock.",
+                    "ttlMs": 0,
+                    "cacheScope": "private",
+                }),
+            ));
+        }
+
         if method == "initialize" {
             mock.initializes.fetch_add(1, Ordering::Relaxed);
             let n = mock.initializes.load(Ordering::Relaxed);
-            let mut resp = ok_body(
-                id,
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
+            let mut resp = json_ok(json!({
+                "jsonrpc": "2.0", "id": id,
+                "result": {
+                    "protocolVersion": OLD,
                     "capabilities": {},
-                    "serverInfo": { "name": "mock", "version": "1" }
-                }),
-            )
-            .to_string()
-            .into_response();
-            resp.headers_mut().insert(
-                HeaderName::from_static(SESSION_HEADER),
-                HeaderValue::try_from(format!("session-{n}")).unwrap(),
-            );
+                    "serverInfo": { "name": "mock", "version": "1" },
+                    "instructions": "A mock.",
+                }
+            }));
+            if !mock.no_session {
+                resp.headers_mut().insert(
+                    reqwest::header::HeaderName::from_static(SESSION_HEADER),
+                    reqwest::header::HeaderValue::try_from(format!("session-{n}")).unwrap(),
+                );
+            }
             return resp;
         }
 
@@ -592,47 +713,69 @@ mod tests {
                         "nextCursor": "c1"
                     })
                 } else {
-                    json!({ "tools": [{
-                        "name": "search_issues",
-                        "description": "Search issues.",
-                        "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } },
-                        "annotations": { "readOnlyHint": true, "destructiveHint": false }
-                    }] })
+                    json!({ "tools": [
+                        {
+                            "name": "search_issues",
+                            "description": "Search issues.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": { "q": { "type": "string" } }
+                            },
+                            "annotations": { "readOnlyHint": true, "destructiveHint": false }
+                        },
+                        {
+                            "name": "execute_sql",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "region": { "type": "string", "x-mcp-header": "Region" },
+                                    "query": { "type": "string" }
+                                }
+                            }
+                        }
+                    ] })
                 }
             }
             "tools/call" => {
+                if mock.wants_input {
+                    return json_ok(json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "input_required",
+                            "inputRequests": [{
+                                "method": "elicitation/create",
+                                "params": { "message": "who?", "requestedSchema": {
+                                    "type": "object", "properties": {}
+                                } }
+                            }]
+                        }
+                    }));
+                }
                 if req["params"]["name"] == json!("boom") {
                     json!({ "content": [{ "type": "text", "text": "it failed" }], "isError": true })
                 } else {
                     json!({
                         "content": [
                             { "type": "text", "text": "found 2" },
-                            { "type": "image", "data": "..." }
+                            { "type": "image", "data": "aGVsbG8=", "mimeType": "image/png" }
                         ],
                         "structuredContent": { "count": 2 }
                     })
                 }
             }
             other => {
-                return serde_json::json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "error": { "code": -32601, "message": format!("no method {other}") }
-                })
-                .to_string()
-                .into_response()
+                return json_status(
+                    StatusCode::NOT_FOUND,
+                    rpc_error(Some(id), METHOD_NOT_FOUND, json!(other)),
+                )
             }
         };
 
         if mock.sse {
-            // A server message before the response, as the spec permits.
-            let body = format!(
-                "event: message\ndata: {}\n\nevent: message\ndata: {}\n\n",
-                json!({ "jsonrpc": "2.0", "method": "notifications/progress" }),
-                ok_body(id, result)
-            );
+            let body = format!("event: message\ndata: {}\n\n", ok_body(id, result));
             ([(CONTENT_TYPE, "text/event-stream")], body).into_response()
         } else {
-            ok_body(id, result).to_string().into_response()
+            json_ok(ok_body(id, result))
         }
     }
 
@@ -657,93 +800,156 @@ mod tests {
 
     async fn client_for(mock: Arc<Mock>) -> McpClient {
         let url = serve(mock).await;
+        client_at(url, Fixed(auth_headers(None, "tok").unwrap()))
+    }
+
+    fn client_at(url: String, auth: Fixed) -> McpClient {
         McpClient::new(
             reqwest::Client::new(),
             url,
-            Arc::new(Fixed(auth_headers(None, "tok").unwrap())),
+            Arc::new(auth),
+            Arc::new(MemoryBlobStore::new()),
+            "t1",
         )
     }
 
+    // ── Era selection ────────────────────────────────────────────────────
+
     #[tokio::test]
-    async fn a_json_server_lists_tools_with_their_annotations() {
+    async fn a_modern_server_is_used_without_a_handshake() {
         let mock = Arc::new(Mock::default());
         let client = client_for(mock.clone()).await;
         let tools = client.list_tools().await.expect("lists");
 
-        assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "search_issues");
-        assert_eq!(tools[0].annotations.read_only, Some(true));
-        assert_eq!(tools[0].annotations.destructive, Some(false));
-        assert_eq!(
-            tools[0].annotations.idempotent, None,
-            "an unstated hint stays unknown rather than becoming false"
+        assert!(
+            !mock.methods().contains(&"initialize".to_string()),
+            "a stateless server must not be handshaken with, saw {:?}",
+            mock.methods()
         );
-        assert_eq!(
-            mock.methods(),
-            vec!["initialize", "notifications/initialized", "tools/list"],
-            "the handshake precedes the first call"
-        );
+        assert_eq!(client.instructions().await.as_deref(), Some("A mock."));
     }
 
     #[tokio::test]
-    async fn an_sse_server_is_read_the_same_way() {
+    async fn a_legacy_server_falls_back_to_the_handshake() {
         let mock = Arc::new(Mock {
-            sse: true,
+            legacy: true,
             ..Default::default()
         });
-        let client = client_for(mock).await;
+        let client = client_for(mock.clone()).await;
         let tools = client.list_tools().await.expect("lists");
+
+        assert_eq!(tools[0].name, "search_issues");
         assert_eq!(
-            tools[0].name, "search_issues",
-            "the response is found past unrelated server messages"
+            mock.initializes.load(Ordering::Relaxed),
+            1,
+            "a refused probe costs one round trip, then the old handshake"
         );
+        assert_eq!(client.instructions().await.as_deref(), Some("A mock."));
+
+        let list = mock.last("tools/list");
+        assert_eq!(list.header(SESSION_HEADER).as_deref(), Some("session-1"));
     }
 
     #[tokio::test]
-    async fn the_session_id_is_carried_after_the_handshake() {
+    async fn the_era_is_settled_once_and_kept() {
+        let mock = Arc::new(Mock::default());
+        let client = client_for(mock.clone()).await;
+        client.list_tools().await.expect("lists");
+        client.list_tools().await.expect("lists again");
+
+        assert_eq!(
+            mock.discovers.load(Ordering::Relaxed),
+            1,
+            "the era is a property of the server, not of a request"
+        );
+    }
+
+    // ── Modern request shape ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn every_modern_request_carries_its_version_and_identity() {
         let mock = Arc::new(Mock::default());
         let client = client_for(mock.clone()).await;
         client.list_tools().await.expect("lists");
 
-        let seen = mock.seen.lock().unwrap().clone();
-        let (_, init_session, init_version) = &seen[0];
-        assert_eq!(*init_session, None, "initialize carries no session yet");
-        assert_eq!(*init_version, None);
-        for (method, session, version) in &seen[1..] {
-            assert_eq!(
-                session.as_deref(),
-                Some("session-1"),
-                "{method} must echo the session"
-            );
-            assert_eq!(version.as_deref(), Some(PROTOCOL_VERSION));
-        }
-    }
-
-    #[tokio::test]
-    async fn a_dropped_session_is_re_established_once() {
-        let mock = Arc::new(Mock::default());
-        mock.expire_once.store(true, Ordering::Relaxed);
-        let client = client_for(mock.clone()).await;
-
-        let tools = client.list_tools().await.expect("recovers from a 404");
-        assert_eq!(tools[0].name, "search_issues");
+        let list = mock.last("tools/list");
+        let meta = &list.body["params"]["_meta"];
         assert_eq!(
-            mock.initializes.load(Ordering::Relaxed),
-            2,
-            "the client re-handshakes rather than failing the call"
+            meta["io.modelcontextprotocol/protocolVersion"],
+            json!(MODERN)
+        );
+        assert_eq!(
+            meta["io.modelcontextprotocol/clientInfo"]["name"],
+            json!("substructure")
+        );
+        assert!(
+            meta.get("io.modelcontextprotocol/clientCapabilities")
+                .is_some(),
+            "capabilities are required even when we declare none"
+        );
+        assert_eq!(list.header(VERSION_HEADER).as_deref(), Some(MODERN));
+        assert_eq!(list.header(METHOD_HEADER).as_deref(), Some("tools/list"));
+        assert_eq!(
+            list.header(SESSION_HEADER),
+            None,
+            "sessions are not part of this revision"
         );
     }
 
     #[tokio::test]
-    async fn pages_are_followed_to_the_end() {
+    async fn a_call_names_its_tool_in_a_header() {
+        let mock = Arc::new(Mock::default());
+        let client = client_for(mock.clone()).await;
+        client
+            .call_tool("search_issues", &json!({ "q": "crash" }))
+            .await
+            .expect("calls");
+
+        let call = mock.last("tools/call");
+        assert_eq!(call.header(METHOD_HEADER).as_deref(), Some("tools/call"));
+        assert_eq!(call.header(NAME_HEADER).as_deref(), Some("search_issues"));
+    }
+
+    #[tokio::test]
+    async fn annotated_arguments_are_mirrored_into_headers() {
+        let mock = Arc::new(Mock::default());
+        let client = client_for(mock.clone()).await;
+        client.list_tools().await.expect("lists");
+        client
+            .call_tool(
+                "execute_sql",
+                &json!({ "region": "us-west1", "query": "SELECT 1" }),
+            )
+            .await
+            .expect("calls");
+
+        let call = mock.last("tools/call");
+        assert_eq!(
+            call.header("mcp-param-Region").as_deref(),
+            Some("us-west1"),
+            "a server routing on the header sees what the body says"
+        );
+    }
+
+    // ── Results ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_result_asking_for_input_is_an_error_not_an_empty_answer() {
         let mock = Arc::new(Mock {
-            paginate: true,
+            wants_input: true,
             ..Default::default()
         });
         let client = client_for(mock).await;
-        let tools = client.list_tools().await.expect("lists");
-        let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["page_one", "search_issues"]);
+        let err = client
+            .call_tool("search_issues", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            !err.retryable,
+            "the model must not be handed a blank result: {}",
+            err.message
+        );
     }
 
     #[tokio::test]
@@ -755,9 +961,44 @@ mod tests {
             .await
             .expect("calls");
 
-        assert_eq!(outcome.content, "found 2\n[image content]");
+        assert_eq!(
+            outcome.content, "found 2",
+            "an image is not described in the text; it rides as an attachment"
+        );
         assert_eq!(outcome.structured, Some(json!({ "count": 2 })));
         assert!(!outcome.is_error);
+    }
+
+    #[tokio::test]
+    async fn an_image_is_kept_rather_than_described() {
+        let mock = Arc::new(Mock::default());
+        let url = serve(mock).await;
+        let blobs = Arc::new(MemoryBlobStore::new());
+        let client = McpClient::new(
+            reqwest::Client::new(),
+            url,
+            Arc::new(Fixed(auth_headers(None, "tok").unwrap())),
+            blobs.clone(),
+            "t1",
+        );
+        let outcome = client
+            .call_tool("search_issues", &json!({}))
+            .await
+            .expect("calls");
+
+        assert_eq!(outcome.attachments.len(), 1);
+        let kept = &outcome.attachments[0];
+        assert_eq!(kept.mime, "image/png");
+        assert_eq!(kept.tenant_id, "t1");
+        assert_eq!(
+            blobs.get(kept).await.expect("stored"),
+            b"hello".to_vec(),
+            "the bytes reached the store, not the event log"
+        );
+        assert!(
+            kept.uri().starts_with("blob://t1/"),
+            "the ref is what the transcript carries"
+        );
     }
 
     #[tokio::test]
@@ -776,6 +1017,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn annotations_survive_the_listing() {
+        let mock = Arc::new(Mock::default());
+        let client = client_for(mock).await;
+        let tools = client.list_tools().await.expect("lists");
+        assert_eq!(tools[0].annotations.read_only, Some(true));
+        assert_eq!(tools[0].annotations.destructive, Some(false));
+        assert_eq!(
+            tools[0].annotations.idempotent, None,
+            "an unstated hint stays unknown rather than becoming false"
+        );
+    }
+
+    // ── Transport ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn an_sse_server_is_read_the_same_way() {
+        let mock = Arc::new(Mock {
+            sse: true,
+            ..Default::default()
+        });
+        let client = client_for(mock).await;
+        let tools = client.list_tools().await.expect("lists");
+        assert_eq!(tools[0].name, "search_issues");
+    }
+
+    #[tokio::test]
+    async fn a_legacy_server_without_sessions_works() {
+        let mock = Arc::new(Mock {
+            legacy: true,
+            no_session: true,
+            ..Default::default()
+        });
+        let client = client_for(mock.clone()).await;
+        client.list_tools().await.expect("lists");
+        client.list_tools().await.expect("lists again");
+
+        assert_eq!(
+            mock.initializes.load(Ordering::Relaxed),
+            1,
+            "a server that mints no session has not forgotten one"
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_are_followed_to_the_end() {
+        let mock = Arc::new(Mock {
+            paginate: true,
+            ..Default::default()
+        });
+        let client = client_for(mock).await;
+        let tools = client.list_tools().await.expect("lists");
+        let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["page_one", "search_issues", "execute_sql"]);
+    }
+
+    #[tokio::test]
     async fn a_rejected_credential_asks_for_re_auth() {
         let mock = Arc::new(Mock {
             reject_credential: true,
@@ -787,7 +1084,8 @@ mod tests {
             err.auth,
             Some(AuthNeed::Reauthorize),
             "401 is a re-auth signal, not a plain failure; the registry refines it \
-             against what the file declares"
+             against what the file declares. saw: {}",
+            err.message
         );
         assert!(
             !err.retryable,
@@ -797,13 +1095,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreachable_connection_is_retryable() {
-        let client = McpClient::new(
-            reqwest::Client::new(),
-            "http://127.0.0.1:1/mcp",
-            Arc::new(Fixed(HeaderMap::new())),
+        let client = client_at(
+            "http://127.0.0.1:1/mcp".to_string(),
+            Fixed(HeaderMap::new()),
         );
         let err = client.list_tools().await.unwrap_err();
-        assert!(err.retryable);
+        assert!(err.retryable, "{}", err.message);
     }
 
     #[test]
@@ -817,9 +1114,22 @@ mod tests {
             "tok",
             "a connection naming its own header gets the raw token"
         );
-        assert!(
-            named.get("sentry-bearer").unwrap().is_sensitive(),
-            "credentials are not logged"
+        assert!(named.get("sentry-bearer").unwrap().is_sensitive());
+    }
+
+    #[tokio::test]
+    async fn a_named_credential_header_reaches_the_server() {
+        let mock = Arc::new(Mock::default());
+        let url = serve(mock.clone()).await;
+        let client = client_at(
+            url,
+            Fixed(auth_headers(Some("sentry-bearer"), "raw").unwrap()),
+        );
+        client.list_tools().await.expect("lists");
+        assert_eq!(
+            mock.last("tools/list").header("sentry-bearer").as_deref(),
+            Some("raw"),
+            "a connection that names its own header is not forced onto Bearer"
         );
     }
 }

@@ -288,7 +288,7 @@ impl SessionState {
             // Mirror the settle endpoint: settle + tool.finished, the worker
             // appends the node, the view is discarded.
             return Ok(match completions.into_iter().next() {
-                Some(c) => tool::complete(c.tool_call_id, c.name, c.result),
+                Some(c) => tool::complete(c.tool_call_id, c.name, c.result, Vec::new()),
                 None => Vec::new(),
             });
         }
@@ -304,6 +304,7 @@ impl SessionState {
                     id: c.tool_call_id,
                     name: c.name,
                     result: c.result,
+                    attachments: Vec::new(),
                 })
             })
             .collect();

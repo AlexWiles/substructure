@@ -1312,6 +1312,12 @@
         {
           "additionalProperties": false,
           "properties": {
+            "attachments": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "error": {
               "anyOf": [
                 {

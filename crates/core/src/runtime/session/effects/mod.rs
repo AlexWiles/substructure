@@ -65,6 +65,7 @@ pub enum Outcome {
     Llm(Box<LlmResponse>),
     Tool {
         result: String,
+        attachments: Vec<String>,
     },
     /// The child session is running; its turn result arrives separately.
     SubAgentStarted,

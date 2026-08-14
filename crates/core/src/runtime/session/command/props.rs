@@ -518,6 +518,7 @@ impl World {
                         None,
                         Outcome::Tool {
                             result: "ok".to_string(),
+                            attachments: Vec::new(),
                         },
                     )
                 } else {

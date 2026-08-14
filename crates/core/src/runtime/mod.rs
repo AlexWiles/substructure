@@ -671,9 +671,10 @@ impl Runtime {
 
     pub async fn settle_effect(&self, input: SettleEffectInput) -> Result<(), RuntimeError> {
         let outcome = match input.settlement {
-            EffectSettlement::Result(EffectResultPayload::ToolCall { result }) => {
-                Outcome::Tool { result }
-            }
+            EffectSettlement::Result(EffectResultPayload::ToolCall { result }) => Outcome::Tool {
+                result,
+                attachments: Vec::new(),
+            },
             EffectSettlement::Result(EffectResultPayload::LlmCall { response }) => {
                 Outcome::Llm(response)
             }
