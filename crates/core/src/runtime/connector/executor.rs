@@ -4,7 +4,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::connectors::registry::Connections;
-use crate::connectors::{ConnectorError, ToolOutcome};
+use crate::connectors::ConnectorError;
+use crate::protocol::StoredResult;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
@@ -146,8 +147,7 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
             };
             let outcome = match answer {
                 LocalAnswer::Result(result) => Outcome::Tool {
-                    result,
-                    attachments: Vec::new(),
+                    result: StoredResult::text(result),
                 },
                 LocalAnswer::Error(message) => {
                     SettleError::new(ErrorInfo::new(ErrorCode::HandlerError, message), false).into()
@@ -173,23 +173,15 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
 fn settle_call(
     tool_call_id: String,
     attempt: u32,
-    result: Result<ToolOutcome, ConnectorError>,
+    result: Result<StoredResult, ConnectorError>,
 ) -> CommandPayload {
     let outcome = match result {
-        Ok(outcome) if outcome.is_error => SettleError::new(
-            ErrorInfo::new(ErrorCode::HandlerError, outcome.content),
+        Ok(result) if result.is_error => SettleError::new(
+            ErrorInfo::new(ErrorCode::HandlerError, result.rendered()),
             false,
         )
         .into(),
-        // Prefer the structured form when the connection sent one: it round
-        // trips through a declared `output` schema, where rendered text would not.
-        Ok(outcome) => Outcome::Tool {
-            result: match outcome.structured {
-                Some(value) => value.to_string(),
-                None => outcome.content,
-            },
-            attachments: outcome.attachments.iter().map(|r| r.uri()).collect(),
-        },
+        Ok(result) => Outcome::Tool { result },
         Err(err) => SettleError::new(
             ErrorInfo::new(ErrorCode::HandlerError, err.message),
             err.retryable,
@@ -241,12 +233,13 @@ mod tests {
         content: &str,
         structured: Option<serde_json::Value>,
         is_error: bool,
-    ) -> ToolOutcome {
-        ToolOutcome {
-            content: content.to_string(),
-            structured,
+    ) -> StoredResult {
+        StoredResult {
+            content: vec![crate::protocol::StoredContent::Text {
+                text: content.to_string(),
+            }],
+            structured_content: structured,
             is_error,
-            attachments: Vec::new(),
         }
     }
 
@@ -302,7 +295,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(
-                    result,
+                    result.rendered(),
                     structured.to_string(),
                     "only the structured form can satisfy a declared output schema"
                 );
@@ -319,7 +312,7 @@ mod tests {
                 kind: EffectKind::ToolCall,
                 outcome: Outcome::Tool { result, .. },
                 ..
-            } => assert_eq!(result, "Issue 7"),
+            } => assert_eq!(result.rendered(), "Issue 7"),
             other => panic!("expected a result; got {other:?}"),
         }
     }

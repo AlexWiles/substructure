@@ -10,6 +10,7 @@
 //! matched exhaustively, so a new command fails to compile until a trace
 //! exercises it.
 
+use crate::protocol::StoredResult;
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
@@ -459,7 +460,7 @@ fn flow_full_loop() -> Trace {
         vec![Action::ToolResult {
             id: "tc-1".to_string(),
             attempt: Some(0),
-            result: "sunny".to_string(),
+            result: StoredResult::text("sunny".to_string()),
         }],
     );
 
@@ -713,8 +714,7 @@ fn flow_interrupt_and_resume() -> Trace {
             "tc-1".to_string(),
             Some(0),
             Outcome::Tool {
-                result: "yes".to_string(),
-                attachments: Vec::new(),
+                result: StoredResult::text("yes".to_string()),
             },
         ),
         &frontend(),
@@ -992,7 +992,7 @@ fn flow_parallel_fan_out() -> Trace {
         vec![Action::ToolResult {
             id: "tc-1".to_string(),
             attempt: Some(0),
-            result: "one".to_string(),
+            result: StoredResult::text("one".to_string()),
         }],
     );
     t.decide(
@@ -1000,7 +1000,7 @@ fn flow_parallel_fan_out() -> Trace {
         vec![Action::ToolResult {
             id: "tc-2".to_string(),
             attempt: Some(0),
-            result: "two".to_string(),
+            result: StoredResult::text("two".to_string()),
         }],
     );
     t

@@ -33,9 +33,10 @@ use uuid::Uuid;
 
 use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
+use crate::protocol::StoredContent;
 use crate::protocol::{
     AgentConfig, ClientContext, Content, ContentPart, DecisionAction, DecisionResponse,
-    DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, ToolCall,
+    DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, StoredResult, ToolCall,
 };
 use crate::runtime::blob::{attachment_part, BlobRef};
 
@@ -82,13 +83,11 @@ pub fn propose(
             ok,
             name,
             result,
-            attachments,
             error,
         } => tool_finished(
             id,
             name,
-            &settled_text(*ok, result, error),
-            attachments,
+            settled_content(*ok, result, error),
             transcript,
             llm_calls,
             pending_calls,
@@ -103,8 +102,7 @@ pub fn propose(
         } => tool_finished(
             id,
             agent_id,
-            &settled_text(*ok, result, error),
-            &[],
+            Content::Text(settled_text(*ok, result, error)),
             transcript,
             llm_calls,
             pending_calls,
@@ -381,21 +379,44 @@ fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionRespon
 /// A tool message. Stored attachments ride as parts, so the blob layer inlines
 /// the bytes at the provider call and the model sees an image as an image. A
 /// result with none is the text it always was.
-fn tool_content(text: &str, attachments: &[String]) -> Content {
-    let refs: Vec<BlobRef> = attachments
+/// What a settled call records. A failure is its error text; a success keeps
+/// the tool's own blocks.
+fn settled_content(ok: bool, result: &Option<StoredResult>, error: &Option<ErrorInfo>) -> Content {
+    if !ok {
+        let text = error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_default();
+        return Content::Text(text);
+    }
+    result
+        .as_ref()
+        .map(tool_content)
+        .unwrap_or_else(|| Content::Text(String::new()))
+}
+
+/// A stored block becomes a message part, so the blob layer inlines the bytes
+/// at the provider call and the model sees an image as an image. A result that
+/// is only text stays text.
+fn tool_content(result: &StoredResult) -> Content {
+    let attachments: Vec<ContentPart> = result
+        .content
         .iter()
-        .filter_map(|u| BlobRef::parse(u))
+        .filter_map(|block| match block {
+            StoredContent::Blob { uri } => BlobRef::parse(uri).map(|r| attachment_part(&r)),
+            // Text and links read as text; `rendered` already carries them.
+            StoredContent::Text { .. } | StoredContent::Link { .. } => None,
+        })
         .collect();
-    if refs.is_empty() {
-        return Content::Text(text.to_string());
+    let text = result.rendered();
+    if attachments.is_empty() {
+        return Content::Text(text);
     }
-    let mut parts = Vec::with_capacity(refs.len() + 1);
+    let mut parts = Vec::with_capacity(attachments.len() + 1);
     if !text.is_empty() {
-        parts.push(ContentPart::Text {
-            text: text.to_string(),
-        });
+        parts.push(ContentPart::Text { text });
     }
-    parts.extend(refs.iter().map(attachment_part));
+    parts.extend(attachments);
     Content::Parts(parts)
 }
 
@@ -406,8 +427,7 @@ fn tool_content(text: &str, attachments: &[String]) -> Content {
 fn tool_finished(
     id: &str,
     name: &str,
-    content: &str,
-    attachments: &[String],
+    content: Content,
     transcript: &[Message],
     llm_calls: &HashMap<String, EffectState>,
     pending_calls: usize,
@@ -415,7 +435,7 @@ fn tool_finished(
     let tool_message = DraftMessage {
         id: None,
         role: Role::Tool,
-        content: Some(tool_content(content, attachments)),
+        content: Some(content),
         tool_calls: None,
         tool_call_id: Some(id.to_string()),
         name: Some(name.to_string()),
@@ -492,6 +512,38 @@ fn appended(transcript: &[Message], message: DraftMessage) -> Vec<DraftMessage> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stored_block_reaches_the_model_as_a_part() {
+        let uri = format!("blob://t1/{}?mime=image%2Fpng&size=5", uuid::Uuid::now_v7());
+        let result = StoredResult {
+            content: vec![
+                StoredContent::Text {
+                    text: "found 2".into(),
+                },
+                StoredContent::Blob { uri: uri.clone() },
+            ],
+            ..Default::default()
+        };
+        match tool_content(&result) {
+            Content::Parts(parts) => {
+                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "found 2"));
+                assert!(
+                    matches!(&parts[1], ContentPart::ImageUrl { image_url } if image_url.url == uri),
+                    "the part carries the ref; the blob layer inlines it at the call"
+                );
+            }
+            other => panic!("expected parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_result_that_is_only_text_stays_text() {
+        assert!(matches!(
+            tool_content(&StoredResult::text("plain")),
+            Content::Text(t) if t == "plain"
+        ));
+    }
+
     use chrono::Utc;
 
     use super::*;
@@ -613,8 +665,7 @@ mod tests {
             id: id.to_string(),
             ok: outcome.is_ok(),
             name: name.to_string(),
-            result: outcome.ok().map(str::to_string),
-            attachments: Vec::new(),
+            result: outcome.ok().map(StoredResult::text),
             error: outcome.err().map(ErrorInfo::handler),
         }
     }

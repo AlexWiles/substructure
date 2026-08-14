@@ -85,7 +85,9 @@ impl TurnActivity {
             EventPayload::ToolCallRequested(t) => {
                 self.start(&t.id, t.name.clone(), Some(&t.arguments), event)
             }
-            EventPayload::ToolCallCompleted(t) => self.end(&t.id, event, Ok(Some(&t.result))),
+            EventPayload::ToolCallCompleted(t) => {
+                self.end(&t.id, event, Ok(Some(&t.result.rendered())))
+            }
             EventPayload::ToolCallErrored(t) => self.end(&t.id, event, Err(&t.error.message)),
             EventPayload::SubAgentRequested(s) => {
                 self.start(&s.id, format!("agent {}", s.agent_id), None, event)
@@ -255,6 +257,7 @@ fn flatten(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::protocol::ErrorInfo;
+    use crate::protocol::StoredResult;
     use crate::session::events::{
         SubAgentRequested, SubAgentTurnCompleted, ToolCallCompleted, ToolCallErrored,
         ToolCallRequested, TurnStarted,
@@ -364,8 +367,7 @@ mod tests {
             EventPayload::ToolCallCompleted(ToolCallCompleted {
                 id: id.into(),
                 name: "tool".into(),
-                result: "ok".into(),
-                attachments: Vec::new(),
+                result: StoredResult::text("ok"),
             }),
         )
     }
@@ -560,8 +562,7 @@ mod tests {
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
                     id: "tc1".into(),
                     name: "send_email".into(),
-                    result: "   ".into(),
-                    attachments: Vec::new(),
+                    result: StoredResult::text("   "),
                 }),
             ),
         ];
@@ -657,8 +658,7 @@ mod tests {
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
                     id,
                     name: "tool".into(),
-                    result: big.clone(),
-                    attachments: Vec::new(),
+                    result: StoredResult::text(big.clone()),
                 }),
             ));
         }

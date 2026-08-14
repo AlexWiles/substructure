@@ -6,8 +6,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::runtime::blob::BlobRef;
-
 pub mod credential;
 pub mod filter;
 pub mod mcp;
@@ -43,19 +41,6 @@ pub struct ToolAnnotations {
     pub destructive: Option<bool>,
     pub idempotent: Option<bool>,
     pub open_world: Option<bool>,
-}
-
-/// The outcome of a tool call on a connection. `is_error` is the connection's
-/// own signal that the tool failed, distinct from a transport failure.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolOutcome {
-    pub content: String,
-    pub structured: Option<Value>,
-    pub is_error: bool,
-    /// What the tool answered with that is not text. The bytes are in the blob
-    /// store and the model reads them as message parts, so nothing large ever
-    /// enters the event log.
-    pub attachments: Vec<BlobRef>,
 }
 
 /// The credential headers for one connection, read for each request. A

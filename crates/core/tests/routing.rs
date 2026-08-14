@@ -194,6 +194,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
     let config = RuntimeConfig::default();
     let runtime = substructure_core::start(
         RuntimeDeps {
+            blobs: None,
             store: Arc::new(SqliteEventStore::new(db.clone()).unwrap()),
             agents: directory.clone(),
             llm: Arc::new(providers),

@@ -3,11 +3,13 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocol::{DecisionResponse, DecisionTrigger, Message};
+use crate::runtime::blob::{inline_refs, BlobStore};
 use crate::runtime::event_store::{EventFilter, EventStore, Seq};
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
+use crate::runtime::session::decision::Trigger;
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::propose::propose;
 use crate::runtime::session::state::SessionState;
@@ -36,6 +38,8 @@ struct WorkerDecisionProjection {
     queue: Arc<dyn WorkerQueue>,
     agents: Arc<dyn AgentDirectory>,
     proposers: Vec<Arc<dyn ChannelProposer>>,
+    /// Absent where nothing stores blobs; a request then goes out as it is.
+    blobs: Option<Arc<dyn BlobStore>>,
 }
 
 impl WorkerDecisionProjection {
@@ -44,12 +48,14 @@ impl WorkerDecisionProjection {
         queue: Arc<dyn WorkerQueue>,
         agents: Arc<dyn AgentDirectory>,
         proposers: Vec<Arc<dyn ChannelProposer>>,
+        blobs: Option<Arc<dyn BlobStore>>,
     ) -> Self {
         Self {
             store,
             queue,
             agents,
             proposers,
+            blobs,
         }
     }
 }
@@ -65,6 +71,7 @@ impl EventProcessor for WorkerDecisionProjection {
             self.store.as_ref(),
             self.agents.as_ref(),
             &self.proposers,
+            self.blobs.as_ref(),
             event,
         )
         .await?
@@ -88,6 +95,7 @@ pub fn spawn_worker_processor(
     queue: Arc<dyn WorkerQueue>,
     agents: Arc<dyn AgentDirectory>,
     proposers: Vec<Arc<dyn ChannelProposer>>,
+    blobs: Option<Arc<dyn BlobStore>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(WorkerDecisionProjection::new(
@@ -95,6 +103,7 @@ pub fn spawn_worker_processor(
         queue,
         agents,
         proposers,
+        blobs,
     ));
     EventProcessorRunner::new(
         store,
@@ -106,6 +115,29 @@ pub fn spawn_worker_processor(
     .spawn()
 }
 
+/// A worker makes its own provider call, so the bytes have to be in what it
+/// receives. Only the call carries them: the messages the worker records keep
+/// their refs, exactly as the engine's own path leaves them.
+async fn inline_for_worker(
+    trigger: &mut Trigger,
+    blobs: Option<&Arc<dyn BlobStore>>,
+    tenant_id: &str,
+) {
+    let (Trigger::LlmExecute { request, .. }, Some(blobs)) = (&mut *trigger, blobs) else {
+        return;
+    };
+    match inline_refs(request, blobs.as_ref(), tenant_id).await {
+        Ok(Some(resolved)) => *request = resolved,
+        Ok(None) => {}
+        // Dispatch anyway: an unreadable blob is the call's own failure to
+        // report, not a reason to hold the decision back forever.
+        Err(e) => tracing::warn!(
+            error = %e.error.message,
+            "inlining blob refs for a worker call failed"
+        ),
+    }
+}
+
 /// Builds the wire request for a decision event: the tree comes rewound from
 /// `load_as_of`, statuses come stamped on the event's meta. A load error must
 /// propagate (the runner retries the batch) — the queue never redelivers a
@@ -114,6 +146,7 @@ async fn extract(
     store: &dyn EventStore,
     agents: &dyn AgentDirectory,
     proposers: &[Arc<dyn ChannelProposer>],
+    blobs: Option<&Arc<dyn BlobStore>>,
     event: SessionEvent,
 ) -> Result<Option<WorkerDecisionRequest>, ProcessorError> {
     let req = match &event.payload {
@@ -163,6 +196,8 @@ async fn extract(
     let worker_state = state.resolve_state_for(message_tree.head_id.as_deref());
     let agent_config = state.resolve_agent_for(message_tree.head_id.as_deref());
 
+    let mut trigger = trigger;
+    inline_for_worker(&mut trigger, blobs, &event.tenant_id).await;
     let trigger = to_wire_trigger(trigger, &transcript, &message_tree, &open_llm_calls);
     let proposed = propose(
         &trigger,
@@ -254,7 +289,9 @@ mod tests {
 
     use chrono::Utc;
 
-    use super::{extract, AgentDirectory};
+    use std::sync::Arc;
+
+    use super::{extract, inline_for_worker, AgentDirectory, BlobStore, Trigger};
     use crate::protocol::OwnerKind;
     use crate::protocol::{
         AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, RetryPolicy, Role,
@@ -431,11 +468,102 @@ mod tests {
             session: agg,
             events: BroadcastBus::new(1),
         };
-        let req = extract(&store, &EmptyAgentDirectory, &[], event)
+        let req = extract(&store, &EmptyAgentDirectory, &[], None, event)
             .await
             .expect("extract succeeds")
             .expect("a deliverable request");
         serde_json::to_value(&req).expect("wire request serializes")
+    }
+
+    fn llm_execute_with(url: &str) -> Trigger {
+        Trigger::LlmExecute {
+            id: "call-1".into(),
+            request: crate::protocol::LlmRequest {
+                model: "m".into(),
+                messages: vec![DraftMessage {
+                    id: None,
+                    role: Role::User,
+                    content: Some(Content::Parts(vec![
+                        crate::protocol::ContentPart::ImageUrl {
+                            image_url: crate::protocol::ImageUrl { url: url.into() },
+                        },
+                    ])),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                    reasoning: None,
+                }],
+                tools: None,
+                temperature: None,
+                max_completion_tokens: None,
+                reasoning: None,
+            },
+            format: None,
+            defer_tools_strategy: Default::default(),
+            stream: false,
+            attempt: 0,
+            deadline: None,
+        }
+    }
+
+    fn only_url(trigger: &Trigger) -> String {
+        let Trigger::LlmExecute { request, .. } = trigger else {
+            panic!("an llm call");
+        };
+        match request.messages[0].content.as_ref().expect("content") {
+            crate::protocol::Content::Parts(parts) => match &parts[0] {
+                crate::protocol::ContentPart::ImageUrl { image_url } => image_url.url.clone(),
+                other => panic!("expected an image part, got {other:?}"),
+            },
+            other => panic!("expected parts, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_worker_call_carries_the_bytes_not_the_ref() {
+        let blobs: Arc<dyn BlobStore> = Arc::new(crate::runtime::blob::MemoryBlobStore::new());
+        let stored = blobs
+            .put(crate::runtime::blob::NewBlob {
+                tenant_id: "tenant-a".into(),
+                mime: "image/png".into(),
+                name: None,
+                bytes: b"hello".to_vec(),
+            })
+            .await
+            .expect("stored");
+
+        let mut trigger = llm_execute_with(&stored.uri());
+        inline_for_worker(&mut trigger, Some(&blobs), "tenant-a").await;
+
+        assert_eq!(
+            only_url(&trigger),
+            "data:image/png;base64,aGVsbG8=",
+            "the worker makes the provider call, so it needs the bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ref_the_store_cannot_read_still_reaches_the_worker() {
+        let blobs: Arc<dyn BlobStore> = Arc::new(crate::runtime::blob::MemoryBlobStore::new());
+        let missing = format!(
+            "blob://tenant-a/{}?mime=image%2Fpng&size=1",
+            uuid::Uuid::now_v7()
+        );
+        let mut trigger = llm_execute_with(&missing);
+        inline_for_worker(&mut trigger, Some(&blobs), "tenant-a").await;
+
+        assert_eq!(
+            only_url(&trigger),
+            missing,
+            "a decision is never held back by one unreadable blob"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_store_a_call_goes_out_as_it_is() {
+        let mut trigger = llm_execute_with("https://example.test/a.png");
+        inline_for_worker(&mut trigger, None, "tenant-a").await;
+        assert_eq!(only_url(&trigger), "https://example.test/a.png");
     }
 
     /// The `session.start` request for a fresh session, as `agents` declares it.
@@ -468,7 +596,7 @@ mod tests {
             session: agg,
             events: BroadcastBus::new(1),
         };
-        let req = extract(&store, agents, &[], event)
+        let req = extract(&store, agents, &[], None, event)
             .await
             .expect("extract succeeds")
             .expect("a deliverable request");

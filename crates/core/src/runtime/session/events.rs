@@ -9,7 +9,7 @@ pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, ConnectorToolKind, DeferToolsStrategy, DraftMessage, ErrorInfo, InterruptOrigin,
     LlmFormat, LlmRequest, LlmResponse, Message, MessageTree, NewMessage, RetryPolicy,
-    SessionOwner, Usage, WorkerState,
+    SessionOwner, StoredResult, Usage, WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,10 +295,7 @@ pub struct ToolCallRequested {
 pub struct ToolCallCompleted {
     pub id: String,
     pub name: String,
-    pub result: String,
-    /// `blob://` refs for what the tool answered with that is not text.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<String>,
+    pub result: StoredResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

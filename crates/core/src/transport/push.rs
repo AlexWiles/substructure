@@ -259,7 +259,11 @@ async fn submit(
         decision.agent.as_ref(),
         Some(&decision.trigger),
         &runtime.llm_blocks(tenant_id),
-    ) {
+        runtime.blob_store(),
+        tenant_id,
+    )
+    .await
+    {
         Ok(resolved) => resolved,
         Err(e) => {
             tracing::warn!(

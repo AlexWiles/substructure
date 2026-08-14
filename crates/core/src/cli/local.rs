@@ -294,7 +294,7 @@ pub(crate) async fn start_engine(
                 .map(|p| (p.name.clone(), client(p)))
                 .collect(),
         )),
-        blobs,
+        blobs.clone(),
     ));
 
     let agents = Arc::new(StaticAgentDirectory::new(
@@ -320,6 +320,7 @@ pub(crate) async fn start_engine(
             session_index_store,
             cursor_store,
             wake_store,
+            blobs: Some(blobs),
             token_delta_transport,
         },
         config,

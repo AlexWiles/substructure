@@ -14,8 +14,10 @@ use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmResolver};
 use crate::protocol::{
-    Content, ContentPart, ErrorCode, FileData, ImageUrl, LlmRequest, LlmResponse, SessionOwner,
+    AudioData, Content, ContentPart, ErrorCode, FileData, ImageUrl, LlmRequest, LlmResponse,
+    SessionOwner, VideoUrl,
 };
+use crate::protocol::{StoredContent, StoredResult, ToolContent, ToolResult};
 
 pub const BLOB_SCHEME: &str = "blob://";
 
@@ -146,6 +148,103 @@ impl BlobStore for MemoryBlobStore {
     }
 }
 
+/// The name a provider knows an audio encoding by, from its mime.
+fn audio_format(mime: &str) -> &str {
+    match mime.split('/').nth(1).unwrap_or_default() {
+        "mpeg" | "mp3" => "mp3",
+        "wav" | "x-wav" | "wave" => "wav",
+        other => other,
+    }
+}
+
+/// Store the bytes a tool sent inline, leaving a `blob://` ref in their place,
+/// so a result carrying an image is small enough to persist.
+///
+/// A block the store refuses keeps its bytes: the call succeeded, and inline
+/// bytes still reach the model.
+pub async fn store(result: ToolResult, blobs: &dyn BlobStore, tenant_id: &str) -> StoredResult {
+    let mut content = Vec::with_capacity(result.content.len());
+    for block in result.content {
+        let Some((data, mime)) = block
+            .inline()
+            .map(|(data, mime)| (data.to_string(), mime.to_string()))
+        else {
+            content.push(match &block {
+                ToolContent::ResourceLink {
+                    uri,
+                    name,
+                    mime_type,
+                } => StoredContent::Link {
+                    uri: uri.clone(),
+                    name: name.clone(),
+                    mime_type: mime_type.clone(),
+                },
+                ToolContent::Resource { resource } => StoredContent::Text {
+                    text: resource.text.clone().unwrap_or_default(),
+                },
+                ToolContent::Text { text } => StoredContent::Text { text: text.clone() },
+                // Carried bytes; `inline` would have returned them.
+                ToolContent::Image { .. } | ToolContent::Audio { .. } => StoredContent::Text {
+                    text: String::new(),
+                },
+            });
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data) else {
+            content.push(StoredContent::Text {
+                text: format!("[unreadable {} content]", essence(&mime)),
+            });
+            continue;
+        };
+        let name = block.name().map(str::to_string);
+        let put = blobs
+            .put(NewBlob {
+                tenant_id: tenant_id.to_string(),
+                mime: mime.clone(),
+                name: name.clone(),
+                bytes,
+            })
+            .await;
+        content.push(match put {
+            Ok(r) => StoredContent::Blob { uri: r.uri() },
+            // Naming the content costs the model an image. The result has
+            // nowhere to keep bytes, which is the point: a store that fails
+            // cannot put them in the event log instead.
+            Err(e) => {
+                tracing::warn!("storing a tool's inline content failed: {e}");
+                StoredContent::Text {
+                    text: format!("[{} content]", essence(&mime)),
+                }
+            }
+        });
+    }
+    StoredResult {
+        content,
+        structured_content: result.structured_content,
+        is_error: result.is_error,
+    }
+}
+
+/// Stands in where a deployment stores nothing. Every block is named rather
+/// than kept, which is the same answer a broken store gives.
+pub struct Nowhere;
+
+pub static NOWHERE: Nowhere = Nowhere;
+
+#[async_trait]
+impl BlobStore for Nowhere {
+    async fn put(&self, _: NewBlob) -> Result<BlobRef, BlobError> {
+        Err(BlobError::NotFound)
+    }
+    async fn get(&self, _: &BlobRef) -> Result<Vec<u8>, BlobError> {
+        Err(BlobError::NotFound)
+    }
+}
+
+fn essence(mime: &str) -> &str {
+    mime.split('/').next().unwrap_or("file")
+}
+
 /// A stored attachment as the message part its kind rides in.
 pub fn attachment_part(r: &BlobRef) -> ContentPart {
     if r.mime.starts_with("image/") {
@@ -222,14 +321,18 @@ struct BlobResolvingCallable {
     blobs: Arc<dyn BlobStore>,
 }
 
-impl BlobResolvingCallable {
-    /// `None` when the request holds no blob refs; the original goes through
-    /// untouched.
-    async fn resolved(
-        &self,
-        request: &LlmRequest,
-        ctx: &CallContext<'_>,
-    ) -> Result<Option<LlmRequest>, LlmCallError> {
+/// Replace every `blob://` ref in `request` with the bytes it names. `None`
+/// when the request holds none; the original then goes through untouched.
+///
+/// Every path that hands a request to a provider calls this — the engine's own
+/// callable, and the dispatch that sends a call out to a worker — so the two
+/// cannot inline differently.
+pub async fn inline_refs(
+    request: &LlmRequest,
+    blobs: &dyn BlobStore,
+    tenant_id: &str,
+) -> Result<Option<LlmRequest>, LlmCallError> {
+    {
         let has_blob = request.messages.iter().any(
             |m| matches!(&m.content, Some(Content::Parts(parts)) if parts.iter().any(is_blob_part)),
         );
@@ -253,30 +356,49 @@ impl BlobResolvingCallable {
                     }
                     continue;
                 };
-                if r.tenant_id != ctx.tenant_id {
+                if r.tenant_id != tenant_id {
                     return Err(blob_call_error("blob ref for another tenant", false));
                 }
-                let bytes =
-                    self.blobs.get(&r).await.map_err(|e| {
-                        blob_call_error(&e.to_string(), matches!(e, BlobError::Io(_)))
-                    })?;
+                let bytes = blobs
+                    .get(&r)
+                    .await
+                    .map_err(|e| blob_call_error(&e.to_string(), matches!(e, BlobError::Io(_))))?;
                 match part {
                     ContentPart::ImageUrl { image_url } => {
                         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
                         image_url.url = format!("data:{};base64,{b64}", r.mime);
                     }
-                    // A text file inlines as a text part, which every
-                    // provider takes; anything else rides as a data url.
+                    // A ref travels as a file; what it becomes is its mime's
+                    // to say. Text inlines as text, which every provider takes,
+                    // and sound and moving pictures take the parts named for
+                    // them. Anything else rides as a data url.
                     ContentPart::File { file } => {
-                        if text_like(&r.mime) {
-                            let name = file.filename.clone();
-                            let text = String::from_utf8_lossy(&bytes);
-                            *part = ContentPart::Text {
-                                text: format!("<file name={name:?}>\n{text}\n</file>"),
-                            };
-                        } else {
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-                            file.file_data = format!("data:{};base64,{b64}", r.mime);
+                        let b64 = || base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        let essence = r.mime.split('/').next().unwrap_or_default();
+                        match essence {
+                            _ if text_like(&r.mime) => {
+                                let name = file.filename.clone();
+                                let text = String::from_utf8_lossy(&bytes);
+                                *part = ContentPart::Text {
+                                    text: format!("<file name={name:?}>\n{text}\n</file>"),
+                                };
+                            }
+                            "audio" => {
+                                *part = ContentPart::InputAudio {
+                                    input_audio: AudioData {
+                                        data: b64(),
+                                        format: audio_format(&r.mime).to_string(),
+                                    },
+                                }
+                            }
+                            "video" => {
+                                *part = ContentPart::VideoUrl {
+                                    video_url: VideoUrl {
+                                        url: format!("data:{};base64,{}", r.mime, b64()),
+                                    },
+                                }
+                            }
+                            _ => file.file_data = format!("data:{};base64,{}", r.mime, b64()),
                         }
                     }
                     _ => unreachable!(),
@@ -285,7 +407,9 @@ impl BlobResolvingCallable {
         }
         Ok(Some(resolved))
     }
+}
 
+impl BlobResolvingCallable {
     /// Swap each generated image's `data:` URI for a stored ref. A store
     /// failure keeps the URI: the call succeeded, and inline bytes still work.
     async fn store_images(&self, response: &mut LlmResponse, ctx: &CallContext<'_>) {
@@ -356,7 +480,7 @@ impl LlmCallable for BlobResolvingCallable {
         request: &LlmRequest,
         ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let mut response = match self.resolved(request, ctx).await? {
+        let mut response = match inline_refs(request, self.blobs.as_ref(), ctx.tenant_id).await? {
             Some(resolved) => self.inner.call(&resolved, ctx).await?,
             None => self.inner.call(request, ctx).await?,
         };
@@ -370,7 +494,7 @@ impl LlmCallable for BlobResolvingCallable {
         ctx: &CallContext<'_>,
         tx: tokio::sync::mpsc::UnboundedSender<crate::protocol::StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {
-        let mut response = match self.resolved(request, ctx).await? {
+        let mut response = match inline_refs(request, self.blobs.as_ref(), ctx.tenant_id).await? {
             Some(resolved) => self.inner.call_streaming(&resolved, ctx, tx).await?,
             None => self.inner.call_streaming(request, ctx, tx).await?,
         };
@@ -416,6 +540,194 @@ mod tests {
             None
         );
         assert_eq!(BlobRef::parse("blob://t1?mime=a&size=1"), None);
+    }
+
+    #[tokio::test]
+    async fn sound_and_moving_pictures_take_the_parts_named_for_them() {
+        let blobs = MemoryBlobStore::new();
+        let mut refs = Vec::new();
+        for (mime, bytes) in [
+            ("audio/mpeg", b"aaa".to_vec()),
+            ("video/mp4", b"vvv".to_vec()),
+            ("application/zip", b"zzz".to_vec()),
+        ] {
+            refs.push(
+                blobs
+                    .put(NewBlob {
+                        tenant_id: "t1".into(),
+                        mime: mime.into(),
+                        name: Some("f".into()),
+                        bytes,
+                    })
+                    .await
+                    .expect("stored"),
+            );
+        }
+        let mut request = request("unused");
+        request.messages[0].content = Some(Content::Parts(
+            refs.iter()
+                .map(|r| ContentPart::File {
+                    file: FileData {
+                        filename: "f".into(),
+                        file_data: r.uri(),
+                    },
+                })
+                .collect(),
+        ));
+
+        let out = inline_refs(&request, &blobs, "t1")
+            .await
+            .expect("resolves")
+            .expect("held refs");
+        let Some(Content::Parts(parts)) = &out.messages[0].content else {
+            panic!("parts");
+        };
+        match &parts[0] {
+            ContentPart::InputAudio { input_audio } => {
+                assert_eq!(input_audio.format, "mp3", "the mime names the encoding");
+                assert_eq!(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&input_audio.data)
+                        .expect("base64"),
+                    b"aaa".to_vec()
+                );
+            }
+            other => panic!("expected audio, got {other:?}"),
+        }
+        assert!(
+            matches!(&parts[1], ContentPart::VideoUrl { video_url }
+                if video_url.url.starts_with("data:video/mp4;base64,")),
+            "video takes its own part, not a file: {:?}",
+            parts[1]
+        );
+        assert!(
+            matches!(&parts[2], ContentPart::File { file }
+                if file.file_data.starts_with("data:application/zip;base64,")),
+            "anything else still rides as a file"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_bytes_are_stored_and_replaced_by_a_ref() {
+        use crate::protocol::{ResourceContents, ToolContent, ToolResult};
+
+        let blobs = MemoryBlobStore::new();
+        let result = ToolResult {
+            content: vec![
+                ToolContent::Text {
+                    text: "the chart".into(),
+                },
+                ToolContent::Image {
+                    data: "aGVsbG8=".into(),
+                    mime_type: "image/png".into(),
+                },
+                ToolContent::Resource {
+                    resource: ResourceContents {
+                        uri: "file:///a/report.pdf".into(),
+                        mime_type: Some("application/pdf".into()),
+                        text: None,
+                        blob: Some("d29ybGQ=".into()),
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let result = store(result, &blobs, "t1").await;
+
+        let StoredContent::Blob { uri } = &result.content[1] else {
+            panic!(
+                "stored bytes become a blob block, got {:?}",
+                result.content[1]
+            );
+        };
+        let r = BlobRef::parse(uri).expect("a ref");
+        assert_eq!(r.mime, "image/png", "the ref carries what it is");
+        assert_eq!(r.tenant_id, "t1");
+        assert_eq!(blobs.get(&r).await.expect("stored"), b"hello".to_vec());
+
+        let StoredContent::Blob { uri } = &result.content[2] else {
+            panic!("a resource with bytes becomes a blob block too");
+        };
+        let r = BlobRef::parse(uri).expect("a ref");
+        assert_eq!(blobs.get(&r).await.expect("stored"), b"world".to_vec());
+        assert_eq!(
+            r.name.as_deref(),
+            Some("report.pdf"),
+            "the resource uri names the file"
+        );
+
+        assert!(
+            matches!(&result.content[0], StoredContent::Text { text } if text == "the chart"),
+            "text is left alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_that_refuses_never_leaves_bytes_in_the_result() {
+        use crate::protocol::{ToolContent, ToolResult};
+
+        struct Refuses;
+        #[async_trait]
+        impl BlobStore for Refuses {
+            async fn put(&self, _: NewBlob) -> Result<BlobRef, BlobError> {
+                Err(BlobError::NotFound)
+            }
+            async fn get(&self, _: &BlobRef) -> Result<Vec<u8>, BlobError> {
+                Err(BlobError::NotFound)
+            }
+        }
+
+        let result = ToolResult {
+            content: vec![ToolContent::Image {
+                data: "aGVsbG8=".into(),
+                mime_type: "image/png".into(),
+            }],
+            ..Default::default()
+        };
+        let result = store(result, &Refuses, "t1").await;
+
+        assert!(
+            matches!(&result.content[0], StoredContent::Text { text } if text == "[image content]"),
+            "a refused store must not persist the bytes: {:?}",
+            result.content[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ref_that_is_already_stored_is_left_alone() {
+        use crate::protocol::{ToolContent, ToolResult};
+
+        let blobs = MemoryBlobStore::new();
+        let stored = blobs
+            .put(NewBlob {
+                tenant_id: "t1".into(),
+                mime: "image/png".into(),
+                name: None,
+                bytes: b"hi".to_vec(),
+            })
+            .await
+            .expect("stored");
+        let uri = stored.uri();
+        let result = ToolResult {
+            content: vec![ToolContent::Image {
+                data: "aGk=".into(),
+                mime_type: "image/png".into(),
+            }],
+            ..Default::default()
+        };
+        let result = store(result, &blobs, "t1").await;
+
+        let StoredContent::Blob { uri: after } = &result.content[0] else {
+            panic!("a blob block");
+        };
+        assert_ne!(*after, uri, "each put mints its own id");
+        assert_eq!(
+            blobs
+                .get(&BlobRef::parse(after).expect("a ref"))
+                .await
+                .expect("stored"),
+            b"hi".to_vec()
+        );
     }
 
     struct FakeStore;

@@ -17,7 +17,7 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo};
+use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo, StoredResult};
 use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{ToolHandler, Trigger};
@@ -45,17 +45,14 @@ impl KindSpec for ToolSpec {
 
     fn settle(&self, state: &SessionState, id: &str, outcome: Outcome) -> Vec<EventPayload> {
         match outcome {
-            Outcome::Tool {
-                result,
-                attachments,
-            } => {
+            Outcome::Tool { result } => {
                 let name = state
                     .tool_call(id)
                     .map(|t| t.name.clone())
                     .unwrap_or_default();
                 match state
                     .declared_output_schema(id, &name)
-                    .and_then(|schema| output_violation(&schema, &result))
+                    .and_then(|schema| output_violation(&schema, &result.rendered()))
                 {
                     Some(v) => fail(
                         self,
@@ -70,7 +67,7 @@ impl KindSpec for ToolSpec {
                             false,
                         ),
                     ),
-                    None => complete(id.to_string(), name, result, attachments),
+                    None => complete(id.to_string(), name, result),
                 }
             }
             Outcome::Error(e) => fail(self, state, id, &e),
@@ -98,7 +95,6 @@ impl KindSpec for ToolSpec {
             ok: false,
             name: name_of(state, id),
             result: None,
-            attachments: Vec::new(),
             error: Some(e.error.clone()),
         })];
         if let (Some(auth), Some(target)) = (e.auth, connector_target(state, id)) {
@@ -172,22 +168,19 @@ fn connector_target(state: &SessionState, id: &str) -> Option<String> {
 pub(in crate::runtime::session) fn complete(
     id: String,
     name: String,
-    result: String,
-    attachments: Vec<String>,
+    result: StoredResult,
 ) -> Vec<EventPayload> {
     vec![
         EventPayload::ToolCallCompleted(ToolCallCompleted {
             id: id.clone(),
             name: name.clone(),
             result: result.clone(),
-            attachments: attachments.clone(),
         }),
         decision_queued(Trigger::ToolFinished {
             id,
             ok: true,
             name,
             result: Some(result),
-            attachments,
             error: None,
         }),
     ]

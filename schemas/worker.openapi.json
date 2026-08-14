@@ -447,7 +447,10 @@
                   "null"
                 ]
               },
-              "result": {},
+              "result": {
+                "$ref": "#/components/schemas/ToolResult",
+                "description": "Blocks of content, or a bare JSON value read as one text block."
+              },
               "type": {
                 "const": "tool.result",
                 "type": "string"
@@ -991,12 +994,6 @@
           {
             "additionalProperties": false,
             "properties": {
-              "attachments": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
               "error": {
                 "anyOf": [
                   {
@@ -1017,9 +1014,13 @@
                 "type": "boolean"
               },
               "result": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/StoredResult"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "type": {
@@ -1882,6 +1883,39 @@
         "title": "ReasoningProvider",
         "type": "string"
       },
+      "ResourceContents": {
+        "additionalProperties": false,
+        "description": "The body of an embedded resource, as MCP defines it: text inline, or bytes\nunder `blob`.",
+        "properties": {
+          "blob": {
+            "description": "Base64 on the way in; a `blob://` ref once the engine has stored it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri"
+        ],
+        "title": "ResourceContents",
+        "type": "object"
+      },
       "RetryConfig": {
         "additionalProperties": false,
         "description": "An agent's retry overrides, one per effect kind. `default` covers the kinds\nthat name nothing; a kind is layered on top of it, so the two compose.\n\nPer kind because the kinds are not alike: an LLM call is idempotent and worth\nretrying, a tool call may not be, and a connector fetch holds up every\ndecision behind it.",
@@ -1998,6 +2032,95 @@
         "title": "Role",
         "type": "string"
       },
+      "StoredContent": {
+        "description": "One block of a recorded tool answer. Bytes are never here: they are in the\nblob store, and `Blob` names them. Which kind a block was is not lost — the\nref carries the mime, and every reader switches on that anyway.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A `blob://` ref. It already carries the mime, the size and the name in\nits query, so nothing here repeats them — a second copy is only a way\nfor the two to disagree.",
+            "properties": {
+              "type": {
+                "const": "blob",
+                "type": "string"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "uri"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A resource the tool named rather than sent.",
+            "properties": {
+              "mimeType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "link",
+                "type": "string"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "uri"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "StoredContent"
+      },
+      "StoredResult": {
+        "additionalProperties": false,
+        "description": "What the engine recorded a tool answering. Distinct from [`ToolResult`]:\nthat one carries bytes, this one cannot, so no path can persist them.",
+        "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/StoredContent"
+            },
+            "type": "array"
+          },
+          "isError": {
+            "type": "boolean"
+          },
+          "structuredContent": {}
+        },
+        "title": "StoredResult",
+        "type": "object"
+      },
       "SubAgent": {
         "additionalProperties": false,
         "description": "A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,\nand the tool name the model calls); its model-facing input is the conventional\nsingle-`message` delegation schema.",
@@ -2052,6 +2175,117 @@
         ],
         "title": "ToolCallFunction",
         "type": "object"
+      },
+      "ToolContent": {
+        "description": "One block of a tool's answer, as the tool sends it: the shape MCP defines,\nwith bytes inline under `data`.\n\nThis is an inbound type only. The engine stores the bytes and records a\n[`StoredContent`] instead, so nothing downstream can carry them.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data",
+              "mimeType"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "type": {
+                "const": "audio",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data",
+              "mimeType"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "resource": {
+                "$ref": "#/components/schemas/ResourceContents"
+              },
+              "type": {
+                "const": "resource",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "resource"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mimeType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "resource_link",
+                "type": "string"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "uri"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "ToolContent"
       },
       "ToolInput": {
         "description": "The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",
@@ -2112,6 +2346,27 @@
           }
         ],
         "title": "ToolInput"
+      },
+      "ToolResult": {
+        "additionalProperties": false,
+        "description": "What a tool answered. The shape is MCP's — blocks of content, an optional\nstructured form, and the tool's own failure signal — because every source\nlowers to it: a connection, a worker, or a client submitting a transcript.",
+        "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/ToolContent"
+            },
+            "type": "array"
+          },
+          "isError": {
+            "description": "The tool ran and reported failure. Distinct from a transport fault.",
+            "type": "boolean"
+          },
+          "structuredContent": {
+            "description": "Present when the tool declares an output schema. Preferred over the\nblocks: it round trips where rendered text would not."
+          }
+        },
+        "title": "ToolResult",
+        "type": "object"
       },
       "Usage": {
         "additionalProperties": false,

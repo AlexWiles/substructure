@@ -17,8 +17,9 @@ use tokio::sync::Mutex;
 
 use super::mcp::McpClient;
 use super::oauth::Probed;
-use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, ToolOutcome};
+use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool};
 use crate::protocol::ConnectorProtocol;
+use crate::protocol::StoredResult;
 use crate::runtime::blob::BlobStore;
 
 /// A connection as configured: where it is and how to authenticate.
@@ -324,7 +325,7 @@ impl Connections {
         id: &str,
         name: &str,
         arguments: &Value,
-    ) -> Result<ToolOutcome, ConnectorError> {
+    ) -> Result<StoredResult, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
         self.attempt(tenant_id, id, &spec, |client| async move {
             client.call_tool(name, arguments).await

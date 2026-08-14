@@ -11,6 +11,7 @@
 //! it compares the whole persisted snapshot, not the fields a test thought to
 //! look at.
 
+use crate::protocol::StoredResult;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
@@ -517,8 +518,7 @@ impl World {
                         tool_call_id,
                         None,
                         Outcome::Tool {
-                            result: "ok".to_string(),
-                            attachments: Vec::new(),
+                            result: StoredResult::text("ok".to_string()),
                         },
                     )
                 } else {

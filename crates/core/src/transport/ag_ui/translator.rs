@@ -201,7 +201,7 @@ impl AgUiTranslator {
                 out
             }
             EventPayload::ToolCallCompleted(t) => {
-                let mut out = vec![tool_result(t.id.clone(), t.result)];
+                let mut out = vec![tool_result(t.id.clone(), t.result.rendered())];
                 if ends_run {
                     out.extend(self.finish_client_yield());
                 }
@@ -878,7 +878,7 @@ mod tests {
         let r = vals(t.on_event(
             ev(json!({
                 "type": "tool.call.completed", "id": "x",
-                "name": "get_weather", "result": r#"{"temp":62}"#,
+                "name": "get_weather", "result": {"content":[{"type":"text","text":r#"{"temp":62}"#}]},
             })),
             false,
         ));
@@ -960,7 +960,7 @@ mod tests {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let a = t.on_event(
             ev(json!({
-                "type": "tool.call.completed", "id": "tc-1", "name": "f", "result": "RA",
+                "type": "tool.call.completed", "id": "tc-1", "name": "f", "result": {"content":[{"type":"text","text":"RA"}]},
             })),
             false,
         );
@@ -969,7 +969,7 @@ mod tests {
 
         let b = vals(t.on_event(
             ev(json!({
-                "type": "tool.call.completed", "id": "tc-2", "name": "g", "result": "RB",
+                "type": "tool.call.completed", "id": "tc-2", "name": "g", "result": {"content":[{"type":"text","text":"RB"}]},
             })),
             false,
         ));
@@ -1041,7 +1041,7 @@ mod tests {
         let done = vals(t.on_event(
             ev(json!({
                 "type": "tool.call.completed", "id": "w",
-                "name": "get_weather", "result": r#"{"temp":62}"#,
+                "name": "get_weather", "result": {"content":[{"type":"text","text":r#"{"temp":62}"#}]},
             })),
             true,
         ));
@@ -1057,13 +1057,13 @@ mod tests {
         let _ = t.on_event(tool_requested("w2", "g", "{}", "worker"), false);
         let r1 = vals(t.on_event(
             ev(json!({
-                "type": "tool.call.completed", "id": "w1", "name": "f", "result": "1",
+                "type": "tool.call.completed", "id": "w1", "name": "f", "result": {"content":[{"type":"text","text":"1"}]},
             })),
             false,
         ));
         let r2 = vals(t.on_event(
             ev(json!({
-                "type": "tool.call.completed", "id": "w2", "name": "g", "result": "2",
+                "type": "tool.call.completed", "id": "w2", "name": "g", "result": {"content":[{"type":"text","text":"2"}]},
             })),
             false,
         ));
@@ -1083,7 +1083,7 @@ mod tests {
         let r = vals(t.on_event(
             ev(json!({
                 "type": "tool.call.completed", "id": "x",
-                "name": "get_user_timezone", "result": "America/Los_Angeles",
+                "name": "get_user_timezone", "result": {"content":[{"type":"text","text":"America/Los_Angeles"}]},
             })),
             false,
         ));

@@ -3,14 +3,14 @@ name = "example"
 [llm.openrouter]
 type = "openrouter"
 
-[agent.oncall]
+[agent.assistant]
 llm = "openrouter"
-model = "anthropic/claude-haiku-4.5"
-system = "You are the on-call assistant. Answer in the thread, and keep it short."
+model = "google/gemini-3.7-flash"
+system = "You are a helpful assistant."
 
 [slack]
-dm = "oncall"
-mentions = "oncall"
+dm = "assistant"
+mentions = "assistant"
 
 [remote]
 url = "https://api.substructure.ai"

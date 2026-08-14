@@ -1341,7 +1341,7 @@ impl SessionState {
                 if let Some(e) = self.effect_mut(EffectKind::ToolCall, &payload.id) {
                     e.tracking.complete();
                     if let Some(tc) = e.tool_mut() {
-                        tc.result = Some(payload.result.clone());
+                        tc.result = Some(payload.result.rendered());
                         tc.is_error = false;
                     }
                 }

@@ -12,7 +12,7 @@ use crate::protocol::{OwnerKind, SessionOwner};
 use crate::session::command::SessionError;
 use crate::session::decision::{EffectResultPayload, WorkKind};
 use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
-use crate::session::wire::{resolve_response, result_to_string};
+use crate::session::wire::resolve_response;
 use crate::span::SpanContext;
 use crate::transport::http::Body;
 use crate::transport::session_sse::{merge_session_stream, resume_cursor};
@@ -40,7 +40,16 @@ pub async fn submit(
     // every settle must name its own id and every llm.call must name its model
     // and its llm block. An unresolvable one can't be filled here — reject it.
     let blocks = state.runtime.llm_blocks(caller.tenant_id());
-    let resolved = match resolve_response(req.decision, None, None, &blocks) {
+    let resolved = match resolve_response(
+        req.decision,
+        None,
+        None,
+        &blocks,
+        state.runtime.blob_store(),
+        caller.tenant_id(),
+    )
+    .await
+    {
         Ok(resolved) => resolved,
         Err(e) => {
             return (
@@ -143,9 +152,7 @@ pub async fn settle_effect(
             WorkKind::ToolCall,
             id,
             attempt,
-            EffectSettlement::Result(EffectResultPayload::ToolCall {
-                result: result_to_string(result),
-            }),
+            EffectSettlement::Result(EffectResultPayload::ToolCall { result }),
         ),
         SettleEffectRequest::LlmResult {
             id,

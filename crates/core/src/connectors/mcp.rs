@@ -29,9 +29,11 @@ use serde_json::Value;
 use sse_stream::Sse;
 use tokio::sync::Mutex;
 
-use crate::runtime::blob::{text_like, BlobRef, BlobStore, NewBlob};
+use crate::runtime::blob::{text_like, BlobStore, NewBlob};
 
-use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, ToolAnnotations, ToolOutcome};
+use crate::protocol::{StoredContent, StoredResult};
+
+use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, ToolAnnotations};
 
 /// The revisions we accept, best first. The SDK probes for the first and falls
 /// back to the second only when a server proves it speaks the older one.
@@ -91,7 +93,7 @@ impl McpClient {
         &self,
         name: &str,
         arguments: &Value,
-    ) -> Result<ToolOutcome, ConnectorError> {
+    ) -> Result<StoredResult, ConnectorError> {
         let service = self.connect().await?;
         let mut params = CallToolRequestParams::new(name.to_string());
         params.arguments = arguments.as_object().cloned();
@@ -104,23 +106,22 @@ impl McpClient {
     /// Text is read into the result; everything else is stored and referenced.
     /// The model sees a stored block as a message part, so an image comes back
     /// as an image rather than as a note saying there was one.
-    async fn outcome(&self, result: CallToolResult) -> ToolOutcome {
-        let mut text = Vec::new();
-        let mut attachments = Vec::new();
+    async fn outcome(&self, result: CallToolResult) -> StoredResult {
+        let mut content = Vec::new();
         for block in &result.content {
             match block {
-                ContentBlock::Text(t) => text.push(t.text.clone()),
+                ContentBlock::Text(t) => content.push(StoredContent::Text {
+                    text: t.text.clone(),
+                }),
                 ContentBlock::Image(i) => {
-                    self.keep(&i.data, &i.mime_type, None, &mut text, &mut attachments)
-                        .await
+                    self.keep(&i.data, &i.mime_type, None, &mut content).await
                 }
                 ContentBlock::Audio(a) => {
-                    self.keep(&a.data, &a.mime_type, None, &mut text, &mut attachments)
-                        .await
+                    self.keep(&a.data, &a.mime_type, None, &mut content).await
                 }
                 ContentBlock::Resource(r) => match &r.resource {
-                    ResourceContents::TextResourceContents { text: body, .. } => {
-                        text.push(body.clone())
+                    ResourceContents::TextResourceContents { text, .. } => {
+                        content.push(StoredContent::Text { text: text.clone() })
                     }
                     ResourceContents::BlobResourceContents {
                         blob,
@@ -129,58 +130,60 @@ impl McpClient {
                         ..
                     } => {
                         let mime = mime_type.as_deref().unwrap_or("application/octet-stream");
-                        self.keep(blob, mime, Some(uri), &mut text, &mut attachments)
-                            .await
+                        self.keep(blob, mime, Some(uri), &mut content).await
                     }
-                    _ => text.push("[resource content]".to_string()),
+                    _ => content.push(StoredContent::Text {
+                        text: "[resource content]".to_string(),
+                    }),
                 },
-                // A link is a URL, not bytes: the model can read it as it is.
-                ContentBlock::ResourceLink(r) => text.push(r.uri.clone()),
-                _ => text.push("[content]".to_string()),
+                // A link names bytes rather than sending them; it is recorded
+                // as the link it is.
+                ContentBlock::ResourceLink(r) => content.push(StoredContent::Link {
+                    uri: r.uri.clone(),
+                    name: Some(r.name.clone()),
+                    mime_type: r.mime_type.clone(),
+                }),
+                _ => content.push(StoredContent::Text {
+                    text: "[content]".to_string(),
+                }),
             }
         }
-        ToolOutcome {
-            content: text.join("\n"),
-            structured: result.structured_content,
+        StoredResult {
+            content,
+            structured_content: result.structured_content,
             is_error: result.is_error.unwrap_or(false),
-            attachments,
         }
     }
 
     /// Store one block's bytes. A block that cannot be decoded or stored is
     /// named instead: losing an image must not fail the call that carried it.
-    async fn keep(
-        &self,
-        data: &str,
-        mime: &str,
-        uri: Option<&str>,
-        text: &mut Vec<String>,
-        out: &mut Vec<BlobRef>,
-    ) {
-        let kind = mime.split('/').next().unwrap_or("file").to_string();
+    async fn keep(&self, data: &str, mime: &str, uri: Option<&str>, out: &mut Vec<StoredContent>) {
+        let named = mime.split('/').next().unwrap_or("file").to_string();
+        let mut note = |text: String| out.push(StoredContent::Text { text });
         let Ok(bytes) = BASE64.decode(data) else {
-            text.push(format!("[unreadable {kind} content]"));
+            note(format!("[unreadable {named} content]"));
             return;
         };
         // Text that arrived as bytes belongs in the result, not the store.
         if text_like(mime) {
             match String::from_utf8(bytes) {
-                Ok(body) => text.push(body),
-                Err(_) => text.push(format!("[unreadable {kind} content]")),
+                Ok(text) => note(text),
+                Err(_) => note(format!("[unreadable {named} content]")),
             }
             return;
         }
+        let name = uri.map(|u| u.rsplit('/').next().unwrap_or(u).to_string());
         let blob = NewBlob {
             tenant_id: self.tenant_id.clone(),
             mime: mime.to_string(),
-            name: uri.map(|u| u.rsplit('/').next().unwrap_or(u).to_string()),
+            name: name.clone(),
             bytes,
         };
         match self.blobs.put(blob).await {
-            Ok(r) => out.push(r),
+            Ok(r) => out.push(StoredContent::Blob { uri: r.uri() }),
             Err(e) => {
-                tracing::warn!("keeping {kind} content from a tool failed: {e}");
-                text.push(format!("[{kind} content]"));
+                tracing::warn!("keeping {named} content from a tool failed: {e}");
+                note(format!("[{named} content]"));
             }
         }
     }
@@ -962,10 +965,11 @@ mod tests {
             .expect("calls");
 
         assert_eq!(
-            outcome.content, "found 2",
-            "an image is not described in the text; it rides as an attachment"
+            outcome.as_text(),
+            "found 2",
+            "an image is not described in the text; it rides as its own block"
         );
-        assert_eq!(outcome.structured, Some(json!({ "count": 2 })));
+        assert_eq!(outcome.structured_content, Some(json!({ "count": 2 })));
         assert!(!outcome.is_error);
     }
 
@@ -986,18 +990,19 @@ mod tests {
             .await
             .expect("calls");
 
-        assert_eq!(outcome.attachments.len(), 1);
-        let kept = &outcome.attachments[0];
-        assert_eq!(kept.mime, "image/png");
-        assert_eq!(kept.tenant_id, "t1");
+        let StoredContent::Blob { uri } = &outcome.content[1] else {
+            panic!(
+                "the stored bytes become a blob block, got {:?}",
+                outcome.content
+            );
+        };
+        let r = crate::runtime::blob::BlobRef::parse(uri).expect("a ref");
+        assert_eq!(r.mime, "image/png", "the ref carries what it is");
+        assert_eq!(r.tenant_id, "t1");
         assert_eq!(
-            blobs.get(kept).await.expect("stored"),
+            blobs.get(&r).await.expect("stored"),
             b"hello".to_vec(),
             "the bytes reached the store, not the event log"
-        );
-        assert!(
-            kept.uri().starts_with("blob://t1/"),
-            "the ref is what the transcript carries"
         );
     }
 
@@ -1013,7 +1018,7 @@ mod tests {
             outcome.is_error,
             "the far side failed, the connection did not"
         );
-        assert_eq!(outcome.content, "it failed");
+        assert_eq!(outcome.as_text(), "it failed");
     }
 
     #[tokio::test]
