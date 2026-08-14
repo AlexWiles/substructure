@@ -483,8 +483,6 @@ mod tests {
                 let request: Value = serde_json::from_str(&body).unwrap_or_default();
                 let json = [(reqwest::header::CONTENT_TYPE, "application/json")];
                 let result = match request["method"].as_str().unwrap_or_default() {
-                    // A handshake-era server: it has never heard of the probe,
-                    // so the client falls back to `initialize`.
                     "server/discover" => {
                         return (
                             reqwest::StatusCode::NOT_FOUND,

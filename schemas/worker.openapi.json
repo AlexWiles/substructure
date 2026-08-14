@@ -335,7 +335,6 @@
                 ]
               },
               "content": {
-                "description": "Blocks of content, in the shape MCP defines.",
                 "items": {
                   "$ref": "#/components/schemas/ToolContent"
                 },
@@ -350,13 +349,11 @@
                   "null"
                 ]
               },
-              "isError": {
+              "is_error": {
                 "type": "boolean"
               },
-              "result": {
-                "description": "A bare JSON value, read as one text block. The common case, and\nexclusive with `content` — two named fields, so nothing has to\nguess which shape it was handed."
-              },
-              "structuredContent": {},
+              "result": {},
+              "structured_content": {},
               "type": {
                 "const": "tool.result",
                 "type": "string"
@@ -1760,10 +1757,8 @@
       },
       "ResourceContents": {
         "additionalProperties": false,
-        "description": "The body of an embedded resource, as MCP defines it: text inline, or bytes\nunder `blob`.",
         "properties": {
           "blob": {
-            "description": "Base64 on the way in; a `blob://` ref once the engine has stored it.",
             "type": [
               "string",
               "null"
@@ -1908,7 +1903,6 @@
         "type": "string"
       },
       "StoredContent": {
-        "description": "One block of a recorded tool answer. Bytes are never here: they are in the\nblob store, and `Blob` names them. Which kind a block was is not lost — the\nref carries the mime, and every reader switches on that anyway.",
         "oneOf": [
           {
             "additionalProperties": false,
@@ -1929,7 +1923,6 @@
           },
           {
             "additionalProperties": false,
-            "description": "A `blob://` ref. It already carries the mime, the size and the name in\nits query, so nothing here repeats them — a second copy is only a way\nfor the two to disagree.",
             "properties": {
               "type": {
                 "const": "blob",
@@ -1947,7 +1940,6 @@
           },
           {
             "additionalProperties": false,
-            "description": "A resource the tool named rather than sent.",
             "properties": {
               "mimeType": {
                 "type": [
@@ -1980,7 +1972,6 @@
       },
       "StoredResult": {
         "additionalProperties": false,
-        "description": "What the engine recorded a tool answering. Distinct from [`ToolResult`]:\nthat one carries bytes, this one cannot, so no path can persist them.",
         "properties": {
           "content": {
             "items": {
@@ -2052,7 +2043,6 @@
         "type": "object"
       },
       "ToolContent": {
-        "description": "One block of a tool's answer, as the tool sends it: the shape MCP defines,\nwith bytes inline under `data`.\n\nThis is an inbound type only. The engine stores the bytes and records a\n[`StoredContent`] instead, so nothing downstream can carry them.",
         "oneOf": [
           {
             "additionalProperties": false,

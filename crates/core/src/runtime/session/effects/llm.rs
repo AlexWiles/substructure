@@ -241,9 +241,6 @@ fn assistant_message(call_id: &str, response: &LlmResponse) -> DraftMessage {
         if let Some(text) = &response.content {
             parts.push(StoredContent::Text { text: text.clone() });
         }
-        // A generated image is stored before it lands here, so its url is the
-        // ref. One that could not be stored keeps its data url, and a link is
-        // what carries a url the engine does not own.
         for img in &response.images {
             parts.push(
                 match img.url.starts_with(crate::runtime::blob::BLOB_SCHEME) {

@@ -375,11 +375,6 @@ fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionRespon
     }
 }
 
-/// A tool message. Stored attachments ride as parts, so the blob layer inlines
-/// the bytes at the provider call and the model sees an image as an image. A
-/// result with none is the text it always was.
-/// What a settled call records. A failure is its error text; a success keeps
-/// the tool's own blocks.
 fn settled_content(ok: bool, result: &Option<StoredResult>, error: &Option<ErrorInfo>) -> Content {
     if !ok {
         let text = error
@@ -394,12 +389,7 @@ fn settled_content(ok: bool, result: &Option<StoredResult>, error: &Option<Error
         .unwrap_or_else(|| Content::Text(String::new()))
 }
 
-/// A stored block becomes a message part, so the blob layer inlines the bytes
-/// at the provider call and the model sees an image as an image. A result that
-/// is only text stays text.
 fn tool_content(result: &StoredResult) -> Content {
-    // A tool's blocks and a message's parts are the same shape, so what the
-    // tool answered rides into the message as it is.
     let media: Vec<StoredContent> = result
         .content
         .iter()

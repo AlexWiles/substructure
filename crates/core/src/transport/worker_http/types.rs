@@ -49,7 +49,6 @@ pub enum SettleEffectRequest {
         id: String,
         #[serde(default)]
         attempt: Option<u32>,
-        /// Blocks of content, or a bare JSON value read as one text block.
         result: crate::protocol::ToolResult,
     },
     #[serde(rename = "llm.result")]

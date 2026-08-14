@@ -127,13 +127,20 @@ impl SettleKind {
 pub enum ResolveError {
     /// A settle omitted its effect id, but the answered decision was not the matching
     /// `*.execute` (or there was no trigger context), so the id can't be inferred.
-    UnresolvableSettleId { kind: &'static str },
+    UnresolvableSettleId {
+        kind: &'static str,
+    },
     /// An `llm.call` omitted `model` and no agent config supplied one.
     MissingModel,
     /// An `llm.call` named no `[llm.*]` block and no agent config supplied one.
-    MissingLlm { declared: String },
+    MissingLlm {
+        declared: String,
+    },
     /// An `llm.call` named a block this app does not declare.
-    UnknownLlm { name: String, declared: String },
+    UnknownLlm {
+        name: String,
+        declared: String,
+    },
     /// A handler value the addressed surface does not support: `server` on a
     /// declared tool.
     InvalidHandler {
@@ -141,8 +148,9 @@ pub enum ResolveError {
         handler: &'static str,
     },
     /// An `llm.result` response that doesn't parse in the call's format.
-    InvalidLlmResponse { message: String },
-    /// A `tool.result` that named both shapes of answer.
+    InvalidLlmResponse {
+        message: String,
+    },
     AmbiguousToolResult,
 }
 
@@ -445,8 +453,6 @@ async fn lower_actions(
                         is_error,
                     )
                     .map_err(|_| ResolveError::AmbiguousToolResult)?;
-                    // The bytes go away here: everything past this seam is
-                    // synchronous, and the recorded shape cannot hold them.
                     Action::ToolResult {
                         id,
                         attempt,
@@ -560,8 +566,6 @@ async fn lower_actions(
 /// `open_llm_calls`); every other trigger maps 1:1. The tree is frozen while the
 /// decision is pending, so the result is stable across redeliveries and matches
 /// what reconciling the echo will write.
-/// A JSON value as the text the engine stores. A string is itself; anything
-/// else is its canonical JSON, and null is empty.
 pub fn result_to_string(value: Value) -> String {
     match value {
         Value::String(s) => s,
@@ -653,10 +657,6 @@ pub async fn to_wire_trigger(
             deadline,
         } => DecisionTrigger::LlmExecute {
             id,
-            // A worker makes the provider call, so what it receives is the
-            // resolved shape: refs replaced by what they name. A ref that will
-            // not resolve fails the decision rather than reaching the worker
-            // as a request it cannot read.
             request: {
                 let prompt = resolve(&request, blobs, tenant_id).await?;
                 match format {
@@ -1819,7 +1819,6 @@ mod tests {
                 other => panic!("expected a tool.result; got {other:?}"),
             }
         };
-        // The common case: a bare value, read as one text block.
         assert_eq!(
             settle(r#"{"type":"tool.result","id":"tc-1","result":"plain"}"#).await,
             "plain"
@@ -1829,7 +1828,6 @@ mod tests {
             r#"{"temp":71}"#,
             "a non-string value is its canonical json"
         );
-        // Blocks ride under their own name, so neither shape has to be guessed.
         assert_eq!(
             settle(
                 r#"{"type":"tool.result","id":"tc-1","content":[{"type":"text","text":"blocks"}]}"#
@@ -1838,7 +1836,7 @@ mod tests {
             "blocks"
         );
         assert_eq!(
-            settle(r#"{"type":"tool.result","id":"tc-1","structuredContent":{"temp":71}}"#).await,
+            settle(r#"{"type":"tool.result","id":"tc-1","structured_content":{"temp":71}}"#).await,
             r#"{"temp":71}"#,
             "a declared output schema round trips as structure, not as text"
         );

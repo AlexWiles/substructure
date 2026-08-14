@@ -354,8 +354,6 @@ pub enum Action {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        /// Already stored: the seam that resolves a response puts the bytes
-        /// away before the aggregate, which cannot do IO, ever sees them.
         result: StoredResult,
     },
     #[serde(rename = "llm.result")]

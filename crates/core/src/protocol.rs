@@ -77,8 +77,6 @@ pub struct VideoUrl {
     pub url: String,
 }
 
-/// The body of an embedded resource, as MCP defines it: text inline, or bytes
-/// under `blob`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[schemars(title = "ResourceContents")]
@@ -88,15 +86,11 @@ pub struct ResourceContents {
     pub mime_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// Base64 on the way in; a `blob://` ref once the engine has stored it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob: Option<String>,
 }
 
 impl ToolResult {
-    /// A tool's answer as an action carries it: a bare `result`, or `content`
-    /// blocks. Naming the two shapes differently is what makes this a check
-    /// rather than a guess.
     pub fn from_action(
         result: Option<Value>,
         content: Option<Vec<ToolContent>>,
@@ -117,11 +111,6 @@ impl ToolResult {
     }
 }
 
-/// One block of a tool's answer, as the tool sends it: the shape MCP defines,
-/// with bytes inline under `data`.
-///
-/// This is an inbound type only. The engine stores the bytes and records a
-/// [`StoredContent`] instead, so nothing downstream can carry them.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[schemars(title = "ToolContent")]
@@ -153,8 +142,6 @@ pub enum ToolContent {
 }
 
 impl ToolContent {
-    /// The base64 a tool sent inline, and its mime. `None` once the bytes are
-    /// stored, and for the blocks that never carry any.
     pub fn inline(&self) -> Option<(&str, &str)> {
         match self {
             Self::Image { data, mime_type } | Self::Audio { data, mime_type } => {
@@ -168,7 +155,6 @@ impl ToolContent {
         }
     }
 
-    /// A name for the block, where it has one.
     pub fn name(&self) -> Option<&str> {
         match self {
             Self::Resource { resource } => {
@@ -182,9 +168,6 @@ impl ToolContent {
 
 pub const OCTET_STREAM: &str = "application/octet-stream";
 
-/// One block of a recorded tool answer. Bytes are never here: they are in the
-/// blob store, and `Blob` names them. Which kind a block was is not lost — the
-/// ref carries the mime, and every reader switches on that anyway.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[schemars(title = "StoredContent")]
@@ -192,13 +175,9 @@ pub enum StoredContent {
     Text {
         text: String,
     },
-    /// A `blob://` ref. It already carries the mime, the size and the name in
-    /// its query, so nothing here repeats them — a second copy is only a way
-    /// for the two to disagree.
     Blob {
         uri: String,
     },
-    /// A resource the tool named rather than sent.
     #[serde(rename_all = "camelCase")]
     Link {
         uri: String,
@@ -209,8 +188,6 @@ pub enum StoredContent {
     },
 }
 
-/// What the engine recorded a tool answering. Distinct from [`ToolResult`]:
-/// that one carries bytes, this one cannot, so no path can persist them.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[schemars(title = "StoredResult")]
@@ -231,7 +208,6 @@ impl StoredResult {
         }
     }
 
-    /// Every text block, joined. What a model reads where it reads nothing else.
     pub fn as_text(&self) -> String {
         self.content
             .iter()
@@ -244,7 +220,6 @@ impl StoredResult {
             .join("\n")
     }
 
-    /// The structured form when the tool sent one, else the text.
     pub fn rendered(&self) -> String {
         match &self.structured_content {
             Some(value) => value.to_string(),
@@ -253,20 +228,14 @@ impl StoredResult {
     }
 }
 
-/// What a tool answered. The shape is MCP's — blocks of content, an optional
-/// structured form, and the tool's own failure signal — because every source
-/// lowers to it: a connection, a worker, or a client submitting a transcript.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[schemars(title = "ToolResult")]
 pub struct ToolResult {
     #[serde(default)]
     pub content: Vec<ToolContent>,
-    /// Present when the tool declares an output schema. Preferred over the
-    /// blocks: it round trips where rendered text would not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<Value>,
-    /// The tool ran and reported failure. Distinct from a transport fault.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_error: bool,
 }
@@ -279,9 +248,6 @@ impl ToolResult {
         }
     }
 
-    /// A bare JSON value as one text block, for callers that hold one. The
-    /// wire has no such shorthand: a tool result is always its blocks, so
-    /// nothing has to guess whether an object is a result or a payload.
     pub fn from_value(value: Value) -> Self {
         Self::text(match value {
             Value::String(s) => s,
@@ -290,7 +256,6 @@ impl ToolResult {
         })
     }
 
-    /// Every text block, joined. What a model reads where it reads nothing else.
     pub fn as_text(&self) -> String {
         self.content
             .iter()
@@ -302,7 +267,6 @@ impl ToolResult {
             .join("\n")
     }
 
-    /// The structured form when the tool sent one, else the text.
     pub fn rendered(&self) -> String {
         match &self.structured_content {
             Some(value) => value.to_string(),
@@ -345,9 +309,6 @@ pub enum Content {
     Parts(Vec<StoredContent>),
 }
 
-/// Content on its way to a provider. Bytes are real here: a `blob://` ref
-/// cannot appear, because the only way to build one of these is to resolve a
-/// [`Content`], and resolving is what turns a ref into what it names.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(title = "PromptContent")]
@@ -357,7 +318,6 @@ pub enum PromptContent {
 }
 
 impl PromptContent {
-    /// Concatenated text from every text part.
     pub fn text_owned(&self) -> String {
         match self {
             Self::Text(s) => s.clone(),
@@ -373,7 +333,6 @@ impl PromptContent {
     }
 }
 
-/// A message on its way to a provider. Never recorded.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "PromptMessage")]
 pub struct PromptMessage {
@@ -390,7 +349,6 @@ pub struct PromptMessage {
     pub reasoning: Option<Box<Reasoning>>,
 }
 
-/// A request on its way to a provider. The shape a provider client reads.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "PromptRequest")]
@@ -408,7 +366,6 @@ pub struct PromptRequest {
 }
 
 impl PromptRequest {
-    /// The definitions this request carries under `search`.
     pub fn offered_tools(&self, search: DeferToolsStrategy) -> Option<Vec<&LlmTool>> {
         Some(search.offered(self.tools.as_ref()?))
     }
@@ -1653,21 +1610,13 @@ pub enum ClientInput {
         id: String,
         #[serde(default)]
         attempt: Option<u32>,
-        /// A bare JSON value, read as one text block. The common case, and
-        /// exclusive with `content` — two named fields, so nothing has to
-        /// guess which shape it was handed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<Value>,
-        /// Blocks of content, in the shape MCP defines.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<Vec<ToolContent>>,
-        #[serde(
-            rename = "structuredContent",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         structured_content: Option<Value>,
-        #[serde(rename = "isError", default, skip_serializing_if = "is_false")]
+        #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
     #[serde(rename = "tool.error")]
@@ -1981,21 +1930,13 @@ pub enum DecisionAction {
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        /// A bare JSON value, read as one text block. The common case, and
-        /// exclusive with `content` — two named fields, so nothing has to
-        /// guess which shape it was handed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<Value>,
-        /// Blocks of content, in the shape MCP defines.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<Vec<ToolContent>>,
-        #[serde(
-            rename = "structuredContent",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         structured_content: Option<Value>,
-        #[serde(rename = "isError", default, skip_serializing_if = "is_false")]
+        #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
     /// `id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,

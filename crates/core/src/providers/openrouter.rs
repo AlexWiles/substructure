@@ -45,7 +45,6 @@ impl From<&LlmTool> for WireTool {
 }
 
 /// A transcript message as the router takes it. Built rather than serializing a
-/// `PromptMessage` straight through: the engine's own fields are not part of
 /// this API, and `reasoning_details` has to go back under the router's name for
 /// it rather than ours.
 #[derive(Serialize)]
@@ -447,7 +446,9 @@ impl OpenRouterClient {
                 LlmCallError::new(
                     ErrorCode::ProviderError,
                     format!("HTTP request failed: {e}"),
-                    e.is_timeout() || e.is_connect(),
+                    // Only an unbuildable request is hopeless; it would be
+                    // built the same way again.
+                    !e.is_builder(),
                 )
             })
     }
@@ -703,6 +704,42 @@ impl LlmProviderTrait for OpenRouterProvider {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_dropped_connection_is_worth_another_attempt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+
+        let client = OpenRouterClient::new(format!("http://{addr}"), "k");
+        let owner = SessionOwner::default();
+        let err = client
+            .call(
+                &req(),
+                &CallContext {
+                    session_id: "s1",
+                    tenant_id: "t1",
+                    agent_id: "a1",
+                    call_id: "c1",
+                    attempt: 0,
+                    owner: &owner,
+                    ancestry: &[],
+                    defer_tools_strategy: Default::default(),
+                },
+            )
+            .await
+            .expect_err("the server hung up");
+
+        assert!(
+            err.retryable,
+            "a request that got no answer must be tried again: {}",
+            err.error.message
+        );
+    }
+
     use super::*;
     use crate::protocol::{PromptContent, PromptMessage, Role};
 

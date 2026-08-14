@@ -1,14 +1,3 @@
-//! MCP connections, over the official SDK.
-//!
-//! `rmcp` owns the protocol: both revisions, the `server/discover` probe and its
-//! fallback to the handshake, pagination, response caching, and the request
-//! metadata each revision wants. What is written here is only what the engine
-//! needs on top of it — credentials that are read per request, and failures
-//! lowered to the three answers the registry acts on.
-//!
-//! One `McpClient` fronts one connection and holds one running service, built
-//! on first use and rebuilt if the connection dies.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -35,8 +24,6 @@ use crate::protocol::{StoredContent, StoredResult};
 
 use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, ToolAnnotations};
 
-/// The revisions we accept, best first. The SDK probes for the first and falls
-/// back to the second only when a server proves it speaks the older one.
 const PREFERRED: ProtocolVersion = ProtocolVersion::V_2026_07_28;
 const LEGACY: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 
@@ -68,7 +55,6 @@ impl McpClient {
         }
     }
 
-    /// What the server said it is for. Read after a connection, else `None`.
     pub async fn instructions(&self) -> Option<String> {
         let service = self.service.lock().await;
         service
@@ -77,7 +63,6 @@ impl McpClient {
             .and_then(|info| info.instructions.clone())
     }
 
-    /// Every tool the connection offers, following the pages to the end.
     pub async fn list_tools(&self) -> Result<Vec<RemoteTool>, ConnectorError> {
         let service = self.connect().await?;
         match service.list_all_tools().await {
@@ -103,9 +88,6 @@ impl McpClient {
         }
     }
 
-    /// Text is read into the result; everything else is stored and referenced.
-    /// The model sees a stored block as a message part, so an image comes back
-    /// as an image rather than as a note saying there was one.
     async fn outcome(&self, result: CallToolResult) -> StoredResult {
         let mut content = Vec::new();
         for block in &result.content {
@@ -136,8 +118,6 @@ impl McpClient {
                         text: "[resource content]".to_string(),
                     }),
                 },
-                // A link names bytes rather than sending them; it is recorded
-                // as the link it is.
                 ContentBlock::ResourceLink(r) => content.push(StoredContent::Link {
                     uri: r.uri.clone(),
                     name: Some(r.name.clone()),
@@ -155,8 +135,6 @@ impl McpClient {
         }
     }
 
-    /// Store one block's bytes. A block that cannot be decoded or stored is
-    /// named instead: losing an image must not fail the call that carried it.
     async fn keep(&self, data: &str, mime: &str, uri: Option<&str>, out: &mut Vec<StoredContent>) {
         let named = mime.split('/').next().unwrap_or("file").to_string();
         let mut note = |text: String| out.push(StoredContent::Text { text });
@@ -164,7 +142,6 @@ impl McpClient {
             note(format!("[unreadable {named} content]"));
             return;
         };
-        // Text that arrived as bytes belongs in the result, not the store.
         if text_like(mime) {
             match String::from_utf8(bytes) {
                 Ok(text) => note(text),
@@ -188,8 +165,6 @@ impl McpClient {
         }
     }
 
-    /// The running service, built on first use. Connecting is where the SDK
-    /// settles the revision, so nothing above here knows which one is in play.
     async fn connect(&self) -> Result<Arc<Running>, ConnectorError> {
         let mut slot = self.service.lock().await;
         if let Some(service) = slot.as_ref() {
@@ -218,9 +193,6 @@ impl McpClient {
         Ok(service)
     }
 
-    /// Lower a service failure, dropping the connection when it is the
-    /// connection that broke: the next call then builds a fresh one rather than
-    /// talking to a service whose task has gone.
     async fn lower(&self, error: ServiceError) -> ConnectorError {
         if matches!(
             error,
@@ -232,11 +204,6 @@ impl McpClient {
     }
 }
 
-// ── Credentials ──────────────────────────────────────────────────────────
-
-/// The SDK's HTTP backend, with our credential read on every request rather
-/// than fixed when the transport was built. A token replaced in the store thus
-/// reaches the next request, and the connection stays.
 #[derive(Clone)]
 struct Credentialed {
     http: reqwest::Client,
@@ -244,11 +211,6 @@ struct Credentialed {
 }
 
 impl Credentialed {
-    /// The credential as the SDK wants it: a bare bearer token where that is
-    /// what it is, and a header of our own naming otherwise.
-    ///
-    /// `carried` is what the transport already computed — the protocol headers
-    /// this revision requires — so it is added to, never replaced.
     async fn headers(
         &self,
         mut custom: Headers,
@@ -351,8 +313,6 @@ impl StreamableHttpClient for Credentialed {
     }
 }
 
-/// What can go wrong below the protocol: the credential could not be built, or
-/// the request did not go out.
 #[derive(Debug, thiserror::Error)]
 enum WireError {
     #[error("{0}")]
@@ -361,8 +321,6 @@ enum WireError {
     Http(reqwest::Error),
 }
 
-/// Re-wrap the built-in client's failure as ours. Only the innermost variant
-/// differs; every other case is carried through unchanged.
 fn lift(error: StreamableHttpError<reqwest::Error>) -> StreamableHttpError<WireError> {
     use StreamableHttpError as E;
     match error {
@@ -386,10 +344,6 @@ fn lift(error: StreamableHttpError<reqwest::Error>) -> StreamableHttpError<WireE
     }
 }
 
-// ── Lowering failures ────────────────────────────────────────────────────
-
-/// A failure while connecting. The credential is refused here more often than
-/// anywhere else: it is the first request the connection makes.
 fn initialize_error(error: rmcp::service::ClientInitializeError) -> ConnectorError {
     use rmcp::service::ClientInitializeError;
     match error {
@@ -405,8 +359,6 @@ fn initialize_error(error: rmcp::service::ClientInitializeError) -> ConnectorErr
 
 fn service_error(error: ServiceError) -> ConnectorError {
     match error {
-        // The far side answered, and said no. Asking again the same way will
-        // get the same answer.
         ServiceError::McpError(e) => {
             ConnectorError::permanent(format!("connection returned an error: {e}"))
         }
@@ -423,12 +375,9 @@ fn service_error(error: ServiceError) -> ConnectorError {
     }
 }
 
-/// Read a boxed transport failure for the two things the registry acts on: a
-/// refused credential, and whether another attempt could work.
 fn transport_error(error: &(dyn std::error::Error + 'static)) -> ConnectorError {
     if let Some(wire) = error.downcast_ref::<StreamableHttpError<WireError>>() {
         return match wire {
-            // The registry knows which credential went out, and corrects this.
             StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_) => {
                 ConnectorError::unauthorized(
                     AuthNeed::Reauthorize,
@@ -436,9 +385,6 @@ fn transport_error(error: &(dyn std::error::Error + 'static)) -> ConnectorError 
                 )
             }
             StreamableHttpError::Client(WireError::Credential(e)) => e.clone(),
-            // The SDK only names a refusal when the server published a
-            // challenge with it. Servers that publish none are common, and a
-            // bare 401 means the same thing.
             StreamableHttpError::Client(WireError::Http(e)) => match e.status() {
                 Some(status) if status.as_u16() == 401 || status.as_u16() == 403 => {
                     ConnectorError::unauthorized(
@@ -448,16 +394,12 @@ fn transport_error(error: &(dyn std::error::Error + 'static)) -> ConnectorError 
                 }
                 _ => ConnectorError::retryable(format!("connection unreachable: {e}")),
             },
-            // A revision that has no sessions cannot lose one, and one that has
-            // them re-establishes below us.
             StreamableHttpError::SessionExpired => {
                 ConnectorError::retryable("connection session expired")
             }
             StreamableHttpError::Deserialize(e) => {
                 ConnectorError::permanent(format!("connection sent an unreadable result: {e}"))
             }
-            // A status the SDK has no variant for arrives stringified. A
-            // refusal is the one we must not lose.
             StreamableHttpError::UnexpectedServerResponse(message) => match status_of(message) {
                 Some(401 | 403) => ConnectorError::unauthorized(
                     AuthNeed::Reauthorize,
@@ -474,7 +416,6 @@ fn transport_error(error: &(dyn std::error::Error + 'static)) -> ConnectorError 
     ConnectorError::retryable(format!("connection failed: {error}"))
 }
 
-/// The status out of the SDK's `HTTP {status}: {body}` report.
 fn status_of(message: &str) -> Option<u16> {
     message
         .strip_prefix("HTTP ")?
@@ -483,8 +424,6 @@ fn status_of(message: &str) -> Option<u16> {
         .parse()
         .ok()
 }
-
-// ── Lowering the model ───────────────────────────────────────────────────
 
 fn remote_tool(tool: Tool) -> RemoteTool {
     RemoteTool {
@@ -549,20 +488,15 @@ mod tests {
 
     #[derive(Default)]
     struct Mock {
-        /// Refuse `server/discover` the way a handshake-era server does.
         legacy: bool,
-        /// Answer `server/discover` with the versions this server allows.
         offers: Option<Vec<String>>,
         /// Answer with SSE instead of a single JSON body.
         sse: bool,
-        /// Shake hands but mint no session id, as a legacy server may.
         no_session: bool,
-        /// Drop the legacy session once, so the client has to re-handshake.
         expire_once: AtomicBool,
         reject_credential: bool,
         /// Page `tools/list` once before returning the last page.
         paginate: bool,
-        /// Answer `tools/call` by asking for input this client cannot give.
         wants_input: bool,
         discovers: AtomicUsize,
         initializes: AtomicUsize,
@@ -660,7 +594,6 @@ mod tests {
         if method == "server/discover" {
             mock.discovers.fetch_add(1, Ordering::Relaxed);
             if mock.legacy {
-                // A handshake-era server does not know the method.
                 return json_status(
                     StatusCode::NOT_FOUND,
                     rpc_error(Some(id), METHOD_NOT_FOUND, json!("server/discover")),
@@ -816,8 +749,6 @@ mod tests {
         )
     }
 
-    // ── Era selection ────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn a_modern_server_is_used_without_a_handshake() {
         let mock = Arc::new(Mock::default());
@@ -867,8 +798,6 @@ mod tests {
             "the era is a property of the server, not of a request"
         );
     }
-
-    // ── Modern request shape ─────────────────────────────────────────────
 
     #[tokio::test]
     async fn every_modern_request_carries_its_version_and_identity() {
@@ -934,8 +863,6 @@ mod tests {
             "a server routing on the header sees what the body says"
         );
     }
-
-    // ── Results ──────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn a_result_asking_for_input_is_an_error_not_an_empty_answer() {
@@ -1033,8 +960,6 @@ mod tests {
             "an unstated hint stays unknown rather than becoming false"
         );
     }
-
-    // ── Transport ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn an_sse_server_is_read_the_same_way() {

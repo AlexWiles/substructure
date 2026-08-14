@@ -422,8 +422,14 @@ fn part_to_block(part: &ContentPart) -> Option<RequestBlock> {
         }),
         ContentPart::ImageUrl { image_url } => Some(image_block(&image_url.url)),
         ContentPart::File { file } => document_block(&file.file_data),
-        // Audio/video parts have no Messages API equivalent here.
-        _ => None,
+        ContentPart::InputAudio { .. } => Some(RequestBlock::Text {
+            text: "[audio content]".to_string(),
+            cache_control: None,
+        }),
+        ContentPart::VideoUrl { .. } => Some(RequestBlock::Text {
+            text: "[video content]".to_string(),
+            cache_control: None,
+        }),
     }
 }
 
@@ -1199,7 +1205,9 @@ impl AnthropicClient {
                 LlmCallError::new(
                     ErrorCode::ProviderError,
                     format!("HTTP request failed: {e}"),
-                    e.is_timeout() || e.is_connect(),
+                    // Only an unbuildable request is hopeless; it would be
+                    // built the same way again.
+                    !e.is_builder(),
                 )
             })
     }

@@ -111,7 +111,6 @@ pub trait BlobStore: Send + Sync {
     async fn get(&self, r: &BlobRef) -> Result<Vec<u8>, BlobError>;
 }
 
-/// An in-memory store for tests in other modules, keyed by minted id.
 #[cfg(test)]
 pub(crate) struct MemoryBlobStore(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
 
@@ -148,9 +147,6 @@ impl BlobStore for MemoryBlobStore {
     }
 }
 
-/// A mime as its type and subtype, with any parameters dropped. Every mime
-/// question in this module goes through here, so they cannot answer
-/// `audio/mpeg; rate=44100` differently from one another.
 fn mime_parts(mime: &str) -> (&str, &str) {
     let base = mime.split(';').next().unwrap_or_default().trim();
     match base.split_once('/') {
@@ -159,22 +155,30 @@ fn mime_parts(mime: &str) -> (&str, &str) {
     }
 }
 
-/// The name a provider knows an audio encoding by. `None` where no provider
-/// takes it — those bytes ride as a file rather than as a format that would
-/// be rejected on arrival.
-fn audio_format(mime: &str) -> Option<&'static str> {
-    match mime_parts(mime).1 {
+/// The set OpenRouter documents; anything else rides as a file.
+pub(crate) fn audio_format(mime: &str) -> Option<&'static str> {
+    let (kind, sub) = mime_parts(mime);
+    if kind != "audio" {
+        return None;
+    }
+    match sub {
         "mpeg" | "mp3" => Some("mp3"),
-        "wav" | "x-wav" | "wave" => Some("wav"),
+        "wav" | "x-wav" | "wave" | "vnd.wave" => Some("wav"),
+        "aiff" | "x-aiff" => Some("aiff"),
+        "aac" => Some("aac"),
+        "ogg" => Some("ogg"),
+        "flac" | "x-flac" => Some("flac"),
+        "mp4" | "m4a" | "x-m4a" => Some("m4a"),
         _ => None,
     }
 }
 
-/// Store the bytes a tool sent inline, leaving a `blob://` ref in their place,
-/// so a result carrying an image is small enough to persist.
-///
-/// A block the store refuses keeps its bytes: the call succeeded, and inline
-/// bytes still reach the model.
+/// The containers OpenRouter documents.
+pub(crate) fn video_playable(mime: &str) -> bool {
+    let (kind, sub) = mime_parts(mime);
+    kind == "video" && matches!(sub, "mp4" | "mpeg" | "mov" | "quicktime" | "webm")
+}
+
 pub async fn store(result: ToolResult, blobs: &dyn BlobStore, tenant_id: &str) -> StoredResult {
     let mut content = Vec::with_capacity(result.content.len());
     for block in result.content {
@@ -221,9 +225,6 @@ pub async fn store(result: ToolResult, blobs: &dyn BlobStore, tenant_id: &str) -
     }
 }
 
-/// One block's bytes put away, leaving the ref that names them. Bytes that
-/// cannot be read or cannot be stored are named instead: the result has
-/// nowhere to keep them, which is the point.
 async fn keep(
     data: String,
     mime: String,
@@ -254,8 +255,6 @@ async fn keep(
     }
 }
 
-/// Stands in where a deployment stores nothing. Every block is named rather
-/// than kept, which is the same answer a broken store gives.
 pub struct Nowhere;
 
 pub static NOWHERE: Nowhere = Nowhere;
@@ -277,7 +276,6 @@ fn essence(mime: &str) -> &str {
     }
 }
 
-/// A stored attachment as the message part its kind rides in.
 pub fn attachment_part(r: &BlobRef) -> ContentPart {
     if essence(&r.mime) == "image" {
         ContentPart::ImageUrl {
@@ -354,11 +352,6 @@ struct BlobResolvingCallable {
     blobs: Arc<dyn BlobStore>,
 }
 
-/// A recorded request as the one a provider reads: every `blob://` ref
-/// replaced by what it names.
-///
-/// This is the only way to build a [`PromptRequest`], so no path can hand a
-/// provider a reference it cannot read.
 pub async fn resolve(
     request: &LlmRequest,
     blobs: &dyn BlobStore,
@@ -396,7 +389,6 @@ pub async fn resolve(
     })
 }
 
-/// One recorded block as the part a provider takes.
 async fn prompt_part(
     part: &StoredContent,
     blobs: &dyn BlobStore,
@@ -404,8 +396,6 @@ async fn prompt_part(
 ) -> Result<ContentPart, LlmCallError> {
     match part {
         StoredContent::Text { text } => Ok(ContentPart::Text { text: text.clone() }),
-        // A link names bytes elsewhere. An image the provider can fetch rides
-        // as one; anything else is the url, which the model can read.
         StoredContent::Link {
             uri,
             mime_type,
@@ -436,8 +426,6 @@ async fn prompt_part(
     }
 }
 
-/// The part a stored blob becomes, by mime. Text inlines as text, which every
-/// provider takes; sound and moving pictures take the parts named for them.
 fn media_part(r: &BlobRef, bytes: Vec<u8>) -> ContentPart {
     let b64 = || base64::engine::general_purpose::STANDARD.encode(&bytes);
     let name = r.name.clone().unwrap_or_else(|| "file".to_string());
@@ -453,15 +441,13 @@ fn media_part(r: &BlobRef, bytes: Vec<u8>) -> ContentPart {
                 url: format!("data:{};base64,{}", r.mime, b64()),
             },
         },
-        // An encoding no provider names rides as a file, not as a format that
-        // would be rejected on arrival.
         "audio" if audio_format(&r.mime).is_some() => ContentPart::InputAudio {
             input_audio: AudioData {
                 data: b64(),
                 format: audio_format(&r.mime).unwrap_or_default().to_string(),
             },
         },
-        "video" => ContentPart::VideoUrl {
+        "video" if video_playable(&r.mime) => ContentPart::VideoUrl {
             video_url: VideoUrl {
                 url: format!("data:{};base64,{}", r.mime, b64()),
             },
@@ -648,6 +634,81 @@ mod tests {
             matches!(&parts[2], ContentPart::File { file }
                 if file.file_data.starts_with("data:application/zip;base64,")),
             "anything else still rides as a file"
+        );
+    }
+
+    #[test]
+    fn audio_formats_cover_what_a_provider_names() {
+        for (mime, want) in [
+            ("audio/mpeg", Some("mp3")),
+            ("audio/mp4", Some("m4a")),
+            ("audio/x-m4a", Some("m4a")),
+            ("audio/ogg", Some("ogg")),
+            ("audio/flac", Some("flac")),
+            ("audio/aac", Some("aac")),
+            ("audio/wav; rate=44100", Some("wav")),
+            ("audio/basic", None),
+            // `mp4` and `mpeg` are subtypes of both kinds; the type decides.
+            ("video/mp4", None),
+            ("video/mpeg", None),
+        ] {
+            assert_eq!(audio_format(mime), want, "{mime}");
+        }
+        assert!(video_playable("video/mp4"));
+        assert!(video_playable("video/quicktime"));
+        assert!(!video_playable("video/x-matroska"));
+        assert!(
+            !video_playable("audio/mpeg"),
+            "the type decides, not the subtype"
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_and_video_reach_the_model_in_their_own_parts() {
+        let blobs = MemoryBlobStore::new();
+        let mut refs = Vec::new();
+        for (mime, bytes) in [
+            ("audio/ogg", b"aaa".to_vec()),
+            ("video/quicktime", b"vvv".to_vec()),
+            ("video/x-matroska", b"mmm".to_vec()),
+        ] {
+            refs.push(
+                blobs
+                    .put(NewBlob {
+                        tenant_id: "t1".into(),
+                        mime: mime.into(),
+                        name: Some("f".into()),
+                        bytes,
+                    })
+                    .await
+                    .expect("stored"),
+            );
+        }
+        let mut request = request("unused");
+        request.messages[0].content = Some(Content::Parts(
+            refs.iter()
+                .map(|r| StoredContent::Blob { uri: r.uri() })
+                .collect(),
+        ));
+
+        let out = resolve(&request, &blobs, "t1").await.expect("resolves");
+        let Some(PromptContent::Parts(parts)) = &out.messages[0].content else {
+            panic!("parts");
+        };
+        assert!(
+            matches!(&parts[0], ContentPart::InputAudio { input_audio }
+                if input_audio.format == "ogg"),
+            "an encoding a provider names rides as audio: {:?}",
+            parts[0]
+        );
+        assert!(
+            matches!(&parts[1], ContentPart::VideoUrl { video_url }
+                if video_url.url.starts_with("data:video/quicktime;base64,")),
+            "a container a provider names rides as video"
+        );
+        assert!(
+            matches!(&parts[2], ContentPart::File { .. }),
+            "one it does not name rides as a file, not as a rejected part"
         );
     }
 
@@ -907,8 +968,6 @@ mod tests {
         assert!(
             matches!(&parts[1], ContentPart::ImageUrl { image_url } if image_url.url == expected)
         );
-        // The recorded request still holds the ref: resolving is a conversion,
-        // not an edit.
         match &request.messages[0].content {
             Some(Content::Parts(parts)) => {
                 assert!(matches!(&parts[1], StoredContent::Blob { .. }))

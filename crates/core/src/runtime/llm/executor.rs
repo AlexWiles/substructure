@@ -57,10 +57,6 @@ pub fn spawn_llm_task_executor(
                             ancestry: &task.ancestry,
                             defer_tools_strategy: task.defer_tools_strategy,
                         };
-                        // A provider reads the resolved shape, and resolving
-                        // is the only way to build one — so no call can carry
-                        // a ref the provider cannot read. A ref that will not
-                        // resolve fails the call, like any other bad request.
                         let prompt = crate::runtime::blob::resolve(
                             &task.request,
                             blobs.as_ref(),

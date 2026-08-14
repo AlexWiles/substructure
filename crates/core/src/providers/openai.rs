@@ -77,7 +77,6 @@ struct StreamOptions {
 }
 
 /// A transcript message as Chat Completions takes it. Built rather than
-/// serializing a `PromptMessage` straight through, because the engine's own
 /// fields — the node `id`, the reasoning it holds for a provider that wants it
 /// back — are not part of this API, and a strict server rejects an unknown key.
 #[derive(Serialize)]
@@ -652,7 +651,9 @@ impl OpenAiClient {
                 LlmCallError::new(
                     ErrorCode::ProviderError,
                     format!("HTTP request failed: {e}"),
-                    e.is_timeout() || e.is_connect(),
+                    // Only an unbuildable request is hopeless; it would be
+                    // built the same way again.
+                    !e.is_builder(),
                 )
             })
     }

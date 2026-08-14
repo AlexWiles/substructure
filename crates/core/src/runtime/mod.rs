@@ -89,8 +89,6 @@ pub struct Runtime {
     handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     shutdown_timeout: Duration,
     worker_retry_resolver: Arc<dyn WorkerRetryResolver>,
-    /// Where a tool's inline bytes land before the result is persisted. A
-    /// deployment that stores nothing passes [`blob::Nowhere`].
     blobs: Arc<dyn BlobStore>,
 }
 
@@ -682,13 +680,10 @@ impl Runtime {
         .map_err(RuntimeError::from)
     }
 
-    /// Where message attachments and tool bytes land.
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
         self.blobs.as_ref()
     }
 
-    /// A tool's answer as the engine records it: bytes out of the blocks and
-    /// into the store. Without a store the bytes are named, never kept.
     pub(crate) async fn stored(
         &self,
         result: crate::protocol::ToolResult,
@@ -699,14 +694,9 @@ impl Runtime {
 
     pub async fn settle_effect(&self, input: SettleEffectInput) -> Result<(), RuntimeError> {
         let outcome = match input.settlement {
-            EffectSettlement::Result(EffectResultPayload::ToolCall { result }) => {
-                // A worker sends bytes inline, as MCP does. Storing them here
-                // is what turns the inbound shape into the recorded one, so
-                // the event log carries refs and never bytes.
-                Outcome::Tool {
-                    result: self.stored(result, input.caller.tenant_id()).await,
-                }
-            }
+            EffectSettlement::Result(EffectResultPayload::ToolCall { result }) => Outcome::Tool {
+                result: self.stored(result, input.caller.tenant_id()).await,
+            },
             EffectSettlement::Result(EffectResultPayload::LlmCall { response }) => {
                 Outcome::Llm(response)
             }
@@ -827,8 +817,6 @@ pub struct RuntimeDeps {
     pub cursor_store: Arc<dyn ProcessorCursorStore>,
     pub wake_store: Arc<dyn WakeScheduleStore>,
     pub token_delta_transport: Arc<dyn TokenDeltaTransport>,
-    /// Where message attachments live. A worker makes its own provider call,
-    /// so its dispatch inlines refs from here.
     pub blobs: Arc<dyn BlobStore>,
 }
 

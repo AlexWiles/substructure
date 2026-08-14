@@ -13,6 +13,13 @@ The machine-readable source is
 [`schemas/protocol.schema.json`](../schemas/protocol.schema.json). See
 [Typed bindings](./270-typed-bindings.md) to generate types for your language.
 
+## Field naming
+
+Fields the engine defines are `snake_case`. A payload borrowed whole from
+another spec keeps that spec's spelling — MCP's content blocks stay
+`mimeType`, and AG-UI's interrupt payload stays `expiresAt` — so a worker can
+forward one without renaming its fields.
+
 ## A decision request
 
 The model called your `get_weather` tool.

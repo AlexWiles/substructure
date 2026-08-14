@@ -16,6 +16,11 @@ together at the same version.
 - A tool result is blocks of content. A tool that answers with an image, audio, or a file keeps the bytes in the blob store, and the model reads them.
 - A worker or a client answers a tool call with blocks of content, in the shape MCP defines.
 - Model calls that run on a worker receive the bytes their refs name.
+- Slack messages with audio and video reach the model. A kind no provider reads is reported as an attachment, not downloaded.
+
+### Fixed
+
+- A model call that gets no answer is tried again. Before, only a timeout or a failure to connect was, so a dropped connection stopped the run on the first attempt.
 
 ## [0.5.0] - 2026-08-13
 
