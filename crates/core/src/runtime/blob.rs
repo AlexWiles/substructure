@@ -401,7 +401,7 @@ async fn prompt_part(
             mime_type,
             name,
         } => Ok(match mime_type.as_deref() {
-            Some(mime) if mime.starts_with("image/") => ContentPart::ImageUrl {
+            Some(mime) if essence(mime) == "image" => ContentPart::ImageUrl {
                 image_url: ImageUrl { url: uri.clone() },
             },
             _ => ContentPart::Text {
