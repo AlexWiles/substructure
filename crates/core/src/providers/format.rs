@@ -2,7 +2,7 @@
 //! and a provider's native wire format, for agents that declare `format`.
 //! Reuses the server-side adapters' translation code.
 
-use crate::protocol::{DeferToolsStrategy, LlmFormat, LlmRequest, LlmResponse, StreamDelta};
+use crate::protocol::{DeferToolsStrategy, LlmFormat, LlmResponse, PromptRequest, StreamDelta};
 
 use super::{anthropic, openai};
 
@@ -10,7 +10,7 @@ impl LlmFormat {
     /// The provider-native request body for an `llm.execute` trigger.
     pub fn request_to_wire(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         search: DeferToolsStrategy,
     ) -> serde_json::Value {
         match self {
@@ -58,26 +58,25 @@ impl DeltaParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Content, DraftMessage, Role};
+    use crate::protocol::PromptContent;
+    use crate::protocol::{PromptMessage, Role};
     use serde_json::json;
 
-    fn request() -> LlmRequest {
-        LlmRequest {
+    fn request() -> PromptRequest {
+        PromptRequest {
             model: "m".to_string(),
             messages: vec![
-                DraftMessage {
-                    id: None,
+                PromptMessage {
                     role: Role::System,
-                    content: Some(Content::Text("be nice".to_string())),
+                    content: Some(PromptContent::Text("be nice".to_string())),
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
                     reasoning: None,
                 },
-                DraftMessage {
-                    id: None,
+                PromptMessage {
                     role: Role::User,
-                    content: Some(Content::Text("hi".to_string())),
+                    content: Some(PromptContent::Text("hi".to_string())),
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,

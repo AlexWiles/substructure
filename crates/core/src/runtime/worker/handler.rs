@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocol::{DecisionResponse, DecisionTrigger, Message};
+use crate::runtime::blob::BlobStore;
 use crate::runtime::event_store::{EventFilter, EventStore, Seq};
 use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
@@ -36,6 +37,7 @@ struct WorkerDecisionProjection {
     queue: Arc<dyn WorkerQueue>,
     agents: Arc<dyn AgentDirectory>,
     proposers: Vec<Arc<dyn ChannelProposer>>,
+    blobs: Arc<dyn BlobStore>,
 }
 
 impl WorkerDecisionProjection {
@@ -44,12 +46,14 @@ impl WorkerDecisionProjection {
         queue: Arc<dyn WorkerQueue>,
         agents: Arc<dyn AgentDirectory>,
         proposers: Vec<Arc<dyn ChannelProposer>>,
+        blobs: Arc<dyn BlobStore>,
     ) -> Self {
         Self {
             store,
             queue,
             agents,
             proposers,
+            blobs,
         }
     }
 }
@@ -65,6 +69,7 @@ impl EventProcessor for WorkerDecisionProjection {
             self.store.as_ref(),
             self.agents.as_ref(),
             &self.proposers,
+            self.blobs.as_ref(),
             event,
         )
         .await?
@@ -88,6 +93,7 @@ pub fn spawn_worker_processor(
     queue: Arc<dyn WorkerQueue>,
     agents: Arc<dyn AgentDirectory>,
     proposers: Vec<Arc<dyn ChannelProposer>>,
+    blobs: Arc<dyn BlobStore>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let projection = Arc::new(WorkerDecisionProjection::new(
@@ -95,6 +101,7 @@ pub fn spawn_worker_processor(
         queue,
         agents,
         proposers,
+        blobs,
     ));
     EventProcessorRunner::new(
         store,
@@ -114,6 +121,7 @@ async fn extract(
     store: &dyn EventStore,
     agents: &dyn AgentDirectory,
     proposers: &[Arc<dyn ChannelProposer>],
+    blobs: &dyn BlobStore,
     event: SessionEvent,
 ) -> Result<Option<WorkerDecisionRequest>, ProcessorError> {
     let req = match &event.payload {
@@ -163,7 +171,21 @@ async fn extract(
     let worker_state = state.resolve_state_for(message_tree.head_id.as_deref());
     let agent_config = state.resolve_agent_for(message_tree.head_id.as_deref());
 
-    let trigger = to_wire_trigger(trigger, &transcript, &message_tree, &open_llm_calls);
+    let trigger = to_wire_trigger(
+        trigger,
+        &transcript,
+        &message_tree,
+        &open_llm_calls,
+        blobs,
+        &event.tenant_id,
+    )
+    .await
+    .map_err(|e| {
+        ProcessorError::Apply(format!(
+            "resolving a decision for delivery: {}",
+            e.error.message
+        ))
+    })?;
     let proposed = propose(
         &trigger,
         &transcript,
@@ -431,10 +453,16 @@ mod tests {
             session: agg,
             events: BroadcastBus::new(1),
         };
-        let req = extract(&store, &EmptyAgentDirectory, &[], event)
-            .await
-            .expect("extract succeeds")
-            .expect("a deliverable request");
+        let req = extract(
+            &store,
+            &EmptyAgentDirectory,
+            &[],
+            &crate::runtime::blob::NOWHERE,
+            event,
+        )
+        .await
+        .expect("extract succeeds")
+        .expect("a deliverable request");
         serde_json::to_value(&req).expect("wire request serializes")
     }
 
@@ -468,7 +496,7 @@ mod tests {
             session: agg,
             events: BroadcastBus::new(1),
         };
-        let req = extract(&store, agents, &[], event)
+        let req = extract(&store, agents, &[], &crate::runtime::blob::NOWHERE, event)
             .await
             .expect("extract succeeds")
             .expect("a deliverable request");

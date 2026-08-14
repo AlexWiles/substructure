@@ -14,10 +14,10 @@ use super::{
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
-use crate::protocol::{
-    ClientInput, Content, ContentPart, FileData, ImageUrl, OwnerKind, Role, SessionOwner,
+use crate::protocol::{ClientInput, Content, OwnerKind, Role, SessionOwner, StoredContent};
+use crate::runtime::blob::{
+    audio_format, text_like, video_playable, BlobError, BlobRef, BlobStore, NewBlob,
 };
-use crate::runtime::blob::{text_like, BlobError, BlobRef, BlobStore, NewBlob};
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
 use crate::session::state::SessionStatus;
@@ -31,6 +31,9 @@ const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_PDF_BYTES: u64 = 10 * 1024 * 1024;
 /// Text inlines into the prompt, so a little goes a long way.
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
+// Media rides in every later model call on the session, so these stay small.
+const MAX_AUDIO_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_VIDEO_BYTES: u64 = 20 * 1024 * 1024;
 const IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 const IMAGE_NOT_ATTACHED: &str = "_an image could not be attached_";
 
@@ -257,24 +260,12 @@ fn attachment_cap(mime: &str) -> Option<u64> {
         Some(MAX_PDF_BYTES)
     } else if text_like(mime) {
         Some(MAX_TEXT_BYTES)
+    } else if audio_format(mime).is_some() {
+        Some(MAX_AUDIO_BYTES)
+    } else if video_playable(mime) {
+        Some(MAX_VIDEO_BYTES)
     } else {
         None
-    }
-}
-
-/// A stored attachment as the message part its kind rides in.
-fn attachment_part(r: &BlobRef) -> ContentPart {
-    if r.mime.starts_with("image/") {
-        ContentPart::ImageUrl {
-            image_url: ImageUrl { url: r.uri() },
-        }
-    } else {
-        ContentPart::File {
-            file: FileData {
-                filename: r.name.clone().unwrap_or_else(|| "file".to_string()),
-                file_data: r.uri(),
-            },
-        }
     }
 }
 
@@ -730,7 +721,7 @@ impl SlackBot {
         &self,
         ws: &Workspace,
         files: impl Iterator<Item = SlackFile>,
-    ) -> HashMap<String, ContentPart> {
+    ) -> HashMap<String, StoredContent> {
         let Some(blobs) = &self.blobs else {
             return HashMap::new();
         };
@@ -760,7 +751,7 @@ impl SlackBot {
                 .await;
             match stored {
                 Ok(r) => {
-                    out.insert(f.id, attachment_part(&r));
+                    out.insert(f.id, StoredContent::Blob { uri: r.uri() });
                 }
                 Err(e) => tracing::warn!(error = %e, file = %f.id, "slack: blob put failed"),
             }
@@ -808,10 +799,10 @@ impl SlackBot {
         };
         let mut blocks = Vec::new();
         for part in parts {
-            let ContentPart::ImageUrl { image_url } = part else {
+            let StoredContent::Blob { uri } = part else {
                 continue;
             };
-            match self.slack_image_block(ws, &image_url.url).await {
+            match self.slack_image_block(ws, uri).await {
                 Ok(Some(block)) => blocks.push(block),
                 Ok(None) => {}
                 Err(e) => {
@@ -2356,6 +2347,23 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audio_and_video_are_accepted_within_their_caps() {
+        assert_eq!(super::attachment_cap("audio/mpeg"), Some(MAX_AUDIO_BYTES));
+        assert_eq!(super::attachment_cap("audio/ogg"), Some(MAX_AUDIO_BYTES));
+        assert_eq!(super::attachment_cap("video/mp4"), Some(MAX_VIDEO_BYTES));
+        assert_eq!(
+            super::attachment_cap("video/quicktime"),
+            Some(MAX_VIDEO_BYTES)
+        );
+        assert_eq!(
+            super::attachment_cap("video/x-matroska"),
+            None,
+            "a container no provider names is reported, not downloaded"
+        );
+        assert_eq!(super::attachment_cap("application/zip"), None);
+    }
+
     use super::*;
     use crate::protocol::{ErrorCode, ErrorInfo};
     use crate::session::events::TurnCompleted;

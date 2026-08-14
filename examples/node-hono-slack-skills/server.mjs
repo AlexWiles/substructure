@@ -85,7 +85,7 @@ function decide({ trigger, proposed, state, messages }) {
 
     if (trigger.type === "tool.execute") {
         const tool = toolsOf(active).find((t) => t.name === trigger.name);
-        return { actions: [{ type: "tool.result", result: tool.exec(trigger.input.value) }] };
+        return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: tool.exec(trigger.input.value) }] } }] };
     }
 
     return proposed;

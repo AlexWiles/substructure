@@ -89,7 +89,7 @@ function decide({ trigger, proposed, state }) {
         // return updated state and the tool result
         return {
             state,
-            actions: [{ type: "tool.result", result: renderPlan(state.plan) }],
+            actions: [{ type: "tool.result", result: { content: [{ type: "text", text: renderPlan(state.plan) }] } }],
         };
     }
 

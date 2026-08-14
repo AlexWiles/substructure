@@ -17,7 +17,7 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo};
+use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo, StoredResult};
 use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::{ToolHandler, Trigger};
@@ -52,7 +52,7 @@ impl KindSpec for ToolSpec {
                     .unwrap_or_default();
                 match state
                     .declared_output_schema(id, &name)
-                    .and_then(|schema| output_violation(&schema, &result))
+                    .and_then(|schema| output_violation(&schema, &result.rendered()))
                 {
                     Some(v) => fail(
                         self,
@@ -168,7 +168,7 @@ fn connector_target(state: &SessionState, id: &str) -> Option<String> {
 pub(in crate::runtime::session) fn complete(
     id: String,
     name: String,
-    result: String,
+    result: StoredResult,
 ) -> Vec<EventPayload> {
     vec![
         EventPayload::ToolCallCompleted(ToolCallCompleted {

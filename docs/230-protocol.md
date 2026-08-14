@@ -13,6 +13,13 @@ The machine-readable source is
 [`schemas/protocol.schema.json`](../schemas/protocol.schema.json). See
 [Typed bindings](./270-typed-bindings.md) to generate types for your language.
 
+## Field naming
+
+Fields the engine defines are `snake_case`. A payload borrowed whole from
+another spec keeps that spec's spelling — MCP's content blocks stay
+`mimeType`, and AG-UI's interrupt payload stays `expiresAt` — so a worker can
+forward one without renaming its fields.
+
 ## A decision request
 
 The model called your `get_weather` tool.
@@ -63,7 +70,7 @@ Run the tool and return its result.
 ```json
 {
   "actions": [
-    { "type": "tool.result", "result": "It is clear in Tokyo." }
+    { "type": "tool.result", "result": { "content": [{ "type": "text", "text": "It is clear in Tokyo." }] } }
   ],
   "state": { "turns": 3 }
 }
@@ -201,7 +208,7 @@ type Trigger =
           id: string
           ok: boolean
           name: string
-          result?: string
+          result?: StoredResult
           error?: ErrorInfo
       }
     | {
@@ -297,7 +304,7 @@ type Action =
           type: "tool.result"
           id?: string             // id and attempt default to those of the
           attempt?: number        // tool.execute you answer
-          result: unknown
+          result: ToolResult
       }
     | {
           type: "tool.error"

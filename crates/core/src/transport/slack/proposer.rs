@@ -328,6 +328,7 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::StoredResult;
     use crate::protocol::{AgentConfig, InterruptOrigin, McpServer, OwnerKind, RetryPolicy};
     use crate::runtime::session::state::OpenInterrupt;
     use crate::session::events::{AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested};
@@ -506,7 +507,7 @@ mod tests {
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
                     id: "tc1".into(),
                     name: "search_web".into(),
-                    result: "found".into(),
+                    result: StoredResult::text("found"),
                 }),
             ),
         ]
@@ -714,7 +715,7 @@ mod tests {
             id: "tc1".to_string(),
             ok: true,
             name: "search_web".to_string(),
-            result: Some("found".to_string()),
+            result: Some(StoredResult::text("found")),
             error: None,
         };
         let proposed = DecisionResponse {

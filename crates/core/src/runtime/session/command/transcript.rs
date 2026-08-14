@@ -6,6 +6,7 @@
 //! is its sole writer.
 
 use super::{Completion, SessionError};
+use crate::protocol::StoredResult;
 use crate::protocol::{
     ClientAppend, ClientContext, ClientMessage, ClientMessages, ClientPayload, Content,
     DraftMessage, EffectStatus, NewMessage, Role,
@@ -288,7 +289,7 @@ impl SessionState {
             // Mirror the settle endpoint: settle + tool.finished, the worker
             // appends the node, the view is discarded.
             return Ok(match completions.into_iter().next() {
-                Some(c) => tool::complete(c.tool_call_id, c.name, c.result),
+                Some(c) => tool::complete(c.tool_call_id, c.name, StoredResult::text(c.result)),
                 None => Vec::new(),
             });
         }
@@ -303,7 +304,7 @@ impl SessionState {
                 EventPayload::ToolCallCompleted(ToolCallCompleted {
                     id: c.tool_call_id,
                     name: c.name,
-                    result: c.result,
+                    result: StoredResult::text(c.result),
                 })
             })
             .collect();

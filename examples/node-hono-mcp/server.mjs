@@ -41,7 +41,7 @@ async function decide({ trigger, proposed }) {
             .map((c) => c.text)
             .join("\n");
         if (res.isError) return { actions: [{ type: "tool.error", error: text }] };
-        return { actions: [{ type: "tool.result", result: text }] };
+        return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text }] } }] };
     }
 
     return proposed;

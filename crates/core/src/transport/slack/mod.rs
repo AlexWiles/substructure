@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::protocol::{
-    Content, ContentPart, DraftMessage, InterruptOption, InterruptPayload, Role,
+    Content, DraftMessage, InterruptOption, InterruptPayload, Role, StoredContent,
 };
 
 /// A message the bot must answer: a mention or a DM.
@@ -223,7 +223,7 @@ fn build_batch(
     path: &[crate::protocol::Message],
     thread: &[SlackMsg],
     inbound: &Inbound,
-    uploads: &HashMap<String, ContentPart>,
+    uploads: &HashMap<String, StoredContent>,
 ) -> Vec<DraftMessage> {
     let mut batch = Vec::new();
     let mut seen: std::collections::HashSet<String> = path.iter().map(|m| m.id.clone()).collect();
@@ -270,7 +270,7 @@ fn build_batch(
 fn with_attachments(
     text: String,
     files: &[SlackFile],
-    uploads: &HashMap<String, ContentPart>,
+    uploads: &HashMap<String, StoredContent>,
 ) -> Content {
     let mut attached = Vec::new();
     let mut notes = Vec::new();
@@ -291,7 +291,7 @@ fn with_attachments(
     if attached.is_empty() {
         return Content::Text(text);
     }
-    let mut parts = vec![ContentPart::Text { text }];
+    let mut parts = vec![StoredContent::Text { text }];
     parts.extend(attached);
     Content::Parts(parts)
 }
@@ -682,10 +682,8 @@ mod tests {
         ];
         let uploads = HashMap::from_iter([(
             "F1".to_string(),
-            ContentPart::ImageUrl {
-                image_url: crate::protocol::ImageUrl {
-                    url: "blob://t/ab?mime=image%2Fpng&size=10".to_string(),
-                },
+            StoredContent::Blob {
+                uri: "blob://t/ab?mime=image%2Fpng&size=10".to_string(),
             },
         )]);
         let batch = build_batch(&[], &[msg], &mention_at("3.0"), &uploads);
@@ -695,12 +693,12 @@ mod tests {
                 // The unstored pdf becomes a note the model can act on.
                 assert!(matches!(
                     &parts[0],
-                    ContentPart::Text { text }
+                    StoredContent::Text { text }
                         if text == "<@U1>: here\n[unreadable attachments: attachment (application/pdf)]"
                 ));
                 assert!(matches!(
                     &parts[1],
-                    ContentPart::ImageUrl { image_url } if image_url.url.starts_with("blob://")
+                    StoredContent::Blob { uri } if uri.starts_with("blob://")
                 ));
             }
             _ => panic!("expected parts"),
@@ -730,11 +728,8 @@ mod tests {
         }];
         let uploads = HashMap::from_iter([(
             "F9".to_string(),
-            ContentPart::File {
-                file: crate::protocol::FileData {
-                    filename: "q3.pdf".into(),
-                    file_data: "blob://t/ab?mime=application%2Fpdf&size=10".into(),
-                },
+            StoredContent::Blob {
+                uri: "blob://t/ab?mime=application%2Fpdf&size=10&name=q3.pdf".into(),
             },
         )]);
         let batch = build_batch(&[], &[msg], &mention_at("3.0"), &uploads);
@@ -742,8 +737,7 @@ mod tests {
             Content::Parts(parts) => {
                 assert!(matches!(
                     &parts[1],
-                    ContentPart::File { file }
-                        if file.filename == "q3.pdf" && file.file_data.starts_with("blob://")
+                    StoredContent::Blob { uri } if uri.contains("q3.pdf")
                 ));
             }
             _ => panic!("expected parts"),
@@ -842,7 +836,7 @@ mod tests {
         }
     }
 
-    fn no_uploads() -> HashMap<String, ContentPart> {
+    fn no_uploads() -> HashMap<String, StoredContent> {
         HashMap::new()
     }
 

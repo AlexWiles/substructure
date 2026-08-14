@@ -97,7 +97,8 @@ function decide({ trigger, proposed, identity }) {
         if (identity.kind !== "frontend") {
             return { actions: [{ type: "tool.error", error: "not an end user" }] };
         }
-        return { actions: [{ type: "tool.result", result: filesFor(identity.id) }] };
+        const text = filesFor(identity.id);
+        return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: text }] } }] };
     }
     return proposed;
 }

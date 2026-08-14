@@ -77,6 +77,204 @@ pub struct VideoUrl {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[schemars(title = "ResourceContents")]
+pub struct ResourceContents {
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
+}
+
+impl ToolResult {
+    pub fn from_action(
+        result: Option<Value>,
+        content: Option<Vec<ToolContent>>,
+        structured_content: Option<Value>,
+        is_error: bool,
+    ) -> Result<Self, &'static str> {
+        let content = match (result, content) {
+            (Some(_), Some(_)) => return Err("a tool result names both `result` and `content`"),
+            (Some(value), None) => Self::from_value(value).content,
+            (None, Some(content)) => content,
+            (None, None) => Vec::new(),
+        };
+        Ok(Self {
+            content,
+            structured_content,
+            is_error,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(title = "ToolContent")]
+pub enum ToolContent {
+    Text {
+        text: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Image {
+        data: String,
+        mime_type: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Audio {
+        data: String,
+        mime_type: String,
+    },
+    Resource {
+        resource: ResourceContents,
+    },
+    #[serde(rename_all = "camelCase")]
+    ResourceLink {
+        uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
+}
+
+impl ToolContent {
+    pub fn inline(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Image { data, mime_type } | Self::Audio { data, mime_type } => {
+                Some((data, mime_type))
+            }
+            Self::Resource { resource } => Some((
+                resource.blob.as_deref()?,
+                resource.mime_type.as_deref().unwrap_or(OCTET_STREAM),
+            )),
+            Self::Text { .. } | Self::ResourceLink { .. } => None,
+        }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Resource { resource } => {
+                Some(resource.uri.rsplit('/').next().unwrap_or(&resource.uri))
+            }
+            Self::ResourceLink { name, .. } => name.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+pub const OCTET_STREAM: &str = "application/octet-stream";
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(title = "StoredContent")]
+pub enum StoredContent {
+    Text {
+        text: String,
+    },
+    Blob {
+        uri: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Link {
+        uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[schemars(title = "StoredResult")]
+pub struct StoredResult {
+    #[serde(default)]
+    pub content: Vec<StoredContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
+}
+
+impl StoredResult {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![StoredContent::Text { text: text.into() }],
+            ..Default::default()
+        }
+    }
+
+    pub fn as_text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                StoredContent::Text { text } => Some(text.clone()),
+                StoredContent::Link { uri, .. } => Some(uri.clone()),
+                StoredContent::Blob { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn rendered(&self) -> String {
+        match &self.structured_content {
+            Some(value) => value.to_string(),
+            None => self.as_text(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(title = "ToolResult")]
+pub struct ToolResult {
+    #[serde(default)]
+    pub content: Vec<ToolContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_error: bool,
+}
+
+impl ToolResult {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolContent::Text { text: text.into() }],
+            ..Default::default()
+        }
+    }
+
+    pub fn from_value(value: Value) -> Self {
+        Self::text(match value {
+            Value::String(s) => s,
+            Value::Null => String::new(),
+            other => other.to_string(),
+        })
+    }
+
+    pub fn as_text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                ToolContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn rendered(&self) -> String {
+        match &self.structured_content {
+            Some(value) => value.to_string(),
+            None => self.as_text(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[schemars(title = "ContentPart")]
@@ -108,7 +306,69 @@ pub enum ContentPart {
 #[schemars(title = "Content")]
 pub enum Content {
     Text(String),
+    Parts(Vec<StoredContent>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(title = "PromptContent")]
+pub enum PromptContent {
+    Text(String),
     Parts(Vec<ContentPart>),
+}
+
+impl PromptContent {
+    pub fn text_owned(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "PromptMessage")]
+pub struct PromptMessage {
+    pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<PromptContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Box<Reasoning>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "PromptRequest")]
+pub struct PromptRequest {
+    pub model: String,
+    pub messages: Vec<PromptMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<LlmTool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+impl PromptRequest {
+    pub fn offered_tools(&self, search: DeferToolsStrategy) -> Option<Vec<&LlmTool>> {
+        Some(search.offered(self.tools.as_ref()?))
+    }
 }
 
 /// Which provider wrote a [`Reasoning`]'s blocks. They ride back only to it:
@@ -1350,8 +1610,14 @@ pub enum ClientInput {
         id: String,
         #[serde(default)]
         attempt: Option<u32>,
-        #[serde(default)]
-        result: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Vec<ToolContent>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_content: Option<Value>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
     },
     #[serde(rename = "tool.error")]
     ToolError {
@@ -1505,7 +1771,7 @@ pub enum DecisionTrigger {
         ok: bool,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
+        result: Option<StoredResult>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<ErrorInfo>,
     },
@@ -1664,8 +1930,14 @@ pub enum DecisionAction {
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        // Any JSON value; non-strings are canonicalized to JSON text.
-        result: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Vec<ToolContent>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_content: Option<Value>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
     },
     /// `id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,
     /// fencing the result to the attempt that ran.

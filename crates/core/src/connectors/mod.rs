@@ -43,15 +43,6 @@ pub struct ToolAnnotations {
     pub open_world: Option<bool>,
 }
 
-/// The outcome of a tool call on a connection. `is_error` is the connection's
-/// own signal that the tool failed, distinct from a transport failure.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolOutcome {
-    pub content: String,
-    pub structured: Option<Value>,
-    pub is_error: bool,
-}
-
 /// The credential headers for one connection, read for each request. A
 /// credential replaced in the store thus reaches the next request, and the
 /// connector session stays.

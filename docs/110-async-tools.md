@@ -44,7 +44,7 @@ function decide({ trigger, proposed }) {
 When the render finishes, end the call by its `id`.
 
 ```jsonc
-{ "type": "tool.result", "id": "<toolCallId>", "result": "https://reports/42.pdf" }
+{ "type": "tool.result", "id": "<toolCallId>", "result": { "content": [{ "type": "text", "text": "https://reports/42.pdf" }] } }
 ```
 
 Send it to the engine's client API. See
@@ -75,7 +75,7 @@ engine or your worker.
 Report the result and name the call by `id`.
 
 ```typescript
-{ type: "tool.result", id: string, attempt?: number, result?: unknown }
+{ type: "tool.result", id: string, attempt?: number, result: ToolResult }
 { type: "tool.error", id: string, error: string, retryable: boolean, attempt?: number }
 ```
 

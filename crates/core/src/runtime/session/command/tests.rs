@@ -1,3 +1,4 @@
+use crate::protocol::StoredResult;
 use std::collections::HashMap;
 
 use crate::protocol::{
@@ -144,7 +145,7 @@ fn frontend_can_complete_own_client_handled_tool_call() {
             "tc-1".to_string(),
             Some(0),
             Outcome::Tool {
-                result: "ok".to_string(),
+                result: StoredResult::text("ok".to_string()),
             },
         ),
         &Caller::Frontend {
@@ -205,7 +206,7 @@ fn frontend_with_mismatched_user_id_is_denied() {
                 "tc-1".to_string(),
                 Some(0),
                 Outcome::Tool {
-                    result: "ok".to_string(),
+                    result: StoredResult::text("ok".to_string()),
                 },
             ),
             &caller,
@@ -247,7 +248,7 @@ fn frontend_cannot_complete_worker_handled_tool_call() {
                 "tc-1".to_string(),
                 Some(0),
                 Outcome::Tool {
-                    result: "ok".to_string(),
+                    result: StoredResult::text("ok".to_string()),
                 },
             ),
             &caller,
@@ -364,7 +365,7 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
             "tc-1".to_string(),
             Some(0),
             Outcome::Tool {
-                result: result.to_string(),
+                result: StoredResult::text(result),
             },
         ),
         &machine(),
@@ -539,7 +540,7 @@ fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
             "tc-1".to_string(),
             Some(0),
             Outcome::Tool {
-                result: "ok".to_string(),
+                result: StoredResult::text("ok".to_string()),
             },
         ),
         &machine,
@@ -589,7 +590,7 @@ fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() 
             "tc-1".to_string(),
             Some(0),
             Outcome::Tool {
-                result: "ok".to_string(),
+                result: StoredResult::text("ok".to_string()),
             },
         ),
         &Caller::ApiKey {
@@ -645,7 +646,7 @@ fn complete_tool_call_with_wrong_attempt_fails() {
                 "tc-1".to_string(),
                 Some(7),
                 Outcome::Tool {
-                    result: "ok".to_string(),
+                    result: StoredResult::text("ok".to_string()),
                 },
             ),
             &caller,
@@ -916,7 +917,7 @@ fn complete_unknown_tool_call_fails() {
                 "tc-unknown".to_string(),
                 Some(0),
                 Outcome::Tool {
-                    result: "ok".to_string(),
+                    result: StoredResult::text("ok".to_string()),
                 },
             ),
             &caller,
@@ -3034,7 +3035,7 @@ fn complete_tool(agg: &mut SessionAggregate, id: &str, result: &str) -> Vec<Even
             id.to_string(),
             Some(0),
             Outcome::Tool {
-                result: result.to_string(),
+                result: StoredResult::text(result.to_string()),
             },
         ),
         &machine(),
@@ -3150,7 +3151,7 @@ fn worker_tool_fires_tool_result_in_the_completion_commit() {
             actions: vec![Action::ToolResult {
                 id: "t1".to_string(),
                 attempt: Some(0),
-                result: "RA".to_string(),
+                result: StoredResult::text("RA".to_string()),
             }],
             state: None,
             agent: None,
@@ -4487,7 +4488,7 @@ fn tool_result_during_interrupt_queues_until_resume() {
             "tc-1".to_string(),
             Some(0),
             Outcome::Tool {
-                result: "done".to_string(),
+                result: StoredResult::text("done".to_string()),
             },
         ),
         &system,
@@ -4744,7 +4745,7 @@ fn machine_caller_from_wrong_tenant_is_denied() {
                 "tc-1".to_string(),
                 Some(0),
                 Outcome::Tool {
-                    result: "ok".to_string(),
+                    result: StoredResult::text("ok".to_string()),
                 },
             ),
             &cross_tenant_machine,
@@ -4825,7 +4826,7 @@ fn parallel_tool_results_record_in_completion_order() {
                 id.to_string(),
                 Some(0),
                 Outcome::Tool {
-                    result: format!("result-{id}"),
+                    result: StoredResult::text(format!("result-{id}")),
                 },
             ),
             &sys,
@@ -4952,7 +4953,7 @@ fn tool_result_action(id: &str) -> Action {
     Action::ToolResult {
         id: id.to_string(),
         attempt: Some(0),
-        result: format!("result-{id}"),
+        result: StoredResult::text(format!("result-{id}")),
     }
 }
 
@@ -9256,7 +9257,7 @@ fn settle_without_attempt_settles_the_current_attempt() {
             "tc-1".to_string(),
             None,
             Outcome::Tool {
-                result: "ok".to_string(),
+                result: StoredResult::text("ok".to_string()),
             },
         ),
         &machine(),
@@ -9277,7 +9278,7 @@ fn settle_without_attempt_settles_the_current_attempt() {
                 "tc-2".to_string(),
                 Some(7),
                 Outcome::Tool {
-                    result: "ok".to_string(),
+                    result: StoredResult::text("ok".to_string()),
                 },
             ),
             &machine(),
@@ -9322,7 +9323,7 @@ fn fork_voids_a_pending_tool_call() {
                 "tc-1".to_string(),
                 Some(0),
                 Outcome::Tool {
-                    result: "ok".to_string(),
+                    result: StoredResult::text("ok".to_string()),
                 },
             ),
             &machine(),
@@ -9431,7 +9432,7 @@ fn promoting_submit_drops_a_queued_settle_for_the_branch_it_forked_away() {
             "tc-1".to_string(),
             Some(0),
             Outcome::Tool {
-                result: "ok".to_string(),
+                result: StoredResult::text("ok".to_string()),
             },
         ),
         &machine(),
@@ -9565,7 +9566,7 @@ fn submit_settling_work_it_forked_away_voids_it_instead() {
             actions: vec![Action::ToolResult {
                 id: "tc-1".to_string(),
                 attempt: None,
-                result: "late".to_string(),
+                result: StoredResult::text("late".to_string()),
             }],
             state: None,
             agent: None,
@@ -9673,7 +9674,7 @@ fn void_guard_matches_kind_not_just_id() {
             actions: vec![Action::ToolResult {
                 id: "shared".to_string(),
                 attempt: None,
-                result: "ok".to_string(),
+                result: StoredResult::text("ok".to_string()),
             }],
             state: None,
             agent: None,
@@ -9732,7 +9733,7 @@ fn fork_drops_a_retrying_settle_decision() {
             "tc-1".to_string(),
             Some(0),
             Outcome::Tool {
-                result: "ok".to_string(),
+                result: StoredResult::text("ok".to_string()),
             },
         ),
         &machine(),

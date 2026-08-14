@@ -361,10 +361,23 @@
                 "null"
               ]
             },
+            "content": {
+              "items": {
+                "$ref": "#/$defs/ToolContent"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },
+            "is_error": {
+              "type": "boolean"
+            },
             "result": {},
+            "structured_content": {},
             "type": {
               "const": "tool.result",
               "type": "string"
@@ -519,7 +532,7 @@
         },
         {
           "items": {
-            "$ref": "#/$defs/ContentPart"
+            "$ref": "#/$defs/StoredContent"
           },
           "type": "array"
         }
@@ -762,21 +775,33 @@
                 "null"
               ]
             },
+            "content": {
+              "items": {
+                "$ref": "#/$defs/ToolContent"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "id": {
               "type": [
                 "string",
                 "null"
               ]
             },
+            "is_error": {
+              "type": "boolean"
+            },
             "result": {},
+            "structured_content": {},
             "type": {
               "const": "tool.result",
               "type": "string"
             }
           },
           "required": [
-            "type",
-            "result"
+            "type"
           ],
           "type": "object"
         },
@@ -1332,9 +1357,13 @@
               "type": "boolean"
             },
             "result": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StoredResult"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "type": {
@@ -2443,6 +2472,37 @@
       "title": "ReasoningProvider",
       "type": "string"
     },
+    "ResourceContents": {
+      "additionalProperties": false,
+      "properties": {
+        "blob": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mimeType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri"
+      ],
+      "title": "ResourceContents",
+      "type": "object"
+    },
     "ResponseImage": {
       "additionalProperties": false,
       "description": "An image returned by the model in the response.",
@@ -2625,6 +2685,91 @@
       ],
       "title": "Role",
       "type": "string"
+    },
+    "StoredContent": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "blob",
+              "type": "string"
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "uri"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mimeType": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "link",
+              "type": "string"
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "uri"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "StoredContent"
+    },
+    "StoredResult": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "items": {
+            "$ref": "#/$defs/StoredContent"
+          },
+          "type": "array"
+        },
+        "isError": {
+          "type": "boolean"
+        },
+        "structuredContent": {}
+      },
+      "title": "StoredResult",
+      "type": "object"
     },
     "StreamDelta": {
       "additionalProperties": false,
@@ -2812,6 +2957,116 @@
       ],
       "title": "ToolCallFunction",
       "type": "object"
+    },
+    "ToolContent": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "mimeType": {
+              "type": "string"
+            },
+            "type": {
+              "const": "image",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data",
+            "mimeType"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "mimeType": {
+              "type": "string"
+            },
+            "type": {
+              "const": "audio",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data",
+            "mimeType"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "resource": {
+              "$ref": "#/$defs/ResourceContents"
+            },
+            "type": {
+              "const": "resource",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "resource"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mimeType": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "resource_link",
+              "type": "string"
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "uri"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "ToolContent"
     },
     "ToolInput": {
       "description": "The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",

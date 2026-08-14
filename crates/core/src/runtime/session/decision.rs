@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
     ClientContext, DeferToolsStrategy, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest,
-    LlmResponse, RetryOverride, RetryPolicy, Usage,
+    LlmResponse, RetryOverride, RetryPolicy, StoredResult, ToolResult, Usage,
 };
 use crate::runtime::retry::RetryTarget;
 
@@ -177,7 +177,7 @@ pub enum Trigger {
         ok: bool,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
+        result: Option<StoredResult>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<ErrorInfo>,
     },
@@ -303,7 +303,7 @@ pub enum WorkKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectResultPayload {
     ToolCall {
-        result: String,
+        result: ToolResult,
     },
     /// Boxed, like [`Outcome::Llm`]: a response dwarfs a tool result, and this
     /// enum is passed by value on every settle.
@@ -354,7 +354,7 @@ pub enum Action {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        result: String,
+        result: StoredResult,
     },
     #[serde(rename = "llm.result")]
     LlmResult {

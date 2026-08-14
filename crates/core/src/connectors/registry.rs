@@ -17,8 +17,10 @@ use tokio::sync::Mutex;
 
 use super::mcp::McpClient;
 use super::oauth::Probed;
-use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, ToolOutcome};
+use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool};
 use crate::protocol::ConnectorProtocol;
+use crate::protocol::StoredResult;
+use crate::runtime::blob::BlobStore;
 
 /// A connection as configured: where it is and how to authenticate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -274,6 +276,7 @@ pub struct Offer {
 pub struct Connections {
     registry: Arc<dyn ConnectionRegistry>,
     credentials: Arc<dyn CredentialResolver>,
+    blobs: Arc<dyn BlobStore>,
     http: reqwest::Client,
     clients: Mutex<HashMap<(String, String), Arc<McpClient>>>,
     /// What each server answered an unauthenticated call with, keyed by URL:
@@ -285,10 +288,12 @@ impl Connections {
     pub fn new(
         registry: Arc<dyn ConnectionRegistry>,
         credentials: Arc<dyn CredentialResolver>,
+        blobs: Arc<dyn BlobStore>,
     ) -> Self {
         Self {
             registry,
             credentials,
+            blobs,
             http: reqwest::Client::new(),
             clients: Mutex::new(HashMap::new()),
             probed: Mutex::new(HashMap::new()),
@@ -320,7 +325,7 @@ impl Connections {
         id: &str,
         name: &str,
         arguments: &Value,
-    ) -> Result<ToolOutcome, ConnectorError> {
+    ) -> Result<StoredResult, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
         self.attempt(tenant_id, id, &spec, |client| async move {
             client.call_tool(name, arguments).await
@@ -378,9 +383,13 @@ impl Connections {
             spec: spec.clone(),
         });
         let client = match spec.protocol {
-            ConnectorProtocol::Mcp => {
-                Arc::new(McpClient::new(self.http.clone(), spec.url.clone(), source))
-            }
+            ConnectorProtocol::Mcp => Arc::new(McpClient::new(
+                self.http.clone(),
+                spec.url.clone(),
+                source,
+                self.blobs.clone(),
+                tenant_id,
+            )),
         };
 
         let mut clients = self.clients.lock().await;
@@ -472,7 +481,20 @@ mod tests {
                     return (reqwest::StatusCode::UNAUTHORIZED, "no").into_response();
                 }
                 let request: Value = serde_json::from_str(&body).unwrap_or_default();
+                let json = [(reqwest::header::CONTENT_TYPE, "application/json")];
                 let result = match request["method"].as_str().unwrap_or_default() {
+                    "server/discover" => {
+                        return (
+                            reqwest::StatusCode::NOT_FOUND,
+                            json,
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": request["id"],
+                                "error": { "code": -32601, "message": "no such method" }
+                            })
+                            .to_string(),
+                        )
+                            .into_response()
+                    }
                     "initialize" => serde_json::json!({
                         "protocolVersion": "2025-11-25",
                         "capabilities": {},
@@ -485,8 +507,11 @@ mod tests {
                         serde_json::json!({ "tools": [ { "name": "search", "inputSchema": {} } ] })
                     }
                 };
-                serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })
-                    .to_string()
+                (
+                    json,
+                    serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })
+                        .to_string(),
+                )
                     .into_response()
             },
         );
@@ -556,6 +581,7 @@ mod tests {
                 spec,
             )]))),
             credentials,
+            Arc::new(crate::runtime::blob::MemoryBlobStore::new()),
         )
     }
 
@@ -767,6 +793,7 @@ mod tests {
                 spec.clone(),
             )]))),
             Arc::new(NoCredential),
+            Arc::new(crate::runtime::blob::MemoryBlobStore::new()),
         );
 
         for _ in 0..3 {

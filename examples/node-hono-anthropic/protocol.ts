@@ -19,7 +19,6 @@ export interface Protocol {
  * internally-tagged union — its seven tags produce serde's "unknown variant, expected one
  * of …" error for free. `Runtime::handle_client_input` is the single seam that dispatches
  * it (mirroring `resolve_response` on the worker side).
- *
  * Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
  * the turn, creating the session if new) and the optional idempotency `turn_id` are
  * fields of the four submit variants only. A resume/settle addresses an interrupt/effect
@@ -54,8 +53,11 @@ export interface ClientInput {
     interrupt_id?: string;
     payload?: unknown;
     attempt?: number | null;
+    content?: ToolContent[] | null;
     id?: string;
+    is_error?: boolean;
     result?: unknown;
+    structured_content?: unknown;
     error?: string;
     retryable?: boolean;
 }
@@ -106,6 +108,25 @@ export interface AgentTool {
  */
 export type Handler = "server" | "worker" | "client";
 
+export interface ToolContent {
+    text?: string;
+    type: ToolContentType;
+    data?: string;
+    mimeType?: null | string;
+    resource?: ResourceContents;
+    name?: null | string;
+    uri?: string;
+}
+
+export interface ResourceContents {
+    blob?: null | string;
+    mimeType?: null | string;
+    text?: null | string;
+    uri: string;
+}
+
+export type ToolContentType = "text" | "image" | "audio" | "resource" | "resource_link";
+
 /**
  * The wire form of a [`Message`]: `id` is optional because a client-submitted or
  * worker-authored message is not yet recorded. `record`/`rerecord`
@@ -113,42 +134,42 @@ export type Handler = "server" | "worker" | "client";
  * [`Message`] (id always present) at recording time.
  */
 export interface DraftMessage {
-    content?: ContentPart[] | null | string;
+    content?: StoredContent[] | null | string;
     id?: null | string;
     name?: null | string;
+    reasoning?: Reasoning | null;
     role: Role;
     tool_call_id?: null | string;
     tool_calls?: ToolCall[] | null;
 }
 
-export interface ContentPart {
+export interface StoredContent {
     text?: string;
-    type: ContentPartType;
-    image_url?: ImageURL;
-    file?: FileData;
-    input_audio?: AudioData;
-    video_url?: VideoURL;
+    type: StoredContentType;
+    uri?: string;
+    mimeType?: null | string;
+    name?: null | string;
 }
 
-export interface FileData {
-    file_data: string;
-    filename: string;
+export type StoredContentType = "text" | "blob" | "link";
+
+/**
+ * What the model thought before it answered. `text` is for a reader; `blocks`
+ * are the provider's own, held verbatim because Anthropic requires the
+ * thinking that precedes a tool call back unmodified, signature included.
+ */
+export interface Reasoning {
+    blocks?: unknown[];
+    provider: ReasoningProvider;
+    text?: null | string;
 }
 
-export interface ImageURL {
-    url: string;
-}
-
-export interface AudioData {
-    data: string;
-    format: string;
-}
-
-export type ContentPartType = "text" | "image_url" | "file" | "input_audio" | "video_url";
-
-export interface VideoURL {
-    url: string;
-}
+/**
+ * Which provider wrote a [`Reasoning`]'s blocks. They ride back only to it:
+ * another provider reads them as noise, and Anthropic rejects blocks it did
+ * not sign.
+ */
+export type ReasoningProvider = "anthropic" | "openai" | "openrouter";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -236,7 +257,6 @@ export interface DecisionRequest {
 /**
  * A declared agent identity — the same shape whether it is written in an
  * `[agent.<id>]` section or returned by a worker.
- *
  * `llm` names the `[llm.*]` block every proposed call runs on, and so decides
  * both the venue (the engine with a vendor key, or the agent's own worker) and
  * the wire shape of a worker-run call. It is effectively required: a config
@@ -246,7 +266,6 @@ export interface AgentConfig {
     /**
      * Where the engine tells the model that an MCP server is available, and
      * what that server says it is for.
-     *
      * Separate from `defer_tools`: a server exists whether or not its tools
      * are deferred, and where a notice lands is a fact about this agent's
      * prompt rather than about any server.
@@ -256,13 +275,18 @@ export interface AgentConfig {
      * Defer every tool this agent offers, from any source, unless the tool or
      * the connection says otherwise. Absent ⇒ the agent defers nothing of its
      * own; a connection may still defer on its own account.
-     *
      * Presence is the switch, so an agent cannot carry settings that do
      * nothing. Declared on the agent because an agent can hold this opinion
      * before it names a connection: one that sets it gets the search tools
      * from its first turn, so a connection added later costs no cache.
      */
     defer_tools?: boolean | null | DeferTools;
+    /**
+     * How hard the model thinks, carried on the agent because it pairs with
+     * the model. Unset sends no reasoning config and leaves the provider its
+     * own default.
+     */
+    effort?: ReasoningEffort | null;
     /**
      * The `[llm.*]` block this agent's calls run on.
      */
@@ -293,7 +317,6 @@ export interface AgentConfig {
 /**
  * Where the engine tells the model that an MCP server is available, and
  * what that server says it is for.
- *
  * Separate from `defer_tools`: a server exists whether or not its tools
  * are deferred, and where a notice lands is a fact about this agent's
  * prompt rather than about any server.
@@ -328,12 +351,10 @@ export interface DeferTools {
  * Which tools the agent gets to reach the ones it defers.
  *
  * How the tools an agent defers reach the model.
- *
  * The engine holds every deferred definition whatever this says, and answers
  * its own tools whatever this says. This chooses two things: which of those
  * tools the request advertises, and whether the request carries the deferred
  * definitions.
- *
  * Declared on the agent, beside `defer_tools`: which tools an agent gets is
  * the agent's business, the same way as whether it defers at all.
  *
@@ -342,6 +363,8 @@ export interface DeferTools {
  * name it cannot then reach.
  */
 export type DeferToolsStrategy = "search";
+
+export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
 
 /**
  * An MCP server the agent draws tools from. `id` resolves against the engine's
@@ -372,11 +395,9 @@ export type AuthFailure = "interrupt" | "degrade";
 /**
  * What the model sees of one connection, for one agent: which tools, and how
  * they reach the model.
- *
  * The filter is applied in order — capability predicates, then `include`, then
  * `exclude` — and only ever narrowing, so a filter can never widen what the
  * connection grants. `defer` runs after it and removes nothing.
- *
  * `include`/`exclude` are globs matched against the tool's name on the
  * connection, the name its own documentation uses, not the prefixed name the
  * model sees. Capability predicates read the MCP annotations; a tool that
@@ -399,7 +420,6 @@ export interface MCPTools {
 /**
  * An agent's retry overrides, one per effect kind. `default` covers the kinds
  * that name nothing; a kind is layered on top of it, so the two compose.
- *
  * Per kind because the kinds are not alike: an LLM call is idempotent and worth
  * retrying, a tool call may not be, and a connector fetch holds up every
  * decision behind it.
@@ -417,7 +437,6 @@ export interface RetryConfig {
  * inherited. Every override is a layer over the engine's default for the effect
  * kind, so tuning one knob does not mean restating the other four — and leaving
  * a timeout out keeps the default bound rather than removing it.
- *
  * An override cannot set a timeout back to unbounded. Waiting effectively
  * forever is a large number, which is also the honest way to say it.
  */
@@ -517,9 +536,10 @@ export interface Node {
 }
 
 export interface Message {
-    content?: ContentPart[] | null | string;
+    content?: StoredContent[] | null | string;
     id: string;
     name?: null | string;
+    reasoning?: Reasoning | null;
     role: Role;
     tool_call_id?: null | string;
     tool_calls?: ToolCall[];
@@ -566,7 +586,6 @@ export interface DecisionResponse {
  * agent's identity over the current view.
  *
  * `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
- *
  * There is no `handler`: where a call runs follows from its name. A tool
  * resolved from a connector runs on the engine, a tool declared
  * `handler: client` runs on the client, and anything else runs on the
@@ -616,7 +635,10 @@ export interface DecisionAction {
     arguments?: unknown;
     name?: string;
     attempt?: number | null;
+    content?: ToolContent[] | null;
+    is_error?: boolean;
     result?: unknown;
+    structured_content?: unknown;
     /**
      * A neutral `LlmResponse`, or the provider's native response when the
      * answered `llm.execute` carried a `format`.
@@ -651,7 +673,6 @@ export interface DecisionAction {
  * sentence. A closed set, and required on every [`ErrorInfo`]: an optional
  * code is one nobody fills in, which leaves every consumer handling a `None`
  * that should not exist.
- *
  * `provider_error`, `rate_limited`, `refused`, `budget_exceeded` and
  * `deadline_exceeded` describe a call that ran and went wrong.
  * `invalid_response` — a document did not parse, or parsed into something
@@ -679,8 +700,6 @@ export interface ReasoningConfig {
     max_tokens?: number | null;
 }
 
-export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
-
 /**
  * A tool's declared contract: flat on the wire. Providers that need
  * OpenAI-style `{"type": "function", "function": {…}}` nesting re-wrap at
@@ -689,11 +708,9 @@ export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | 
 export interface LlmTool {
     /**
      * Keep this definition out of the request.
-     *
      * The engine still records it, still routes a call to it, and still finds
      * it in a search. Only the request omits it, which is what keeps a large
      * tool set out of the model's context and out of the cached prefix.
-     *
      * Any source can set it: a tool the config declares, a connection, or
      * whatever comes next. Deferral is a property of a tool, not of where it
      * came from.
@@ -772,7 +789,7 @@ export interface DecisionTrigger {
     input?: ToolInput;
     error?: ErrorInfo | null;
     ok?: boolean;
-    result?: null | string;
+    result?: StoredResult | null | string;
     format?: LlmFormat | null;
     /**
      * The neutral `LlmRequest` JSON, or the provider's native request body
@@ -782,6 +799,12 @@ export interface DecisionTrigger {
     stream?: boolean;
     cost?: null | string;
     message?: DraftMessage | null;
+    /**
+     * True when the model declined the request rather than answering it.
+     * A refusal reads as a turn that stopped well and said nothing, so
+     * without this the run continues from a blank answer.
+     */
+    refused?: boolean;
     truncated?: boolean;
     usage?: Usage | null;
     agent_id?: string;
@@ -795,7 +818,6 @@ export interface DecisionTrigger {
 /**
  * Why something failed. One shape on every event, on the wire, and in the
  * internal carriers that produce them — shaped after a Stripe API error.
- *
  * `retryable` is deliberately absent: whether to try again is a decision the
  * engine makes about one attempt, not a fact about the failure, and it is
  * meaningless on a terminal like `turn.completed`. It rides on the events
@@ -851,6 +873,12 @@ export interface ToolInput {
 
 export type Status = "valid" | "invalid" | "malformed";
 
+export interface StoredResult {
+    content?: StoredContent[];
+    isError?: boolean;
+    structuredContent?: unknown;
+}
+
 export type DecisionTriggerType =
     | "session.start"
     | "client.messages"
@@ -865,7 +893,6 @@ export type DecisionTriggerType =
 
 /**
  * What one call read and wrote, in counts every provider means the same way.
- *
  * Each vendor names and scopes these differently: Anthropic reports the part
  * of the prompt it did not read from the cache, OpenAI reports the whole
  * prompt including that part. A session that changes model, and a tree whose

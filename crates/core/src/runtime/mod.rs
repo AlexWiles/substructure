@@ -12,6 +12,7 @@ use crate::protocol::{
     ErrorCode, ErrorInfo, InterruptResumption, SessionOwner, TokenDelta,
 };
 use crate::providers::memory_queue::TaskQueue;
+use crate::runtime::blob::BlobStore;
 use connector::{spawn_connector_dispatch_processor, spawn_connector_task_executor, ConnectorTask};
 use event_store::{EventStore, Seq};
 use llm::{
@@ -30,7 +31,6 @@ use session::index::{
 use session::read::SessionReader;
 use session::state::EffectKind;
 use session::subscriptions::SessionSubscriptionSpec;
-use session::wire::result_to_string;
 use session::{execute, ConflictRetry, ExecuteError, ExecuteInput, SessionAggregate, SessionEvent};
 use span::SpanContext;
 use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
@@ -89,6 +89,7 @@ pub struct Runtime {
     handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     shutdown_timeout: Duration,
     worker_retry_resolver: Arc<dyn WorkerRetryResolver>,
+    blobs: Arc<dyn BlobStore>,
 }
 
 pub struct SubmitClientPayload {
@@ -437,7 +438,17 @@ impl Runtime {
                 id,
                 attempt,
                 result,
+                content,
+                structured_content,
+                is_error,
             } => {
+                let answered = crate::protocol::ToolResult::from_action(
+                    result,
+                    content,
+                    structured_content,
+                    is_error,
+                )
+                .map_err(|e| RuntimeError::Internal(e.to_string()))?;
                 return self
                     .settle_client_tool(
                         session_id,
@@ -446,7 +457,7 @@ impl Runtime {
                         id,
                         attempt,
                         EffectSettlement::Result(EffectResultPayload::ToolCall {
-                            result: result_to_string(result),
+                            result: answered,
                         }),
                     )
                     .await;
@@ -669,11 +680,23 @@ impl Runtime {
         .map_err(RuntimeError::from)
     }
 
+    pub(crate) fn blob_store(&self) -> &dyn BlobStore {
+        self.blobs.as_ref()
+    }
+
+    pub(crate) async fn stored(
+        &self,
+        result: crate::protocol::ToolResult,
+        tenant_id: &str,
+    ) -> crate::protocol::StoredResult {
+        blob::store(result, self.blob_store(), tenant_id).await
+    }
+
     pub async fn settle_effect(&self, input: SettleEffectInput) -> Result<(), RuntimeError> {
         let outcome = match input.settlement {
-            EffectSettlement::Result(EffectResultPayload::ToolCall { result }) => {
-                Outcome::Tool { result }
-            }
+            EffectSettlement::Result(EffectResultPayload::ToolCall { result }) => Outcome::Tool {
+                result: self.stored(result, input.caller.tenant_id()).await,
+            },
             EffectSettlement::Result(EffectResultPayload::LlmCall { response }) => {
                 Outcome::Llm(response)
             }
@@ -794,6 +817,7 @@ pub struct RuntimeDeps {
     pub cursor_store: Arc<dyn ProcessorCursorStore>,
     pub wake_store: Arc<dyn WakeScheduleStore>,
     pub token_delta_transport: Arc<dyn TokenDeltaTransport>,
+    pub blobs: Arc<dyn BlobStore>,
 }
 
 pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
@@ -811,6 +835,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         cursor_store,
         wake_store,
         token_delta_transport,
+        blobs,
     } = deps;
     let cancel = CancellationToken::new();
 
@@ -830,6 +855,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
             llm,
             llm_task_queue,
             token_delta_transport.clone(),
+            blobs.clone(),
             config.llm_executor_workers,
             cancel.clone(),
         ));
@@ -873,6 +899,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         worker_queue.clone(),
         agents.clone(),
         channel_proposers,
+        blobs.clone(),
         cancel.clone(),
     );
     let session_index_processor_handle = spawn_session_index_processor(
@@ -926,5 +953,6 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         handles: tokio::sync::Mutex::new(handles),
         shutdown_timeout: config.shutdown_timeout,
         worker_retry_resolver: config.worker_retry_resolver,
+        blobs,
     })
 }

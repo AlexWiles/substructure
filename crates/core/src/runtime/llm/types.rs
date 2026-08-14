@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::protocol::{
-    DeferToolsStrategy, ErrorCode, ErrorInfo, LlmRequest, LlmResponse, LlmTool, SessionOwner,
+    DeferToolsStrategy, ErrorCode, ErrorInfo, LlmResponse, LlmTool, PromptRequest, SessionOwner,
     StreamDelta,
 };
 
@@ -127,7 +127,7 @@ impl CallContext<'_> {
 pub trait LlmCallable: Send + Sync + 'static {
     async fn call(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError>;
 
@@ -136,7 +136,7 @@ pub trait LlmCallable: Send + Sync + 'static {
     /// Default implementation ignores the channel and delegates to `call()`.
     async fn call_streaming(
         &self,
-        request: &LlmRequest,
+        request: &PromptRequest,
         ctx: &CallContext<'_>,
         _tx: tokio::sync::mpsc::UnboundedSender<StreamDelta>,
     ) -> Result<LlmResponse, LlmCallError> {

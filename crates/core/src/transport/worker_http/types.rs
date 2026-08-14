@@ -49,8 +49,7 @@ pub enum SettleEffectRequest {
         id: String,
         #[serde(default)]
         attempt: Option<u32>,
-        /// Any JSON value; a non-string is canonicalized to its JSON text at the route.
-        result: serde_json::Value,
+        result: crate::protocol::ToolResult,
     },
     #[serde(rename = "llm.result")]
     LlmResult {

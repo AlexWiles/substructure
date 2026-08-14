@@ -30,7 +30,7 @@ function decide({ trigger, proposed }) {
     // Run our tool when the model calls it.
     if (trigger.type === "tool.execute") {
         const tool = tools.find((t) => t.name === trigger.name);
-        return { actions: [{ type: "tool.result", result: tool.exec() }] };
+        return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: tool.exec() }] } }] };
     }
 
     // Accept the engine's proposal for every other decision.

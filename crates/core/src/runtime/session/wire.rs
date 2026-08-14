@@ -26,11 +26,13 @@ use super::decision::{Action, ToolHandler, Trigger};
 use super::reconcile::news_start;
 use super::state::{new_call_id, new_message_id, EffectState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
+use crate::llm::LlmCallError;
 use crate::protocol::{
     AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
     ErrorInfo, Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message,
     MessageTree, RetryPolicy, WorkerIdentity, WorkerState,
 };
+use crate::runtime::blob::{resolve, store, BlobStore};
 use crate::runtime::llm::LlmBlocks;
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::worker::WorkerDecisionRequest;
@@ -74,18 +76,6 @@ impl DraftMessage {
             name: self.name,
             reasoning: self.reasoning,
         }
-    }
-}
-
-/// Canonicalize a lenient JSON wire value (a tool result, tool arguments) to the
-/// strict internal string form: a string passes through, `null` becomes empty,
-/// any other value becomes its JSON text. Lets workers and clients author these
-/// fields as plain values instead of JSON-encoded-in-a-string.
-pub fn result_to_string(value: Value) -> String {
-    match value {
-        Value::String(s) => s,
-        Value::Null => String::new(),
-        other => other.to_string(),
     }
 }
 
@@ -137,13 +127,20 @@ impl SettleKind {
 pub enum ResolveError {
     /// A settle omitted its effect id, but the answered decision was not the matching
     /// `*.execute` (or there was no trigger context), so the id can't be inferred.
-    UnresolvableSettleId { kind: &'static str },
+    UnresolvableSettleId {
+        kind: &'static str,
+    },
     /// An `llm.call` omitted `model` and no agent config supplied one.
     MissingModel,
     /// An `llm.call` named no `[llm.*]` block and no agent config supplied one.
-    MissingLlm { declared: String },
+    MissingLlm {
+        declared: String,
+    },
     /// An `llm.call` named a block this app does not declare.
-    UnknownLlm { name: String, declared: String },
+    UnknownLlm {
+        name: String,
+        declared: String,
+    },
     /// A handler value the addressed surface does not support: `server` on a
     /// declared tool.
     InvalidHandler {
@@ -151,7 +148,10 @@ pub enum ResolveError {
         handler: &'static str,
     },
     /// An `llm.result` response that doesn't parse in the call's format.
-    InvalidLlmResponse { message: String },
+    InvalidLlmResponse {
+        message: String,
+    },
+    AmbiguousToolResult,
 }
 
 impl ResolveError {
@@ -163,6 +163,7 @@ impl ResolveError {
             ResolveError::MissingLlm { .. } | ResolveError::UnknownLlm { .. } => "llm".to_string(),
             ResolveError::InvalidHandler { .. } => "handler".to_string(),
             ResolveError::InvalidLlmResponse { .. } => "response".to_string(),
+            ResolveError::AmbiguousToolResult => "result".to_string(),
         })
     }
 
@@ -175,6 +176,9 @@ impl ResolveError {
                 serde_json::json!({ "reason": "unresolvable_settle_id", "kind": kind })
             }
             ResolveError::MissingModel => serde_json::json!({ "reason": "missing_model" }),
+            ResolveError::AmbiguousToolResult => {
+                serde_json::json!({ "reason": "ambiguous_tool_result" })
+            }
             ResolveError::MissingLlm { declared } => {
                 serde_json::json!({ "reason": "missing_llm", "declared": declared })
             }
@@ -197,6 +201,10 @@ impl std::fmt::Display for ResolveError {
             ResolveError::UnresolvableSettleId { kind } => write!(
                 f,
                 "{kind}.result/{kind}.error omitted its id, but this decision does not answer a {kind}.execute"
+            ),
+            ResolveError::AmbiguousToolResult => write!(
+                f,
+                "tool.result names both `result` and `content`; send one"
             ),
             ResolveError::MissingModel => write!(
                 f,
@@ -313,11 +321,13 @@ pub struct ResolvedResponse {
 /// `blocks` is where a call's `llm` name becomes a venue and a wire shape: this
 /// is the one seam that reads the declared `[llm.*]`, so nothing downstream has
 /// to re-derive where a call runs.
-pub fn resolve_response(
+pub async fn resolve_response(
     response: DecisionResponse,
     echoed_config: Option<&AgentConfig>,
     trigger: Option<&DecisionTrigger>,
     blocks: &LlmBlocks,
+    blobs: &dyn BlobStore,
+    tenant_id: &str,
 ) -> Result<ResolvedResponse, ResolveError> {
     let DecisionResponse {
         messages,
@@ -334,7 +344,10 @@ pub fn resolve_response(
         }
     }
     let merge_cfg = agent.as_ref().or(echoed_config);
-    let resolved = lower_actions(actions, &messages, merge_cfg, trigger, blocks)?;
+    let resolved = lower_actions(
+        actions, &messages, merge_cfg, trigger, blocks, blobs, tenant_id,
+    )
+    .await?;
     Ok(ResolvedResponse {
         messages,
         actions: resolved,
@@ -346,18 +359,20 @@ pub fn resolve_response(
 
 /// Lower each wire action to its internal [`Action`]. `view` is the response's
 /// declared transcript, used to fill an omitted-`messages` `llm.call`.
-fn lower_actions(
+async fn lower_actions(
     actions: Vec<DecisionAction>,
     view: &[DraftMessage],
     config: Option<&AgentConfig>,
     trigger: Option<&DecisionTrigger>,
     blocks: &LlmBlocks,
+    blobs: &dyn BlobStore,
+    tenant_id: &str,
 ) -> Result<Vec<Action>, ResolveError> {
     let config_retry = config.and_then(|c| c.retry.as_deref());
-    actions
-        .into_iter()
-        .map(|action| {
-            Ok(match action {
+    let mut lowered = Vec::with_capacity(actions.len());
+    for action in actions {
+        lowered.push({
+            Ok::<Action, ResolveError>(match action {
                 DecisionAction::CallLlm {
                     id,
                     llm,
@@ -426,12 +441,22 @@ fn lower_actions(
                     id,
                     attempt,
                     result,
+                    content,
+                    structured_content,
+                    is_error,
                 } => {
                     let (id, attempt) = resolve_settle(id, attempt, trigger, SettleKind::Tool)?;
+                    let answered = crate::protocol::ToolResult::from_action(
+                        result,
+                        content,
+                        structured_content,
+                        is_error,
+                    )
+                    .map_err(|_| ResolveError::AmbiguousToolResult)?;
                     Action::ToolResult {
                         id,
                         attempt,
-                        result: result_to_string(result),
+                        result: store(answered, blobs, tenant_id).await,
                     }
                 }
                 DecisionAction::LlmResult {
@@ -529,8 +554,9 @@ fn lower_actions(
                 DecisionAction::SyncConnector { id } => Action::SyncConnector { id },
                 DecisionAction::Done { data } => Action::Done { data },
             })
-        })
-        .collect()
+        }?);
+    }
+    Ok(lowered)
 }
 
 /// Project an internal [`Trigger`] to the [`DecisionTrigger`] a worker sees. A bare
@@ -540,13 +566,23 @@ fn lower_actions(
 /// `open_llm_calls`); every other trigger maps 1:1. The tree is frozen while the
 /// decision is pending, so the result is stable across redeliveries and matches
 /// what reconciling the echo will write.
-pub fn to_wire_trigger(
+pub fn result_to_string(value: Value) -> String {
+    match value {
+        Value::String(s) => s,
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+pub async fn to_wire_trigger(
     trigger: Trigger,
     active_path: &[Message],
     tree: &MessageTree,
     open_llm_calls: &HashMap<String, EffectState>,
-) -> DecisionTrigger {
-    match trigger {
+    blobs: &dyn BlobStore,
+    tenant_id: &str,
+) -> Result<DecisionTrigger, LlmCallError> {
+    Ok(match trigger {
         Trigger::SessionStart => DecisionTrigger::SessionStart,
         // The worker wire has no notion of a deferred turn: by delivery the turn
         // is running, so `turn_id` is dropped here.
@@ -621,9 +657,12 @@ pub fn to_wire_trigger(
             deadline,
         } => DecisionTrigger::LlmExecute {
             id,
-            request: match format {
-                Some(f) => f.request_to_wire(&request, defer_tools_strategy),
-                None => serde_json::to_value(&request).unwrap_or_default(),
+            request: {
+                let prompt = resolve(&request, blobs, tenant_id).await?;
+                match format {
+                    Some(f) => f.request_to_wire(&prompt, defer_tools_strategy),
+                    None => serde_json::to_value(&prompt).unwrap_or_default(),
+                }
             },
             format,
             stream,
@@ -697,15 +736,15 @@ pub fn to_wire_trigger(
             cost,
             usage,
         },
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentTool, ClientContext, ClientInput, ClientPayload, Content, NewMessage, Role, ToolCall,
-        ToolCallFunction, ToolInput,
+        AgentTool, ClientContext, ClientInput, ClientPayload, Content, NewMessage, Role,
+        StoredResult, ToolCall, ToolCallFunction, ToolInput,
     };
     use crate::runtime::llm::LlmBlock;
     use crate::runtime::session::decision::LlmHandler;
@@ -724,7 +763,7 @@ mod tests {
     }
 
     /// Lower just `actions` (no messages/config) through the response seam.
-    fn resolve_test_actions(
+    async fn resolve_test_actions(
         actions: Vec<DecisionAction>,
         trigger: Option<&DecisionTrigger>,
     ) -> Result<Vec<Action>, ResolveError> {
@@ -739,12 +778,15 @@ mod tests {
             None,
             trigger,
             &blocks(),
+            &crate::runtime::blob::NOWHERE,
+            "t1",
         )
+        .await
         .map(|r| r.actions)
     }
 
-    #[test]
-    fn call_id_is_minted_when_omitted() {
+    #[tokio::test]
+    async fn call_id_is_minted_when_omitted() {
         let actions = resolve_test_actions(
             vec![DecisionAction::CallTool {
                 id: None,
@@ -754,6 +796,7 @@ mod tests {
             }],
             None,
         )
+        .await
         .expect("resolves");
         match &actions[0] {
             Action::CallTool { id, .. } => assert!(!id.is_empty(), "engine mints an id"),
@@ -761,13 +804,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_call_naming_no_block_is_rejected_at_the_seam() {
+    #[tokio::test]
+    async fn a_call_naming_no_block_is_rejected_at_the_seam() {
         let mut call = bare_llm_call();
         if let DecisionAction::CallLlm { model, .. } = &mut call {
             *model = Some("m".to_string());
         }
-        let err = resolve_test_actions(vec![call], None).unwrap_err();
+        let err = resolve_test_actions(vec![call], None).await.unwrap_err();
         assert_eq!(
             err,
             ResolveError::MissingLlm {
@@ -777,14 +820,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_call_naming_an_undeclared_block_is_rejected_at_the_seam() {
+    #[tokio::test]
+    async fn a_call_naming_an_undeclared_block_is_rejected_at_the_seam() {
         let mut call = bare_llm_call();
         if let DecisionAction::CallLlm { llm, model, .. } = &mut call {
             *llm = Some("clade".to_string());
             *model = Some("m".to_string());
         }
-        let err = resolve_test_actions(vec![call], None).unwrap_err();
+        let err = resolve_test_actions(vec![call], None).await.unwrap_err();
         assert_eq!(
             err,
             ResolveError::UnknownLlm {
@@ -794,8 +837,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_declared_server_tool_is_rejected_at_the_seam() {
+    #[tokio::test]
+    async fn a_declared_server_tool_is_rejected_at_the_seam() {
         let mut config = cfg("m1", None);
         config.tools.push(AgentTool {
             name: "t".to_string(),
@@ -816,7 +859,10 @@ mod tests {
             None,
             None,
             &blocks(),
+            &crate::runtime::blob::NOWHERE,
+            "t1",
         )
+        .await
         .unwrap_err();
         assert_eq!(
             err,
@@ -828,8 +874,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn omitted_settle_id_is_filled_from_the_answered_execute() {
+    #[tokio::test]
+    async fn omitted_settle_id_is_filled_from_the_answered_execute() {
         let trigger = DecisionTrigger::ToolExecute {
             id: "eff-1".to_string(),
             name: "do_thing".to_string(),
@@ -844,10 +890,14 @@ mod tests {
             vec![DecisionAction::ToolResult {
                 id: None,
                 attempt: None,
-                result: serde_json::json!("ok"),
+                result: Some(serde_json::json!("ok")),
+                content: None,
+                structured_content: None,
+                is_error: false,
             }],
             Some(&trigger),
         )
+        .await
         .expect("resolves");
         match &actions[0] {
             Action::ToolResult { id, .. } => assert_eq!(id, "eff-1"),
@@ -855,8 +905,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn omitted_settle_attempt_is_fenced_to_the_answered_execute() {
+    #[tokio::test]
+    async fn omitted_settle_attempt_is_fenced_to_the_answered_execute() {
         let trigger = DecisionTrigger::ToolExecute {
             id: "eff-1".to_string(),
             name: "do_thing".to_string(),
@@ -867,40 +917,50 @@ mod tests {
             attempt: 2,
             deadline: None,
         };
-        let resolved = |attempt| {
+        let resolved = async |attempt| {
             resolve_test_actions(
                 vec![DecisionAction::ToolResult {
                     id: None,
                     attempt,
-                    result: serde_json::json!("ok"),
+                    result: Some(serde_json::json!("ok")),
+                    content: None,
+                    structured_content: None,
+                    is_error: false,
                 }],
                 Some(&trigger),
             )
+            .await
             .expect("resolves")
         };
         // Omitted ⇒ fenced to the trigger's attempt, not left unfenced.
-        match &resolved(None)[0] {
+        let a = resolved(None).await;
+        match &a[0] {
             Action::ToolResult { attempt, .. } => assert_eq!(*attempt, Some(2)),
             other => panic!("unexpected: {other:?}"),
         }
         // Explicit ⇒ preserved verbatim (fence a specific attempt).
-        match &resolved(Some(0))[0] {
+        let a = resolved(Some(0)).await;
+        match &a[0] {
             Action::ToolResult { attempt, .. } => assert_eq!(*attempt, Some(0)),
             other => panic!("unexpected: {other:?}"),
         }
     }
 
-    #[test]
-    fn out_of_band_omitted_attempt_stays_current() {
+    #[tokio::test]
+    async fn out_of_band_omitted_attempt_stays_current() {
         // No answering trigger: an omitted attempt settles the current one (None).
         let actions = resolve_test_actions(
             vec![DecisionAction::ToolResult {
                 id: Some("eff-1".to_string()),
                 attempt: None,
-                result: serde_json::json!("ok"),
+                result: Some(serde_json::json!("ok")),
+                content: None,
+                structured_content: None,
+                is_error: false,
             }],
             None,
         )
+        .await
         .expect("resolves");
         match &actions[0] {
             Action::ToolResult { attempt, .. } => assert_eq!(*attempt, None),
@@ -908,26 +968,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn omitted_settle_id_without_a_matching_execute_is_an_error() {
+    #[tokio::test]
+    async fn omitted_settle_id_without_a_matching_execute_is_an_error() {
         let err = resolve_test_actions(
             vec![DecisionAction::ToolResult {
                 id: None,
                 attempt: None,
-                result: serde_json::json!("ok"),
+                result: Some(serde_json::json!("ok")),
+                content: None,
+                structured_content: None,
+                is_error: false,
             }],
             None,
         )
+        .await
         .unwrap_err();
         assert_eq!(err, ResolveError::UnresolvableSettleId { kind: "tool" });
     }
 
-    #[test]
-    fn the_block_settles_the_venue_and_the_wire_shape() {
+    #[tokio::test]
+    async fn the_block_settles_the_venue_and_the_wire_shape() {
         // A worker-run block carries its format onto the call; an engine-run
         // one is always neutral. Neither is stated on the call itself.
         let byo = cfg_on("byo", "m1", None);
-        match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&byo), None).unwrap() {
+        match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&byo), None)
+            .await
+            .unwrap()
+        {
             Action::CallLlm {
                 handler, format, ..
             } => {
@@ -938,7 +1005,9 @@ mod tests {
         }
 
         let claude = cfg("m1", None);
-        match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&claude), None).unwrap()
+        match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&claude), None)
+            .await
+            .unwrap()
         {
             Action::CallLlm {
                 handler, format, ..
@@ -950,15 +1019,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_call_may_name_a_different_block_than_the_config() {
+    #[tokio::test]
+    async fn a_call_may_name_a_different_block_than_the_config() {
         // Mixing venues per call: the call's own `llm` wins over the config's.
         let claude = cfg("m1", None);
         let mut call = bare_llm_call();
         if let DecisionAction::CallLlm { llm, .. } = &mut call {
             *llm = Some("byo".to_string());
         }
-        match resolve_one_call(call, vec![user_wire("hi")], Some(&claude), None).unwrap() {
+        match resolve_one_call(call, vec![user_wire("hi")], Some(&claude), None)
+            .await
+            .unwrap()
+        {
             Action::CallLlm { llm, handler, .. } => {
                 assert_eq!(llm, "byo");
                 assert_eq!(handler, LlmHandler::Worker);
@@ -967,8 +1039,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_format_execute_carries_the_provider_native_request() {
+    #[tokio::test]
+    async fn a_format_execute_carries_the_provider_native_request() {
         let request = LlmRequest {
             model: "claude-haiku-4-5".to_string(),
             messages: vec![
@@ -1001,7 +1073,11 @@ mod tests {
             &[],
             &MessageTree::default(),
             &HashMap::new(),
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         match wire {
             DecisionTrigger::LlmExecute {
                 request, format, ..
@@ -1031,7 +1107,11 @@ mod tests {
             &[],
             &MessageTree::default(),
             &HashMap::new(),
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         match wire {
             DecisionTrigger::LlmExecute {
                 request: wired,
@@ -1056,8 +1136,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_raw_response_answering_a_format_execute_is_translated() {
+    #[tokio::test]
+    async fn a_raw_response_answering_a_format_execute_is_translated() {
         let trigger = format_execute_trigger(Some(LlmFormat::Anthropic));
         let actions = resolve_test_actions(
             vec![DecisionAction::LlmResult {
@@ -1075,6 +1155,7 @@ mod tests {
             }],
             Some(&trigger),
         )
+        .await
         .expect("resolves");
         match &actions[0] {
             Action::LlmResult { id, response, .. } => {
@@ -1087,8 +1168,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_unparseable_llm_result_is_a_resolve_error() {
+    #[tokio::test]
+    async fn an_unparseable_llm_result_is_a_resolve_error() {
         for format in [Some(LlmFormat::Anthropic), None] {
             let trigger = format_execute_trigger(format);
             let err = resolve_test_actions(
@@ -1099,6 +1180,7 @@ mod tests {
                 }],
                 Some(&trigger),
             )
+            .await
             .unwrap_err();
             assert!(
                 matches!(err, ResolveError::InvalidLlmResponse { .. }),
@@ -1153,7 +1235,7 @@ mod tests {
         }
     }
 
-    fn resolve_one_call(
+    async fn resolve_one_call(
         call: DecisionAction,
         view: Vec<DraftMessage>,
         echoed: Option<&AgentConfig>,
@@ -1170,15 +1252,19 @@ mod tests {
             echoed,
             None,
             &blocks(),
-        )?;
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await?;
         Ok(r.actions.into_iter().next().expect("one action"))
     }
 
-    #[test]
-    fn bare_llm_call_merges_model_stream_and_system_from_config() {
+    #[tokio::test]
+    async fn bare_llm_call_merges_model_stream_and_system_from_config() {
         let config = cfg("m1", Some("be nice"));
-        let action =
-            resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&config), None).unwrap();
+        let action = resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&config), None)
+            .await
+            .unwrap();
         match action {
             Action::CallLlm {
                 request, stream, ..
@@ -1195,8 +1281,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explicit_messages_suppress_system_injection() {
+    #[tokio::test]
+    async fn explicit_messages_suppress_system_injection() {
         let config = cfg("m1", Some("be nice"));
         let call = DecisionAction::CallLlm {
             id: None,
@@ -1210,8 +1296,9 @@ mod tests {
             stream: None,
             retry: None,
         };
-        let action =
-            resolve_one_call(call, vec![user_wire("the view")], Some(&config), None).unwrap();
+        let action = resolve_one_call(call, vec![user_wire("the view")], Some(&config), None)
+            .await
+            .unwrap();
         match action {
             Action::CallLlm { request, .. } => {
                 let roles: Vec<_> = request.messages.iter().map(|m| &m.role).collect();
@@ -1224,8 +1311,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explicit_model_overrides_config() {
+    #[tokio::test]
+    async fn explicit_model_overrides_config() {
         let config = cfg("base", None);
         let call = DecisionAction::CallLlm {
             id: None,
@@ -1239,21 +1326,25 @@ mod tests {
             stream: None,
             retry: None,
         };
-        let action = resolve_one_call(call, vec![], Some(&config), None).unwrap();
+        let action = resolve_one_call(call, vec![], Some(&config), None)
+            .await
+            .unwrap();
         match action {
             Action::CallLlm { request, .. } => assert_eq!(request.model, "override"),
             other => panic!("expected llm.call; got {other:?}"),
         }
     }
 
-    #[test]
-    fn bare_llm_call_without_a_model_source_is_an_error() {
-        let err = resolve_one_call(bare_llm_call(), vec![], None, None).unwrap_err();
+    #[tokio::test]
+    async fn bare_llm_call_without_a_model_source_is_an_error() {
+        let err = resolve_one_call(bare_llm_call(), vec![], None, None)
+            .await
+            .unwrap_err();
         assert_eq!(err, ResolveError::MissingModel);
     }
 
-    #[test]
-    fn the_response_config_is_the_merge_source_over_the_echoed_one() {
+    #[tokio::test]
+    async fn the_response_config_is_the_merge_source_over_the_echoed_one() {
         let echoed = cfg("old", None);
         let action = resolve_one_call(
             bare_llm_call(),
@@ -1261,6 +1352,7 @@ mod tests {
             Some(&echoed),
             Some(cfg("new", None)),
         )
+        .await
         .unwrap();
         match action {
             Action::CallLlm { request, .. } => assert_eq!(
@@ -1311,24 +1403,30 @@ mod tests {
         messages.iter().cloned().map(DraftMessage::from).collect()
     }
 
-    #[test]
-    fn materializes_a_client_message_onto_the_active_path() {
+    #[tokio::test]
+    async fn materializes_a_client_message_onto_the_active_path() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
         ];
         let tree = linear_tree(&path);
 
-        let (messages, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientMessage {
-                messages: vec![msg("u2", Role::User, "more").into()],
-                client: ClientContext::default(),
-                turn_id: None,
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (messages, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientMessage {
+                    messages: vec![msg("u2", Role::User, "more").into()],
+                    client: ClientContext::default(),
+                    turn_id: None,
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
 
         assert_eq!(
             messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
@@ -1337,8 +1435,8 @@ mod tests {
         assert_eq!(new_from, 2);
     }
 
-    #[test]
-    fn materializes_an_append_batch_dropping_recorded_ids() {
+    #[tokio::test]
+    async fn materializes_an_append_batch_dropping_recorded_ids() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
@@ -1347,20 +1445,26 @@ mod tests {
 
         // "a1" is already recorded: dropped, so the news lands on the head
         // instead of folding back onto its old node.
-        let (messages, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientMessage {
-                messages: vec![
-                    msg("a1", Role::Assistant, "yo").into(),
-                    msg("u2", Role::User, "more").into(),
-                    msg("u3", Role::User, "and more").into(),
-                ],
-                client: ClientContext::default(),
-                turn_id: None,
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (messages, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientMessage {
+                    messages: vec![
+                        msg("a1", Role::Assistant, "yo").into(),
+                        msg("u2", Role::User, "more").into(),
+                        msg("u3", Role::User, "and more").into(),
+                    ],
+                    client: ClientContext::default(),
+                    turn_id: None,
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
 
         assert_eq!(
             messages.iter().map(|m| m.id.as_deref()).collect::<Vec<_>>(),
@@ -1369,8 +1473,8 @@ mod tests {
         assert_eq!(new_from, 2);
     }
 
-    #[test]
-    fn annotates_an_appending_full_view() {
+    #[tokio::test]
+    async fn annotates_an_appending_full_view() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
@@ -1382,21 +1486,27 @@ mod tests {
             msg("u2", Role::User, "more"),
         ]);
 
-        let (_, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientTranscript {
-                messages: view,
-                new_from: 0,
-                client: ClientContext::default(),
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (_, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientTranscript {
+                    messages: view,
+                    new_from: 0,
+                    client: ClientContext::default(),
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
         assert_eq!(new_from, 2);
     }
 
-    #[test]
-    fn annotates_an_edit_at_its_divergence_point() {
+    #[tokio::test]
+    async fn annotates_an_edit_at_its_divergence_point() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
@@ -1406,42 +1516,54 @@ mod tests {
         // An edit of a1: fresh id, resent up to that point.
         let view = wire_view(&[msg("u1", Role::User, "hi"), msg("e1", Role::User, "edited")]);
 
-        let (_, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientTranscript {
-                messages: view,
-                new_from: 0,
-                client: ClientContext::default(),
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (_, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientTranscript {
+                    messages: view,
+                    new_from: 0,
+                    client: ClientContext::default(),
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
         assert_eq!(new_from, 1);
     }
 
-    #[test]
-    fn annotates_a_no_op_resend_as_all_recorded() {
+    #[tokio::test]
+    async fn annotates_a_no_op_resend_as_all_recorded() {
         let path = vec![
             msg("u1", Role::User, "hi"),
             msg("a1", Role::Assistant, "yo"),
         ];
         let tree = linear_tree(&path);
 
-        let (_, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientTranscript {
-                messages: wire_view(&path),
-                new_from: 0,
-                client: ClientContext::default(),
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (_, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientTranscript {
+                    messages: wire_view(&path),
+                    new_from: 0,
+                    client: ClientContext::default(),
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
         assert_eq!(new_from, 2, "empty news: nothing to write");
     }
 
-    #[test]
-    fn annotates_an_idless_view_as_all_new() {
+    #[tokio::test]
+    async fn annotates_an_idless_view_as_all_new() {
         let path = vec![msg("u1", Role::User, "hi")];
         let tree = linear_tree(&path);
         let idless = |text: &str| DraftMessage {
@@ -1455,38 +1577,48 @@ mod tests {
         };
         let view = vec![idless("hi"), idless("more")];
 
-        let (_, new_from) = transcript_of(to_wire_trigger(
-            Trigger::ClientTranscript {
-                messages: view,
-                new_from: 0,
-                client: ClientContext::default(),
-            },
-            &path,
-            &tree,
-            &HashMap::new(),
-        ));
+        let (_, new_from) = transcript_of(
+            to_wire_trigger(
+                Trigger::ClientTranscript {
+                    messages: view,
+                    new_from: 0,
+                    client: ClientContext::default(),
+                },
+                &path,
+                &tree,
+                &HashMap::new(),
+                &crate::runtime::blob::NOWHERE,
+                "t1",
+            )
+            .await
+            .expect("resolves"),
+        );
         assert_eq!(new_from, 0);
     }
 
-    #[test]
-    fn passes_non_client_triggers_through() {
+    #[tokio::test]
+    async fn passes_non_client_triggers_through() {
         let tree = MessageTree::default();
         let out = to_wire_trigger(
             Trigger::ToolFinished {
                 id: "tc-1".to_string(),
                 ok: true,
                 name: "t".to_string(),
-                result: Some("r".to_string()),
+                result: Some(StoredResult::text("r")),
                 error: None,
             },
             &[],
             &tree,
             &HashMap::new(),
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         assert!(matches!(out, DecisionTrigger::ToolFinished { .. }));
     }
 
-    fn tool_execute(
+    async fn tool_execute(
         name: &str,
         arguments: &str,
         active_path: &[Message],
@@ -1503,7 +1635,11 @@ mod tests {
             active_path,
             &MessageTree::default(),
             open_llm_calls,
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         match trigger {
             DecisionTrigger::ToolExecute { input, .. } => input,
             t => panic!("expected a tool.execute trigger; got {t:?}"),
@@ -1562,8 +1698,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn tool_arguments_are_classified_against_the_declared_input() {
+    #[tokio::test]
+    async fn tool_arguments_are_classified_against_the_declared_input() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": { "city": { "type": "string" } },
@@ -1572,10 +1708,10 @@ mod tests {
         let (path, calls) = weather_call(schema);
 
         assert!(matches!(
-            tool_execute("get_weather", r#"{"city":"NYC"}"#, &path, &calls),
+            tool_execute("get_weather", r#"{"city":"NYC"}"#, &path, &calls).await,
             ToolInput::Valid { .. }
         ));
-        match tool_execute("get_weather", r#"{"city":5}"#, &path, &calls) {
+        match tool_execute("get_weather", r#"{"city":5}"#, &path, &calls).await {
             ToolInput::Invalid { value, error } => {
                 assert_eq!(
                     value,
@@ -1590,13 +1726,13 @@ mod tests {
             other => panic!("expected invalid; got {other:?}"),
         }
         assert!(matches!(
-            tool_execute("get_weather", "not json", &path, &calls),
+            tool_execute("get_weather", "not json", &path, &calls).await,
             ToolInput::Malformed { .. }
         ));
     }
 
-    #[test]
-    fn the_input_classification_is_always_on_the_wire() {
+    #[tokio::test]
+    async fn the_input_classification_is_always_on_the_wire() {
         let trigger = to_wire_trigger(
             Trigger::ToolExecute {
                 id: "tc-1".to_string(),
@@ -1608,26 +1744,30 @@ mod tests {
             &[],
             &MessageTree::default(),
             &HashMap::new(),
-        );
+            &crate::runtime::blob::NOWHERE,
+            "t1",
+        )
+        .await
+        .expect("resolves");
         let v = serde_json::to_value(&trigger).expect("serializes");
         assert_eq!(v["input"]["status"], "malformed");
         assert!(v["input"]["error"].is_string());
     }
 
-    #[test]
-    fn an_undeclared_tool_is_classified_by_parse_alone() {
+    #[tokio::test]
+    async fn an_undeclared_tool_is_classified_by_parse_alone() {
         let (path, calls) = weather_call(serde_json::json!({"type": "object"}));
         assert!(
             matches!(
-                tool_execute("not_declared", r#"{"anything": true}"#, &path, &calls),
+                tool_execute("not_declared", r#"{"anything": true}"#, &path, &calls).await,
                 ToolInput::Valid { .. }
             ),
             "no declared schema to check against; the proposal carries the unknown-tool default"
         );
     }
 
-    #[test]
-    fn action_defaults_fill_handler_and_retryable() {
+    #[tokio::test]
+    async fn action_defaults_fill_handler_and_retryable() {
         let actions: Vec<DecisionAction> = serde_json::from_str(
             r#"[
                 {"type":"llm.call","request":{"model":"m","messages":[]}},
@@ -1659,23 +1799,46 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_tool_result_settles_with_any_json_value() {
-        let settle = |json: &str| {
+    #[tokio::test]
+    async fn naming_both_shapes_of_answer_is_refused() {
+        let a: DecisionAction = serde_json::from_str(
+            r#"{"type":"tool.result","id":"tc-1","result":"a","content":[{"type":"text","text":"b"}]}"#,
+        )
+        .expect("parses");
+        let err = resolve_test_actions(vec![a], None).await.unwrap_err();
+        assert_eq!(err, ResolveError::AmbiguousToolResult);
+    }
+
+    #[tokio::test]
+    async fn a_tool_result_settles_as_the_blocks_it_carries() {
+        let settle = async |json: &str| {
             let a: DecisionAction = serde_json::from_str(json).expect("parses");
-            let actions = resolve_test_actions(vec![a], None).expect("resolves");
+            let actions = resolve_test_actions(vec![a], None).await.expect("resolves");
             match actions.into_iter().next().expect("one action") {
-                Action::ToolResult { result, .. } => result,
+                Action::ToolResult { result, .. } => result.rendered(),
                 other => panic!("expected a tool.result; got {other:?}"),
             }
         };
         assert_eq!(
-            settle(r#"{"type":"tool.result","id":"tc-1","result":{"temp":71}}"#),
-            r#"{"temp":71}"#
+            settle(r#"{"type":"tool.result","id":"tc-1","result":"plain"}"#).await,
+            "plain"
         );
         assert_eq!(
-            settle(r#"{"type":"tool.result","id":"tc-1","result":"plain"}"#),
-            "plain"
+            settle(r#"{"type":"tool.result","id":"tc-1","result":{"temp":71}}"#).await,
+            r#"{"temp":71}"#,
+            "a non-string value is its canonical json"
+        );
+        assert_eq!(
+            settle(
+                r#"{"type":"tool.result","id":"tc-1","content":[{"type":"text","text":"blocks"}]}"#
+            )
+            .await,
+            "blocks"
+        );
+        assert_eq!(
+            settle(r#"{"type":"tool.result","id":"tc-1","structured_content":{"temp":71}}"#).await,
+            r#"{"temp":71}"#,
+            "a declared output schema round trips as structure, not as text"
         );
     }
 
@@ -1710,7 +1873,7 @@ mod tests {
                 matches!(i, ClientInput::InterruptResume { .. })
             }),
             (
-                r#"{"type":"tool.result","id":"c1","result":{"n":1}}"#,
+                r#"{"type":"tool.result","id":"c1","result":{"content":[{"type":"text","text":"n"}]}}"#,
                 |i| matches!(i, ClientInput::ToolResult { .. }),
             ),
             (
@@ -1744,7 +1907,7 @@ mod tests {
         // A stray `agent_id`/`turn_id` on a settle has no field to land in, so it is
         // ignored rather than mistaken for addressing.
         let input: ClientInput = serde_json::from_str(
-            r#"{"type":"tool.result","id":"c1","result":"ok","agent_id":"bot","turn_id":"t1"}"#,
+            r#"{"type":"tool.result","id":"c1","result":{"content":[]},"agent_id":"bot","turn_id":"t1"}"#,
         )
         .expect("parses; the stray addressing fields are ignored");
         assert!(matches!(input, ClientInput::ToolResult { .. }));
@@ -1795,16 +1958,5 @@ mod tests {
             }
             other => panic!("expected interrupt.resume, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn tool_result_canonicalizes_non_string_values() {
-        assert_eq!(result_to_string(serde_json::json!({"n": 1})), r#"{"n":1}"#);
-        assert_eq!(result_to_string(serde_json::json!("plain")), "plain");
-        assert_eq!(
-            result_to_string(Value::Null),
-            "",
-            "null canonicalizes to empty"
-        );
     }
 }

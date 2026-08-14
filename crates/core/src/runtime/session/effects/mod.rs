@@ -47,7 +47,7 @@ use super::state::{
     new_call_id, EffectKind, EffectPayload, EffectTracking, QueueEntry, SessionState,
 };
 use crate::connectors::{AuthNeed, RemoteTool};
-use crate::protocol::{EffectStatus, ErrorCode, ErrorInfo, LlmResponse};
+use crate::protocol::{EffectStatus, ErrorCode, ErrorInfo, LlmResponse, StoredResult};
 use crate::runtime::Caller;
 
 pub mod connector;
@@ -64,7 +64,7 @@ pub mod turn_end;
 pub enum Outcome {
     Llm(Box<LlmResponse>),
     Tool {
-        result: String,
+        result: StoredResult,
     },
     /// The child session is running; its turn result arrives separately.
     SubAgentStarted,

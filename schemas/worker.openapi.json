@@ -138,23 +138,6 @@
         ],
         "title": "Announce"
       },
-      "AudioData": {
-        "additionalProperties": false,
-        "properties": {
-          "data": {
-            "type": "string"
-          },
-          "format": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "data",
-          "format"
-        ],
-        "title": "AudioData",
-        "type": "object"
-      },
       "AuthFailure": {
         "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
         "oneOf": [
@@ -198,103 +181,13 @@
           },
           {
             "items": {
-              "$ref": "#/components/schemas/ContentPart"
+              "$ref": "#/components/schemas/StoredContent"
             },
             "type": "array"
           }
         ],
         "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged).",
         "title": "Content"
-      },
-      "ContentPart": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "text": {
-                "type": "string"
-              },
-              "type": {
-                "const": "text",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "text"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "image_url": {
-                "$ref": "#/components/schemas/ImageUrl"
-              },
-              "type": {
-                "const": "image_url",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "image_url"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "file": {
-                "$ref": "#/components/schemas/FileData"
-              },
-              "type": {
-                "const": "file",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "file"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "input_audio": {
-                "$ref": "#/components/schemas/AudioData"
-              },
-              "type": {
-                "const": "input_audio",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "input_audio"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "type": {
-                "const": "video_url",
-                "type": "string"
-              },
-              "video_url": {
-                "$ref": "#/components/schemas/VideoUrl"
-              }
-            },
-            "required": [
-              "type",
-              "video_url"
-            ],
-            "type": "object"
-          }
-        ],
-        "title": "ContentPart"
       },
       "DecisionAction": {
         "description": "The action a worker authors on the wire. Mirrors the internal `Action`, but a\nsettle's effect id may be omitted: on the sync/pull paths the answered\n`*.execute` trigger names it, so echoing it is redundant. `resolve_response`\n(`runtime::session::wire`) turns this into the internal `Action` (id always\npresent) at the transport boundary.",
@@ -441,21 +334,33 @@
                   "null"
                 ]
               },
+              "content": {
+                "items": {
+                  "$ref": "#/components/schemas/ToolContent"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "id": {
                 "type": [
                   "string",
                   "null"
                 ]
               },
+              "is_error": {
+                "type": "boolean"
+              },
               "result": {},
+              "structured_content": {},
               "type": {
                 "const": "tool.result",
                 "type": "string"
               }
             },
             "required": [
-              "type",
-              "result"
+              "type"
             ],
             "type": "object"
           },
@@ -1011,9 +916,13 @@
                 "type": "boolean"
               },
               "result": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/StoredResult"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "type": {
@@ -1522,23 +1431,6 @@
         "title": "ErrorInfo",
         "type": "object"
       },
-      "FileData": {
-        "additionalProperties": false,
-        "properties": {
-          "file_data": {
-            "type": "string"
-          },
-          "filename": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "filename",
-          "file_data"
-        ],
-        "title": "FileData",
-        "type": "object"
-      },
       "Handler": {
         "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default), `client`, or `server` (set by\nthe engine for connector tools, never declared by a worker). An LLM call has\nno `handler`: where it runs follows from the `[llm.*]` block it names.",
         "oneOf": [
@@ -1559,19 +1451,6 @@
           }
         ],
         "title": "Handler"
-      },
-      "ImageUrl": {
-        "additionalProperties": false,
-        "properties": {
-          "url": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "url"
-        ],
-        "title": "ImageUrl",
-        "type": "object"
       },
       "LlmFormat": {
         "description": "The wire shape of a worker-run LLM call, declared on a `type = \"worker\"`\n`[llm.*]` block. Absent ⇒ the engine's neutral format. Set ⇒ `llm.execute`\ncarries the provider's native request body, and `llm.result`/\n`llm.token.delta` accept the provider's native response and stream events.",
@@ -1876,6 +1755,37 @@
         "title": "ReasoningProvider",
         "type": "string"
       },
+      "ResourceContents": {
+        "additionalProperties": false,
+        "properties": {
+          "blob": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri"
+        ],
+        "title": "ResourceContents",
+        "type": "object"
+      },
       "RetryConfig": {
         "additionalProperties": false,
         "description": "An agent's retry overrides, one per effect kind. `default` covers the kinds\nthat name nothing; a kind is layered on top of it, so the two compose.\n\nPer kind because the kinds are not alike: an LLM call is idempotent and worth\nretrying, a tool call may not be, and a connector fetch holds up every\ndecision behind it.",
@@ -1992,6 +1902,91 @@
         "title": "Role",
         "type": "string"
       },
+      "StoredContent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "blob",
+                "type": "string"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "uri"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mimeType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "link",
+                "type": "string"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "uri"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "StoredContent"
+      },
+      "StoredResult": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/StoredContent"
+            },
+            "type": "array"
+          },
+          "isError": {
+            "type": "boolean"
+          },
+          "structuredContent": {}
+        },
+        "title": "StoredResult",
+        "type": "object"
+      },
       "SubAgent": {
         "additionalProperties": false,
         "description": "A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,\nand the tool name the model calls); its model-facing input is the conventional\nsingle-`message` delegation schema.",
@@ -2046,6 +2041,116 @@
         ],
         "title": "ToolCallFunction",
         "type": "object"
+      },
+      "ToolContent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data",
+              "mimeType"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "type": {
+                "const": "audio",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "data",
+              "mimeType"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "resource": {
+                "$ref": "#/components/schemas/ResourceContents"
+              },
+              "type": {
+                "const": "resource",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "resource"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "mimeType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "resource_link",
+                "type": "string"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "uri"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "ToolContent"
       },
       "ToolInput": {
         "description": "The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",
@@ -2159,19 +2264,6 @@
           "total"
         ],
         "title": "Usage",
-        "type": "object"
-      },
-      "VideoUrl": {
-        "additionalProperties": false,
-        "properties": {
-          "url": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "url"
-        ],
-        "title": "VideoUrl",
         "type": "object"
       },
       "WorkerIdentity": {

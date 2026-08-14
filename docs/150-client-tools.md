@@ -39,7 +39,7 @@ No `tool.execute` reaches the worker for `get_location`. When the model calls
 it, the run stops with the call open. The client ends the call by `id`.
 
 ```jsonc
-{ "type": "tool.result", "id": "<toolCallId>", "result": "Lisbon" }
+{ "type": "tool.result", "id": "<toolCallId>", "result": { "content": [{ "type": "text", "text": "Lisbon" }] } }
 ```
 
 ## The round trip
@@ -60,7 +60,7 @@ The client answers an open call with one of these inputs.
 
 ```typescript
 type ClientInput =
-    | { type: "tool.result", id: string, attempt?: number, result?: unknown }
+    | { type: "tool.result", id: string, attempt?: number, result: ToolResult }
     | { type: "tool.error", id: string, error: string, retryable: boolean, attempt?: number }
 ```
 

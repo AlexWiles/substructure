@@ -114,7 +114,7 @@ async function decide({ trigger, proposed }) {
     if (trigger.type === "tool.execute") {
         const tool = tools.find((t) => t.name === trigger.name);
         try {
-            return { actions: [{ type: "tool.result", result: await tool.exec(trigger.input.value) }] };
+            return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: await tool.exec(trigger.input.value) }] } }] };
         } catch (err) {
             return { actions: [{ type: "tool.error", error: err.message }] };
         }

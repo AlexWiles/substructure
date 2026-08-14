@@ -33,9 +33,10 @@ use uuid::Uuid;
 
 use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
+use crate::protocol::StoredContent;
 use crate::protocol::{
     AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
-    DraftMessage, ErrorInfo, Message, Role, ToolCall,
+    DraftMessage, ErrorInfo, Message, Role, StoredResult, ToolCall,
 };
 
 pub fn propose(
@@ -85,7 +86,7 @@ pub fn propose(
         } => tool_finished(
             id,
             name,
-            &settled_text(*ok, result, error),
+            settled_content(*ok, result, error),
             transcript,
             llm_calls,
             pending_calls,
@@ -100,7 +101,7 @@ pub fn propose(
         } => tool_finished(
             id,
             agent_id,
-            &settled_text(*ok, result, error),
+            Content::Text(settled_text(*ok, result, error)),
             transcript,
             llm_calls,
             pending_calls,
@@ -374,6 +375,39 @@ fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionRespon
     }
 }
 
+fn settled_content(ok: bool, result: &Option<StoredResult>, error: &Option<ErrorInfo>) -> Content {
+    if !ok {
+        let text = error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_default();
+        return Content::Text(text);
+    }
+    result
+        .as_ref()
+        .map(tool_content)
+        .unwrap_or_else(|| Content::Text(String::new()))
+}
+
+fn tool_content(result: &StoredResult) -> Content {
+    let media: Vec<StoredContent> = result
+        .content
+        .iter()
+        .filter(|block| !matches!(block, StoredContent::Text { .. }))
+        .cloned()
+        .collect();
+    let text = result.rendered();
+    if media.is_empty() {
+        return Content::Text(text);
+    }
+    let mut parts = Vec::with_capacity(media.len() + 1);
+    if !text.is_empty() {
+        parts.push(StoredContent::Text { text });
+    }
+    parts.extend(media);
+    Content::Parts(parts)
+}
+
 /// Record the tool message (the error text when the call failed, so the model
 /// sees it), then wait for in-flight siblings or re-issue the parent request.
 /// No proposal when the parent call can't be resolved: a half proposal that
@@ -381,7 +415,7 @@ fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionRespon
 fn tool_finished(
     id: &str,
     name: &str,
-    content: &str,
+    content: Content,
     transcript: &[Message],
     llm_calls: &HashMap<String, EffectState>,
     pending_calls: usize,
@@ -389,7 +423,7 @@ fn tool_finished(
     let tool_message = DraftMessage {
         id: None,
         role: Role::Tool,
-        content: Some(Content::Text(content.to_string())),
+        content: Some(content),
         tool_calls: None,
         tool_call_id: Some(id.to_string()),
         name: Some(name.to_string()),
@@ -466,6 +500,38 @@ fn appended(transcript: &[Message], message: DraftMessage) -> Vec<DraftMessage> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stored_block_reaches_the_model_as_a_part() {
+        let uri = format!("blob://t1/{}?mime=image%2Fpng&size=5", uuid::Uuid::now_v7());
+        let result = StoredResult {
+            content: vec![
+                StoredContent::Text {
+                    text: "found 2".into(),
+                },
+                StoredContent::Blob { uri: uri.clone() },
+            ],
+            ..Default::default()
+        };
+        match tool_content(&result) {
+            Content::Parts(parts) => {
+                assert!(matches!(&parts[0], StoredContent::Text { text } if text == "found 2"));
+                assert!(
+                    matches!(&parts[1], StoredContent::Blob { uri: u } if *u == uri),
+                    "the part carries the ref; the blob layer inlines it at the call"
+                );
+            }
+            other => panic!("expected parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_result_that_is_only_text_stays_text() {
+        assert!(matches!(
+            tool_content(&StoredResult::text("plain")),
+            Content::Text(t) if t == "plain"
+        ));
+    }
+
     use chrono::Utc;
 
     use super::*;
@@ -587,7 +653,7 @@ mod tests {
             id: id.to_string(),
             ok: outcome.is_ok(),
             name: name.to_string(),
-            result: outcome.ok().map(str::to_string),
+            result: outcome.ok().map(StoredResult::text),
             error: outcome.err().map(ErrorInfo::handler),
         }
     }
