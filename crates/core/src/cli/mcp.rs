@@ -197,7 +197,7 @@ fn open_existing_db(cfg: &ProjectConfig) -> Result<Option<SqliteDb>> {
 }
 
 async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -> Result<()> {
-    let (id, spec) = pick(&cfg.connections()?, id)?;
+    let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
     require_auth(&id, &spec, AuthKind::Oauth)?;
 
     let http = reqwest::Client::new();
@@ -295,7 +295,7 @@ async fn set_token_local(
     globals: &CloudGlobals,
     cfg: ProjectConfig,
 ) -> Result<()> {
-    let (id, spec) = pick(&cfg.connections()?, id)?;
+    let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
     require_auth(&id, &spec, AuthKind::Token)?;
 
     let token = match &env {
@@ -315,7 +315,7 @@ async fn set_token_local(
 }
 
 async fn delete_token_local(id: Option<String>, cfg: ProjectConfig) -> Result<()> {
-    let (id, _) = pick(&cfg.connections()?, id)?;
+    let (id, _) = pick(&cfg.resolved_connections()?, id)?;
     let Some(db) = open_existing_db(&cfg)? else {
         println!("`{id}` holds no credential.");
         return Ok(());
@@ -336,7 +336,7 @@ async fn store_credential(cfg: &ProjectConfig, id: &str, credential: Credential)
 }
 
 async fn list_local(cfg: ProjectConfig) -> Result<()> {
-    let connections = cfg.connections()?;
+    let connections = cfg.resolved_connections()?;
     if connections.is_empty() {
         bail!("substructure.toml declares no connections under `[mcp.<id>]`");
     }
@@ -418,7 +418,7 @@ pub(crate) enum Needs {
 /// connection that works.
 pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<(String, Needs)>> {
     let declared: Vec<(String, ConnectionSpec)> = cfg
-        .connections()?
+        .resolved_connections()?
         .into_iter()
         .filter(|(_, spec)| spec.auth != Some(AuthKind::None))
         .collect();

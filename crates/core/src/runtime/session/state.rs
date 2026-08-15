@@ -892,10 +892,6 @@ pub struct SessionState {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_versions: Vec<Logged<AgentVersion>>,
-    /// Plugins enabled during the session, each anchored where its first use
-    /// happened. A set that unions along the path, unlike the versioned
-    /// channels: enabling one plugin cannot supersede another.
-    pub plugin_enables: Vec<Logged<Versioned<String>>>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
@@ -972,7 +968,6 @@ impl SessionState {
             sub_agent_token_usage: Usage::default(),
             state_versions: Vec::new(),
             agent_versions: Vec::new(),
-            plugin_enables: Vec::new(),
             ancestry: Vec::new(),
             data: serde_json::Value::Null,
             worker_retry: None,
@@ -1497,15 +1492,6 @@ impl SessionState {
                     },
                 });
             }
-            EventPayload::PluginEnabled(p) => {
-                self.plugin_enables.push(Logged {
-                    seq: ctx.sequence,
-                    entry: Versioned {
-                        value: p.id.clone(),
-                        anchor: p.anchor.clone(),
-                    },
-                });
-            }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
                 // Terminal: void pending decisions so late submissions no-op; calls void via CallVoided events.
@@ -1838,15 +1824,11 @@ impl SessionState {
                 collisions: Vec::new(),
             };
         };
-        self.connector_tools_for_config(&config, leaf)
+        self.connector_tools_for_config(&config)
     }
 
-    pub fn connector_tools_for_config(
-        &self,
-        config: &AgentConfig,
-        leaf: Option<&str>,
-    ) -> filter::Merged {
-        let servers = self.servers_for(config, leaf);
+    pub fn connector_tools_for_config(&self, config: &AgentConfig) -> filter::Merged {
+        let servers = self.servers_for(config);
         let mut resolutions: Vec<filter::Resolution> = servers
             .iter()
             .filter_map(|connector| {
@@ -1865,8 +1847,7 @@ impl SessionState {
         // From the config alone: a fetch that has not settled must not decide
         // whether a tool definition exists. An agent that says `search` thus
         // gets these from its first turn, and a connection added later moves
-        // no definition. A plugin's servers count whether or not the plugin is
-        // enabled yet, for the same reason.
+        // no definition. A plugin's servers count for the same reason.
         let defers = config.defers_tools()
             || config.tools.iter().any(|t| t.defer == Some(true))
             || config.mcp.iter().any(|c| filter::defers(c, false))
@@ -1897,7 +1878,7 @@ impl SessionState {
     fn connector_source(&self, connector_id: &str, leaf: Option<&str>) -> Option<Source> {
         let config = self.resolve_agent_for(leaf)?;
         let server = self
-            .servers_for(&config, leaf)
+            .servers_for(&config)
             .into_iter()
             .find(|c| c.id == connector_id)?;
         let sync = self.connector_sync(connector_id)?;
@@ -1921,7 +1902,7 @@ impl SessionState {
         let Some(config) = self.resolve_agent_for(leaf) else {
             return Vec::new();
         };
-        self.servers_for(&config, leaf)
+        self.servers_for(&config)
             .iter()
             .filter(|c| {
                 self.effect(EffectKind::ConnectorSync, &c.id)
@@ -1972,7 +1953,7 @@ impl SessionState {
             .iter()
             .map(|t| t.to_llm_tool(config.defers_tools()));
         let connector = self
-            .connector_tools_for_config(&config, leaf)
+            .connector_tools_for_config(&config)
             .tools
             .into_iter()
             .filter(|t| t.kind.is_remote())
@@ -2120,7 +2101,7 @@ impl SessionState {
         let Some(config) = self.resolve_agent_for(leaf) else {
             return Vec::new();
         };
-        self.servers_for(&config, leaf)
+        self.servers_for(&config)
             .iter()
             .filter(|c| !self.has_effect(EffectKind::ConnectorSync, &c.id))
             .map(|c| c.id.clone())
@@ -2139,7 +2120,7 @@ impl SessionState {
         let Some(config) = self.resolve_agent_for(leaf) else {
             return false;
         };
-        self.servers_for(&config, leaf).iter().any(|c| {
+        self.servers_for(&config).iter().any(|c| {
             self.tracking(EffectKind::ConnectorSync, &c.id)
                 .is_some_and(EffectTracking::is_in_flight)
         })
@@ -2160,79 +2141,19 @@ impl SessionState {
         resolve_on_path(&self.agent_versions, &on_path).map(|v| v.value.clone())
     }
 
-    /// The plugins in force on this path: `enabled = true` in the config, plus
-    /// every enablement recorded on the path. A union, not newest-wins —
-    /// enabling one plugin cannot supersede another.
-    pub fn enabled_plugins(&self, leaf: Option<&str>) -> std::collections::HashSet<String> {
-        let config = self.resolve_agent_for(leaf);
-        let on_path = self.path_set(leaf);
-        let configured = config
-            .iter()
-            .flat_map(|c| &c.plugins)
-            .filter(|p| p.enabled)
-            .map(|p| p.id.clone());
-        let recorded = self
-            .plugin_enables
-            .iter()
-            .filter(|e| match e.anchor() {
-                None => true,
-                Some(a) => on_path.contains(a),
-            })
-            .map(|e| e.value.clone());
-        configured.chain(recorded).collect()
-    }
-
-    /// Every server connection `config` reaches on this path: its `mcp`
-    /// entries, then each enabled plugin's servers under the plugin's own
-    /// policy. The one place a plugin's servers join the `mcp` machinery.
-    pub fn servers_for(&self, config: &AgentConfig, leaf: Option<&str>) -> Vec<McpServer> {
-        let enabled = self.enabled_plugins(leaf);
+    /// Every server connection `config` reaches: its `mcp` entries, then each
+    /// plugin's servers under the plugin's own policy. The one place a
+    /// plugin's servers join the `mcp` machinery.
+    ///
+    /// Naming a plugin is what turns it on, so the config in force is the
+    /// whole answer — a plugin written in mid-session is reached here, and the
+    /// schedule owes its fetch like any connection's.
+    pub fn servers_for(&self, config: &AgentConfig) -> Vec<McpServer> {
         let plugin_servers = config
             .plugins
             .iter()
-            .filter(|p| enabled.contains(&p.id))
             .flat_map(|p| p.servers.iter().map(|id| p.server(id)));
         config.mcp.iter().cloned().chain(plugin_servers).collect()
-    }
-
-    /// What enabling `plugin_id` at the head records: the enablement, then a
-    /// fetch for each of the plugin's servers never fetched in this session.
-    /// Nothing for a plugin already enabled here, or one the config does not
-    /// name — the call's own fault answers those.
-    pub fn enable_plugin_events(&self, plugin_id: &str) -> Vec<EventPayload> {
-        let leaf = self.head_id.clone();
-        let Some(config) = self.resolve_agent_for(leaf.as_deref()) else {
-            return Vec::new();
-        };
-        let Some(plugin) = config.plugins.iter().find(|p| p.id == plugin_id) else {
-            return Vec::new();
-        };
-        if self.enabled_plugins(leaf.as_deref()).contains(plugin_id) {
-            return Vec::new();
-        }
-        let retry = RetryPolicy::resolve(
-            None,
-            config.retry.as_deref(),
-            crate::runtime::retry::RetryTarget::ConnectorSync,
-        );
-        let mut events = vec![EventPayload::PluginEnabled(PluginEnabled {
-            id: plugin_id.to_string(),
-            anchor: leaf,
-        })];
-        events.extend(
-            plugin
-                .servers
-                .iter()
-                .filter(|id| !self.has_effect(EffectKind::ConnectorSync, id))
-                .map(|id| {
-                    EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
-                        id: id.clone(),
-                        attempt: 0,
-                        retry: retry.clone(),
-                    })
-                }),
-        );
-        events
     }
 
     pub fn message_tree(&self) -> MessageTree {
@@ -2385,7 +2306,6 @@ impl SessionState {
         rewind_log(&mut self.nodes, seq);
         rewind_log(&mut self.state_versions, seq);
         rewind_log(&mut self.agent_versions, seq);
-        rewind_log(&mut self.plugin_enables, seq);
         self.head_id = head_id.map(str::to_string);
         self
     }

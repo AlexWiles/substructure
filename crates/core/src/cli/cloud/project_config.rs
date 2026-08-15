@@ -168,8 +168,9 @@ impl ProjectConfig {
 
     /// Every connection the file reaches, with each plugin's servers resolved
     /// from its directory — so `subs mcp login pdf-renderer` works on a
-    /// connection a plugin brought.
-    pub fn connections(&self) -> anyhow::Result<BTreeMap<String, ConnectionSpec>> {
+    /// connection a plugin brought. Reads the plugin directories: named for
+    /// the cost.
+    pub fn resolved_connections(&self) -> anyhow::Result<BTreeMap<String, ConnectionSpec>> {
         Ok(self.resolved_manifest()?.0.connections())
     }
 
@@ -253,6 +254,16 @@ impl ProjectConfig {
         moved_keys(&value, &at)?;
         let mut config: ProjectConfig =
             value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
+        // A file writes `path`; the bundle is resolved data. A committed
+        // bundle would silently shadow the directory it was resolved from.
+        for (id, spec) in &config.plugin {
+            if spec.bundle.is_some() {
+                return Err(anyhow!(
+                    "{at}: [plugin.{id}]: `bundle` is resolved data and does not belong in the \
+                     file. Write `path` and let the CLI resolve it."
+                ));
+            }
+        }
         config
             .manifest()
             .validate()
@@ -1266,5 +1277,26 @@ mod tests {
             find_from(&nested).unwrap().unwrap().config.org(),
             Some("inner")
         );
+    }
+}
+
+#[cfg(test)]
+mod plugin_file_tests {
+    use super::*;
+
+    #[test]
+    fn a_committed_bundle_is_a_parse_error() {
+        let err = ProjectConfig::parse(
+            r#"
+            [plugin.pdf]
+            path = "./plugins/pdf"
+            [plugin.pdf.bundle]
+            name = "pdf-tools"
+            "#,
+            Path::new("substructure.toml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("resolved data"), "{err}");
     }
 }

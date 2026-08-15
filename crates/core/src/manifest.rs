@@ -127,13 +127,14 @@ impl Manifest {
         // A plugin's servers are ordinary MCP connections under derived ids;
         // only the pairing with an agent knows they came from a plugin.
         let from_plugins = self.plugin.iter().flat_map(|(pid, spec)| {
-            spec.bundle.iter().flat_map(|b| {
-                b.servers.iter().map(|(name, server)| {
-                    let spec = ConnectionSpec {
+            spec.bundle.iter().flat_map(move |b| {
+                b.servers.iter().map(move |(name, server)| {
+                    let resolved = ConnectionSpec {
                         protocol: ConnectorProtocol::Mcp,
+                        auth: spec.auth.get(name).copied().or(server.auth),
                         ..server.clone()
                     };
-                    (crate::plugins::server_id(pid, name), spec)
+                    (crate::plugins::server_id(pid, name), resolved)
                 })
             })
         });
@@ -161,6 +162,7 @@ impl Manifest {
                     .into_iter()
                     .map(|n| format!("[plugin.{id}]: {n}")),
             );
+            spec.hash = Some(loaded.bundle.hash());
             spec.bundle = Some(loaded.bundle);
         }
         // What the bundles brought is part of the declaration.
@@ -393,6 +395,16 @@ pub struct PluginSpec {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PluginBundle>,
+    /// Per-server auth override, `<server> = "oauth" | "token" | "none"` —
+    /// what `mcp.json` has no field for. `none` is the one that matters: it
+    /// clears the standing "authorize this" notice a credential-less server
+    /// would otherwise keep raising.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub auth: BTreeMap<String, AuthKind>,
+    /// The bundle's content hash, stamped when the bundle is resolved. What a
+    /// deployment stores and diffs on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 /// What of a plugin can be checked from what is present: the id always, the
@@ -405,6 +417,14 @@ fn check_plugin(id: &str, spec: &PluginSpec, manifest: &Manifest) -> Result<()> 
     let Some(bundle) = &spec.bundle else {
         return Ok(());
     };
+    for name in spec.auth.keys() {
+        if !bundle.servers.contains_key(name) {
+            bail!(
+                "`auth` names no server `{name}`. The plugin's servers: {}",
+                declared(bundle.servers.keys())
+            );
+        }
+    }
     for (name, server) in &bundle.servers {
         check_id(name).map_err(|e| anyhow::anyhow!("server `{name}`: {e}"))?;
         check_url(&server.url).map_err(|e| anyhow::anyhow!("server `{name}`: {e}"))?;
@@ -515,8 +535,8 @@ impl McpRef {
 /// One plugin an agent uses: a bare id, or a table with the knobs.
 ///
 /// Same two spellings as [`McpRef`], for the same reason: the policy belongs
-/// to the pair, so one `[plugin.<id>]` serves an agent that pre-enables it and
-/// one that lets first use enable it.
+/// to the pair, so one `[plugin.<id>]` serves two agents that read its servers
+/// differently.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PluginRef {
     All(String),
@@ -530,9 +550,6 @@ pub enum PluginRef {
 #[serde(deny_unknown_fields)]
 pub struct PluginEntry {
     pub id: String,
-    /// On from session start; unset, the first skill use enables it.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpToolsEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -572,7 +589,6 @@ impl PluginRef {
         };
         AgentPlugin {
             id: id.to_string(),
-            enabled: entry.is_some_and(|e| e.enabled),
             description,
             skills,
             servers,
@@ -1495,12 +1511,11 @@ defer_tools = { strategy = "sometimes" }
 
     #[test]
     fn a_plugin_is_declared_and_referenced_like_a_connection() {
-        let m = plugin_manifest(r#"["pdf", { id = "pdf", enabled = true, approve = "always" }]"#);
+        let m = plugin_manifest(r#"["pdf", { id = "pdf", approve = "always" }]"#);
         m.validate().unwrap();
         let config = m.agent["support"].to_agent_config(&m).unwrap();
         assert_eq!(config.plugins.len(), 2);
-        assert!(!config.plugins[0].enabled);
-        assert!(config.plugins[1].enabled);
+        assert_eq!(config.plugins[0].approve, Approve::default());
         assert_eq!(config.plugins[1].approve, Approve::Always);
     }
 
@@ -1565,6 +1580,38 @@ defer_tools = { strategy = "sometimes" }
         let wire = m.for_wire();
         assert!(wire.plugin["pdf"].path.is_none());
         assert!(wire.plugin["pdf"].bundle.is_some());
+    }
+
+    #[test]
+    fn a_plugin_auth_override_reaches_the_derived_connection() {
+        let mut m = plugin_manifest(r#"["pdf"]"#);
+        let spec = m.plugin.get_mut("pdf").unwrap();
+        spec.bundle = Some(crate::plugins::PluginBundle {
+            name: "pdf-tools".into(),
+            servers: [(
+                "renderer".to_string(),
+                ConnectionSpec {
+                    url: "https://pdf.example.com/mcp".into(),
+                    protocol: ConnectorProtocol::Mcp,
+                    auth: None,
+                    header: None,
+                    prefix_tools: true,
+                },
+            )]
+            .into(),
+            ..Default::default()
+        });
+        spec.auth = [("renderer".to_string(), AuthKind::None)].into();
+        m.validate().unwrap();
+        assert_eq!(
+            m.connections()["pdf-renderer"].auth,
+            Some(AuthKind::None),
+            "the override is how a credential-less server clears the authorize notice"
+        );
+
+        m.plugin.get_mut("pdf").unwrap().auth = [("typo".to_string(), AuthKind::None)].into();
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("names no server `typo`"), "{err}");
     }
 
     #[test]

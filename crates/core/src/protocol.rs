@@ -675,8 +675,8 @@ pub struct AgentConfig {
     /// MCP servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
-    /// Plugins this agent may use. Skills ride here as metadata; a plugin's
-    /// servers behave as `mcp` entries once the plugin is enabled.
+    /// Plugins this agent uses. Skills ride here as metadata; a plugin's
+    /// servers behave as `mcp` entries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<AgentPlugin>,
     /// Defer every tool this agent offers, from any source, unless the tool or
@@ -992,19 +992,17 @@ pub struct McpTools {
     pub defer: Option<bool>,
 }
 
-/// A plugin an agent may use, resolved to what the engine needs at runtime:
-/// the skills the model discovers, and the connection ids of the plugin's
+/// A plugin an agent uses, resolved to what the engine needs at runtime: the
+/// skills the model discovers, and the connection ids of the plugin's
 /// servers. Stamped from the bundle when the config loads, the way sub-agent
 /// descriptions are — a worker echoes it rather than authoring it.
+///
+/// Naming a plugin is what turns it on: the config in force is the whole
+/// answer, so a worker enables one by writing it into the agent's config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "AgentPlugin")]
 pub struct AgentPlugin {
     pub id: String,
-    /// On from session start. Absent, the plugin sits in the catalog and the
-    /// first skill use enables it — recording the enablement on the branch and
-    /// waking the plugin's servers.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub enabled: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

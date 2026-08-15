@@ -145,16 +145,34 @@ pub fn load_dir(root: &Path) -> Result<Loaded> {
         notices.push("hooks/ is not supported and was ignored".to_string());
     }
 
-    Ok(Loaded {
-        bundle: PluginBundle {
-            name: sanitize_line(&manifest.name),
-            version: manifest.version.map(|v| sanitize_line(&v)),
-            description: sanitize_line(&manifest.description),
-            skills,
-            servers,
-        },
-        notices,
-    })
+    let bundle = PluginBundle {
+        name: sanitize_line(&manifest.name),
+        version: manifest.version.map(|v| sanitize_line(&v)),
+        description: sanitize_line(&manifest.description),
+        skills,
+        servers,
+    };
+    // Caught here, with the file names, rather than as a deployment's opaque
+    // 413 after the upload.
+    let bytes = content_bytes(&bundle);
+    if bytes > MAX_BUNDLE_BYTES {
+        bail!(
+            "{} holds {bytes} bytes of skill content; the limit is {MAX_BUNDLE_BYTES}. \
+             Move large files out of the skills, or split the plugin.",
+            root.display()
+        );
+    }
+    Ok(Loaded { bundle, notices })
+}
+
+const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
+
+fn content_bytes(bundle: &PluginBundle) -> usize {
+    bundle
+        .skills
+        .iter()
+        .map(|s| s.body.len() + s.files.values().map(String::len).sum::<usize>())
+        .sum()
 }
 
 /// `plugin.json`. Unknown fields are allowed, per the spec: they warn there,
@@ -190,9 +208,9 @@ fn load_skills(dir: &Path, notices: &mut Vec<String>) -> Result<Vec<Skill>> {
 fn load_skill(dir: &Path, notices: &mut Vec<String>) -> Result<Skill> {
     let text = std::fs::read_to_string(dir.join("SKILL.md")).context("no SKILL.md")?;
     let (front, body) = split_frontmatter(&text)?;
-    let name = frontmatter_value(front, "name").context("frontmatter has no `name`")?;
-    let description =
-        frontmatter_value(front, "description").context("frontmatter has no `description`")?;
+    let name = frontmatter_value(front, "name").ok_or_else(|| unreadable_key(front, "name"))?;
+    let description = frontmatter_value(front, "description")
+        .ok_or_else(|| unreadable_key(front, "description"))?;
     check_skill_name(&name)?;
     if dir.file_name().and_then(|n| n.to_str()) != Some(name.as_str()) {
         bail!("`name: {name}` does not match the directory name");
@@ -230,8 +248,28 @@ fn frontmatter_value(front: &str, key: &str) -> Option<String> {
     front.lines().find_map(|line| {
         let rest = line.strip_prefix(key)?.trim_start().strip_prefix(':')?;
         let value = rest.trim().trim_matches('"').trim_matches('\'');
+        // A block-scalar indicator is the value's absence, not the value.
+        if matches!(value, ">" | "|" | ">-" | "|-" | ">+" | "|+") {
+            return None;
+        }
         (!value.is_empty()).then(|| value.to_string())
     })
+}
+
+/// Why `key` could not be read: absent, or written in a YAML form the plain
+/// reader does not take — the notice should say which.
+fn unreadable_key(front: &str, key: &str) -> anyhow::Error {
+    let written = front.lines().any(|l| {
+        l.strip_prefix(key)
+            .is_some_and(|r| r.trim_start().starts_with(':'))
+    });
+    match written {
+        true => anyhow::anyhow!(
+            "frontmatter `{key}` is not a plain value; folded and multiline strings are not \
+             supported"
+        ),
+        false => anyhow::anyhow!("frontmatter has no `{key}`"),
+    }
 }
 
 /// The Agent Skills `name` rules, which also keep it usable in a tool-ish name.
@@ -348,10 +386,11 @@ struct McpFileServer {
     headers: BTreeMap<String, String>,
 }
 
-/// Author-controlled text that lands near a prompt: control characters out,
-/// one line only.
+/// Author-controlled text that lands near a prompt: escape sequences and
+/// control characters out, one line only.
 fn sanitize_line(text: &str) -> String {
-    text.chars()
+    strip_escapes(text)
+        .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
         .trim()
@@ -360,9 +399,34 @@ fn sanitize_line(text: &str) -> String {
 
 /// Body text keeps its shape; only the invisible is removed.
 fn sanitize_text(text: &str) -> String {
-    text.chars()
+    strip_escapes(text)
+        .chars()
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
         .collect()
+}
+
+/// Whole ANSI sequences, not just the ESC: dropping the ESC alone leaves the
+/// parameters as visible junk.
+fn strip_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            chars.next();
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -450,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptions_cannot_carry_control_characters() {
+    fn descriptions_cannot_carry_escapes_or_control_characters() {
         let dir = tempfile::tempdir().unwrap();
         write(
             dir.path(),
@@ -458,7 +522,41 @@ mod tests {
             "{ \"name\": \"x\", \"description\": \"a\\u001b[31mb\\nc\" }",
         );
         let loaded = load_dir(dir.path()).unwrap();
-        assert_eq!(loaded.bundle.description, "a [31mb c");
+        assert_eq!(
+            loaded.bundle.description, "ab c",
+            "the whole sequence goes, not just the escape"
+        );
+    }
+
+    #[test]
+    fn a_bundle_over_the_size_limit_is_an_error_naming_the_limit() {
+        let dir = plugin_dir();
+        write(
+            dir.path(),
+            "skills/form-filling/references/huge.md",
+            &"x".repeat(MAX_BUNDLE_BYTES + 1),
+        );
+        let err = load_dir(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn a_folded_frontmatter_value_is_named_as_the_reason() {
+        let dir = plugin_dir();
+        write(
+            dir.path(),
+            "skills/folded/SKILL.md",
+            "---\nname: folded\ndescription: >-\n  long text\n---\nbody",
+        );
+        let loaded = load_dir(dir.path()).unwrap();
+        assert!(
+            loaded
+                .notices
+                .iter()
+                .any(|n| n.contains("not a plain value")),
+            "{:?}",
+            loaded.notices
+        );
     }
 
     #[test]

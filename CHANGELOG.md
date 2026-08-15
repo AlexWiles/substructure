@@ -13,7 +13,7 @@ together at the same version.
 
 - Support approval interrupts on destructive MCP tools.
 - Add agent plugins: `[plugin.<id>]` declares a plugin directory, and an agent uses it with `plugins`.
-- Add the `skill` tool. It loads a skill's instructions, and the first use enables the plugin and connects its MCP servers.
+- Add the `skill` tool. It loads a skill's instructions and its files.
 - Show a plugin catalog in the system prompt.
 
 ### Fixed

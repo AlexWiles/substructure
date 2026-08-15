@@ -56,6 +56,13 @@ fn argument(arguments: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The two halves of a `<plugin>:<skill>` name — the one split rule, shared
+/// by the routing that freezes the plugin and the answer that reads it. A
+/// name without a colon has no plugin half.
+pub fn split_skill(named: &str) -> (&str, &str) {
+    named.split_once(':').unwrap_or(("", named))
+}
+
 /// `skill`: a body or a file out of the bundle the resolver found for the
 /// call's own plugin. Every fault carries the list the model needed — the
 /// error is the directory.
@@ -79,13 +86,14 @@ pub fn skill_answer(
             .join(", ")
     };
 
-    let Some((plugin_id, skill_name)) = named.split_once(':') else {
+    let (plugin_id, skill_name) = split_skill(&named);
+    if plugin_id.is_empty() {
         return LocalAnswer::Error(format!(
             "`{named}` is not a skill name. Skills are named `<plugin>:<skill>`; this agent's \
              plugins: {}.",
             catalog()
         ));
-    };
+    }
     let Some(plugin) = config.plugins.iter().find(|p| p.id == plugin_id) else {
         return LocalAnswer::Error(format!(
             "no plugin `{plugin_id}` for this agent. Declared: {}.",
@@ -162,7 +170,6 @@ mod tests {
                     mcp: vec![],
                     plugins: vec![AgentPlugin {
                         id: "pdf".to_string(),
-                        enabled: false,
                         description: "PDF work.".to_string(),
                         skills: vec![SkillMeta {
                             name: "form-filling".to_string(),
@@ -250,5 +257,22 @@ mod tests {
             };
             assert!(text.contains(expected), "{arguments}: {text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::split_skill;
+
+    #[test]
+    fn one_split_rule_for_routing_and_answering() {
+        assert_eq!(split_skill("pdf:form-filling"), ("pdf", "form-filling"));
+        assert_eq!(split_skill("form-filling"), ("", "form-filling"));
+        assert_eq!(
+            split_skill("a:b:c"),
+            ("a", "b:c"),
+            "only the first colon splits"
+        );
+        assert_eq!(split_skill(""), ("", ""));
     }
 }

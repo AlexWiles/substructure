@@ -204,17 +204,14 @@ pub(in crate::runtime::session) fn request(
         // The plugin is routing, frozen from the arguments: a config change
         // cannot re-aim a skill call already made.
         Some(tool) if tool.kind == ConnectorToolKind::Skill => {
-            let (plugin, skill) = skill_named(&arguments);
-            (
-                name,
-                arguments,
-                ToolHandler::Server,
-                Some(ConnectorTarget {
-                    connector: plugin,
-                    remote_name: skill,
-                    kind: tool.kind,
-                }),
-            )
+            let named = argument(&arguments, "name").unwrap_or_default();
+            let (plugin, skill) = crate::runtime::session::engine_tools::split_skill(&named);
+            let target = ConnectorTarget {
+                connector: plugin.to_string(),
+                remote_name: skill.to_string(),
+                kind: tool.kind,
+            };
+            (name, arguments, ToolHandler::Server, Some(target))
         }
         Some(tool) => (
             name,
@@ -235,15 +232,9 @@ pub(in crate::runtime::session) fn request(
     if state.has_effect(EffectKind::ToolCall, &tool_call_id) {
         return Ok(Vec::new());
     }
-    // Using a skill is what enables its plugin. The enablement lands before
-    // the call, so the call and everything after it read the plugin as on.
-    let mut events = match &target {
-        Some(t) if t.kind == ConnectorToolKind::Skill => state.enable_plugin_events(&t.connector),
-        _ => Vec::new(),
-    };
     // The execute decision for a worker-handled call queues at dispatch,
     // alongside the deadline clock.
-    events.push(EventPayload::ToolCallRequested(ToolCallRequested {
+    Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
         id: tool_call_id,
         attempt: 0,
         name,
@@ -251,18 +242,7 @@ pub(in crate::runtime::session) fn request(
         handler,
         target,
         retry,
-    }));
-    Ok(events)
-}
-
-/// The `<plugin>:<skill>` a skill call names, split for routing. A name that
-/// is not that shape routes with empty halves and is answered with the fault.
-fn skill_named(arguments: &str) -> (String, String) {
-    let named = argument(arguments, "name").unwrap_or_default();
-    match named.split_once(':') {
-        Some((plugin, skill)) => (plugin.to_string(), skill.to_string()),
-        None => (String::new(), named),
-    }
+    })])
 }
 
 /// A `call_tool` becomes the call it names: the same name, the same arguments,

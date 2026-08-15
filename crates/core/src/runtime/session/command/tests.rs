@@ -10873,11 +10873,10 @@ fn an_admin_caller_raises_an_admin_interrupt() {
 
 // ── plugins ──────────────────────────────────────────────────────────────
 
-fn plugin_config(enabled: bool) -> AgentConfig {
+fn plugin_config() -> AgentConfig {
     AgentConfig {
         plugins: vec![crate::protocol::AgentPlugin {
             id: "pdf".to_string(),
-            enabled,
             description: "PDF work.".to_string(),
             skills: vec![crate::protocol::SkillMeta {
                 name: "form-filling".to_string(),
@@ -10892,63 +10891,22 @@ fn plugin_config(enabled: bool) -> AgentConfig {
     }
 }
 
-fn plugin_session(enabled: bool) -> SessionAggregate {
-    create_session_with_config("sess-1", "tenant-a", "user-1", Some(plugin_config(enabled)))
+fn plugin_session() -> SessionAggregate {
+    create_session_with_config("sess-1", "tenant-a", "user-1", Some(plugin_config()))
 }
 
 #[test]
-fn a_declared_plugin_offers_the_skill_tool_and_dials_nothing() {
-    let agg = plugin_session(false);
-    assert!(
-        !agg.state
-            .has_effect(EffectKind::ConnectorSync, "pdf-renderer"),
-        "an unused plugin costs no fetch"
-    );
+fn a_declared_plugin_offers_the_skill_tool_and_fetches_its_servers() {
+    let mut agg = plugin_session();
     assert!(
         offered(&agg).contains(&"skill".to_string()),
         "the skill tool is offered from turn 1: {:?}",
         offered(&agg)
     );
-}
-
-#[test]
-fn using_a_skill_enables_the_plugin_and_wakes_its_servers() {
-    let mut agg = plugin_session(false);
-    let events = call(&mut agg, "tc-1", "skill", r#"{"name":"pdf:form-filling"}"#);
-
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, EventPayload::PluginEnabled(p) if p.id == "pdf")),
-        "got {events:?}"
-    );
-    assert_eq!(
-        sync_requests(&events),
-        ["pdf-renderer"],
-        "enabling is what wakes the plugin's servers"
-    );
-    assert!(agg.state.enabled_plugins(None).contains("pdf"));
-    assert!(
-        agg.state.skill_call("tc-1").is_some(),
-        "the call is frozen as a skill call for the executor"
-    );
-
-    let again = call(&mut agg, "tc-2", "skill", r#"{"name":"pdf:form-filling"}"#);
-    assert!(
-        !again
-            .iter()
-            .any(|e| matches!(e, EventPayload::PluginEnabled(_))),
-        "enabling is said once: {again:?}"
-    );
-}
-
-#[test]
-fn an_enabled_plugin_fetches_at_session_start() {
-    let mut agg = plugin_session(true);
     assert!(
         agg.state
             .has_effect(EffectKind::ConnectorSync, "pdf-renderer"),
-        "`enabled = true` is on from the start"
+        "naming a plugin is what turns it on"
     );
     settle_sync(&mut agg, "pdf-renderer", &["fill_form"]);
     assert!(
@@ -10959,8 +10917,21 @@ fn an_enabled_plugin_fetches_at_session_start() {
 }
 
 #[test]
+fn using_a_skill_only_freezes_the_call() {
+    let mut agg = plugin_session();
+    call(&mut agg, "tc-1", "skill", r#"{"name":"pdf:form-filling"}"#);
+    assert!(
+        agg.state.skill_call("tc-1").is_some(),
+        "the call is frozen as a skill call for the executor"
+    );
+}
+
+#[test]
 fn the_catalog_rides_the_first_prompt_once() {
-    let mut agg = plugin_session(false);
+    let mut agg = plugin_session();
+    // The plugin's servers are owed a fetch from the start, and a call waits
+    // for it — settled here so the first prompt is the first call's.
+    settle_sync(&mut agg, "pdf-renderer", &["fill_form"]);
     let prompt = |agg: &mut SessionAggregate, id: &str| {
         dispatch(
             agg,
@@ -11000,31 +10971,53 @@ fn the_catalog_rides_the_first_prompt_once() {
 }
 
 #[test]
-fn a_branch_from_before_the_enablement_does_not_inherit_it() {
-    let mut agg = plugin_session(false);
-    let ctx = CommitContext {
-        span: SpanContext::root(),
-        occurred_at: Utc::now(),
-    };
-    agg.commit(
-        vec![EventPayload::NewMessage(NewMessage {
-            message: node_msg("u1", Role::User, "hi").record(),
-            parent_id: None,
-        })],
-        &ctx,
-    );
-    call(&mut agg, "tc-1", "skill", r#"{"name":"pdf:form-filling"}"#);
-    assert!(agg.state.enabled_plugins(Some("u1")).contains("pdf"));
+fn a_worker_adding_a_plugin_mid_session_wakes_its_servers() {
+    let mut agg =
+        create_session_with_config("sess-1", "tenant-a", "user-1", Some(agent_config("m1")));
+    assert!(!agg
+        .state
+        .has_effect(EffectKind::ConnectorSync, "pdf-renderer"));
 
-    agg.commit(
-        vec![EventPayload::NewMessage(NewMessage {
-            message: node_msg("u2", Role::User, "other branch").record(),
-            parent_id: None,
-        })],
-        &ctx,
+    let d = open_decision(&mut agg, "hi");
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![node_msg("u1", Role::User, "hi")],
+            actions: vec![],
+            state: None,
+            agent: Some(plugin_config()),
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+    assert_eq!(
+        sync_requests(&events),
+        ["pdf-renderer"],
+        "the config write reads its own plugins"
+    );
+}
+
+#[test]
+fn a_declared_tool_named_skill_shadows_the_engines_and_is_a_collision() {
+    let mut cfg = plugin_config();
+    cfg.tools.push(AgentTool {
+        name: "skill".to_string(),
+        description: String::new(),
+        input: None,
+        output: None,
+        handler: Some(Handler::Client),
+        defer: None,
+    });
+    let agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(cfg));
+    let merged = agg.state.connector_tools(None);
+    assert!(
+        merged.collisions.contains(&"skill".to_string()),
+        "reported, so the warning has something to say: {:?}",
+        merged.collisions
     );
     assert!(
-        !agg.state.enabled_plugins(Some("u2")).contains("pdf"),
-        "the enablement is anchored where it happened"
+        !merged.tools.iter().any(|t| t.name == "skill"),
+        "the declared tool wins; the engine's is not offered"
     );
 }

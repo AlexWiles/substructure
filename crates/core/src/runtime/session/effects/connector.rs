@@ -115,7 +115,7 @@ pub(in crate::runtime::session) fn owed(state: &SessionState, leaf: Option<&str>
         .map(|connection_id| Dep::ConnectorSettled { connection_id })
         .collect();
     if let Some(config) = state.resolve_agent_for(leaf) {
-        for c in state.servers_for(&config, leaf) {
+        for c in state.servers_for(&config) {
             if state
                 .tracking(EffectKind::ConnectorSync, &c.id)
                 .is_some_and(EffectTracking::is_in_flight)
@@ -132,15 +132,15 @@ pub(in crate::runtime::session) fn owed(state: &SessionState, leaf: Option<&str>
 }
 
 /// Fetch every connection `config` reaches that this session has never
-/// fetched. An unenabled plugin's servers are not reached yet, so they are
-/// not fetched: enabling is what wakes them.
+/// fetched — a plugin's servers included, since naming the plugin is what
+/// reaches them.
 pub(in crate::runtime::session) fn sync(
     state: &SessionState,
     config: &AgentConfig,
 ) -> Vec<EventPayload> {
     let retry = RetryPolicy::resolve(None, config.retry.as_deref(), RetryTarget::ConnectorSync);
     state
-        .servers_for(config, state.head_id.as_deref())
+        .servers_for(config)
         .iter()
         .filter(|c| !state.has_effect(EffectKind::ConnectorSync, &c.id))
         .map(|c| {
@@ -194,7 +194,7 @@ impl SessionState {
             return;
         };
         let Some(connector) = self
-            .servers_for(&config, leaf.as_deref())
+            .servers_for(&config)
             .into_iter()
             .find(|c| c.id == connection_id)
         else {
@@ -226,9 +226,7 @@ impl SessionState {
         }
         // Names this fetch lost. Scoped to this connection, because every other
         // connection reports its own when it settles.
-        let collisions = self
-            .connector_tools_for_config(&config, leaf.as_deref())
-            .collisions;
+        let collisions = self.connector_tools_for_config(&config).collisions;
         for name in collisions
             .iter()
             .filter(|name| r.tools.iter().any(|t| &&t.name == name))
@@ -254,6 +252,12 @@ impl SessionState {
                      this connection's tools cannot be found"
                 );
             }
+        }
+        if !config.plugins.is_empty() && collisions.iter().any(|n| n == filter::SKILL) {
+            tracing::warn!(
+                "the config declares `skill`, so the engine's own is not offered; \
+                 this agent's plugins cannot be used"
+            );
         }
         if r.unannotated > 0 {
             tracing::warn!(

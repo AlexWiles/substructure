@@ -35,17 +35,14 @@ pub fn interrupt_id(connection: &str) -> String {
 pub fn needing(state: &SessionState) -> Option<(String, AuthNeed)> {
     let leaf = state.head_id.clone();
     let config = state.resolve_agent_for(leaf.as_deref())?;
-    state
-        .servers_for(&config, leaf.as_deref())
-        .into_iter()
-        .find_map(|server| {
-            if server.auth_failure == AuthFailure::Degrade {
-                return None;
-            }
-            let need = state.connector_sync(&server.id)?.auth?;
-            state
-                .open_interrupt(&interrupt_id(&server.id))
-                .is_none()
-                .then(|| (server.id.clone(), need))
-        })
+    state.servers_for(&config).into_iter().find_map(|server| {
+        if server.auth_failure == AuthFailure::Degrade {
+            return None;
+        }
+        let need = state.connector_sync(&server.id)?.auth?;
+        state
+            .open_interrupt(&interrupt_id(&server.id))
+            .is_none()
+            .then(|| (server.id.clone(), need))
+    })
 }

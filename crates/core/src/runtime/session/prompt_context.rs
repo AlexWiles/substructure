@@ -51,7 +51,8 @@ pub fn owed(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<Prom
         .collect()
 }
 
-/// The connections this path has not announced yet.
+/// The connections this path has not announced yet — a plugin's servers
+/// included, since they behave as `mcp` entries.
 ///
 /// Once means once in the prompt. The record is the context id on an earlier
 /// call of this path, so a fork that never held the server announces it.
@@ -63,12 +64,12 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
         return Vec::new();
     }
     let said = state.context_ids_on_path(leaf, call_id);
-    config
-        .mcp
-        .iter()
-        .map(|server| (server, format!("mcp:{}", server.id)))
-        .filter(|(_, id)| !said.contains(id))
-        .filter_map(|(server, id)| {
+    state
+        .servers_for(&config)
+        .into_iter()
+        .map(|server| (format!("mcp:{}", server.id), server))
+        .filter(|(id, _)| !said.contains(id))
+        .filter_map(|(id, server)| {
             Some(PromptContext {
                 id,
                 placement: Placement::System,
@@ -80,11 +81,6 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
         .collect()
 }
 
-/// Skill descriptions ride the catalog until the entries said so far pass
-/// this; names always ride. The frontier harnesses' cap, so a plugin-heavy
-/// agent degrades to names rather than flooding the prompt.
-const CATALOG_BUDGET: usize = 4000;
-
 /// One catalog entry per plugin the path has not seen: what it is, its
 /// skills, and that the `skill` tool is the way in. Each plugin is its own
 /// context, so one declared mid-session introduces itself through the ladder
@@ -94,7 +90,6 @@ fn plugin_catalog(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Ve
         return Vec::new();
     };
     let said = state.context_ids_on_path(leaf, call_id);
-    let mut spent = 0usize;
     config
         .plugins
         .iter()
@@ -104,19 +99,16 @@ fn plugin_catalog(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Ve
             let skills: Vec<SkillListing> = plugin
                 .skills
                 .iter()
-                .map(|s| {
-                    spent += s.description.len();
-                    SkillListing {
-                        name: format!("{}:{}", plugin.id, s.name),
-                        description: (spent <= CATALOG_BUDGET).then(|| s.description.clone()),
-                    }
+                .map(|s| SkillListing {
+                    name: format!("{}:{}", plugin.id, s.name),
+                    description: s.description.clone(),
                 })
                 .collect();
             let content = serde_json::to_string(&PluginListing {
                 plugin: &plugin.id,
                 about: (!plugin.description.is_empty()).then_some(&plugin.description),
                 skills,
-                usage: "load a skill with the `skill` tool; using one activates the plugin",
+                usage: "load a skill with the `skill` tool",
             })
             .unwrap_or_default();
             PromptContext {
@@ -141,8 +133,8 @@ struct PluginListing<'a> {
 #[derive(serde::Serialize)]
 struct SkillListing {
     name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    description: String,
 }
 
 /// Merge what this call does not already hold. `applied` is the record, not the
@@ -225,7 +217,130 @@ fn message(call_id: &str, context: &str, role: Role, content: &str) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::StoredContent;
+    use crate::connectors::RemoteTool;
+    use crate::protocol::{AgentConfig, AgentPlugin, RetryPolicy, SkillMeta, StoredContent};
+    use crate::runtime::session::events::{
+        AgentConfigUpdated, ConnectorSyncCompleted, ConnectorSyncRequested, EventPayload,
+    };
+    use crate::session::state::ApplyContext;
+
+    fn apply(state: &mut SessionState, seq: u64, payload: EventPayload) {
+        state.apply(
+            &payload,
+            &ApplyContext {
+                occurred_at: chrono::Utc::now(),
+                sequence: seq,
+            },
+        );
+    }
+
+    fn plugin_state(settled: bool) -> SessionState {
+        let mut s = SessionState::new("sess-1".to_string());
+        apply(
+            &mut s,
+            1,
+            EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                config: AgentConfig {
+                    llm: None,
+                    model: "m1".to_string(),
+                    system: None,
+                    effort: None,
+                    retry: None,
+                    tools: vec![],
+                    sub_agents: vec![],
+                    mcp: vec![],
+                    plugins: vec![AgentPlugin {
+                        id: "pdf".to_string(),
+                        description: "PDF work.".to_string(),
+                        skills: vec![
+                            SkillMeta {
+                                name: "form-filling".to_string(),
+                                description: "long ".repeat(500),
+                            },
+                            SkillMeta {
+                                name: "text-extraction".to_string(),
+                                description: "also long ".repeat(500),
+                            },
+                        ],
+                        servers: vec!["pdf-renderer".to_string()],
+                        tools: None,
+                        auth_failure: Default::default(),
+                        approve: Default::default(),
+                    }],
+                    defer_tools: None,
+                    announce_mcp: Default::default(),
+                },
+                anchor: None,
+            }),
+        );
+        if settled {
+            apply(
+                &mut s,
+                3,
+                EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
+                    id: "pdf-renderer".to_string(),
+                    attempt: 0,
+                    retry: RetryPolicy::no_retry(),
+                }),
+            );
+            apply(
+                &mut s,
+                4,
+                EventPayload::ConnectorSyncCompleted(Box::new(ConnectorSyncCompleted {
+                    id: "pdf-renderer".to_string(),
+                    prefix: Some("pdf-renderer".to_string()),
+                    tools: vec![RemoteTool {
+                        name: "fill_form".to_string(),
+                        description: String::new(),
+                        input: None,
+                        output: None,
+                        annotations: Default::default(),
+                    }],
+                    instructions: None,
+                })),
+            );
+        }
+        s
+    }
+
+    fn owed_ids(state: &SessionState) -> Vec<String> {
+        owed(state, None, "call-1")
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    #[test]
+    fn a_plugins_settled_server_is_announced_like_any_connection() {
+        let state = plugin_state(true);
+        assert_eq!(owed_ids(&state), ["plugin:pdf", "mcp:pdf-renderer"]);
+        let owed = owed(&state, None, "call-1");
+        assert!(
+            owed[1]
+                .content
+                .starts_with("{\"mcp_server\":\"pdf-renderer\""),
+            "{}",
+            owed[1].content
+        );
+    }
+
+    #[test]
+    fn a_plugins_unsettled_server_is_not_announced() {
+        let state = plugin_state(false);
+        assert_eq!(
+            owed_ids(&state),
+            ["plugin:pdf"],
+            "the catalog speaks; the server has not answered yet"
+        );
+    }
+
+    #[test]
+    fn the_catalog_carries_every_skill_description() {
+        let state = plugin_state(false);
+        let catalog = &owed(&state, None, "call-1")[0].content;
+        assert!(catalog.matches("long long").count() >= 2, "{catalog}");
+        assert!(catalog.contains("pdf:text-extraction"), "{catalog}");
+    }
 
     #[test]
     fn inline_context_keeps_image_parts() {
