@@ -32,9 +32,7 @@ use super::events::*;
 use super::prompt_context;
 use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{
-    AgentTool, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, Handler, McpServer,
-};
+use crate::protocol::{AgentTool, ConnectorTool, DeferToolsStrategy, Handler, McpServer};
 
 /// One connection as the engine's own tools see it: what the agent declared,
 /// what the connection offered, and what it said it is for.
@@ -1903,30 +1901,7 @@ impl SessionState {
         let leaf = effect.anchor.clone();
         let tc = effect.tool()?;
         let target = tc.target.as_ref()?;
-        if target.kind.is_remote() {
-            return None;
-        }
-        let argument = |key: &str| {
-            serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                .ok()
-                .and_then(|v| v.get(key)?.as_str().map(str::to_string))
-                .unwrap_or_default()
-        };
-        match target.kind {
-            ConnectorToolKind::Remote => None,
-            ConnectorToolKind::Find => Some(LocalAnswer::Result(filter::find_answer(
-                &self.searchable_tools(leaf.as_deref()),
-                &argument("query"),
-                self.resolve_agent_for(leaf.as_deref())
-                    .map(|c| c.defer_settings())
-                    .unwrap_or_default()
-                    .max_matches,
-            ))),
-            ConnectorToolKind::Call => Some(LocalAnswer::Error(
-                self.call_tool_fault(&tc.arguments, leaf.as_deref())
-                    .unwrap_or_else(|| "the call could not be routed".to_string()),
-            )),
-        }
+        super::engine_tools::answer(self, target.kind, leaf.as_deref(), &tc.arguments)
     }
 
     /// Every tool the agent can reach, deferred or not, as the model would see

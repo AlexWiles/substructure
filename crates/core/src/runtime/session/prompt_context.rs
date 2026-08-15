@@ -36,10 +36,19 @@ pub struct PromptContext {
     pub content: String,
 }
 
-/// Everything the engine owes this call, in a fixed order — two replays that
-/// disagreed would send two different prompts.
+/// A source of engine-derived context, pure over [`SessionState`].
+pub type Contributor = fn(&SessionState, Option<&str>, &str) -> Vec<PromptContext>;
+
+/// Every source, in a fixed order — two replays that disagreed would send two
+/// different prompts. A new source is one entry here.
+const CONTRIBUTORS: &[Contributor] = &[announce_servers];
+
+/// Everything the engine owes this call.
 pub fn owed(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<PromptContext> {
-    announce_servers(state, leaf, call_id)
+    CONTRIBUTORS
+        .iter()
+        .flat_map(|contribute| contribute(state, leaf, call_id))
+        .collect()
 }
 
 /// The connections this path has not announced yet.
