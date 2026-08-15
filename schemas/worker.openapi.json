@@ -138,6 +138,27 @@
         ],
         "title": "Announce"
       },
+      "Approve": {
+        "description": "Which calls on a connection stop for a person first. Like [`AuthFailure`],\nit belongs to the pair: only an agent someone watches can be asked.",
+        "oneOf": [
+          {
+            "const": "never",
+            "description": "Nothing asks.",
+            "type": "string"
+          },
+          {
+            "const": "destructive",
+            "description": "A tool the connection does not call read-only, and does not call\nnon-destructive. Silence is destructive, as the MCP spec reads it.",
+            "type": "string"
+          },
+          {
+            "const": "always",
+            "description": "Every call on this connection.",
+            "type": "string"
+          }
+        ],
+        "title": "Approve"
+      },
       "AuthFailure": {
         "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
         "oneOf": [
@@ -1500,6 +1521,10 @@
         "additionalProperties": false,
         "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
         "properties": {
+          "approve": {
+            "$ref": "#/components/schemas/Approve",
+            "description": "Which of this connection's calls wait for a person. Absent ⇒ none do."
+          },
           "auth_failure": {
             "$ref": "#/components/schemas/AuthFailure"
           },

@@ -9,6 +9,12 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Support approval interrupts on destructive MCP tools.
+
+### Fixed
+
 ## [0.6.0] - 2026-08-14
 
 ### Added

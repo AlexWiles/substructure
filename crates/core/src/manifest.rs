@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
 use crate::protocol::ReasoningEffort;
 use crate::protocol::{
-    AgentConfig, AgentTool, AuthFailure, ConnectorProtocol, DeferTools, Handler, LlmFormat,
-    McpServer, McpTools, RetryConfig, SubAgent,
+    AgentConfig, AgentTool, Approve, AuthFailure, ConnectorProtocol, DeferTools, Handler,
+    LlmFormat, McpServer, McpTools, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -354,6 +354,9 @@ pub struct McpEntry {
     pub tools: Option<McpToolsEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_failure: Option<AuthFailure>,
+    /// Which calls stop for a person. Absent ⇒ none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approve: Option<Approve>,
 }
 
 /// The file's spelling of [`McpTools`], mirrored for the one reason
@@ -405,11 +408,13 @@ impl McpRef {
                 id: id.clone(),
                 tools: None,
                 auth_failure: AuthFailure::default(),
+                approve: Approve::default(),
             },
             Self::Filtered(entry) => McpServer {
                 id: entry.id.clone(),
                 tools: entry.tools.as_ref().map(McpToolsEntry::to_wire),
                 auth_failure: entry.auth_failure.unwrap_or_default(),
+                approve: entry.approve.unwrap_or_default(),
             },
         }
     }
@@ -1014,6 +1019,28 @@ mod tests {
             mcp[0].tools.as_ref().expect("a filter").read_only,
             Some(true)
         );
+    }
+
+    #[test]
+    fn approve_is_read_from_the_entry_that_names_the_connection() {
+        let m = connected(r#"[{ id = "sentry", approve = "destructive" }]"#).unwrap();
+        m.validate().unwrap();
+        let agents = m.agents();
+        let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
+        assert_eq!(mcp[0].approve, Approve::Destructive);
+
+        let m = connected(r#"["sentry"]"#).unwrap();
+        let agents = m.agents();
+        let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
+        assert_eq!(mcp[0].approve, Approve::Never, "nothing asks by default");
+    }
+
+    #[test]
+    fn an_unknown_approve_value_is_an_error() {
+        let err = connected(r#"[{ id = "sentry", approve = "sometimes" }]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sometimes"), "names the value: {err}");
     }
 
     /// The wire `McpServer` allows unknown fields, so a misspelled `tools` used

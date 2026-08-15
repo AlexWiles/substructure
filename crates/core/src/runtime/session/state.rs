@@ -1782,6 +1782,22 @@ impl SessionState {
         }
     }
 
+    /// Every model tool call this session has taken on, in any state. Unlike
+    /// [`effects`](Self::effects), a settled one stays: it answers whether a
+    /// call was ever ours to run, which its result alone cannot while the
+    /// decision recording that result is still undelivered.
+    pub fn dispatched_calls(&self) -> Vec<String> {
+        self.effects
+            .values()
+            .filter_map(|e| match e.kind() {
+                EffectKind::ToolCall => Some(e.id.clone()),
+                // Keyed by the child session; the call it answers is inside.
+                EffectKind::SubAgent => e.sub_agent().map(|s| s.tool_call_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The connector tool `name` resolves to on the current path, if any. The
     /// executor reads `connector`/`remote_name` off this to place the call.
     pub fn connector_tool_for(&self, name: &str) -> Option<ConnectorTool> {
@@ -2648,6 +2664,7 @@ mod agent_version_tests {
                         id: "sentry".to_string(),
                         tools: None,
                         auth_failure: Default::default(),
+                        approve: Default::default(),
                     }],
                     ..config(model)
                 },

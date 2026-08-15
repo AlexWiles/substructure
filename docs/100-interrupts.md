@@ -28,6 +28,9 @@ function decide({ trigger, proposed }) {
 }
 ```
 
+The engine raises one itself where a connection says to: see
+[Approving a call](./40-connectors.md#approving-a-call).
+
 A person resumes it by id.
 
 ```jsonc
@@ -78,6 +81,30 @@ The rest of the tree stays live. A client view that edits an earlier message
 branches below the interrupt's anchor and runs as normal. The interrupt stays
 open on the branch they left.
 
+## Answering a prompt
+
+A payload with `metadata.options` renders as a pick — Slack buttons, say. A
+channel answers one on the person's behalf, and the resume it sends says which
+option was picked.
+
+```json
+{ "status": "resolved",
+  "payload": { "decision": "approve" },
+  "responder": { "channel": "slack", "user": "U…", "label": "Approve", "style": "primary" } }
+```
+
+The inner `payload` is the chosen option's `value`, read from the recorded
+interrupt — so a click cannot send a value the interrupt did not offer. The
+`responder` is stamped by the channel, never by the requester: it names who
+answered, and carries the option's `label` and `style`, which are gone once the
+interrupt resolves.
+
+Answering is a decision like any other. The engine proposes the resolution
+above, so a worker that returns `proposed` needs no code for it; one that wants
+its own rules — who may answer, or a refusal — answers the decision itself. A
+channel can deliver the same click twice, so record the ones you have handled in
+worker state.
+
 ## Spec
 
 ```typescript
@@ -96,6 +123,7 @@ open on the branch they left.
 
 ## Next
 
+- [Connectors](./40-connectors.md#approving-a-call): stop before a destructive MCP call.
 - [Slack](./130-slack.md#interrupt-prompts): approval buttons in a thread.
 - [Async tools](./110-async-tools.md): wait on one call instead of the session.
 - [Durability](./200-durability.md): the engine saves the pause.

@@ -150,7 +150,9 @@ async fn run(
             responder: Some(crate::protocol::InterruptResponder {
                 channel: "ag-ui".to_string(),
                 user: None,
+                // No option was picked: the client sends its own payload.
                 label: None,
+                style: None,
             }),
         })
         .unwrap_or_default();

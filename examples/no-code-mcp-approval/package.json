@@ -1,0 +1,8 @@
+{
+  "name": "@substructure.ai/example-no-code-mcp-approval",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node mcp-server.mjs"
+  }
+}

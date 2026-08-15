@@ -137,6 +137,27 @@
       ],
       "title": "Announce"
     },
+    "Approve": {
+      "description": "Which calls on a connection stop for a person first. Like [`AuthFailure`],\nit belongs to the pair: only an agent someone watches can be asked.",
+      "oneOf": [
+        {
+          "const": "never",
+          "description": "Nothing asks.",
+          "type": "string"
+        },
+        {
+          "const": "destructive",
+          "description": "A tool the connection does not call read-only, and does not call\nnon-destructive. Silence is destructive, as the MCP spec reads it.",
+          "type": "string"
+        },
+        {
+          "const": "always",
+          "description": "Every call on this connection.",
+          "type": "string"
+        }
+      ],
+      "title": "Approve"
+    },
     "AudioData": {
       "additionalProperties": false,
       "properties": {
@@ -2034,6 +2055,13 @@
             "null"
           ]
         },
+        "style": {
+          "description": "The chosen option's `style`, when the resolution was a pick.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "user": {
           "description": "Channel-native user id.",
           "type": [
@@ -2217,6 +2245,10 @@
       "additionalProperties": false,
       "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
       "properties": {
+        "approve": {
+          "$ref": "#/$defs/Approve",
+          "description": "Which of this connection's calls wait for a person. Absent ⇒ none do."
+        },
         "auth_failure": {
           "$ref": "#/$defs/AuthFailure"
         },

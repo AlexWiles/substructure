@@ -14,6 +14,10 @@
 //! `turn.finished` proposes a bare `done`, so an echoing worker transparently
 //! settles the turn's deferred `SessionDone`.
 //!
+//! A call a connection says to ask about first is not dispatched: the proposal
+//! interrupts instead, one question per call, and the answer runs that call or
+//! records a refusal as its result.
+//!
 //! A proposal is advice, not authority: the engine never applies one, so the
 //! worker remains the sole author of every decision. `tool.execute` for a
 //! declared tool with valid arguments — the computation itself — needs worker
@@ -35,18 +39,42 @@ use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::StoredContent;
 use crate::protocol::{
-    AgentConfig, ClientContext, Content, DecisionAction, DecisionResponse, DecisionTrigger,
-    DraftMessage, ErrorInfo, Message, Role, StoredResult, ToolCall,
+    AgentConfig, ClientContext, ConnectorTool, ConnectorToolKind, Content, DecisionAction,
+    DecisionResponse, DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, StoredResult,
+    ToolCall,
 };
 
-pub fn propose(
-    trigger: &DecisionTrigger,
-    transcript: &[Message],
-    llm_calls: &HashMap<String, EffectState>,
-    pending_calls: usize,
-    config: Option<&AgentConfig>,
-    decision_id: &str,
-) -> Option<DecisionResponse> {
+/// Prefixes an interrupt this file raised, and carries the call it holds.
+const APPROVAL: &str = "mcp-approve:";
+
+/// One moment of the session, which is all a proposal may read. Stated rather
+/// than taken from the session itself, so the derivation stays pure and a test
+/// can write down what it means to propose against.
+pub struct Proposing<'a> {
+    /// The recorded path to the head.
+    pub transcript: &'a [Message],
+    /// The model calls of that path, by the id of the message each produced.
+    pub llm_calls: &'a HashMap<String, EffectState>,
+    /// Work the engine still owes an answer for, this decision aside.
+    pub pending_calls: usize,
+    /// [`SessionState::dispatched_calls`](super::state::SessionState::dispatched_calls):
+    /// settled ones included, so it holds calls the transcript does not answer.
+    pub dispatched: &'a [String],
+    pub config: Option<&'a AgentConfig>,
+    pub connector_tools: &'a [ConnectorTool],
+    pub decision_id: &'a str,
+}
+
+pub fn propose(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionResponse> {
+    let &Proposing {
+        transcript,
+        llm_calls,
+        pending_calls,
+        config,
+        connector_tools,
+        decision_id,
+        dispatched: _,
+    } = p;
     match trigger {
         // The engine can now author the agent's identity: record the client's
         // view and prompt the model per the config. No config ⇒ interrupt.
@@ -62,7 +90,13 @@ pub fn propose(
             truncated: false,
             refused: false,
             ..
-        } => Some(llm_finished(message, transcript, config, decision_id)),
+        } => Some(llm_finished(
+            message,
+            transcript,
+            config,
+            connector_tools,
+            decision_id,
+        )),
         DecisionTrigger::LlmFinished {
             id,
             ok,
@@ -127,6 +161,15 @@ pub fn propose(
             }],
             ..Default::default()
         }),
+        DecisionTrigger::InterruptResumed { resumption }
+            if resumption.interrupt_id.starts_with(APPROVAL) =>
+        {
+            Some(approval_resumed(
+                &resumption.payload,
+                &resumption.interrupt_id,
+                p,
+            ))
+        }
         // Pick the turn back up where it stopped: re-issue the model call over
         // the current transcript. Without this an engine-hosted session that
         // ever interrupts — after `llm.failed`, say — could never be resumed,
@@ -169,13 +212,20 @@ fn llm_finished(
     message: &DraftMessage,
     transcript: &[Message],
     config: Option<&AgentConfig>,
+    connector_tools: &[ConnectorTool],
     decision_id: &str,
 ) -> DecisionResponse {
     let tool_calls = message.tool_calls.as_deref().unwrap_or_default();
+    let mut held = tool_calls
+        .iter()
+        .filter(|call| approval_needed(call, connector_tools));
+    let first_held = held.next();
     let actions = if tool_calls.is_empty() {
         vec![DecisionAction::Done {
             data: serde_json::to_value(&message.content).unwrap_or_default(),
         }]
+    } else if let Some(first) = first_held {
+        vec![ask(first, connector_tools, held.count())]
     } else {
         tool_calls
             .iter()
@@ -187,6 +237,256 @@ fn llm_finished(
         actions,
         ..Default::default()
     }
+}
+
+/// Stop and ask before this one call runs. One question at a time, because a
+/// branch holds one open interrupt: the answer to this one raises the next.
+fn ask(held: &ToolCall, connector_tools: &[ConnectorTool], remaining: usize) -> DecisionAction {
+    let name = ran_name(held, connector_tools);
+    let arguments = ran_arguments(held, connector_tools);
+    // Slack's mrkdwn has no language tag and renders one as a line of the block.
+    let shown = match &arguments {
+        serde_json::Value::Object(o) if o.is_empty() => String::new(),
+        serde_json::Value::Null => String::new(),
+        value => format!(
+            "\n\n```\n{}\n```",
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        ),
+    };
+    let after = match remaining {
+        0 => String::new(),
+        1 => "\n\nOne more call waits behind it.".to_string(),
+        n => format!("\n\n{n} more calls wait behind it."),
+    };
+    DecisionAction::Interrupt {
+        interrupt_id: Some(format!("{APPROVAL}{}", held.id)),
+        reason: format!("`{name}` needs approval before it runs"),
+        payload: serde_json::json!({
+            "message": format!("Run `{name}`?{shown}{after}"),
+            "tool_call_id": held.id,
+            "metadata": {
+                "type": "tool.approval",
+                "tool": name,
+                "arguments": arguments,
+                "remaining": remaining,
+                "options": [
+                    { "label": "Run it", "value": { "approved": true }, "style": "primary" },
+                    { "label": "Decline", "value": { "approved": false }, "style": "danger" },
+                ],
+            },
+        }),
+    }
+}
+
+/// Answer the one call this approval held, then ask about the next one. An id
+/// naming no outstanding call is a resume this file did not raise.
+fn approval_resumed(
+    payload: &serde_json::Value,
+    interrupt_id: &str,
+    p: &Proposing<'_>,
+) -> DecisionResponse {
+    let &Proposing {
+        transcript,
+        llm_calls,
+        pending_calls,
+        dispatched,
+        config,
+        connector_tools,
+        decision_id,
+    } = p;
+    let asked = interrupt_id.trim_start_matches(APPROVAL);
+    let Some((at, call)) = asked_about(asked, transcript, dispatched) else {
+        return match config {
+            Some(c) => resumed(transcript, c),
+            None => DecisionResponse {
+                messages: recorded(transcript),
+                ..Default::default()
+            },
+        };
+    };
+
+    // The call never ran, so a decline has no effect to fail: the refusal is
+    // recorded as its result.
+    let approved = approved(payload);
+    let refusals = match approved {
+        true => Vec::new(),
+        false => vec![refusal(call)],
+    };
+    let mut actions = match approved {
+        true => route_tool_call(call, config, decision_id),
+        false => Vec::new(),
+    };
+
+    let waiting: Vec<&ToolCall> = transcript[at]
+        .tool_calls
+        .iter()
+        .filter(|c| c.id != call.id && !settled(&c.id, at, transcript, dispatched))
+        .collect();
+    let mut gated = waiting
+        .iter()
+        .filter(|c| approval_needed(c, connector_tools));
+    match gated.next() {
+        Some(next) => actions.push(ask(next, connector_tools, gated.count())),
+        None => actions.extend(
+            waiting
+                .iter()
+                .flat_map(|c| route_tool_call(c, config, decision_id)),
+        ),
+    }
+
+    // The last word on the message prompts the model again; a call still away
+    // in the engine speaks for itself when it settles.
+    if actions.is_empty() && pending_calls == 0 && siblings_answered(&call.id, transcript) {
+        actions.extend(reissue(&call.id, &refusals, transcript, llm_calls));
+    }
+    let mut messages = recorded(transcript);
+    messages.extend(refusals);
+    DecisionResponse {
+        messages,
+        actions,
+        ..Default::default()
+    }
+}
+
+/// Where the message that made `tool_call_id` sits, and the call itself, while
+/// the call is outstanding. So a repeated answer runs nothing.
+fn asked_about<'a>(
+    tool_call_id: &str,
+    transcript: &'a [Message],
+    dispatched: &[String],
+) -> Option<(usize, &'a ToolCall)> {
+    let at = transcript
+        .iter()
+        .rposition(|m| m.tool_calls.iter().any(|c| c.id == tool_call_id))?;
+    let call = transcript[at]
+        .tool_calls
+        .iter()
+        .find(|c| c.id == tool_call_id)?;
+    (!settled(tool_call_id, at, transcript, dispatched)).then_some((at, call))
+}
+
+/// Whether a call has been dealt with: a result recorded, or the engine already
+/// holding it. A call away in the engine may have neither yet, because the
+/// decision recording its result can be held behind this very question.
+fn settled(tool_call_id: &str, at: usize, transcript: &[Message], dispatched: &[String]) -> bool {
+    answered(tool_call_id, at, transcript) || dispatched.iter().any(|id| id == tool_call_id)
+}
+
+/// Whether every other call of the message that made `tool_call_id` has been
+/// answered; `true` where the message cannot be found. A call held by an
+/// approval is in nobody's queue, so the in-flight count alone would re-prompt
+/// the model with a call it never answered — which every provider rejects.
+fn siblings_answered(tool_call_id: &str, transcript: &[Message]) -> bool {
+    let Some(at) = transcript
+        .iter()
+        .rposition(|m| m.tool_calls.iter().any(|c| c.id == tool_call_id))
+    else {
+        return true;
+    };
+    transcript[at]
+        .tool_calls
+        .iter()
+        .all(|c| c.id == tool_call_id || answered(&c.id, at, transcript))
+}
+
+/// Whether a call of the message at `at` has its result recorded.
+fn answered(tool_call_id: &str, at: usize, transcript: &[Message]) -> bool {
+    transcript[at..]
+        .iter()
+        .any(|m| m.tool_call_id.as_deref() == Some(tool_call_id))
+}
+
+/// What the model reads where the result would have been.
+fn refusal(call: &ToolCall) -> DraftMessage {
+    DraftMessage {
+        id: None,
+        role: Role::Tool,
+        content: Some(Content::Text(
+            "A person declined this call. Do not try it again; \
+             say what you were going to do and why it stopped."
+                .to_string(),
+        )),
+        tool_calls: None,
+        tool_call_id: Some(call.id.clone()),
+        name: Some(call.function.name.clone()),
+        reasoning: None,
+    }
+}
+
+/// Whether a resume says to go ahead. Anything unrecognized does not: this
+/// gates the call nobody wanted run by accident.
+fn approved(payload: &serde_json::Value) -> bool {
+    if payload.get("status").and_then(|s| s.as_str()) == Some("cancelled") {
+        return false;
+    }
+    // A channel wraps its answer in an `InterruptResolution`; a person posting
+    // one by hand sends the answer itself.
+    payload
+        .get("payload")
+        .unwrap_or(payload)
+        .get("approved")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn approval_needed(call: &ToolCall, connector_tools: &[ConnectorTool]) -> bool {
+    target_of(call, connector_tools).is_some_and(|tool| tool.approve)
+}
+
+fn ran_name<'a>(call: &'a ToolCall, connector_tools: &'a [ConnectorTool]) -> &'a str {
+    target_of(call, connector_tools)
+        .map(|t| t.name.as_str())
+        .unwrap_or(&call.function.name)
+}
+
+/// The arguments the tool would run with: the tool's own, unwrapped from
+/// `call_tool` as the executor unwraps them.
+fn ran_arguments(call: &ToolCall, connector_tools: &[ConnectorTool]) -> serde_json::Value {
+    let written = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+        .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
+    let wrapped = target_of(call, connector_tools)
+        .is_some_and(|t| t.name != call.function.name)
+        .then(|| written.get("arguments").cloned())
+        .flatten();
+    match wrapped {
+        Some(serde_json::Value::String(text)) => {
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text))
+        }
+        Some(value) => value,
+        None => written,
+    }
+}
+
+fn target_of<'a>(
+    call: &ToolCall,
+    connector_tools: &'a [ConnectorTool],
+) -> Option<&'a ConnectorTool> {
+    approval_target(
+        &call.function.name,
+        &call.function.arguments,
+        connector_tools,
+    )
+}
+
+/// The connector tool a call runs: the one it names, or for the engine's
+/// `call_tool`, the one its arguments name.
+fn approval_target<'a>(
+    name: &str,
+    arguments: &str,
+    connector_tools: &'a [ConnectorTool],
+) -> Option<&'a ConnectorTool> {
+    let named = connector_tools.iter().find(|t| t.name == name)?;
+    if named.kind != ConnectorToolKind::Call {
+        return Some(named);
+    }
+    let inner = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()?
+        .get("name")?
+        .as_str()?
+        .to_string();
+    connector_tools
+        .iter()
+        .find(|t| t.name == inner && t.kind.is_remote())
 }
 
 /// Dispatch one model tool call per config: a sub-agent spawn (paired with the
@@ -429,10 +729,15 @@ fn tool_finished(
         name: Some(name.to_string()),
         reasoning: None,
     };
-    let actions = if pending_calls > 0 {
+    let actions = if pending_calls > 0 || !siblings_answered(id, transcript) {
         Vec::new()
     } else {
-        vec![reissue(id, &tool_message, transcript, llm_calls)?]
+        vec![reissue(
+            id,
+            std::slice::from_ref(&tool_message),
+            transcript,
+            llm_calls,
+        )?]
     };
     Some(DecisionResponse {
         messages: appended(transcript, tool_message),
@@ -443,12 +748,12 @@ fn tool_finished(
 
 /// The parent llm.call re-issued: its verbatim prompt (preserving any prompt
 /// shaping the worker did — system message, compaction) extended with the
-/// recorded path from the assistant message on, plus this tool result. The
-/// parent is named by lineage: the tool call id appears in exactly one
-/// assistant message, recorded under its llm.call's id.
+/// recorded path from the assistant message on, plus the tool results this
+/// decision adds. The parent is named by lineage: the tool call id appears in
+/// exactly one assistant message, recorded under its llm.call's id.
 fn reissue(
     tool_call_id: &str,
-    tool_message: &DraftMessage,
+    tool_messages: &[DraftMessage],
     transcript: &[Message],
     llm_calls: &HashMap<String, EffectState>,
 ) -> Option<DecisionAction> {
@@ -470,7 +775,7 @@ fn reissue(
             .cloned()
             .map(DraftMessage::from),
     );
-    messages.push(tool_message.clone());
+    messages.extend(tool_messages.iter().cloned());
 
     // Every field is explicit from the stored spec, so the seam merges nothing:
     // this preserves any per-turn override (model, venue, prompt shaping) for the loop.
@@ -541,6 +846,40 @@ mod tests {
     };
     use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
+
+    fn inputs<'a>(
+        transcript: &'a [Message],
+        llm_calls: &'a HashMap<String, EffectState>,
+    ) -> Proposing<'a> {
+        Proposing {
+            transcript,
+            llm_calls,
+            pending_calls: 0,
+            dispatched: &[],
+            config: None,
+            connector_tools: &[],
+            decision_id: "d0",
+        }
+    }
+
+    fn propose(
+        trigger: &DecisionTrigger,
+        transcript: &[Message],
+        llm_calls: &HashMap<String, EffectState>,
+        pending_calls: usize,
+        config: Option<&AgentConfig>,
+        decision_id: &str,
+    ) -> Option<DecisionResponse> {
+        super::propose(
+            trigger,
+            &Proposing {
+                pending_calls,
+                config,
+                decision_id,
+                ..inputs(transcript, llm_calls)
+            },
+        )
+    }
 
     fn msg(id: &str, role: Role, text: &str) -> Message {
         Message {
@@ -1369,5 +1708,693 @@ mod tests {
         assert_eq!(child_session_id("d1", "tc1"), child_session_id("d1", "tc1"));
         assert_ne!(child_session_id("d1", "tc1"), child_session_id("d1", "tc2"));
         assert_ne!(child_session_id("d1", "tc1"), child_session_id("d2", "tc1"));
+    }
+
+    // ── approval ─────────────────────────────────────────────────────────
+
+    fn connector_tool(name: &str, approve: bool) -> ConnectorTool {
+        ConnectorTool {
+            name: name.to_string(),
+            description: String::new(),
+            input: None,
+            output: None,
+            connector: "sentry".to_string(),
+            via: Default::default(),
+            remote_name: name.to_string(),
+            kind: ConnectorToolKind::Remote,
+            defer: false,
+            approve,
+        }
+    }
+
+    fn gated() -> Vec<ConnectorTool> {
+        vec![
+            connector_tool("sentry__search", false),
+            connector_tool("sentry__delete", true),
+        ]
+    }
+
+    fn calling(calls: &[(&str, &str)], tools: &[ConnectorTool]) -> Option<DecisionResponse> {
+        let assistant = DraftMessage::from(assistant_with_calls("call-1", calls));
+        super::propose(
+            &llm_finished_trigger(assistant, true, false),
+            &Proposing {
+                connector_tools: tools,
+                ..inputs(&[msg("u1", Role::User, "hi")], &HashMap::new())
+            },
+        )
+    }
+
+    fn answer_with(
+        tool_call_id: &str,
+        payload: serde_json::Value,
+        transcript: &[Message],
+        llm_calls: &HashMap<String, EffectState>,
+        tools: &[ConnectorTool],
+        dispatched: &[String],
+    ) -> DecisionResponse {
+        let trigger = DecisionTrigger::InterruptResumed {
+            resumption: crate::protocol::InterruptResumption {
+                interrupt_id: format!("{APPROVAL}{tool_call_id}"),
+                payload,
+            },
+        };
+        super::propose(
+            &trigger,
+            &Proposing {
+                connector_tools: tools,
+                dispatched,
+                decision_id: "d1",
+                ..inputs(transcript, llm_calls)
+            },
+        )
+        .expect("the resume is answered")
+    }
+
+    fn answer(
+        tool_call_id: &str,
+        payload: serde_json::Value,
+        transcript: &[Message],
+        llm_calls: &HashMap<String, EffectState>,
+        tools: &[ConnectorTool],
+    ) -> DecisionResponse {
+        answer_with(tool_call_id, payload, transcript, llm_calls, tools, &[])
+    }
+
+    fn resume(
+        payload: serde_json::Value,
+        transcript: &[Message],
+        llm_calls: &HashMap<String, EffectState>,
+        tools: &[ConnectorTool],
+    ) -> DecisionResponse {
+        answer("tc-1", payload, transcript, llm_calls, tools)
+    }
+
+    fn result_of(tool_call_id: &str, name: &str) -> Message {
+        Message {
+            id: format!("m-{tool_call_id}"),
+            role: Role::Tool,
+            content: Some(Content::Text("done".to_string())),
+            tool_calls: vec![],
+            tool_call_id: Some(tool_call_id.to_string()),
+            name: Some(name.to_string()),
+            reasoning: None,
+        }
+    }
+
+    fn interrupt(action: &DecisionAction) -> (&str, &serde_json::Value) {
+        match action {
+            DecisionAction::Interrupt {
+                interrupt_id,
+                payload,
+                ..
+            } => (interrupt_id.as_deref().expect("a derived id"), payload),
+            other => panic!("expected an interrupt; got {other:?}"),
+        }
+    }
+
+    fn held() -> (Vec<Message>, HashMap<String, EffectState>) {
+        (
+            vec![
+                msg("u1", Role::User, "hi"),
+                assistant_with_calls("call-1", &[("tc-1", "sentry__delete")]),
+            ],
+            HashMap::from([("call-1".to_string(), call_state("call-1", vec![]))]),
+        )
+    }
+
+    #[test]
+    fn a_call_the_connection_asks_about_stops_before_it_runs() {
+        let p = calling(&[("tc-1", "sentry__delete")], &gated()).expect("proposes");
+        assert_eq!(
+            p.messages.len(),
+            2,
+            "the message is recorded; only the call waits"
+        );
+        match &p.actions[..] {
+            [DecisionAction::Interrupt {
+                interrupt_id,
+                reason,
+                payload,
+            }] => {
+                assert_eq!(
+                    interrupt_id.as_deref(),
+                    Some("mcp-approve:tc-1"),
+                    "the id carries the call, so an answer is bound to what was asked"
+                );
+                assert!(reason.contains("sentry__delete"), "got {reason:?}");
+                assert_eq!(payload["tool_call_id"], serde_json::json!("tc-1"));
+                assert_eq!(
+                    payload["metadata"]["options"][0]["value"]["approved"],
+                    serde_json::json!(true),
+                    "a channel renders the two answers as buttons"
+                );
+                assert_eq!(
+                    payload["metadata"]["options"][1]["value"]["approved"],
+                    serde_json::json!(false)
+                );
+            }
+            other => panic!("expected one interrupt; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_call_nobody_asks_about_is_dispatched_as_before() {
+        let p = calling(&[("tc-1", "sentry__search")], &gated()).expect("proposes");
+        assert!(
+            matches!(&p.actions[..], [DecisionAction::CallTool { .. }]),
+            "got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn a_question_holds_the_calls_nobody_asks_about_too() {
+        let p = calling(
+            &[("tc-1", "sentry__search"), ("tc-2", "sentry__delete")],
+            &gated(),
+        )
+        .expect("proposes");
+        assert!(
+            matches!(&p.actions[..], [DecisionAction::Interrupt { .. }]),
+            "nothing runs until it is answered; got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn an_approval_runs_the_call_it_held() {
+        let (transcript, llm_calls) = held();
+        let p = resume(
+            serde_json::json!({ "approved": true }),
+            &transcript,
+            &llm_calls,
+            &gated(),
+        );
+        match &p.actions[..] {
+            [DecisionAction::CallTool { id, name, .. }] => {
+                assert_eq!(id.as_deref(), Some("tc-1"));
+                assert_eq!(name, "sentry__delete");
+            }
+            other => panic!("expected the held call; got {other:?}"),
+        }
+        assert_eq!(p.messages.len(), 2, "nothing new is recorded");
+    }
+
+    // ── one question per call ────────────────────────────────────────────
+
+    fn two_held() -> (Vec<Message>, HashMap<String, EffectState>) {
+        (
+            vec![
+                msg("u1", Role::User, "hi"),
+                assistant_with_calls(
+                    "call-1",
+                    &[("tc-1", "sentry__delete"), ("tc-2", "sentry__delete")],
+                ),
+            ],
+            HashMap::from([("call-1".to_string(), call_state("call-1", vec![]))]),
+        )
+    }
+
+    #[test]
+    fn each_held_call_is_asked_about_on_its_own() {
+        let p = calling(
+            &[("tc-1", "sentry__delete"), ("tc-2", "sentry__delete")],
+            &gated(),
+        )
+        .expect("proposes");
+        let [action] = &p.actions[..] else {
+            panic!("one question at a time; got {:?}", p.actions)
+        };
+        let (id, payload) = interrupt(action);
+        assert_eq!(
+            id, "mcp-approve:tc-1",
+            "the first call is asked about first"
+        );
+        assert_eq!(
+            payload["metadata"]["remaining"],
+            serde_json::json!(1),
+            "a person deciding this one is told another is behind it"
+        );
+        assert!(
+            payload["message"]
+                .as_str()
+                .expect("a message")
+                .contains("One more call waits"),
+            "got {}",
+            payload["message"]
+        );
+    }
+
+    #[test]
+    fn a_question_carries_the_arguments_the_call_would_run_with() {
+        let mut assistant = assistant_with_calls("call-1", &[("tc-1", "sentry__delete")]);
+        assistant.tool_calls[0].function.arguments =
+            serde_json::json!({ "issue": "PROJ-42" }).to_string();
+        let p = super::propose(
+            &llm_finished_trigger(DraftMessage::from(assistant), true, false),
+            &Proposing {
+                connector_tools: &gated(),
+                ..inputs(&[msg("u1", Role::User, "hi")], &HashMap::new())
+            },
+        )
+        .expect("proposes");
+        let (_, payload) = interrupt(&p.actions[0]);
+        assert_eq!(
+            payload["metadata"]["arguments"],
+            serde_json::json!({ "issue": "PROJ-42" })
+        );
+        let message = payload["message"].as_str().expect("a message");
+        assert!(
+            message.contains("PROJ-42"),
+            "a channel that renders only the message still shows them; got {message}"
+        );
+        assert!(
+            !message.contains("```json"),
+            "Slack's mrkdwn has no language tag and renders one as a line of the \
+             block; got {message}"
+        );
+    }
+
+    #[test]
+    fn a_deferred_question_carries_the_inner_arguments() {
+        let mut tools = gated();
+        tools.push(ConnectorTool {
+            kind: ConnectorToolKind::Call,
+            ..connector_tool(crate::connectors::filter::CALL_TOOL, false)
+        });
+        let mut assistant = assistant_with_calls("call-1", &[("tc-1", "call_tool")]);
+        assistant.tool_calls[0].function.arguments = serde_json::json!({
+            "name": "sentry__delete",
+            "arguments": { "issue": "PROJ-42" },
+        })
+        .to_string();
+        let p = super::propose(
+            &llm_finished_trigger(DraftMessage::from(assistant), true, false),
+            &Proposing {
+                connector_tools: &tools,
+                ..inputs(&[msg("u1", Role::User, "hi")], &HashMap::new())
+            },
+        )
+        .expect("proposes");
+        let (_, payload) = interrupt(&p.actions[0]);
+        assert_eq!(
+            payload["metadata"]["arguments"],
+            serde_json::json!({ "issue": "PROJ-42" }),
+            "the wrapper's `name` is routing, not something to approve"
+        );
+    }
+
+    #[test]
+    fn a_question_about_a_call_with_no_arguments_shows_none() {
+        let p = calling(&[("tc-1", "sentry__delete")], &gated()).expect("proposes");
+        let (_, payload) = interrupt(&p.actions[0]);
+        assert_eq!(payload["metadata"]["arguments"], serde_json::json!({}));
+        assert_eq!(
+            payload["message"],
+            serde_json::json!("Run `sentry__delete`?"),
+            "an empty object is noise in front of a person"
+        );
+    }
+
+    #[test]
+    fn one_call_can_be_run_and_the_next_declined() {
+        let (transcript, llm_calls) = two_held();
+        let first = answer(
+            "tc-1",
+            serde_json::json!({ "approved": true }),
+            &transcript,
+            &llm_calls,
+            &gated(),
+        );
+        match &first.actions[..] {
+            [DecisionAction::CallTool { id, .. }, next] => {
+                assert_eq!(id.as_deref(), Some("tc-1"), "the approved call runs");
+                assert_eq!(
+                    interrupt(next).0,
+                    "mcp-approve:tc-2",
+                    "and the next question is asked in the same breath"
+                );
+                assert_eq!(interrupt(next).1["metadata"]["remaining"], 0);
+            }
+            other => panic!("expected the call and the next question; got {other:?}"),
+        }
+
+        let mut settled = transcript.clone();
+        settled.push(result_of("tc-1", "sentry__delete"));
+        let second = answer(
+            "tc-2",
+            serde_json::json!({ "approved": false }),
+            &settled,
+            &llm_calls,
+            &gated(),
+        );
+        assert!(
+            !second
+                .actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::CallTool { .. })),
+            "the declined call must not run; got {:?}",
+            second.actions
+        );
+        assert_eq!(
+            second
+                .messages
+                .last()
+                .expect("a refusal")
+                .tool_call_id
+                .as_deref(),
+            Some("tc-2")
+        );
+        assert!(
+            matches!(&second.actions[..], [DecisionAction::CallLlm { .. }]),
+            "every call is answered now, so the model reads both outcomes; got {:?}",
+            second.actions
+        );
+    }
+
+    /// The approved call's result is recorded by a decision held behind this
+    /// question, so the transcript alone would ask about it twice.
+    #[test]
+    fn a_call_already_away_is_not_asked_about_again() {
+        let (transcript, llm_calls) = two_held();
+        let p = answer_with(
+            "tc-2",
+            serde_json::json!({ "approved": false }),
+            &transcript,
+            &llm_calls,
+            &gated(),
+            &["tc-1".to_string()],
+        );
+        assert!(
+            !p.actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::Interrupt { .. })),
+            "`tc-1` is running; asking about it again would run it twice; got {:?}",
+            p.actions
+        );
+        assert!(
+            !p.actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::CallLlm { .. })),
+            "the running call answers for itself; got {:?}",
+            p.actions
+        );
+        assert_eq!(
+            p.messages
+                .last()
+                .expect("a refusal")
+                .tool_call_id
+                .as_deref(),
+            Some("tc-2")
+        );
+    }
+
+    #[test]
+    fn a_decline_waits_for_the_calls_still_being_asked_about() {
+        let (transcript, llm_calls) = two_held();
+        let first = answer(
+            "tc-1",
+            serde_json::json!({ "approved": false }),
+            &transcript,
+            &llm_calls,
+            &gated(),
+        );
+        let [next] = &first.actions[..] else {
+            panic!("expected the next question alone; got {:?}", first.actions)
+        };
+        assert_eq!(interrupt(next).0, "mcp-approve:tc-2");
+        assert!(
+            !first
+                .actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::CallLlm { .. })),
+            "prompting the model now would leave `tc-2` unanswered"
+        );
+
+        let mut refused = transcript.clone();
+        refused.push(Message {
+            id: "m-tc-1".to_string(),
+            ..result_of("tc-1", "sentry__delete")
+        });
+        let second = answer(
+            "tc-2",
+            serde_json::json!({ "approved": true }),
+            &refused,
+            &llm_calls,
+            &gated(),
+        );
+        match &second.actions[..] {
+            [DecisionAction::CallTool { id, .. }] => assert_eq!(id.as_deref(), Some("tc-2")),
+            other => panic!("expected the approved call; got {other:?}"),
+        }
+    }
+
+    /// Re-prompting the model with an unanswered call is what providers reject.
+    #[test]
+    fn a_settled_call_waits_for_the_one_still_being_asked_about() {
+        let (transcript, llm_calls) = two_held();
+        let p = super::propose(
+            &tool_finished_trigger("tc-1", "sentry__delete", Ok("done")),
+            &Proposing {
+                connector_tools: &gated(),
+                decision_id: "d1",
+                ..inputs(&transcript, &llm_calls)
+            },
+        )
+        .expect("proposes");
+        assert!(
+            p.actions.is_empty(),
+            "the result is recorded and nothing else; got {:?}",
+            p.actions
+        );
+        assert_eq!(
+            p.messages
+                .last()
+                .expect("the result")
+                .tool_call_id
+                .as_deref(),
+            Some("tc-1")
+        );
+
+        let mut answered = transcript.clone();
+        answered.push(result_of("tc-2", "sentry__delete"));
+        let p = super::propose(
+            &tool_finished_trigger("tc-1", "sentry__delete", Ok("done")),
+            &Proposing {
+                connector_tools: &gated(),
+                decision_id: "d1",
+                ..inputs(&answered, &llm_calls)
+            },
+        )
+        .expect("proposes");
+        assert!(
+            matches!(&p.actions[..], [DecisionAction::CallLlm { .. }]),
+            "got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn an_answer_to_a_call_already_settled_runs_nothing() {
+        let cfg = agent_cfg();
+        let (transcript, llm_calls) = held();
+        let mut settled = transcript.clone();
+        settled.push(result_of("tc-1", "sentry__delete"));
+        let trigger = DecisionTrigger::InterruptResumed {
+            resumption: crate::protocol::InterruptResumption {
+                interrupt_id: format!("{APPROVAL}tc-1"),
+                payload: serde_json::json!({ "approved": true }),
+            },
+        };
+        let p = super::propose(
+            &trigger,
+            &Proposing {
+                config: Some(&cfg),
+                connector_tools: &gated(),
+                decision_id: "d2",
+                ..inputs(&settled, &llm_calls)
+            },
+        )
+        .expect("proposes");
+        assert!(
+            !p.actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::CallTool { .. })),
+            "the call was answered once already; got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn an_approval_from_a_channel_is_read_through_its_wrapper() {
+        let (transcript, llm_calls) = held();
+        let p = resume(
+            serde_json::json!({ "status": "resolved", "payload": { "approved": true } }),
+            &transcript,
+            &llm_calls,
+            &gated(),
+        );
+        assert!(
+            matches!(&p.actions[..], [DecisionAction::CallTool { .. }]),
+            "got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn a_decline_answers_the_model_rather_than_running_the_call() {
+        let (transcript, llm_calls) = held();
+        let p = resume(
+            serde_json::json!({ "approved": false }),
+            &transcript,
+            &llm_calls,
+            &gated(),
+        );
+        assert!(
+            !p.actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::CallTool { .. })),
+            "got {:?}",
+            p.actions
+        );
+        let refusal = p.messages.last().expect("a tool message");
+        assert_eq!(refusal.role, Role::Tool);
+        assert_eq!(refusal.tool_call_id.as_deref(), Some("tc-1"));
+        assert!(matches!(
+            &refusal.content,
+            Some(Content::Text(t)) if t.contains("declined")
+        ));
+        assert!(
+            matches!(&p.actions[..], [DecisionAction::CallLlm { .. }]),
+            "nothing else would prompt the model again; got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn a_decline_still_runs_the_calls_nobody_asked_about() {
+        let transcript = vec![
+            msg("u1", Role::User, "hi"),
+            assistant_with_calls(
+                "call-1",
+                &[("tc-1", "sentry__search"), ("tc-2", "sentry__delete")],
+            ),
+        ];
+        let llm_calls = HashMap::from([("call-1".to_string(), call_state("call-1", vec![]))]);
+        let p = answer(
+            "tc-2",
+            serde_json::json!({ "approved": false }),
+            &transcript,
+            &llm_calls,
+            &gated(),
+        );
+        match &p.actions[..] {
+            [DecisionAction::CallTool { id, .. }] => {
+                assert_eq!(id.as_deref(), Some("tc-1"), "the reader goes ahead");
+            }
+            other => panic!("expected the un-held call alone; got {other:?}"),
+        }
+        assert_eq!(
+            p.messages
+                .last()
+                .expect("a refusal")
+                .tool_call_id
+                .as_deref(),
+            Some("tc-2"),
+            "the held call is answered with the refusal"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_is_not_yes_declines() {
+        let (transcript, llm_calls) = held();
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({ "status": "cancelled", "payload": { "approved": true } }),
+            serde_json::json!({ "approved": "yes" }),
+        ] {
+            let p = resume(payload.clone(), &transcript, &llm_calls, &gated());
+            assert!(
+                !p.actions
+                    .iter()
+                    .any(|a| matches!(a, DecisionAction::CallTool { .. })),
+                "{payload} ran the call; got {:?}",
+                p.actions
+            );
+        }
+    }
+
+    #[test]
+    fn a_deferred_call_asks_about_the_tool_its_arguments_name() {
+        let mut tools = gated();
+        tools.push(ConnectorTool {
+            kind: ConnectorToolKind::Call,
+            ..connector_tool(crate::connectors::filter::CALL_TOOL, false)
+        });
+        let wrapped = |name: &str| {
+            let mut assistant = assistant_with_calls("call-1", &[("tc-1", "call_tool")]);
+            assistant.tool_calls[0].function.arguments =
+                serde_json::json!({ "name": name }).to_string();
+            super::propose(
+                &llm_finished_trigger(DraftMessage::from(assistant), true, false),
+                &Proposing {
+                    connector_tools: &tools,
+                    ..inputs(&[msg("u1", Role::User, "hi")], &HashMap::new())
+                },
+            )
+            .expect("proposes")
+        };
+        match &wrapped("sentry__delete").actions[..] {
+            [DecisionAction::Interrupt {
+                reason, payload, ..
+            }] => {
+                assert!(
+                    reason.contains("sentry__delete"),
+                    "a person asked to approve `call_tool` has been told nothing; got {reason:?}"
+                );
+                assert_eq!(
+                    payload["metadata"]["tool"],
+                    serde_json::json!("sentry__delete")
+                );
+            }
+            other => panic!("the wrapper does not hide what it runs; got {other:?}"),
+        }
+        assert!(matches!(
+            &wrapped("sentry__search").actions[..],
+            [DecisionAction::CallTool { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_resume_of_another_interrupt_picks_the_turn_back_up() {
+        let cfg = agent_cfg();
+        let trigger = DecisionTrigger::InterruptResumed {
+            resumption: crate::protocol::InterruptResumption {
+                interrupt_id: "mcp-auth:sentry".to_string(),
+                payload: serde_json::json!({ "approved": false }),
+            },
+        };
+        let (transcript, llm_calls) = held();
+        let p = super::propose(
+            &trigger,
+            &Proposing {
+                config: Some(&cfg),
+                connector_tools: &gated(),
+                decision_id: "d1",
+                ..inputs(&transcript, &llm_calls)
+            },
+        )
+        .expect("proposes");
+        match &p.actions[..] {
+            [DecisionAction::CallLlm { model, .. }] => {
+                assert_eq!(model.as_deref(), Some("cfg-model"))
+            }
+            other => panic!("expected the model call; got {other:?}"),
+        }
+        assert!(
+            p.messages.iter().all(|m| m.role != Role::Tool),
+            "no call was held, so nothing is refused"
+        );
     }
 }

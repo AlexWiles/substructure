@@ -863,6 +863,9 @@ pub struct ConnectorTool {
     /// from the connection's `defer` and the agent's `defer_tools`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub defer: bool,
+    /// A call to this tool waits for a person.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub approve: bool,
 }
 
 /// What the engine does with a call. Every value but `Remote` is one of the
@@ -911,6 +914,31 @@ pub struct McpServer {
     pub tools: Option<McpTools>,
     #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
     pub auth_failure: AuthFailure,
+    /// Which of this connection's calls wait for a person. Absent ⇒ none do.
+    #[serde(default, skip_serializing_if = "Approve::is_default")]
+    pub approve: Approve,
+}
+
+/// Which calls on a connection stop for a person first. Like [`AuthFailure`],
+/// it belongs to the pair: only an agent someone watches can be asked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "Approve")]
+pub enum Approve {
+    /// Nothing asks.
+    #[default]
+    Never,
+    /// A tool the connection does not call read-only, and does not call
+    /// non-destructive. Silence is destructive, as the MCP spec reads it.
+    Destructive,
+    /// Every call on this connection.
+    Always,
+}
+
+impl Approve {
+    fn is_default(&self) -> bool {
+        *self == Self::Never
+    }
 }
 
 /// What a session does when a connection needs a person to authorize it. It
@@ -1720,6 +1748,9 @@ pub struct InterruptResponder {
     /// The chosen option's label, when the resolution was a pick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The chosen option's `style`, when the resolution was a pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 // ── Engine → worker ──────────────────────────────────────────────────────

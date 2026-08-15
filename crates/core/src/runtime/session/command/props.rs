@@ -400,6 +400,7 @@ impl World {
                 id: "conn-1".to_string(),
                 tools: None,
                 auth_failure: Default::default(),
+                approve: Default::default(),
             }],
             defer_tools: None,
             announce_mcp: Default::default(),
