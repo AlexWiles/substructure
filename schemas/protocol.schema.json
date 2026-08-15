@@ -147,7 +147,7 @@
         },
         {
           "const": "destructive",
-          "description": "A tool the connection does not call read-only, and does not call\nnon-destructive. Silence is destructive, as the MCP spec reads it.",
+          "description": "A tool the connection marks `destructiveHint`. One it says nothing\nabout is not one of these — use `always` where the annotations cannot\nbe relied on.",
           "type": "string"
         },
         {
