@@ -71,6 +71,10 @@ struct Applied {
     changes: Vec<ConfigEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notices: Vec<Notice>,
+    /// What resolving the plugin directories dropped, said by this CLI: the
+    /// deployment never saw what was left behind.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    plugin_notices: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,10 +105,12 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         }
     };
 
-    // The file's own manifest, minus the two fields that name variables on this
-    // machine. A deployment holds its own key and mints its own secret, so
-    // sending either would be sending a name it cannot resolve.
-    let mut manifest = config.manifest().for_wire();
+    // The file's own manifest with every plugin resolved to data, minus the
+    // fields that name things on this machine: env variables, and the plugin
+    // paths the bundles were read from. A deployment holds only what it can
+    // resolve.
+    let (resolved, plugin_notices) = config.resolved_manifest()?;
+    let mut manifest = resolved.for_wire();
     manifest.name = manifest
         .name
         .or_else(|| created.as_ref().map(|c| c.name.clone()));
@@ -120,6 +126,7 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         created,
         changes: applied.changes,
         notices: applied.notices,
+        plugin_notices,
     };
     if cmd.globals.json {
         return print::json(&result);
@@ -224,6 +231,9 @@ fn report(result: &Applied, path: &std::path::Path, globals: &CloudGlobals) {
     // Whatever ran before this — a login, most of it a browser's — is not part
     // of the report.
     println!();
+    for notice in &result.plugin_notices {
+        println!("note: {notice}");
+    }
     if let Some(created) = &result.created {
         println!(
             "Created project {} ({}) in {}",

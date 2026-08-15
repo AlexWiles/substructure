@@ -9,7 +9,7 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::cli::env::{OutputFormat, ProviderBinding, ProviderKind};
 use crate::connectors::registry::ConnectionSpec;
-use crate::manifest::{AgentSection, Manifest, ProviderSpec, SlackConfig};
+use crate::manifest::{AgentSection, Manifest, PluginSpec, ProviderSpec, SlackConfig};
 use crate::runtime::llm::LlmBlocks;
 use crate::runtime::worker::AgentEntry;
 
@@ -87,6 +87,10 @@ pub struct ProjectConfig {
     /// holds the credential, so `auth` is the engine's half alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, ConnectionSpec>,
+    /// Agent plugins this project declares, each a directory `path` the CLI
+    /// resolves to data.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugin: BTreeMap<String, PluginSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<Remote>,
 }
@@ -142,12 +146,31 @@ impl ProjectConfig {
             llm: self.llm.clone(),
             agent: self.agent.clone(),
             mcp: self.mcp.clone(),
+            plugin: self.plugin.clone(),
             slack: self.slack.clone(),
         }
     }
 
-    pub fn connections(&self) -> BTreeMap<String, ConnectionSpec> {
-        self.manifest().connections()
+    /// The manifest with every plugin's bundle loaded from its `path`,
+    /// resolved against this file's directory. What a local engine starts on
+    /// and what `subs apply` sends.
+    pub fn resolved_manifest(&self) -> anyhow::Result<(Manifest, Vec<String>)> {
+        let mut manifest = self.manifest();
+        let base = self
+            .source
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let notices = manifest.resolve_plugins(&base)?;
+        Ok((manifest, notices))
+    }
+
+    /// Every connection the file reaches, with each plugin's servers resolved
+    /// from its directory — so `subs mcp login pdf-renderer` works on a
+    /// connection a plugin brought.
+    pub fn connections(&self) -> anyhow::Result<BTreeMap<String, ConnectionSpec>> {
+        Ok(self.resolved_manifest()?.0.connections())
     }
 
     /// The engine's database, beside the file that names it. One file is one

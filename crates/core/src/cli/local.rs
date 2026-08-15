@@ -236,7 +236,22 @@ pub(crate) async fn start_engine(
     providers: Vec<ProviderEnv>,
     cfg: &ProjectConfig,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
-    let connectors = cfg.connections();
+    // Bundles load here because startup is what applies the file: the engine
+    // then serves skills from this copy, and the directories can change on
+    // disk without moving a live session.
+    let (manifest, plugin_notices) = cfg.resolved_manifest()?;
+    for notice in plugin_notices {
+        tracing::warn!("{notice}");
+    }
+    let plugins: Arc<dyn crate::plugins::PluginResolver> =
+        Arc::new(crate::plugins::StaticPlugins::new(
+            manifest
+                .plugin
+                .iter()
+                .filter_map(|(id, spec)| Some((id.clone(), spec.bundle.clone()?)))
+                .collect(),
+        ));
+    let connectors = manifest.connections();
     let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
     let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
     let cursor_store = Arc::new(SqliteCursorStore::new(db.clone())?);
@@ -299,7 +314,7 @@ pub(crate) async fn start_engine(
 
     let agents = Arc::new(StaticAgentDirectory::new(
         DEFAULT_TENANT.to_string(),
-        cfg.agents(),
+        manifest.agents(),
         cfg.llm_blocks(),
     ));
 
@@ -312,6 +327,7 @@ pub(crate) async fn start_engine(
             llm_task_queue,
             sub_agent_task_queue,
             connections,
+            plugins,
             connector_task_queue,
             worker_queue,
             channel_proposers: vec![Arc::new(crate::transport::slack::SlackProposer::new(

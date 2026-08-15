@@ -6424,6 +6424,7 @@ fn agent_config(model: &str) -> AgentConfig {
         mcp: Vec::new(),
         defer_tools: None,
         announce_mcp: Default::default(),
+        plugins: Vec::new(),
         effort: None,
     }
 }
@@ -7749,6 +7750,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
         Some(AgentConfig {
             defer_tools: Some(DeferTools::default()),
             announce_mcp: Default::default(),
+            plugins: Vec::new(),
             mcp: vec![],
             ..agent_config("m1")
         }),
@@ -7771,6 +7773,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
             agent: Some(AgentConfig {
                 defer_tools: Some(DeferTools::default()),
                 announce_mcp: Default::default(),
+                plugins: Vec::new(),
                 mcp: vec![McpServer {
                     id: "sentry".to_string(),
                     tools: None,
@@ -7801,6 +7804,7 @@ fn a_connection_overrides_the_agents_default() {
         Some(AgentConfig {
             defer_tools: Some(DeferTools::default()),
             announce_mcp: Default::default(),
+            plugins: Vec::new(),
             mcp: vec![McpServer {
                 id: "sentry".to_string(),
                 tools: Some(McpTools {
@@ -10865,4 +10869,162 @@ fn an_admin_caller_raises_an_admin_interrupt() {
         SessionState::caller_interrupt_origin(&machine()),
         InterruptOrigin::Machine
     ));
+}
+
+// ── plugins ──────────────────────────────────────────────────────────────
+
+fn plugin_config(enabled: bool) -> AgentConfig {
+    AgentConfig {
+        plugins: vec![crate::protocol::AgentPlugin {
+            id: "pdf".to_string(),
+            enabled,
+            description: "PDF work.".to_string(),
+            skills: vec![crate::protocol::SkillMeta {
+                name: "form-filling".to_string(),
+                description: "Fill out PDF forms.".to_string(),
+            }],
+            servers: vec!["pdf-renderer".to_string()],
+            tools: None,
+            auth_failure: Default::default(),
+            approve: Default::default(),
+        }],
+        ..agent_config("m1")
+    }
+}
+
+fn plugin_session(enabled: bool) -> SessionAggregate {
+    create_session_with_config("sess-1", "tenant-a", "user-1", Some(plugin_config(enabled)))
+}
+
+#[test]
+fn a_declared_plugin_offers_the_skill_tool_and_dials_nothing() {
+    let agg = plugin_session(false);
+    assert!(
+        !agg.state
+            .has_effect(EffectKind::ConnectorSync, "pdf-renderer"),
+        "an unused plugin costs no fetch"
+    );
+    assert!(
+        offered(&agg).contains(&"skill".to_string()),
+        "the skill tool is offered from turn 1: {:?}",
+        offered(&agg)
+    );
+}
+
+#[test]
+fn using_a_skill_enables_the_plugin_and_wakes_its_servers() {
+    let mut agg = plugin_session(false);
+    let events = call(&mut agg, "tc-1", "skill", r#"{"name":"pdf:form-filling"}"#);
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::PluginEnabled(p) if p.id == "pdf")),
+        "got {events:?}"
+    );
+    assert_eq!(
+        sync_requests(&events),
+        ["pdf-renderer"],
+        "enabling is what wakes the plugin's servers"
+    );
+    assert!(agg.state.enabled_plugins(None).contains("pdf"));
+    assert!(
+        agg.state.skill_call("tc-1").is_some(),
+        "the call is frozen as a skill call for the executor"
+    );
+
+    let again = call(&mut agg, "tc-2", "skill", r#"{"name":"pdf:form-filling"}"#);
+    assert!(
+        !again
+            .iter()
+            .any(|e| matches!(e, EventPayload::PluginEnabled(_))),
+        "enabling is said once: {again:?}"
+    );
+}
+
+#[test]
+fn an_enabled_plugin_fetches_at_session_start() {
+    let mut agg = plugin_session(true);
+    assert!(
+        agg.state
+            .has_effect(EffectKind::ConnectorSync, "pdf-renderer"),
+        "`enabled = true` is on from the start"
+    );
+    settle_sync(&mut agg, "pdf-renderer", &["fill_form"]);
+    assert!(
+        held(&agg).contains(&"pdf_renderer__fill_form".to_string()),
+        "the server's tools join under the derived id: {:?}",
+        held(&agg)
+    );
+}
+
+#[test]
+fn the_catalog_rides_the_first_prompt_once() {
+    let mut agg = plugin_session(false);
+    let prompt = |agg: &mut SessionAggregate, id: &str| {
+        dispatch(
+            agg,
+            CommandPayload::RequestLlmCall {
+                llm: "claude".to_string(),
+                call_id: id.to_string(),
+                request: request_with(vec![]),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            },
+            &system(),
+        );
+        agg.state.llm_call(id).unwrap().prompt.clone()
+    };
+
+    let first = prompt(&mut agg, "call-1");
+    let notice = first.first().expect("the catalog rides the prompt");
+    assert_eq!(notice.role, Role::System);
+    let text = match notice.content.as_ref().expect("content") {
+        Content::Text(t) => t.clone(),
+        _ => panic!("a catalog entry is text"),
+    };
+    assert!(
+        text.starts_with("{\"plugin\":\"pdf\""),
+        "the name leads: {text}"
+    );
+    assert!(text.contains("pdf:form-filling"), "{text}");
+    assert!(text.contains("Fill out PDF forms."), "{text}");
+
+    let second = prompt(&mut agg, "call-2");
+    assert!(
+        second.is_empty(),
+        "a plugin is cataloged once per path: {second:?}"
+    );
+}
+
+#[test]
+fn a_branch_from_before_the_enablement_does_not_inherit_it() {
+    let mut agg = plugin_session(false);
+    let ctx = CommitContext {
+        span: SpanContext::root(),
+        occurred_at: Utc::now(),
+    };
+    agg.commit(
+        vec![EventPayload::NewMessage(NewMessage {
+            message: node_msg("u1", Role::User, "hi").record(),
+            parent_id: None,
+        })],
+        &ctx,
+    );
+    call(&mut agg, "tc-1", "skill", r#"{"name":"pdf:form-filling"}"#);
+    assert!(agg.state.enabled_plugins(Some("u1")).contains("pdf"));
+
+    agg.commit(
+        vec![EventPayload::NewMessage(NewMessage {
+            message: node_msg("u2", Role::User, "other branch").record(),
+            parent_id: None,
+        })],
+        &ctx,
+    );
+    assert!(
+        !agg.state.enabled_plugins(Some("u2")).contains("pdf"),
+        "the enablement is anchored where it happened"
+    );
 }

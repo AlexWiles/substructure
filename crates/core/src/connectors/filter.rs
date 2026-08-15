@@ -148,6 +148,36 @@ pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a
 
 pub const TOOL_SEARCH: &str = "tool_search";
 pub const CALL_TOOL: &str = "call_tool";
+pub const SKILL: &str = "skill";
+
+/// The engine's skill tool, present whenever the agent has plugins. Constant
+/// for the reason the search pair is: enabling a plugin during a session must
+/// move no definition.
+pub fn skill_tool() -> ConnectorTool {
+    engine_tool(
+        SKILL,
+        "Load a skill's instructions. The plugin catalog lists each plugin and its skills; \
+         name one as `<plugin>:<skill>` and follow what comes back. Using a skill activates \
+         its plugin, which also connects the plugin's tools. Pass `file` to read one of the \
+         files the instructions reference."
+            .to_string(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The skill, as `<plugin>:<skill>` from the catalog."
+                },
+                "file": {
+                    "type": "string",
+                    "description": "A file the skill's instructions reference, by its listed path."
+                }
+            },
+            "required": ["name"]
+        }),
+        ConnectorToolKind::Skill,
+    )
+}
 
 /// The tools the engine answers for an agent that defers.
 ///

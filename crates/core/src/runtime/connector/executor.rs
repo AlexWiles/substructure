@@ -5,10 +5,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::connectors::registry::Connections;
 use crate::connectors::ConnectorError;
+use crate::plugins::PluginResolver;
 use crate::protocol::StoredResult;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
+use crate::runtime::session::engine_tools;
 use crate::runtime::session::state::{EffectKind, LocalAnswer};
 use crate::runtime::session::{execute, ConflictRetry, ExecuteInput};
 use crate::runtime::span::SpanContext;
@@ -19,7 +21,8 @@ use crate::protocol::{ErrorCode, ErrorInfo};
 
 pub fn spawn_connector_task_executor(
     store: Arc<dyn EventStore>,
-    connections: Arc<Connections>,
+    connections: Option<Arc<Connections>>,
+    plugins: Arc<dyn PluginResolver>,
     queue: Arc<dyn TaskQueue<ConnectorTask>>,
     worker_count: usize,
     cancel: CancellationToken,
@@ -29,6 +32,7 @@ pub fn spawn_connector_task_executor(
     for _ in 0..worker_count {
         let store = store.clone();
         let connections = connections.clone();
+        let plugins = plugins.clone();
         let mut rx = queue.subscribe();
         let cancel = cancel.clone();
         handles.push(tokio::spawn(async move {
@@ -40,14 +44,32 @@ pub fn spawn_connector_task_executor(
                     },
                     _ = cancel.cancelled() => break,
                 };
-                handle_task(store.as_ref(), connections.as_ref(), task).await;
+                handle_task(
+                    store.as_ref(),
+                    connections.as_deref(),
+                    plugins.as_ref(),
+                    task,
+                )
+                .await;
             }
         }));
     }
     handles
 }
 
-async fn handle_task(store: &dyn EventStore, connections: &Connections, task: ConnectorTask) {
+/// A network task with no connections configured settles as a terminal error
+/// rather than parking the session: the state named a connection this engine
+/// cannot dial.
+fn unreachable() -> ConnectorError {
+    ConnectorError::permanent("no connections are configured on this engine")
+}
+
+async fn handle_task(
+    store: &dyn EventStore,
+    connections: Option<&Connections>,
+    plugins: &dyn PluginResolver,
+    task: ConnectorTask,
+) {
     match task {
         ConnectorTask::Sync {
             session_id,
@@ -57,7 +79,11 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
             span,
             ..
         } => {
-            let command = match connections.list_tools(&tenant_id, &connection_id).await {
+            let listed = match connections {
+                Some(c) => c.list_tools(&tenant_id, &connection_id).await,
+                None => Err(unreachable()),
+            };
+            let command = match listed {
                 Ok(offer) => CommandPayload::settle(
                     EffectKind::ConnectorSync,
                     connection_id.clone(),
@@ -101,9 +127,13 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
             span,
             ..
         } => {
-            let result = connections
-                .call_tool(&tenant_id, &connection_id, &remote_name, &arguments)
-                .await;
+            let result = match connections {
+                Some(c) => {
+                    c.call_tool(&tenant_id, &connection_id, &remote_name, &arguments)
+                        .await
+                }
+                None => Err(unreachable()),
+            };
             let command = settle_call(tool_call_id, attempt, result);
             submit(
                 store,
@@ -137,7 +167,23 @@ async fn handle_task(store: &dyn EventStore, connections: &Connections, task: Co
                     return;
                 }
             };
-            let Some(answer) = session.state.local_connector_answer(&tool_call_id) else {
+            // A skill call reads the bundle, which lives here, not in state.
+            let answer = match session.state.skill_call(&tool_call_id) {
+                Some(call) => {
+                    let bundle = match call.plugin_id.is_empty() {
+                        true => None,
+                        false => plugins.resolve(&tenant_id, &call.plugin_id).await,
+                    };
+                    Some(engine_tools::skill_answer(
+                        &session.state,
+                        bundle.as_ref(),
+                        call.leaf.as_deref(),
+                        &call.arguments,
+                    ))
+                }
+                None => session.state.local_connector_answer(&tool_call_id),
+            };
+            let Some(answer) = answer else {
                 tracing::error!(
                     session_id = %session_id,
                     tool_call_id = %tool_call_id,

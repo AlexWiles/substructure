@@ -69,6 +69,8 @@ pub enum EventPayload {
     WorkerStateUpdated(WorkerStateUpdated),
     #[serde(rename = "agent.updated")]
     AgentConfigUpdated(AgentConfigUpdated),
+    #[serde(rename = "plugin.enabled")]
+    PluginEnabled(PluginEnabled),
     #[serde(rename = "sub_agent.turn_completed")]
     SubAgentTurnCompleted(SubAgentTurnCompleted),
     #[serde(rename = "decision.queued")]
@@ -373,6 +375,15 @@ pub struct WorkerStateUpdated {
 pub struct AgentConfigUpdated {
     pub config: AgentConfig,
     /// Active head when written; `None` if the tree was empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+}
+
+/// A plugin the agent started using. Anchored: a fork from before this point
+/// does not inherit it, and a rewind takes it back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginEnabled {
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
 }

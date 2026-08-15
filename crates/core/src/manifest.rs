@@ -17,10 +17,11 @@ use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::{AuthKind, ConnectionSpec};
+use crate::plugins::PluginBundle;
 use crate::protocol::ReasoningEffort;
 use crate::protocol::{
-    AgentConfig, AgentTool, Approve, AuthFailure, ConnectorProtocol, DeferTools, Handler,
-    LlmFormat, McpServer, McpTools, RetryConfig, SubAgent,
+    AgentConfig, AgentPlugin, AgentTool, Approve, AuthFailure, ConnectorProtocol, DeferTools,
+    Handler, LlmFormat, McpServer, McpTools, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
@@ -43,6 +44,8 @@ pub struct Manifest {
     pub agent: BTreeMap<String, AgentSection>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, ConnectionSpec>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugin: BTreeMap<String, PluginSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackConfig>,
 }
@@ -56,6 +59,9 @@ impl Manifest {
             check_id(id).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
             check_url(&spec.url).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
             check_connection(spec).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
+        }
+        for (id, spec) in &self.plugin {
+            check_plugin(id, spec, self).map_err(|e| anyhow::anyhow!("[plugin.{id}]: {e}"))?;
         }
         for (id, spec) in &self.llm {
             check_llm(id, spec).map_err(|e| anyhow::anyhow!("[llm.{id}]: {e}"))?;
@@ -96,6 +102,11 @@ impl Manifest {
         for section in wire.agent.values_mut() {
             section.signing_secret_env = None;
         }
+        // A deployment gets the resolved bundle; the path names a directory on
+        // this machine.
+        for spec in wire.plugin.values_mut() {
+            spec.path = None;
+        }
         wire
     }
 
@@ -106,16 +117,55 @@ impl Manifest {
     /// `ConnectorProtocol`, and ids must stay unique across sections because an
     /// agent references a bare id and tool names are prefixed from it.
     pub fn connections(&self) -> BTreeMap<String, ConnectionSpec> {
-        self.mcp
-            .iter()
-            .map(|(id, spec)| {
-                let spec = ConnectionSpec {
-                    protocol: ConnectorProtocol::Mcp,
-                    ..spec.clone()
-                };
-                (id.clone(), spec)
+        let declared = self.mcp.iter().map(|(id, spec)| {
+            let spec = ConnectionSpec {
+                protocol: ConnectorProtocol::Mcp,
+                ..spec.clone()
+            };
+            (id.clone(), spec)
+        });
+        // A plugin's servers are ordinary MCP connections under derived ids;
+        // only the pairing with an agent knows they came from a plugin.
+        let from_plugins = self.plugin.iter().flat_map(|(pid, spec)| {
+            spec.bundle.iter().flat_map(|b| {
+                b.servers.iter().map(|(name, server)| {
+                    let spec = ConnectionSpec {
+                        protocol: ConnectorProtocol::Mcp,
+                        ..server.clone()
+                    };
+                    (crate::plugins::server_id(pid, name), spec)
+                })
             })
-            .collect()
+        });
+        declared.chain(from_plugins).collect()
+    }
+
+    /// Load each plugin's bundle from its `path`, for the halves of the CLI
+    /// that need the data: the local engine at startup, `subs apply` before
+    /// the wire copy. Returns the loaders' notices. Entries already carrying
+    /// a bundle are left alone.
+    pub fn resolve_plugins(&mut self, base: &std::path::Path) -> Result<Vec<String>> {
+        let mut notices = Vec::new();
+        for (id, spec) in &mut self.plugin {
+            if spec.bundle.is_some() {
+                continue;
+            }
+            let Some(path) = &spec.path else {
+                continue;
+            };
+            let loaded = crate::plugins::load_dir(&base.join(path))
+                .map_err(|e| anyhow::anyhow!("[plugin.{id}]: {e}"))?;
+            notices.extend(
+                loaded
+                    .notices
+                    .into_iter()
+                    .map(|n| format!("[plugin.{id}]: {n}")),
+            );
+            spec.bundle = Some(loaded.bundle);
+        }
+        // What the bundles brought is part of the declaration.
+        self.validate()?;
+        Ok(notices)
     }
 
     /// The declared blocks as the engine reads them: venue and wire shape,
@@ -236,6 +286,8 @@ pub struct AgentSection {
     pub sub_agents: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<PluginRef>,
     /// The default for every tool of this agent. A tool or a connection
     /// overrides it with its own `defer`. `true` takes the defaults; a table
     /// sets them.
@@ -268,6 +320,7 @@ impl AgentSection {
             || !self.tools.is_empty()
             || !self.sub_agents.is_empty()
             || !self.mcp.is_empty()
+            || !self.plugins.is_empty()
     }
 
     /// The wire config this section seeds, with the hosting stripped. `None`
@@ -285,6 +338,7 @@ impl AgentSection {
             mcp: self.mcp.iter().map(McpRef::to_server).collect(),
             defer_tools: self.defer_tools,
             announce_mcp: Default::default(),
+            plugins: self.plugins.iter().map(|p| p.to_wire(manifest)).collect(),
         })
     }
 
@@ -324,6 +378,45 @@ impl AgentSection {
             }),
         }
     }
+}
+
+/// One `[plugin.<id>]`: an agent-plugins directory resolved to data.
+///
+/// `path` is where the CLI reads it; `bundle` is what a deployment holds.
+/// A file writes only `path` — `subs apply` stamps the bundle onto the wire
+/// copy, and a local engine loads it at startup, so the two halves never
+/// coexist in a committed file.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PluginSpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<PluginBundle>,
+}
+
+/// What of a plugin can be checked from what is present: the id always, the
+/// bundle's servers once a bundle is there.
+fn check_plugin(id: &str, spec: &PluginSpec, manifest: &Manifest) -> Result<()> {
+    check_id(id)?;
+    if spec.path.is_none() && spec.bundle.is_none() {
+        bail!("declares nothing. Set `path` to the plugin's directory.");
+    }
+    let Some(bundle) = &spec.bundle else {
+        return Ok(());
+    };
+    for (name, server) in &bundle.servers {
+        check_id(name).map_err(|e| anyhow::anyhow!("server `{name}`: {e}"))?;
+        check_url(&server.url).map_err(|e| anyhow::anyhow!("server `{name}`: {e}"))?;
+        let derived = crate::plugins::server_id(id, name);
+        if manifest.mcp.contains_key(&derived) {
+            bail!(
+                "server `{name}` resolves to connection id `{derived}`, which `[mcp.{derived}]` \
+                 already declares"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// One connection an agent draws tools from: a bare id for everything the
@@ -416,6 +509,119 @@ impl McpRef {
                 approve: entry.approve.unwrap_or_default(),
             },
         }
+    }
+}
+
+/// One plugin an agent uses: a bare id, or a table with the knobs.
+///
+/// Same two spellings as [`McpRef`], for the same reason: the policy belongs
+/// to the pair, so one `[plugin.<id>]` serves an agent that pre-enables it and
+/// one that lets first use enable it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PluginRef {
+    All(String),
+    Configured(PluginEntry),
+}
+
+/// The table form of a [`PluginRef`]. `deny_unknown_fields` for the reason
+/// [`McpEntry`] has it. `tools`, `auth_failure`, and `approve` apply to the
+/// plugin's servers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginEntry {
+    pub id: String,
+    /// On from session start; unset, the first skill use enables it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<McpToolsEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_failure: Option<AuthFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approve: Option<Approve>,
+}
+
+impl PluginRef {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::All(id) => id,
+            Self::Configured(entry) => &entry.id,
+        }
+    }
+
+    /// The wire form, stamped from the bundle the manifest holds: the model's
+    /// catalog metadata and the derived server ids ride the config, so the
+    /// engine never re-reads a bundle to know what an agent reaches.
+    fn to_wire(&self, manifest: &Manifest) -> AgentPlugin {
+        let id = self.id();
+        let bundle = manifest.plugin.get(id).and_then(|s| s.bundle.as_ref());
+        let (description, skills, servers) = match bundle {
+            Some(b) => (
+                b.description.clone(),
+                b.skill_metas(),
+                b.servers
+                    .keys()
+                    .map(|name| crate::plugins::server_id(id, name))
+                    .collect(),
+            ),
+            None => (String::new(), Vec::new(), Vec::new()),
+        };
+        let entry = match self {
+            Self::All(_) => None,
+            Self::Configured(entry) => Some(entry),
+        };
+        AgentPlugin {
+            id: id.to_string(),
+            enabled: entry.is_some_and(|e| e.enabled),
+            description,
+            skills,
+            servers,
+            tools: entry
+                .and_then(|e| e.tools.as_ref())
+                .map(McpToolsEntry::to_wire),
+            auth_failure: entry.and_then(|e| e.auth_failure).unwrap_or_default(),
+            approve: entry.and_then(|e| e.approve).unwrap_or_default(),
+        }
+    }
+}
+
+impl Serialize for PluginRef {
+    /// Written back as it was written: a bare id stays bare.
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::All(id) => s.serialize_str(id),
+            Self::Configured(entry) => entry.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PluginRef {
+    /// Dispatched on the shape written, like [`McpRef`], so a misspelled field
+    /// is named rather than answered with "matched no variant".
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = PluginRef;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a plugin id, or a table with `id`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<PluginRef, E> {
+                Ok(PluginRef::All(id.to_string()))
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<PluginRef, M::Error> {
+                PluginEntry::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(PluginRef::Configured)
+            }
+        }
+
+        d.deserialize_any(V)
     }
 }
 
@@ -625,6 +831,16 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
                 "`mcp` names no connection `{}`. Declared: {}",
                 server.id(),
                 declared(manifest.mcp.keys())
+            );
+        }
+    }
+
+    for plugin in &section.plugins {
+        if !manifest.plugin.contains_key(plugin.id()) {
+            bail!(
+                "`plugins` names no plugin `{}`. Declared: {}",
+                plugin.id(),
+                declared(manifest.plugin.keys())
             );
         }
     }
@@ -1258,5 +1474,128 @@ defer_tools = { strategy = "sometimes" }
         );
         let err = bad.validate().unwrap_err().to_string();
         assert!(err.contains("names no agent"), "{err}");
+    }
+
+    fn plugin_manifest(agent_plugins: &str) -> Manifest {
+        manifest(&format!(
+            r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [plugin.pdf]
+            path = "./plugins/pdf-tools"
+
+            [agent.support]
+            llm = "claude"
+            model = "m"
+            plugins = {agent_plugins}
+            "#
+        ))
+    }
+
+    #[test]
+    fn a_plugin_is_declared_and_referenced_like_a_connection() {
+        let m = plugin_manifest(r#"["pdf", { id = "pdf", enabled = true, approve = "always" }]"#);
+        m.validate().unwrap();
+        let config = m.agent["support"].to_agent_config(&m).unwrap();
+        assert_eq!(config.plugins.len(), 2);
+        assert!(!config.plugins[0].enabled);
+        assert!(config.plugins[1].enabled);
+        assert_eq!(config.plugins[1].approve, Approve::Always);
+    }
+
+    #[test]
+    fn an_agent_cannot_name_an_undeclared_plugin() {
+        let m = plugin_manifest(r#"["typo"]"#);
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("names no plugin `typo`"), "{err}");
+    }
+
+    #[test]
+    fn a_misspelled_plugin_entry_key_is_a_parse_error() {
+        let err = toml::from_str::<Manifest>(
+            r#"
+            [agent.support]
+            plugins = [{ id = "pdf", enable = true }]
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("enable"), "{err}");
+    }
+
+    #[test]
+    fn a_resolved_bundle_stamps_skills_and_servers_onto_the_wire_config() {
+        let mut m = plugin_manifest(r#"["pdf"]"#);
+        m.plugin.get_mut("pdf").unwrap().bundle = Some(crate::plugins::PluginBundle {
+            name: "pdf-tools".into(),
+            description: "PDF work.".into(),
+            skills: vec![crate::plugins::Skill {
+                name: "form-filling".into(),
+                description: "Fill forms.".into(),
+                body: "…".into(),
+                files: Default::default(),
+            }],
+            servers: [(
+                "renderer".to_string(),
+                ConnectionSpec {
+                    url: "https://pdf.example.com/mcp".into(),
+                    protocol: ConnectorProtocol::Mcp,
+                    auth: None,
+                    header: None,
+                    prefix_tools: true,
+                },
+            )]
+            .into(),
+            version: None,
+        });
+        m.validate().unwrap();
+
+        let config = m.agent["support"].to_agent_config(&m).unwrap();
+        let p = &config.plugins[0];
+        assert_eq!(p.description, "PDF work.");
+        assert_eq!(p.skills[0].name, "form-filling");
+        assert_eq!(p.servers, ["pdf-renderer"]);
+        assert!(
+            m.connections().contains_key("pdf-renderer"),
+            "the plugin's server joins the registry under the derived id"
+        );
+
+        // The wire copy carries the bundle, never the path.
+        let wire = m.for_wire();
+        assert!(wire.plugin["pdf"].path.is_none());
+        assert!(wire.plugin["pdf"].bundle.is_some());
+    }
+
+    #[test]
+    fn a_plugin_server_cannot_shadow_a_declared_connection() {
+        let mut m = plugin_manifest(r#"["pdf"]"#);
+        m.mcp.insert(
+            "pdf-renderer".to_string(),
+            ConnectionSpec {
+                url: "https://other.example.com/mcp".into(),
+                protocol: ConnectorProtocol::Mcp,
+                auth: None,
+                header: None,
+                prefix_tools: true,
+            },
+        );
+        m.plugin.get_mut("pdf").unwrap().bundle = Some(crate::plugins::PluginBundle {
+            name: "pdf-tools".into(),
+            servers: [(
+                "renderer".to_string(),
+                ConnectionSpec {
+                    url: "https://pdf.example.com/mcp".into(),
+                    protocol: ConnectorProtocol::Mcp,
+                    auth: None,
+                    header: None,
+                    prefix_tools: true,
+                },
+            )]
+            .into(),
+            ..Default::default()
+        });
+        let err = m.validate().unwrap_err().to_string();
+        assert!(err.contains("already declares"), "{err}");
     }
 }

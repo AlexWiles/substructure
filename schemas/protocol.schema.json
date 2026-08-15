@@ -47,6 +47,13 @@
         "model": {
           "type": "string"
         },
+        "plugins": {
+          "description": "Plugins this agent may use. Skills ride here as metadata; a plugin's\nservers behave as `mcp` entries once the plugin is enabled.",
+          "items": {
+            "$ref": "#/$defs/AgentPlugin"
+          },
+          "type": "array"
+        },
         "retry": {
           "anyOf": [
             {
@@ -83,6 +90,57 @@
         "model"
       ],
       "title": "AgentConfig",
+      "type": "object"
+    },
+    "AgentPlugin": {
+      "additionalProperties": false,
+      "description": "A plugin an agent may use, resolved to what the engine needs at runtime:\nthe skills the model discovers, and the connection ids of the plugin's\nservers. Stamped from the bundle when the config loads, the way sub-agent\ndescriptions are — a worker echoes it rather than authoring it.",
+      "properties": {
+        "approve": {
+          "$ref": "#/$defs/Approve"
+        },
+        "auth_failure": {
+          "$ref": "#/$defs/AuthFailure"
+        },
+        "description": {
+          "type": "string"
+        },
+        "enabled": {
+          "description": "On from session start. Absent, the plugin sits in the catalog and the\nfirst skill use enables it — recording the enablement on the branch and\nwaking the plugin's servers.",
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "servers": {
+          "description": "Connection-registry ids of this plugin's servers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/SkillMeta"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpTools"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Narrows the plugin's servers, same knobs as an [`McpServer`], applied\nto each of them."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "AgentPlugin",
       "type": "object"
     },
     "AgentTool": {
@@ -2713,6 +2771,23 @@
       ],
       "title": "Role",
       "type": "string"
+    },
+    "SkillMeta": {
+      "additionalProperties": false,
+      "description": "What the model discovers of one skill before loading it.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "SkillMeta",
+      "type": "object"
     },
     "StoredContent": {
       "oneOf": [

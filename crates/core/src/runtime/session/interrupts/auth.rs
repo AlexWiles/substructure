@@ -30,17 +30,22 @@ pub fn interrupt_id(connection: &str) -> String {
 }
 
 /// The first connection that needs a person and has not been asked about.
-/// A connection configured to degrade never stops the session.
+/// A connection configured to degrade never stops the session. A plugin's
+/// servers are covered under the plugin's own policy.
 pub fn needing(state: &SessionState) -> Option<(String, AuthNeed)> {
-    let config = state.resolve_agent_for(state.head_id.as_deref())?;
-    config.mcp.iter().find_map(|server| {
-        if server.auth_failure == AuthFailure::Degrade {
-            return None;
-        }
-        let need = state.connector_sync(&server.id)?.auth?;
-        state
-            .open_interrupt(&interrupt_id(&server.id))
-            .is_none()
-            .then(|| (server.id.clone(), need))
-    })
+    let leaf = state.head_id.clone();
+    let config = state.resolve_agent_for(leaf.as_deref())?;
+    state
+        .servers_for(&config, leaf.as_deref())
+        .into_iter()
+        .find_map(|server| {
+            if server.auth_failure == AuthFailure::Degrade {
+                return None;
+            }
+            let need = state.connector_sync(&server.id)?.auth?;
+            state
+                .open_interrupt(&interrupt_id(&server.id))
+                .is_none()
+                .then(|| (server.id.clone(), need))
+        })
 }

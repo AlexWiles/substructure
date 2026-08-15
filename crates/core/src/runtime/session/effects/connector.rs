@@ -115,7 +115,7 @@ pub(in crate::runtime::session) fn owed(state: &SessionState, leaf: Option<&str>
         .map(|connection_id| Dep::ConnectorSettled { connection_id })
         .collect();
     if let Some(config) = state.resolve_agent_for(leaf) {
-        for c in &config.mcp {
+        for c in state.servers_for(&config, leaf) {
             if state
                 .tracking(EffectKind::ConnectorSync, &c.id)
                 .is_some_and(EffectTracking::is_in_flight)
@@ -131,14 +131,16 @@ pub(in crate::runtime::session) fn owed(state: &SessionState, leaf: Option<&str>
     deps
 }
 
-/// Fetch every connection `config` names that this session has never fetched.
+/// Fetch every connection `config` reaches that this session has never
+/// fetched. An unenabled plugin's servers are not reached yet, so they are
+/// not fetched: enabling is what wakes them.
 pub(in crate::runtime::session) fn sync(
     state: &SessionState,
     config: &AgentConfig,
 ) -> Vec<EventPayload> {
     let retry = RetryPolicy::resolve(None, config.retry.as_deref(), RetryTarget::ConnectorSync);
-    config
-        .mcp
+    state
+        .servers_for(config, state.head_id.as_deref())
         .iter()
         .filter(|c| !state.has_effect(EffectKind::ConnectorSync, &c.id))
         .map(|c| {
@@ -187,10 +189,15 @@ impl SessionState {
     /// on them anyway — an `include` that matches nothing is a typo for whoever
     /// wrote the config, not a runtime condition for the agent to handle.
     fn report_filter(&self, connection_id: &str, offered: &[RemoteTool], prefix: Option<&str>) {
-        let Some(config) = self.resolve_agent_for(self.head_id.as_deref()) else {
+        let leaf = self.head_id.clone();
+        let Some(config) = self.resolve_agent_for(leaf.as_deref()) else {
             return;
         };
-        let Some(connector) = config.mcp.iter().find(|c| c.id == connection_id).cloned() else {
+        let Some(connector) = self
+            .servers_for(&config, leaf.as_deref())
+            .into_iter()
+            .find(|c| c.id == connection_id)
+        else {
             return;
         };
         let defers = filter::defers(&connector, config.defers_tools());
@@ -219,7 +226,9 @@ impl SessionState {
         }
         // Names this fetch lost. Scoped to this connection, because every other
         // connection reports its own when it settles.
-        let collisions = self.connector_tools_for_config(&config).collisions;
+        let collisions = self
+            .connector_tools_for_config(&config, leaf.as_deref())
+            .collisions;
         for name in collisions
             .iter()
             .filter(|name| r.tools.iter().any(|t| &&t.name == name))

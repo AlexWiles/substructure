@@ -201,6 +201,21 @@ pub(in crate::runtime::session) fn request(
     let engine_tool = state.connector_tool_for(&name);
     let (name, arguments, handler, target) = match engine_tool {
         Some(tool) if tool.kind == ConnectorToolKind::Call => unwrap_call(state, name, arguments),
+        // The plugin is routing, frozen from the arguments: a config change
+        // cannot re-aim a skill call already made.
+        Some(tool) if tool.kind == ConnectorToolKind::Skill => {
+            let (plugin, skill) = skill_named(&arguments);
+            (
+                name,
+                arguments,
+                ToolHandler::Server,
+                Some(ConnectorTarget {
+                    connector: plugin,
+                    remote_name: skill,
+                    kind: tool.kind,
+                }),
+            )
+        }
         Some(tool) => (
             name,
             arguments,
@@ -220,9 +235,15 @@ pub(in crate::runtime::session) fn request(
     if state.has_effect(EffectKind::ToolCall, &tool_call_id) {
         return Ok(Vec::new());
     }
+    // Using a skill is what enables its plugin. The enablement lands before
+    // the call, so the call and everything after it read the plugin as on.
+    let mut events = match &target {
+        Some(t) if t.kind == ConnectorToolKind::Skill => state.enable_plugin_events(&t.connector),
+        _ => Vec::new(),
+    };
     // The execute decision for a worker-handled call queues at dispatch,
     // alongside the deadline clock.
-    Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
+    events.push(EventPayload::ToolCallRequested(ToolCallRequested {
         id: tool_call_id,
         attempt: 0,
         name,
@@ -230,7 +251,18 @@ pub(in crate::runtime::session) fn request(
         handler,
         target,
         retry,
-    })])
+    }));
+    Ok(events)
+}
+
+/// The `<plugin>:<skill>` a skill call names, split for routing. A name that
+/// is not that shape routes with empty halves and is answered with the fault.
+fn skill_named(arguments: &str) -> (String, String) {
+    let named = argument(arguments, "name").unwrap_or_default();
+    match named.split_once(':') {
+        Some((plugin, skill)) => (plugin.to_string(), skill.to_string()),
+        None => (String::new(), named),
+    }
 }
 
 /// A `call_tool` becomes the call it names: the same name, the same arguments,

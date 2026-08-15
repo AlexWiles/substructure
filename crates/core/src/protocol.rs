@@ -675,6 +675,10 @@ pub struct AgentConfig {
     /// MCP servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
+    /// Plugins this agent may use. Skills ride here as metadata; a plugin's
+    /// servers behave as `mcp` entries once the plugin is enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<AgentPlugin>,
     /// Defer every tool this agent offers, from any source, unless the tool or
     /// the connection says otherwise. Absent ⇒ the agent defers nothing of its
     /// own; a connection may still defer on its own account.
@@ -880,6 +884,8 @@ pub enum ConnectorToolKind {
     Find,
     /// Run the tool the arguments name.
     Call,
+    /// Load a skill's instructions from a plugin bundle.
+    Skill,
 }
 
 impl ConnectorToolKind {
@@ -984,6 +990,58 @@ pub struct McpTools {
     /// Absent ⇒ the agent's `defer_tools`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer: Option<bool>,
+}
+
+/// A plugin an agent may use, resolved to what the engine needs at runtime:
+/// the skills the model discovers, and the connection ids of the plugin's
+/// servers. Stamped from the bundle when the config loads, the way sub-agent
+/// descriptions are — a worker echoes it rather than authoring it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "AgentPlugin")]
+pub struct AgentPlugin {
+    pub id: String,
+    /// On from session start. Absent, the plugin sits in the catalog and the
+    /// first skill use enables it — recording the enablement on the branch and
+    /// waking the plugin's servers.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillMeta>,
+    /// Connection-registry ids of this plugin's servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
+    /// Narrows the plugin's servers, same knobs as an [`McpServer`], applied
+    /// to each of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<McpTools>,
+    #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
+    pub auth_failure: AuthFailure,
+    #[serde(default, skip_serializing_if = "Approve::is_default")]
+    pub approve: Approve,
+}
+
+impl AgentPlugin {
+    /// One of this plugin's servers as the `mcp` machinery reads it: filter,
+    /// gating, and auth policy come from the plugin entry.
+    pub fn server(&self, id: &str) -> McpServer {
+        McpServer {
+            id: id.to_string(),
+            tools: self.tools.clone(),
+            auth_failure: self.auth_failure,
+            approve: self.approve,
+        }
+    }
+}
+
+/// What the model discovers of one skill before loading it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "SkillMeta")]
+pub struct SkillMeta {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,

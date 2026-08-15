@@ -41,7 +41,7 @@ pub type Contributor = fn(&SessionState, Option<&str>, &str) -> Vec<PromptContex
 
 /// Every source, in a fixed order — two replays that disagreed would send two
 /// different prompts. A new source is one entry here.
-const CONTRIBUTORS: &[Contributor] = &[announce_servers];
+const CONTRIBUTORS: &[Contributor] = &[plugin_catalog, announce_servers];
 
 /// Everything the engine owes this call.
 pub fn owed(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<PromptContext> {
@@ -78,6 +78,71 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
             })
         })
         .collect()
+}
+
+/// Skill descriptions ride the catalog until the entries said so far pass
+/// this; names always ride. The frontier harnesses' cap, so a plugin-heavy
+/// agent degrades to names rather than flooding the prompt.
+const CATALOG_BUDGET: usize = 4000;
+
+/// One catalog entry per plugin the path has not seen: what it is, its
+/// skills, and that the `skill` tool is the way in. Each plugin is its own
+/// context, so one declared mid-session introduces itself through the ladder
+/// without touching what an earlier call cached.
+fn plugin_catalog(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<PromptContext> {
+    let Some(config) = state.resolve_agent_for(leaf) else {
+        return Vec::new();
+    };
+    let said = state.context_ids_on_path(leaf, call_id);
+    let mut spent = 0usize;
+    config
+        .plugins
+        .iter()
+        .map(|plugin| (plugin, format!("plugin:{}", plugin.id)))
+        .filter(|(_, id)| !said.contains(id))
+        .map(|(plugin, id)| {
+            let skills: Vec<SkillListing> = plugin
+                .skills
+                .iter()
+                .map(|s| {
+                    spent += s.description.len();
+                    SkillListing {
+                        name: format!("{}:{}", plugin.id, s.name),
+                        description: (spent <= CATALOG_BUDGET).then(|| s.description.clone()),
+                    }
+                })
+                .collect();
+            let content = serde_json::to_string(&PluginListing {
+                plugin: &plugin.id,
+                about: (!plugin.description.is_empty()).then_some(&plugin.description),
+                skills,
+                usage: "load a skill with the `skill` tool; using one activates the plugin",
+            })
+            .unwrap_or_default();
+            PromptContext {
+                id,
+                placement: Placement::System,
+                content,
+            }
+        })
+        .collect()
+}
+
+/// Struct, not a `json!` map: key order is the wire contract's stability.
+#[derive(serde::Serialize)]
+struct PluginListing<'a> {
+    plugin: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    about: Option<&'a String>,
+    skills: Vec<SkillListing>,
+    usage: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct SkillListing {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 /// Merge what this call does not already hold. `applied` is the record, not the
