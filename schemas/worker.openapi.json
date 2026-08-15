@@ -138,6 +138,24 @@
         ],
         "title": "Announce"
       },
+      "Approve": {
+        "description": "Which of a connection's calls stop for a person.",
+        "oneOf": [
+          {
+            "enum": [
+              "never",
+              "always"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "destructive",
+            "description": "A tool that the connection marks `destructiveHint`.",
+            "type": "string"
+          }
+        ],
+        "title": "Approve"
+      },
       "AuthFailure": {
         "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
         "oneOf": [
@@ -1500,6 +1518,9 @@
         "additionalProperties": false,
         "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
         "properties": {
+          "approve": {
+            "$ref": "#/components/schemas/Approve"
+          },
           "auth_failure": {
             "$ref": "#/components/schemas/AuthFailure"
           },

@@ -421,6 +421,8 @@ type SubAgent = {
 type McpServer = {
     id: string                  // a connection the engine holds. never a URL
     tools?: McpTools            // omitted: every tool the connection offers
+    auth_failure?: "interrupt" | "degrade"          // one that needs authorizing. omitted: "interrupt"
+    approve?: "never" | "destructive" | "always"    // calls that wait for a person. omitted: "never"
 }
 
 type McpTools = {

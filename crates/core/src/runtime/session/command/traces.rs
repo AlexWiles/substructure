@@ -172,6 +172,7 @@ fn config_with_mcp(connection: &str) -> AgentConfig {
             id: connection.to_string(),
             tools: None,
             auth_failure: Default::default(),
+            approve: Default::default(),
         }],
         ..config()
     }

@@ -10,7 +10,7 @@ use crate::runtime::processor::{
     ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
-use crate::runtime::session::propose::propose;
+use crate::runtime::session::propose::{propose, Proposing};
 use crate::runtime::session::state::SessionState;
 use crate::runtime::session::wire::to_wire_trigger;
 use crate::runtime::session::SessionEvent;
@@ -186,13 +186,18 @@ async fn extract(
             e.error.message
         ))
     })?;
+    let connector_tools = state.connector_tools(message_tree.head_id.as_deref()).tools;
     let proposed = propose(
         &trigger,
-        &transcript,
-        &open_llm_calls,
-        pending_calls,
-        agent_config.as_ref(),
-        &req.id,
+        &Proposing {
+            transcript: &transcript,
+            llm_calls: &open_llm_calls,
+            pending_calls,
+            dispatched: &state.dispatched_calls(),
+            config: agent_config.as_ref(),
+            connector_tools: &connector_tools,
+            decision_id: &req.id,
+        },
     )
     // `session.start` is the one trigger the engine cannot derive from the
     // session: the config is the app's declaration, not the session's history.
@@ -276,18 +281,26 @@ mod tests {
 
     use chrono::Utc;
 
+    use std::collections::BTreeMap;
+
     use super::{extract, AgentDirectory};
+    use crate::connectors::RemoteTool;
     use crate::protocol::OwnerKind;
     use crate::protocol::{
-        AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, RetryPolicy, Role,
-        SessionOwner,
+        AgentConfig, Approve, ClientMessage, ClientPayload, Content, DraftMessage, EffectKind,
+        LlmRequest, LlmResponse, McpServer, RetryPolicy, Role, SessionOwner, StoredResult,
+        ToolCall, ToolCallFunction,
     };
     use crate::runtime::event_store::{
         AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, StoreError,
     };
+    use crate::runtime::llm::{LlmBlock, LlmBlocks};
     use crate::runtime::session::command::{CommandPayload, TurnTarget};
+    use crate::runtime::session::decision::LlmHandler;
+    use crate::runtime::session::effects::Outcome;
     use crate::runtime::session::events::EventPayload;
     use crate::runtime::session::state::SessionState;
+    use crate::runtime::session::wire::resolve_response;
     use crate::runtime::session::{CommitContext, SessionAggregate, SessionEvent};
     use crate::runtime::span::SpanContext;
     use crate::runtime::worker::directory::{AgentEntry, StaticAgentDirectory};
@@ -558,6 +571,289 @@ mod tests {
              fails loudly instead of submitting a silent no-op; got {}",
             wire["proposed"]
         );
+    }
+
+    // ── the engine-hosted loop ───────────────────────────────────────────
+    //
+    // These run against a real session. A hand-written transcript can hold a
+    // state that the engine never produces.
+
+    /// `transport::push::decide_in_engine`, with the test settling the effects.
+    async fn drive(agg: &mut SessionAggregate, events: Vec<SessionEvent>) -> Vec<SessionEvent> {
+        let mut queue: Vec<SessionEvent> = events;
+        let mut settled = Vec::new();
+        while let Some(event) = queue.pop() {
+            if !matches!(event.payload, EventPayload::DecisionDispatched(_)) {
+                continue;
+            }
+            let store = FrozenStore {
+                session: agg.clone(),
+                events: BroadcastBus::new(1),
+            };
+            let request = extract(
+                &store,
+                &EmptyAgentDirectory,
+                &[],
+                &crate::runtime::blob::NOWHERE,
+                event,
+            )
+            .await
+            .expect("extract succeeds")
+            .expect("a deliverable request");
+            let blocks =
+                LlmBlocks::new(BTreeMap::from([("claude".to_string(), LlmBlock::engine())]));
+            let resolved = resolve_response(
+                request.proposed,
+                request.agent.as_ref(),
+                Some(&request.trigger),
+                &blocks,
+                &crate::runtime::blob::NOWHERE,
+                "tenant-a",
+            )
+            .await
+            .expect("the proposal resolves");
+            let next = dispatch(
+                agg,
+                CommandPayload::SubmitWorkerDecision {
+                    decision_id: request.decision_id,
+                    transcript: resolved.messages,
+                    actions: resolved.actions,
+                    state: resolved.state,
+                    agent: resolved.agent,
+                    channels: resolved.channels,
+                },
+                &system(),
+            );
+            queue.extend(next.iter().cloned());
+            settled.extend(next);
+        }
+        settled
+    }
+
+    async fn two_calls_awaiting_approval() -> SessionAggregate {
+        let mut agg = SessionAggregate::new(
+            "sess-1".to_string(),
+            "tenant-a".to_string(),
+            SessionState::new("sess-1".to_string()),
+        );
+        let created = dispatch(
+            &mut agg,
+            CommandPayload::CreateSession {
+                agent_id: "agent-1".to_string(),
+                owner: SessionOwner {
+                    kind: OwnerKind::Frontend,
+                    tenant_id: "tenant-a".to_string(),
+                    id: Some("user-1".to_string()),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy::no_retry(),
+            },
+            &system(),
+        );
+        let start = created
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::DecisionDispatched(w) => Some(w.id.clone()),
+                _ => None,
+            })
+            .expect("CreateSession opens a session.start decision");
+        dispatch(
+            &mut agg,
+            CommandPayload::SubmitWorkerDecision {
+                decision_id: start,
+                transcript: vec![],
+                actions: vec![],
+                state: None,
+                agent: Some(AgentConfig {
+                    mcp: vec![McpServer {
+                        id: "sentry".to_string(),
+                        tools: None,
+                        auth_failure: Default::default(),
+                        approve: Approve::Destructive,
+                    }],
+                    ..config("m1")
+                }),
+                channels: Default::default(),
+            },
+            &system(),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::settle(
+                EffectKind::ConnectorSync,
+                "sentry".to_string(),
+                None,
+                Outcome::Connector {
+                    prefix: Some("sentry".to_string()),
+                    tools: vec![RemoteTool {
+                        name: "delete_issue".to_string(),
+                        description: "Delete an issue.".to_string(),
+                        input: None,
+                        output: None,
+                        annotations: crate::connectors::ToolAnnotations {
+                            destructive: Some(true),
+                            ..Default::default()
+                        },
+                    }],
+                    instructions: None,
+                },
+            ),
+            &system(),
+        );
+        dispatch(
+            &mut agg,
+            CommandPayload::RequestLlmCall {
+                llm: "claude".to_string(),
+                call_id: "call-1".to_string(),
+                request: LlmRequest {
+                    model: "m1".to_string(),
+                    messages: vec![],
+                    tools: None,
+                    temperature: None,
+                    max_completion_tokens: None,
+                    reasoning: None,
+                },
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            },
+            &system(),
+        );
+        let finished = dispatch(
+            &mut agg,
+            CommandPayload::settle(
+                EffectKind::LlmCall,
+                "call-1".to_string(),
+                Some(0),
+                Outcome::Llm(Box::new(LlmResponse {
+                    model: "m1".to_string(),
+                    content: None,
+                    tool_calls: vec![delete_call("tc-1", "7"), delete_call("tc-2", "9")],
+                    finish_reason: Some("tool_calls".to_string()),
+                    usage: None,
+                    cost: None,
+                    images: vec![],
+                    reasoning: None,
+                })),
+            ),
+            &system(),
+        );
+        drive(&mut agg, finished).await;
+        agg
+    }
+
+    fn delete_call(id: &str, issue: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "sentry__delete_issue".to_string(),
+                arguments: serde_json::json!({ "id": issue }).to_string(),
+            },
+        }
+    }
+
+    fn resume(interrupt_id: &str, approved: bool) -> CommandPayload {
+        CommandPayload::ResumeInterrupt {
+            interrupt_id: interrupt_id.to_string(),
+            payload: serde_json::json!({ "approved": approved }),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_calls_are_asked_about_one_at_a_time() {
+        let mut agg = two_calls_awaiting_approval().await;
+        assert!(
+            agg.state.open_interrupt("mcp-approve:tc-1").is_some(),
+            "the first call is asked about; open: {:?}",
+            agg.state.open_interrupts
+        );
+        assert!(
+            agg.state.tool_call("tc-1").is_none() && agg.state.tool_call("tc-2").is_none(),
+            "nothing runs while a question is open"
+        );
+
+        let events = dispatch(&mut agg, resume("mcp-approve:tc-1", true), &system());
+        drive(&mut agg, events).await;
+        assert!(
+            agg.state.tool_call("tc-1").is_some(),
+            "the approved call is dispatched"
+        );
+        assert!(
+            agg.state.open_interrupt("mcp-approve:tc-2").is_some(),
+            "and the next question follows it; open: {:?}",
+            agg.state.open_interrupts
+        );
+
+        // It settles while the second question is open, so its decision is held.
+        let events = dispatch(
+            &mut agg,
+            CommandPayload::settle(
+                EffectKind::ToolCall,
+                "tc-1".to_string(),
+                Some(0),
+                Outcome::Tool {
+                    result: StoredResult::text("deleted issue 7"),
+                },
+            ),
+            &system(),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::DecisionDispatched(_))),
+            "a result lands, but its decision waits for the open question"
+        );
+
+        let events = dispatch(&mut agg, resume("mcp-approve:tc-2", false), &system());
+        drive(&mut agg, events).await;
+
+        assert!(
+            agg.state.open_interrupts.is_empty(),
+            "a call already away must not be asked about again; open: {:?}",
+            agg.state.open_interrupts
+        );
+        assert!(
+            agg.state.tool_call("tc-2").is_none(),
+            "the declined call never runs"
+        );
+        let prompt = last_prompt(&agg).expect("the model is prompted with both outcomes");
+        let answers: Vec<(&str, String)> = prompt
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| {
+                (
+                    m.tool_call_id.as_deref().unwrap_or_default(),
+                    m.content
+                        .as_ref()
+                        .and_then(Content::text)
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            answers.len(),
+            2,
+            "every call the model made is answered exactly once; got {answers:?}"
+        );
+        assert!(answers
+            .iter()
+            .any(|(id, text)| *id == "tc-1" && text.contains("deleted issue 7")));
+        assert!(answers
+            .iter()
+            .any(|(id, text)| *id == "tc-2" && text.contains("declined")));
+    }
+
+    fn last_prompt(agg: &SessionAggregate) -> Option<Vec<crate::protocol::Message>> {
+        agg.state
+            .effects_of(EffectKind::LlmCall)
+            .filter(|e| e.id != "call-1")
+            .last()
+            .and_then(|e| e.llm())
+            .map(|c| c.prompt.clone())
     }
 
     #[tokio::test]

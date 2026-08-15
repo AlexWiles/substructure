@@ -17,8 +17,8 @@ use std::num::NonZeroUsize;
 
 use crate::connectors::RemoteTool;
 use crate::protocol::{
-    ConnectorProtocol, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, LlmTool, McpServer,
-    McpTools,
+    Approve, ConnectorProtocol, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, LlmTool,
+    McpServer, McpTools,
 };
 
 /// Separates the connector id from the tool's own name. Doubled because both
@@ -98,7 +98,13 @@ pub fn resolve(
     for tool in kept {
         // A deferred name never reaches the request, so no provider's name
         // limit applies to it.
-        match expand(&connector.id, tool, prefix, defer) {
+        match expand(
+            &connector.id,
+            tool,
+            prefix,
+            defer,
+            approves(connector.approve, tool),
+        ) {
             Some(expanded) => tools.push(expanded),
             None => oversized.push(tool.name.clone()),
         }
@@ -110,6 +116,14 @@ pub fn resolve(
         unannotated,
         unmatched_include,
         oversized,
+    }
+}
+
+pub fn approves(policy: Approve, tool: &RemoteTool) -> bool {
+    match policy {
+        Approve::Never => false,
+        Approve::Always => true,
+        Approve::Destructive => tool.annotations.destructive == Some(true),
     }
 }
 
@@ -172,6 +186,7 @@ fn engine_tool(
         remote_name: String::new(),
         kind,
         defer: false,
+        approve: false,
     }
 }
 
@@ -384,6 +399,7 @@ fn expand(
     tool: &RemoteTool,
     prefix: Option<&str>,
     defer: bool,
+    approve: bool,
 ) -> Option<ConnectorTool> {
     let name = match prefix {
         Some(prefix) => format!("{}{SEPARATOR}{}", name_prefix(prefix), tool.name),
@@ -402,6 +418,7 @@ fn expand(
         remote_name: tool.name.clone(),
         kind: ConnectorToolKind::Remote,
         defer,
+        approve,
     })
 }
 
@@ -525,6 +542,14 @@ mod tests {
             id: id.to_string(),
             tools,
             auth_failure: Default::default(),
+            approve: Default::default(),
+        }
+    }
+
+    fn asking(id: &str, approve: Approve) -> McpServer {
+        McpServer {
+            approve,
+            ..connector(id, None)
         }
     }
 
@@ -835,6 +860,100 @@ mod tests {
         assert!(!glob_match("a*b*c", "axxbyy"));
         assert!(glob_match("a*", "a"));
         assert!(!glob_match("a?", "a"));
+    }
+
+    // ── approval ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn nothing_asks_until_a_connection_says_to() {
+        let offered = [read_only("search"), writer("delete")];
+        let r = resolve(&connector("sentry", None), &offered, Some("sentry"), false);
+        assert!(
+            r.tools.iter().all(|t| !t.approve),
+            "nothing asks by default"
+        );
+    }
+
+    #[test]
+    fn destructive_asks_about_the_writer_and_not_the_reader() {
+        let offered = [read_only("search"), writer("delete")];
+        let r = resolve(
+            &asking("sentry", Approve::Destructive),
+            &offered,
+            Some("sentry"),
+            false,
+        );
+        assert_eq!(names(&r), vec!["sentry__search", "sentry__delete"]);
+        assert!(!r.tools[0].approve, "a read-only tool destroys nothing");
+        assert!(r.tools[1].approve);
+    }
+
+    #[test]
+    fn a_tool_the_server_says_nothing_about_is_not_one_it_called_destructive() {
+        let r = resolve(
+            &asking("custom", Approve::Destructive),
+            &[bare("run")],
+            Some("custom"),
+            false,
+        );
+        assert!(!r.tools[0].approve, "silence is not a claim");
+        let all = resolve(
+            &asking("custom", Approve::Always),
+            &[bare("run")],
+            Some("custom"),
+            false,
+        );
+        assert!(all.tools[0].approve);
+    }
+
+    #[test]
+    fn a_read_only_tool_that_says_nothing_else_asks_nothing() {
+        let tool = tool(
+            "search",
+            crate::connectors::ToolAnnotations {
+                read_only: Some(true),
+                ..Default::default()
+            },
+        );
+        let r = resolve(
+            &asking("sentry", Approve::Destructive),
+            &[tool],
+            Some("sentry"),
+            false,
+        );
+        assert!(!r.tools[0].approve);
+    }
+
+    #[test]
+    fn always_asks_whatever_the_server_says_about_itself() {
+        let offered = [read_only("search"), writer("delete")];
+        let r = resolve(
+            &asking("sentry", Approve::Always),
+            &offered,
+            Some("sentry"),
+            false,
+        );
+        assert!(r.tools.iter().all(|t| t.approve));
+    }
+
+    #[test]
+    fn a_deferred_tool_still_asks() {
+        let r = resolve(
+            &asking("sentry", Approve::Destructive),
+            &[writer("delete")],
+            Some("sentry"),
+            true,
+        );
+        assert!(
+            r.tools[0].approve,
+            "how a tool reaches the model says nothing about what it does"
+        );
+        assert!(
+            search_tools(DeferToolsStrategy::Search)
+                .iter()
+                .all(|t| !t.approve),
+            "the engine's own tools reach nothing on their own"
+        );
     }
 
     // ── deferral ─────────────────────────────────────────────────────────

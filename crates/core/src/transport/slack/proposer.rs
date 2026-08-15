@@ -286,6 +286,7 @@ fn click_proposal(state: &SessionState, args: &Value) -> Option<DecisionResponse
             channel: "slack".to_string(),
             user: Some(click.user.to_string()),
             label: Some(option.label),
+            style: option.style,
         }),
     };
     // The replaced credential reaches the agent only through a new fetch.
@@ -397,6 +398,7 @@ mod tests {
                         id: "sentry".to_string(),
                         tools: None,
                         auth_failure: policy,
+                        approve: Default::default(),
                     }],
                     ..AgentConfig {
                         llm: None,

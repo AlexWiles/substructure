@@ -1782,6 +1782,19 @@ impl SessionState {
         }
     }
 
+    /// Every model tool call this session took on, settled ones included.
+    pub fn dispatched_calls(&self) -> Vec<String> {
+        self.effects
+            .values()
+            .filter_map(|e| match e.kind() {
+                EffectKind::ToolCall => Some(e.id.clone()),
+                // The key is the child session; the call is inside.
+                EffectKind::SubAgent => e.sub_agent().map(|s| s.tool_call_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The connector tool `name` resolves to on the current path, if any. The
     /// executor reads `connector`/`remote_name` off this to place the call.
     pub fn connector_tool_for(&self, name: &str) -> Option<ConnectorTool> {
@@ -2648,6 +2661,7 @@ mod agent_version_tests {
                         id: "sentry".to_string(),
                         tools: None,
                         auth_failure: Default::default(),
+                        approve: Default::default(),
                     }],
                     ..config(model)
                 },

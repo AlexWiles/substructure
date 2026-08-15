@@ -190,7 +190,7 @@ agent uses no compute. In Slack this is a button.
 
 Docs: [Interrupts](./docs/100-interrupts.md)
 
-Examples: [Node](./examples/node-hono-tool-approval)
+Examples: [Node](./examples/node-hono-tool-approval), [No code](./examples/no-code-mcp-approval)
 
 ### Tools that take hours
 

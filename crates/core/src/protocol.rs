@@ -863,6 +863,8 @@ pub struct ConnectorTool {
     /// from the connection's `defer` and the agent's `defer_tools`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub defer: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub approve: bool,
 }
 
 /// What the engine does with a call. Every value but `Remote` is one of the
@@ -911,6 +913,26 @@ pub struct McpServer {
     pub tools: Option<McpTools>,
     #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
     pub auth_failure: AuthFailure,
+    #[serde(default, skip_serializing_if = "Approve::is_default")]
+    pub approve: Approve,
+}
+
+/// Which of a connection's calls stop for a person.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "Approve")]
+pub enum Approve {
+    #[default]
+    Never,
+    /// A tool that the connection marks `destructiveHint`.
+    Destructive,
+    Always,
+}
+
+impl Approve {
+    fn is_default(&self) -> bool {
+        *self == Self::Never
+    }
 }
 
 /// What a session does when a connection needs a person to authorize it. It
@@ -1720,6 +1742,9 @@ pub struct InterruptResponder {
     /// The chosen option's label, when the resolution was a pick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The chosen option's `style`, when the resolution was a pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 // ── Engine → worker ──────────────────────────────────────────────────────

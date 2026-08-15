@@ -429,12 +429,13 @@ fn resolution_text(payload: &Value) -> String {
     if payload["expired"].as_bool() == Some(true) {
         return "⏱ Expired".to_string();
     }
-    let (mark, word) = if payload["status"].as_str() == Some("cancelled") {
-        ("✖", "Cancelled")
-    } else {
-        ("✅", "Resolved")
-    };
     let responder = &payload["responder"];
+    // A `danger` pick stops something. It never gets a green tick.
+    let (mark, word) = match responder["style"].as_str() {
+        _ if payload["status"].as_str() == Some("cancelled") => ("✖", "Cancelled"),
+        Some("danger") => ("❌", "Declined"),
+        _ => ("✅", "Resolved"),
+    };
     match (responder["label"].as_str(), responder["user"].as_str()) {
         (Some(label), Some(user)) => format!("{mark} {label} — <@{user}>"),
         (None, Some(user)) => format!("{mark} {word} by <@{user}>"),
@@ -1142,6 +1143,27 @@ mod tests {
         assert_eq!(
             resolution_text(&serde_json::json!({ "status": "cancelled" })),
             "✖ Cancelled"
+        );
+        assert_eq!(
+            resolution_text(&serde_json::json!({
+                "status": "resolved",
+                "payload": { "approved": false },
+                "responder": { "channel": "slack", "user": "U9", "label": "Decline", "style": "danger" },
+            })),
+            "❌ Decline — <@U9>"
+        );
+        assert_eq!(
+            resolution_text(&serde_json::json!({
+                "responder": { "user": "U9", "style": "danger" }
+            })),
+            "❌ Declined by <@U9>",
+            "a `danger` pick with no label still says which way it went"
+        );
+        assert_eq!(
+            resolution_text(&serde_json::json!({
+                "responder": { "user": "U9", "label": "Run it", "style": "primary" }
+            })),
+            "✅ Run it — <@U9>"
         );
         assert_eq!(
             resolution_text(&serde_json::json!({ "expired": true })),

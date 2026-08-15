@@ -137,6 +137,24 @@
       ],
       "title": "Announce"
     },
+    "Approve": {
+      "description": "Which of a connection's calls stop for a person.",
+      "oneOf": [
+        {
+          "enum": [
+            "never",
+            "always"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "destructive",
+          "description": "A tool that the connection marks `destructiveHint`.",
+          "type": "string"
+        }
+      ],
+      "title": "Approve"
+    },
     "AudioData": {
       "additionalProperties": false,
       "properties": {
@@ -2034,6 +2052,13 @@
             "null"
           ]
         },
+        "style": {
+          "description": "The chosen option's `style`, when the resolution was a pick.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "user": {
           "description": "Channel-native user id.",
           "type": [
@@ -2217,6 +2242,9 @@
       "additionalProperties": false,
       "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
       "properties": {
+        "approve": {
+          "$ref": "#/$defs/Approve"
+        },
         "auth_failure": {
           "$ref": "#/$defs/AuthFailure"
         },

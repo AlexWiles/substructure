@@ -126,29 +126,15 @@ Put the routing hint in the interrupt's `reason`: `tool_call`,
 
 ### What a click does
 
-A click resumes the interrupt with the AG-UI resume shape.
+A click answers the question. The prompt then loses its buttons and says who
+answered and which way: a `danger` button shows ❌, any other ✅. Work after
+that goes into a new message.
 
-```json
-{ "status": "resolved",
-  "payload": { "decision": "approve" },
-  "responder": { "channel": "slack", "user": "U…", "label": "Approve" } }
-```
+A click cannot send anything the prompt did not offer, and clicking twice
+answers once.
 
-The inner `payload` is the chosen option's `value`. The engine reads it from the
-recorded interrupt, so a click cannot send its own value.
-
-Every click is a `client.action` decision. For a prompt button, the engine
-proposes the resolution above as an `interrupt.resolve` action. A worker that
-returns the proposal needs no code.
-
-A worker that wants its own rules answers the decision itself. It can check who
-clicked or refuse the resolve. Slack delivers a click more than once, so record
-the clicks you have handled in worker state.
-
-When someone resumes the interrupt, the prompt loses its buttons and shows the
-result. Work after the resume goes into a new message.
-
-For the worker side, see the
+The worker side — what a click resumes with, and how to answer one yourself —
+is in [Interrupts](./100-interrupts.md#answering-a-prompt), with a worker in the
 [`node-hono-tool-approval`](../examples/node-hono-tool-approval) example.
 
 ### A message while a prompt is open

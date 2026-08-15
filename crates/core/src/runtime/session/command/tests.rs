@@ -6458,6 +6458,7 @@ fn connector_config(ids: &[&str]) -> AgentConfig {
                 id: id.to_string(),
                 tools: None,
                 auth_failure: Default::default(),
+                approve: Default::default(),
             })
             .collect(),
         ..agent_config("m1")
@@ -7146,6 +7147,7 @@ fn searching_connector_config(ids: &[&str]) -> AgentConfig {
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
+                approve: Default::default(),
             })
             .collect(),
         ..agent_config("m1")
@@ -7487,6 +7489,7 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
+                approve: Default::default(),
             }],
             ..agent_config("m1")
         }),
@@ -7622,6 +7625,7 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
                     id: "sentry".to_string(),
                     tools: None,
                     auth_failure: Default::default(),
+                    approve: Default::default(),
                 },
                 McpServer {
                     id: "aws".to_string(),
@@ -7630,6 +7634,7 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
                         ..Default::default()
                     }),
                     auth_failure: Default::default(),
+                    approve: Default::default(),
                 },
             ],
             ..agent_config("m1")
@@ -7702,6 +7707,7 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
+                approve: Default::default(),
             }],
             ..agent_config("m1")
         }),
@@ -7769,6 +7775,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
                     id: "sentry".to_string(),
                     tools: None,
                     auth_failure: Default::default(),
+                    approve: Default::default(),
                 }],
                 ..agent_config("m1")
             }),
@@ -7801,6 +7808,7 @@ fn a_connection_overrides_the_agents_default() {
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
+                approve: Default::default(),
             }],
             ..agent_config("m1")
         }),
@@ -8474,6 +8482,7 @@ fn a_filter_change_re_derives_without_another_fetch() {
                 ..Default::default()
             }),
             auth_failure: Default::default(),
+            approve: Default::default(),
         }],
         ..agent_config("m1")
     };

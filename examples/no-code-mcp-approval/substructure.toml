@@ -1,0 +1,22 @@
+name = "example"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.ops]
+llm = "openrouter"
+model = "anthropic/claude-haiku-4.5"
+system = "You run an issue tracker. Use the tools. Be terse."
+mcp = [{ id = "issues", approve = "destructive" }]
+
+[mcp.issues]
+url = "http://127.0.0.1:4500/mcp"
+auth = "none"
+
+[slack]
+dm = "ops"
+mentions = "ops"
+
+[run]
+agent = "ops"
+output = "pretty"

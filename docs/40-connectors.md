@@ -216,6 +216,102 @@ The capability keys read the connection's MCP annotations. A tool with no
 annotation fails them. Annotations are hints from the server. Use them to take
 fewer tools, not as a security boundary.
 
+## Approving a call
+
+A filter says which tools an agent may reach. `approve` says which of them stop
+and ask a person first.
+
+```toml title="substructure.toml"
+[agent.support]
+mcp = [{ id = "sentry", approve = "destructive" }]
+```
+
+| `approve` | Asks about |
+| --- | --- |
+| `never` (the default) | Nothing. |
+| `destructive` | Each tool the connection marks `destructiveHint`. |
+| `always` | Every call on the connection. |
+
+The setting belongs to the pair, like `auth_failure`. One connection serves an
+agent a person watches and an agent that runs on a schedule, and only the first
+can be asked.
+
+`destructive` asks about the tools a connection says destroy something, and
+about no others. A tool it says nothing about is not one of them: silence is
+not a claim either way, and a setting that read it as one would ask about every
+tool of a server that annotates nothing.
+
+So `destructive` is only as good as what a server says about itself, and a
+server owes you no annotation at all. Where they are absent, wrong, or not
+yours to trust, `always` asks about every call and depends on nothing.
+
+A model that asks for a destructive call gets no tool result until a person
+answers. The engine records the message, runs nothing, and
+[interrupts](./100-interrupts.md).
+
+```jsonc
+{
+  "reason": "`sentry__delete_issue` needs approval before it runs",
+  "payload": {
+    "message": "Run `sentry__delete_issue`?\n\n```\n{\n  \"issue\": \"PROJ-42\"\n}\n```",
+    "tool_call_id": "call_a1",
+    "metadata": {
+      "type": "tool.approval",
+      "tool": "sentry__delete_issue",
+      "arguments": { "issue": "PROJ-42" },
+      "remaining": 0,
+      "options": [
+        { "label": "Run it", "value": { "approved": true }, "style": "primary" },
+        { "label": "Decline", "value": { "approved": false }, "style": "danger" }
+      ]
+    }
+  }
+}
+```
+
+The arguments are there because the tool's name says what would happen and only
+the arguments say what it would happen to. For a deferred tool, they are the
+tool's own — not the `call_tool` wrapper's.
+
+In Slack the two options are buttons in the thread. Anywhere else, resume it.
+
+```jsonc
+{ "type": "interrupt.resume", "interrupt_id": "mcp-approve:<tool call id>", "payload": { "approved": true } }
+```
+
+`true` runs the call. Anything else declines it: the model reads that a person
+declined, and answers from that instead of retrying. A payload nobody
+recognizes declines, because the call this holds is the one nobody wanted run by
+accident.
+
+## One question per call
+
+A model can ask for several calls at once. Each one that needs approval is asked
+about on its own, so a person can run one and decline the next.
+
+The questions come in turn — the answer to one raises the next — because a
+branch holds one open question at a time. `metadata.remaining` counts the calls
+behind this one.
+
+Nothing of that message runs until every question is answered, including the
+calls nobody asks about. A call dispatched while a question is open could settle
+first, and the model would be prompted again with the held call unanswered.
+
+An answered call runs, or gets a refusal recorded as its result. Either way the
+model is prompted again only once every call it made has an answer, so it reads
+what ran and what did not in one go.
+
+The [`no-code-mcp-approval`](../examples/no-code-mcp-approval) example is this
+in one file, with an MCP server to point it at.
+
+An agent whose worker authors its decisions decides this itself: the approval is
+a proposal, like every other, and a worker that writes its own answer to
+`llm.finished` never sees it. See [Tool calls](./60-tools.md).
+
+Nobody is asked where nobody is watching. A session with no channel to show the
+question in stops until someone resumes it by id, so use `never` for an agent
+that runs on a schedule.
+
 ## Deferring a connection
 
 Filtering is one answer to a large connection. Search is the other. Set `defer`
@@ -336,6 +432,7 @@ what the `Retry` button proposes. See [Protocol](./230-protocol.md#actions).
 
 ## Next
 
+- [Interrupts](./100-interrupts.md): the pause an approval is.
 - [Tool calls](./60-tools.md): tools your worker runs.
 - [Deferred tools](./65-deferred-tools.md): what `defer` turns on.
 - [Agents](./30-agents.md): the section that names a connection.
