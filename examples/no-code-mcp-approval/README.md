@@ -117,16 +117,17 @@ model would be prompted again with the held call unanswered.
 | `approve` | Asks about |
 | --- | --- |
 | `never` (the default) | Nothing. |
-| `destructive` | Each tool the connection does not call read-only, and does not call non-destructive. |
+| `destructive` | Each tool the connection marks `destructiveHint`. |
 | `always` | Every call on the connection. |
 
-`destructive` reads `destructiveHint` the way the MCP spec writes it: a tool
-that says nothing is destructive, and a read-only tool is not. Delete the
-`annotations` from `mcp-server.mjs` and run the search again — it now asks,
-because a server that says nothing about a tool has not said it is safe.
+`destructive` asks about what a server says destroys something, and nothing
+else. Delete the `annotations` from `delete_issue` in `mcp-server.mjs` and run
+the delete again — it goes straight through, because the server no longer says
+it destroys anything.
 
-The hints are the server's word about itself. Use `always` where the answer must
-not depend on that.
+That is the limit of the setting: it is the server's word about itself, and a
+server owes you no annotation at all. Use `always` where the answer must not
+depend on that.
 
 ```toml
 [agent.ops]

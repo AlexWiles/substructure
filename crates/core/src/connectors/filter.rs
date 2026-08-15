@@ -15,7 +15,7 @@
 
 use std::num::NonZeroUsize;
 
-use crate::connectors::{RemoteTool, ToolAnnotations};
+use crate::connectors::RemoteTool;
 use crate::protocol::{
     Approve, ConnectorProtocol, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, LlmTool,
     McpServer, McpTools,
@@ -119,20 +119,14 @@ pub fn resolve(
     }
 }
 
-/// Whether a call to this tool waits for a person.
+/// Whether a call to this tool waits for a person. A tool the connection says
+/// nothing about is not one it called destructive.
 pub fn approves(policy: Approve, tool: &RemoteTool) -> bool {
     match policy {
         Approve::Never => false,
         Approve::Always => true,
-        Approve::Destructive => destructive(&tool.annotations),
+        Approve::Destructive => tool.annotations.destructive == Some(true),
     }
-}
-
-/// The spec's reading: true unless said otherwise, and meaningless on a
-/// read-only tool. A filter reads silence the other way — see
-/// [`capability_verdict`].
-fn destructive(a: &ToolAnnotations) -> bool {
-    !a.read_only.unwrap_or(false) && a.destructive.unwrap_or(true)
 }
 
 /// Whether a connection's tools are kept out of the request: its own setting,
@@ -897,21 +891,31 @@ mod tests {
     }
 
     #[test]
-    fn an_unannotated_tool_is_destructive() {
+    fn a_tool_the_server_says_nothing_about_is_not_one_it_called_destructive() {
         let r = resolve(
             &asking("custom", Approve::Destructive),
             &[bare("run")],
             Some("custom"),
             false,
         );
-        assert!(r.tools[0].approve);
+        assert!(
+            !r.tools[0].approve,
+            "silence is not a claim; `always` is what covers a server like this"
+        );
+        let all = resolve(
+            &asking("custom", Approve::Always),
+            &[bare("run")],
+            Some("custom"),
+            false,
+        );
+        assert!(all.tools[0].approve);
     }
 
     #[test]
     fn a_read_only_tool_that_says_nothing_else_asks_nothing() {
         let tool = tool(
             "search",
-            ToolAnnotations {
+            crate::connectors::ToolAnnotations {
                 read_only: Some(true),
                 ..Default::default()
             },
@@ -922,10 +926,7 @@ mod tests {
             Some("sentry"),
             false,
         );
-        assert!(
-            !r.tools[0].approve,
-            "`destructiveHint` says nothing about a read-only tool"
-        );
+        assert!(!r.tools[0].approve);
     }
 
     #[test]

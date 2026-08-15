@@ -680,7 +680,6 @@ mod tests {
             },
             &system(),
         );
-        // One tool, unannotated — which the spec reads as destructive.
         dispatch(
             &mut agg,
             CommandPayload::settle(
@@ -694,7 +693,10 @@ mod tests {
                         description: "Delete an issue.".to_string(),
                         input: None,
                         output: None,
-                        annotations: Default::default(),
+                        annotations: crate::connectors::ToolAnnotations {
+                            destructive: Some(true),
+                            ..Default::default()
+                        },
                     }],
                     instructions: None,
                 },

@@ -928,8 +928,9 @@ pub enum Approve {
     /// Nothing asks.
     #[default]
     Never,
-    /// A tool the connection does not call read-only, and does not call
-    /// non-destructive. Silence is destructive, as the MCP spec reads it.
+    /// A tool the connection marks `destructiveHint`. One it says nothing
+    /// about is not one of these — use `always` where the annotations cannot
+    /// be relied on.
     Destructive,
     /// Every call on this connection.
     Always,

@@ -229,19 +229,21 @@ mcp = [{ id = "sentry", approve = "destructive" }]
 | `approve` | Asks about |
 | --- | --- |
 | `never` (the default) | Nothing. |
-| `destructive` | Each tool the connection does not call read-only, and does not call non-destructive. |
+| `destructive` | Each tool the connection marks `destructiveHint`. |
 | `always` | Every call on the connection. |
 
 The setting belongs to the pair, like `auth_failure`. One connection serves an
 agent a person watches and an agent that runs on a schedule, and only the first
 can be asked.
 
-`destructive` reads `destructiveHint` the way the MCP spec writes it: a tool
-that says nothing is destructive, and a read-only tool is not. So a server that
-annotates nothing asks about all of its tools. That is the opposite of how the
-filter reads the same hints, and for the same reason — a filter is a
-requirement, so silence fails it, while approval is a doubt, so silence raises
-it.
+`destructive` asks about the tools a connection says destroy something, and
+about no others. A tool it says nothing about is not one of them: silence is
+not a claim either way, and a setting that read it as one would ask about every
+tool of a server that annotates nothing.
+
+So `destructive` is only as good as what a server says about itself, and a
+server owes you no annotation at all. Where they are absent, wrong, or not
+yours to trust, `always` asks about every call and depends on nothing.
 
 A model that asks for a destructive call gets no tool result until a person
 answers. The engine records the message, runs nothing, and
