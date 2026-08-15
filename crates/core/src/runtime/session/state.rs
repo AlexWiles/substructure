@@ -1782,16 +1782,13 @@ impl SessionState {
         }
     }
 
-    /// Every model tool call this session has taken on, in any state. Unlike
-    /// [`effects`](Self::effects), a settled one stays: it answers whether a
-    /// call was ever ours to run, which its result alone cannot while the
-    /// decision recording that result is still undelivered.
+    /// Every model tool call this session took on, settled ones included.
     pub fn dispatched_calls(&self) -> Vec<String> {
         self.effects
             .values()
             .filter_map(|e| match e.kind() {
                 EffectKind::ToolCall => Some(e.id.clone()),
-                // Keyed by the child session; the call it answers is inside.
+                // The key is the child session; the call is inside.
                 EffectKind::SubAgent => e.sub_agent().map(|s| s.tool_call_id.clone()),
                 _ => None,
             })

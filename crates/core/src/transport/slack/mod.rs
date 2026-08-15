@@ -430,7 +430,7 @@ fn resolution_text(payload: &Value) -> String {
         return "⏱ Expired".to_string();
     }
     let responder = &payload["responder"];
-    // A `danger` pick is the answer that stops something: never a green tick.
+    // A `danger` pick stops something. It never gets a green tick.
     let (mark, word) = match responder["style"].as_str() {
         _ if payload["status"].as_str() == Some("cancelled") => ("✖", "Cancelled"),
         Some("danger") => ("❌", "Declined"),

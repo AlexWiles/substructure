@@ -575,12 +575,10 @@ mod tests {
 
     // ── the engine-hosted loop ───────────────────────────────────────────
     //
-    // Driven against a real session, because a hand-written transcript can hold
-    // a state the engine never produces.
+    // These run against a real session. A hand-written transcript can hold a
+    // state that the engine never produces.
 
-    /// Accept the proposal for every decision `events` dispatched, and for
-    /// each that follows — `transport::push::decide_in_engine`, with the
-    /// effects settled by the test instead of an executor.
+    /// `transport::push::decide_in_engine`, with the test settling the effects.
     async fn drive(agg: &mut SessionAggregate, events: Vec<SessionEvent>) -> Vec<SessionEvent> {
         let mut queue: Vec<SessionEvent> = events;
         let mut settled = Vec::new();

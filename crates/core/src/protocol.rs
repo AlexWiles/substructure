@@ -863,7 +863,6 @@ pub struct ConnectorTool {
     /// from the connection's `defer` and the agent's `defer_tools`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub defer: bool,
-    /// A call to this tool waits for a person.
     #[serde(default, skip_serializing_if = "is_false")]
     pub approve: bool,
 }
@@ -914,25 +913,19 @@ pub struct McpServer {
     pub tools: Option<McpTools>,
     #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
     pub auth_failure: AuthFailure,
-    /// Which of this connection's calls wait for a person. Absent ⇒ none do.
     #[serde(default, skip_serializing_if = "Approve::is_default")]
     pub approve: Approve,
 }
 
-/// Which calls on a connection stop for a person first. Like [`AuthFailure`],
-/// it belongs to the pair: only an agent someone watches can be asked.
+/// Which of a connection's calls stop for a person.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "Approve")]
 pub enum Approve {
-    /// Nothing asks.
     #[default]
     Never,
-    /// A tool the connection marks `destructiveHint`. One it says nothing
-    /// about is not one of these — use `always` where the annotations cannot
-    /// be relied on.
+    /// A tool that the connection marks `destructiveHint`.
     Destructive,
-    /// Every call on this connection.
     Always,
 }
 

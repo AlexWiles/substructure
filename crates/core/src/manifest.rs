@@ -354,7 +354,6 @@ pub struct McpEntry {
     pub tools: Option<McpToolsEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_failure: Option<AuthFailure>,
-    /// Which calls stop for a person. Absent ⇒ none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approve: Option<Approve>,
 }

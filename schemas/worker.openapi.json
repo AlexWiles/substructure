@@ -139,21 +139,18 @@
         "title": "Announce"
       },
       "Approve": {
-        "description": "Which calls on a connection stop for a person first. Like [`AuthFailure`],\nit belongs to the pair: only an agent someone watches can be asked.",
+        "description": "Which of a connection's calls stop for a person.",
         "oneOf": [
           {
-            "const": "never",
-            "description": "Nothing asks.",
+            "enum": [
+              "never",
+              "always"
+            ],
             "type": "string"
           },
           {
             "const": "destructive",
-            "description": "A tool the connection marks `destructiveHint`. One it says nothing\nabout is not one of these — use `always` where the annotations cannot\nbe relied on.",
-            "type": "string"
-          },
-          {
-            "const": "always",
-            "description": "Every call on this connection.",
+            "description": "A tool that the connection marks `destructiveHint`.",
             "type": "string"
           }
         ],
@@ -1522,8 +1519,7 @@
         "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
         "properties": {
           "approve": {
-            "$ref": "#/components/schemas/Approve",
-            "description": "Which of this connection's calls wait for a person. Absent ⇒ none do."
+            "$ref": "#/components/schemas/Approve"
           },
           "auth_failure": {
             "$ref": "#/components/schemas/AuthFailure"

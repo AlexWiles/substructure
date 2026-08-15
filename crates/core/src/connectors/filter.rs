@@ -119,8 +119,6 @@ pub fn resolve(
     }
 }
 
-/// Whether a call to this tool waits for a person. A tool the connection says
-/// nothing about is not one it called destructive.
 pub fn approves(policy: Approve, tool: &RemoteTool) -> bool {
     match policy {
         Approve::Never => false,
@@ -872,7 +870,7 @@ mod tests {
         let r = resolve(&connector("sentry", None), &offered, Some("sentry"), false);
         assert!(
             r.tools.iter().all(|t| !t.approve),
-            "the default is the behaviour that predates the setting"
+            "nothing asks by default"
         );
     }
 
@@ -898,10 +896,7 @@ mod tests {
             Some("custom"),
             false,
         );
-        assert!(
-            !r.tools[0].approve,
-            "silence is not a claim; `always` is what covers a server like this"
-        );
+        assert!(!r.tools[0].approve, "silence is not a claim");
         let all = resolve(
             &asking("custom", Approve::Always),
             &[bare("run")],

@@ -14,9 +14,9 @@
 //! `turn.finished` proposes a bare `done`, so an echoing worker transparently
 //! settles the turn's deferred `SessionDone`.
 //!
-//! A call a connection says to ask about first is not dispatched: the proposal
-//! interrupts instead, one question per call, and the answer runs that call or
-//! records a refusal as its result.
+//! The engine does not dispatch a call that a connection gates. The proposal
+//! interrupts instead, one question for each call. The answer runs the call or
+//! records a refusal.
 //!
 //! A proposal is advice, not authority: the engine never applies one, so the
 //! worker remains the sole author of every decision. `tool.execute` for a
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use super::state::EffectState;
+use super::state::{inner_arguments, EffectState};
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::StoredContent;
 use crate::protocol::{
@@ -44,21 +44,15 @@ use crate::protocol::{
     ToolCall,
 };
 
-/// Prefixes an interrupt this file raised, and carries the call it holds.
 const APPROVAL: &str = "mcp-approve:";
 
-/// One moment of the session, which is all a proposal may read. Stated rather
-/// than taken from the session itself, so the derivation stays pure and a test
-/// can write down what it means to propose against.
 pub struct Proposing<'a> {
     /// The recorded path to the head.
     pub transcript: &'a [Message],
-    /// The model calls of that path, by the id of the message each produced.
+    /// The model calls of that path, keyed by the message each one produced.
     pub llm_calls: &'a HashMap<String, EffectState>,
-    /// Work the engine still owes an answer for, this decision aside.
     pub pending_calls: usize,
-    /// [`SessionState::dispatched_calls`](super::state::SessionState::dispatched_calls):
-    /// settled ones included, so it holds calls the transcript does not answer.
+    /// [`SessionState::dispatched_calls`](super::state::SessionState::dispatched_calls).
     pub dispatched: &'a [String],
     pub config: Option<&'a AgentConfig>,
     pub connector_tools: &'a [ConnectorTool],
@@ -239,12 +233,10 @@ fn llm_finished(
     }
 }
 
-/// Stop and ask before this one call runs. One question at a time, because a
-/// branch holds one open interrupt: the answer to this one raises the next.
 fn ask(held: &ToolCall, connector_tools: &[ConnectorTool], remaining: usize) -> DecisionAction {
     let name = ran_name(held, connector_tools);
     let arguments = ran_arguments(held, connector_tools);
-    // Slack's mrkdwn has no language tag and renders one as a line of the block.
+    // Slack's mrkdwn renders a language tag as a line of the block.
     let shown = match &arguments {
         serde_json::Value::Object(o) if o.is_empty() => String::new(),
         serde_json::Value::Null => String::new(),
@@ -278,8 +270,7 @@ fn ask(held: &ToolCall, connector_tools: &[ConnectorTool], remaining: usize) -> 
     }
 }
 
-/// Answer the one call this approval held, then ask about the next one. An id
-/// naming no outstanding call is a resume this file did not raise.
+/// Answer the call this approval held, then ask about the next.
 fn approval_resumed(
     payload: &serde_json::Value,
     interrupt_id: &str,
@@ -305,8 +296,7 @@ fn approval_resumed(
         };
     };
 
-    // The call never ran, so a decline has no effect to fail: the refusal is
-    // recorded as its result.
+    // Nothing ran, so a decline has no effect to fail. The refusal is the result.
     let approved = approved(payload);
     let refusals = match approved {
         true => Vec::new(),
@@ -334,8 +324,7 @@ fn approval_resumed(
         ),
     }
 
-    // The last word on the message prompts the model again; a call still away
-    // in the engine speaks for itself when it settles.
+    // The last answer prompts the model. A call in flight does this when it settles.
     if actions.is_empty() && pending_calls == 0 && siblings_answered(&call.id, transcript) {
         actions.extend(reissue(&call.id, &refusals, transcript, llm_calls));
     }
@@ -348,8 +337,7 @@ fn approval_resumed(
     }
 }
 
-/// Where the message that made `tool_call_id` sits, and the call itself, while
-/// the call is outstanding. So a repeated answer runs nothing.
+/// Nothing once the call is settled, so a repeated answer runs nothing.
 fn asked_about<'a>(
     tool_call_id: &str,
     transcript: &'a [Message],
@@ -365,17 +353,10 @@ fn asked_about<'a>(
     (!settled(tool_call_id, at, transcript, dispatched)).then_some((at, call))
 }
 
-/// Whether a call has been dealt with: a result recorded, or the engine already
-/// holding it. A call away in the engine may have neither yet, because the
-/// decision recording its result can be held behind this very question.
 fn settled(tool_call_id: &str, at: usize, transcript: &[Message], dispatched: &[String]) -> bool {
     answered(tool_call_id, at, transcript) || dispatched.iter().any(|id| id == tool_call_id)
 }
 
-/// Whether every other call of the message that made `tool_call_id` has been
-/// answered; `true` where the message cannot be found. A call held by an
-/// approval is in nobody's queue, so the in-flight count alone would re-prompt
-/// the model with a call it never answered — which every provider rejects.
 fn siblings_answered(tool_call_id: &str, transcript: &[Message]) -> bool {
     let Some(at) = transcript
         .iter()
@@ -389,14 +370,12 @@ fn siblings_answered(tool_call_id: &str, transcript: &[Message]) -> bool {
         .all(|c| c.id == tool_call_id || answered(&c.id, at, transcript))
 }
 
-/// Whether a call of the message at `at` has its result recorded.
 fn answered(tool_call_id: &str, at: usize, transcript: &[Message]) -> bool {
     transcript[at..]
         .iter()
         .any(|m| m.tool_call_id.as_deref() == Some(tool_call_id))
 }
 
-/// What the model reads where the result would have been.
 fn refusal(call: &ToolCall) -> DraftMessage {
     DraftMessage {
         id: None,
@@ -413,14 +392,10 @@ fn refusal(call: &ToolCall) -> DraftMessage {
     }
 }
 
-/// Whether a resume says to go ahead. Anything unrecognized does not: this
-/// gates the call nobody wanted run by accident.
 fn approved(payload: &serde_json::Value) -> bool {
     if payload.get("status").and_then(|s| s.as_str()) == Some("cancelled") {
         return false;
     }
-    // A channel wraps its answer in an `InterruptResolution`; a person posting
-    // one by hand sends the answer itself.
     payload
         .get("payload")
         .unwrap_or(payload)
@@ -439,47 +414,28 @@ fn ran_name<'a>(call: &'a ToolCall, connector_tools: &'a [ConnectorTool]) -> &'a
         .unwrap_or(&call.function.name)
 }
 
-/// The arguments the tool would run with: the tool's own, unwrapped from
-/// `call_tool` as the executor unwraps them.
 fn ran_arguments(call: &ToolCall, connector_tools: &[ConnectorTool]) -> serde_json::Value {
     let written = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
         .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
-    let wrapped = target_of(call, connector_tools)
-        .is_some_and(|t| t.name != call.function.name)
-        .then(|| written.get("arguments").cloned())
-        .flatten();
-    match wrapped {
-        Some(serde_json::Value::String(text)) => {
-            serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text))
-        }
-        Some(value) => value,
-        None => written,
+    if target_of(call, connector_tools).is_none_or(|t| t.name == call.function.name) {
+        return written;
     }
+    let inner = inner_arguments(&written);
+    serde_json::from_str(&inner).unwrap_or(serde_json::Value::String(inner))
 }
 
+/// The tool the call runs.
 fn target_of<'a>(
     call: &ToolCall,
     connector_tools: &'a [ConnectorTool],
 ) -> Option<&'a ConnectorTool> {
-    approval_target(
-        &call.function.name,
-        &call.function.arguments,
-        connector_tools,
-    )
-}
-
-/// The connector tool a call runs: the one it names, or for the engine's
-/// `call_tool`, the one its arguments name.
-fn approval_target<'a>(
-    name: &str,
-    arguments: &str,
-    connector_tools: &'a [ConnectorTool],
-) -> Option<&'a ConnectorTool> {
-    let named = connector_tools.iter().find(|t| t.name == name)?;
+    let named = connector_tools
+        .iter()
+        .find(|t| t.name == call.function.name)?;
     if named.kind != ConnectorToolKind::Call {
         return Some(named);
     }
-    let inner = serde_json::from_str::<serde_json::Value>(arguments)
+    let inner = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
         .ok()?
         .get("name")?
         .as_str()?
@@ -2073,8 +2029,7 @@ mod tests {
         );
     }
 
-    /// The approved call's result is recorded by a decision held behind this
-    /// question, so the transcript alone would ask about it twice.
+    /// The transcript alone would ask about the call twice.
     #[test]
     fn a_call_already_away_is_not_asked_about_again() {
         let (transcript, llm_calls) = two_held();
@@ -2150,7 +2105,7 @@ mod tests {
         }
     }
 
-    /// Re-prompting the model with an unanswered call is what providers reject.
+    /// Providers reject a prompt that holds a call with no answer.
     #[test]
     fn a_settled_call_waits_for_the_one_still_being_asked_about() {
         let (transcript, llm_calls) = two_held();
