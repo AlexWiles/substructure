@@ -10871,7 +10871,7 @@ fn an_admin_caller_raises_an_admin_interrupt() {
     ));
 }
 
-// ── plugins ──────────────────────────────────────────────────────────────
+// ── Plugins ──────────────────────────────────────────────────────────
 
 fn plugin_config() -> AgentConfig {
     AgentConfig {
@@ -10929,8 +10929,7 @@ fn using_a_skill_only_freezes_the_call() {
 #[test]
 fn the_catalog_rides_the_first_prompt_once() {
     let mut agg = plugin_session();
-    // The plugin's servers are owed a fetch from the start, and a call waits
-    // for it — settled here so the first prompt is the first call's.
+    // A call waits for the plugin's servers, so settle them first.
     settle_sync(&mut agg, "pdf-renderer", &["fill_form"]);
     let prompt = |agg: &mut SessionAggregate, id: &str| {
         dispatch(

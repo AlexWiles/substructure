@@ -48,7 +48,7 @@
           "type": "string"
         },
         "plugins": {
-          "description": "Plugins this agent uses. Skills ride here as metadata; a plugin's\nservers behave as `mcp` entries.",
+          "description": "Plugins this agent uses.",
           "items": {
             "$ref": "#/$defs/AgentPlugin"
           },
@@ -94,7 +94,7 @@
     },
     "AgentPlugin": {
       "additionalProperties": false,
-      "description": "A plugin an agent uses, resolved to what the engine needs at runtime: the\nskills the model discovers, and the connection ids of the plugin's\nservers. Stamped from the bundle when the config loads, the way sub-agent\ndescriptions are — a worker echoes it rather than authoring it.\n\nNaming a plugin is what turns it on: the config in force is the whole\nanswer, so a worker enables one by writing it into the agent's config.",
+      "description": "A plugin an agent uses. The skills and servers are stamped from the bundle\nwhen the config loads. To enable a plugin, write it into the config.",
       "properties": {
         "approve": {
           "$ref": "#/$defs/Approve"
@@ -130,7 +130,7 @@
               "type": "null"
             }
           ],
-          "description": "Narrows the plugin's servers, same knobs as an [`McpServer`], applied\nto each of them."
+          "description": "Applied to each of the plugin's servers."
         }
       },
       "required": [
@@ -2770,7 +2770,7 @@
     },
     "SkillMeta": {
       "additionalProperties": false,
-      "description": "What the model discovers of one skill before loading it.",
+      "description": "What the model sees of a skill before it loads it.",
       "properties": {
         "description": {
           "type": "string"

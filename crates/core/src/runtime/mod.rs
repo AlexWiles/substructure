@@ -810,7 +810,7 @@ pub struct RuntimeDeps {
     pub llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
     pub sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>>,
     pub connections: Option<Arc<Connections>>,
-    /// Where this deployment serves skill bundles from, per tenant.
+    /// Where this deployment reads plugin bundles from.
     pub plugins: Arc<dyn crate::plugins::PluginResolver>,
     pub connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>>,
     pub worker_queue: Arc<dyn WorkerQueue>,
@@ -864,9 +864,8 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         ));
     }
 
-    // Connector work exists where connections are configured or plugins carry
-    // skills to answer; with neither, nothing can queue it, so the subsystem
-    // is skipped entirely.
+    // Connector work needs connections or plugins. With neither, nothing can
+    // queue it, so the subsystem is skipped.
     let mut connector_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if connections.is_some() || plugins.serves_any() {
         connector_handles.push(spawn_connector_dispatch_processor(

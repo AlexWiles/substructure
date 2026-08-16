@@ -675,8 +675,7 @@ pub struct AgentConfig {
     /// MCP servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
-    /// Plugins this agent uses. Skills ride here as metadata; a plugin's
-    /// servers behave as `mcp` entries.
+    /// Plugins this agent uses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<AgentPlugin>,
     /// Defer every tool this agent offers, from any source, unless the tool or
@@ -992,13 +991,8 @@ pub struct McpTools {
     pub defer: Option<bool>,
 }
 
-/// A plugin an agent uses, resolved to what the engine needs at runtime: the
-/// skills the model discovers, and the connection ids of the plugin's
-/// servers. Stamped from the bundle when the config loads, the way sub-agent
-/// descriptions are — a worker echoes it rather than authoring it.
-///
-/// Naming a plugin is what turns it on: the config in force is the whole
-/// answer, so a worker enables one by writing it into the agent's config.
+/// A plugin an agent uses. The skills and servers are stamped from the bundle
+/// when the config loads. To enable a plugin, write it into the config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "AgentPlugin")]
 pub struct AgentPlugin {
@@ -1010,8 +1004,7 @@ pub struct AgentPlugin {
     /// Connection-registry ids of this plugin's servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub servers: Vec<String>,
-    /// Narrows the plugin's servers, same knobs as an [`McpServer`], applied
-    /// to each of them.
+    /// Applied to each of the plugin's servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
     #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
@@ -1021,8 +1014,7 @@ pub struct AgentPlugin {
 }
 
 impl AgentPlugin {
-    /// One of this plugin's servers as the `mcp` machinery reads it: filter,
-    /// gating, and auth policy come from the plugin entry.
+    /// One of the plugin's servers, with the plugin's policy on it.
     pub fn server(&self, id: &str) -> McpServer {
         McpServer {
             id: id.to_string(),
@@ -1033,7 +1025,7 @@ impl AgentPlugin {
     }
 }
 
-/// What the model discovers of one skill before loading it.
+/// What the model sees of a skill before it loads it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "SkillMeta")]
 pub struct SkillMeta {

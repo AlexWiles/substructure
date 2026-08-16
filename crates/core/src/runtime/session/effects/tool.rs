@@ -201,8 +201,8 @@ pub(in crate::runtime::session) fn request(
     let engine_tool = state.connector_tool_for(&name);
     let (name, arguments, handler, target) = match engine_tool {
         Some(tool) if tool.kind == ConnectorToolKind::Call => unwrap_call(state, name, arguments),
-        // The plugin is routing, frozen from the arguments: a config change
-        // cannot re-aim a skill call already made.
+        // Freeze the plugin from the arguments, so a config change cannot
+        // re-aim a call that was already made.
         Some(tool) if tool.kind == ConnectorToolKind::Skill => {
             let named = argument(&arguments, "name").unwrap_or_default();
             let (plugin, skill) = crate::runtime::session::engine_tools::split_skill(&named);

@@ -91,7 +91,6 @@ pub enum LocalAnswer {
     Error(String),
 }
 
-/// One skill call as the executor answers it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillCall {
     pub leaf: Option<String>,
@@ -1847,7 +1846,7 @@ impl SessionState {
         // From the config alone: a fetch that has not settled must not decide
         // whether a tool definition exists. An agent that says `search` thus
         // gets these from its first turn, and a connection added later moves
-        // no definition. A plugin's servers count for the same reason.
+        // no definition. A plugin's servers count the same way.
         let defers = config.defers_tools()
             || config.tools.iter().any(|t| t.defer == Some(true))
             || config.mcp.iter().any(|c| filter::defers(c, false))
@@ -1922,9 +1921,8 @@ impl SessionState {
         super::engine_tools::answer(self, target.kind, leaf.as_deref(), &tc.arguments)
     }
 
-    /// A skill call's branch, plugin, and arguments, for the executor that
-    /// answers it from the bundle. `None` for every other call. The plugin is
-    /// the routing frozen on the call, not a fresh read of the arguments.
+    /// A skill call's branch, plugin, and arguments. `None` for every other
+    /// call. The plugin is the one frozen on the call.
     pub fn skill_call(&self, tool_call_id: &str) -> Option<SkillCall> {
         let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
         let tc = effect.tool()?;
@@ -2141,13 +2139,9 @@ impl SessionState {
         resolve_on_path(&self.agent_versions, &on_path).map(|v| v.value.clone())
     }
 
-    /// Every server connection `config` reaches: its `mcp` entries, then each
-    /// plugin's servers under the plugin's own policy. The one place a
-    /// plugin's servers join the `mcp` machinery.
-    ///
-    /// Naming a plugin is what turns it on, so the config in force is the
-    /// whole answer — a plugin written in mid-session is reached here, and the
-    /// schedule owes its fetch like any connection's.
+    /// Every server `config` reaches: its `mcp` entries, then each plugin's
+    /// servers under the plugin's own policy. The one place a plugin's servers
+    /// join the `mcp` machinery.
     pub fn servers_for(&self, config: &AgentConfig) -> Vec<McpServer> {
         let plugin_servers = config
             .plugins

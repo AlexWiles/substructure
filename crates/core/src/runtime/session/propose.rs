@@ -153,11 +153,10 @@ pub fn propose(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionR
             }],
             ..Default::default()
         }),
-        // A kind the engine authored answers its own resume. Anything else
-        // picks the turn back up where it stopped: re-issue the model call over
-        // the current transcript. Without this an engine-hosted session that
-        // ever interrupts — after `llm.failed`, say — could never be resumed,
-        // because nothing else would author the next call.
+        // An engine-authored kind answers its own resume. Anything else picks
+        // the turn back up where it stopped: re-issue the model call over the
+        // current transcript. Without this, nothing would author the next call
+        // after an interrupt.
         DecisionTrigger::InterruptResumed { resumption } => {
             interrupts::kind_for(&resumption.interrupt_id)
                 .and_then(|(kind, tail)| kind.resumed(tail, &resumption.payload, p))

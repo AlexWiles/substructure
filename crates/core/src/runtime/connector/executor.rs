@@ -57,9 +57,8 @@ pub fn spawn_connector_task_executor(
     handles
 }
 
-/// A network task with no connections configured settles as a terminal error
-/// rather than parking the session: the state named a connection this engine
-/// cannot dial.
+/// A network task with no connections settles as a terminal error, so the
+/// session does not park.
 fn unreachable() -> ConnectorError {
     ConnectorError::permanent("no connections are configured on this engine")
 }
@@ -167,7 +166,7 @@ async fn handle_task(
                     return;
                 }
             };
-            // A skill call reads the bundle, which lives here, not in state.
+            // A skill call reads the bundle, which is here, not in state.
             let answer = match session.state.skill_call(&tool_call_id) {
                 Some(call) => {
                     let bundle = match call.plugin_id.is_empty() {

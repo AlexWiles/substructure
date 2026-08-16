@@ -236,9 +236,8 @@ pub(crate) async fn start_engine(
     providers: Vec<ProviderEnv>,
     cfg: &ProjectConfig,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
-    // Bundles load here because startup is what applies the file: the engine
-    // then serves skills from this copy, and the directories can change on
-    // disk without moving a live session.
+    // The engine serves skills from this copy, so a change on disk does not
+    // move a live session.
     let (manifest, plugin_notices) = cfg.resolved_manifest()?;
     for notice in plugin_notices {
         tracing::warn!("{notice}");

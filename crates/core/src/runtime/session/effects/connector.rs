@@ -132,8 +132,7 @@ pub(in crate::runtime::session) fn owed(state: &SessionState, leaf: Option<&str>
 }
 
 /// Fetch every connection `config` reaches that this session has never
-/// fetched — a plugin's servers included, since naming the plugin is what
-/// reaches them.
+/// fetched.
 pub(in crate::runtime::session) fn sync(
     state: &SessionState,
     config: &AgentConfig,

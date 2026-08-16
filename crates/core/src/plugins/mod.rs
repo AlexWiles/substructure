@@ -1,8 +1,6 @@
-//! Agent plugins (<https://agent-plugins.org>) as the engine holds them: a
-//! directory resolved into data once, at load or at `subs apply`, and never
-//! read as files again. No code execution: `scripts/` and stdio servers are
-//! dropped with a notice, per the spec's failure isolation — a component that
-//! cannot load never takes its siblings with it.
+//! Agent plugins (<https://agent-plugins.org>), read from a directory into
+//! data. Plugin code does not run here: `scripts/` and stdio servers are
+//! dropped with a notice.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,13 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::connectors::registry::ConnectionSpec;
 use crate::protocol::{ConnectorProtocol, SkillMeta};
 
-/// One plugin, resolved to data. Immutable once built: a session reads the
-/// bundle its config was loaded with, so a re-apply cannot rewrite a session
-/// underneath itself.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PluginBundle {
-    /// From `plugin.json`. Metadata, not the id: the config key an agent
-    /// references is the id, the same way `[mcp.<id>]` works.
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -27,22 +20,18 @@ pub struct PluginBundle {
     pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<Skill>,
-    /// `mcp.json`'s remote servers, keyed by their name in the file. stdio
-    /// entries are not here: nothing in a deployment runs plugin code.
+    /// `mcp.json`'s remote servers, keyed by their name in the file.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub servers: BTreeMap<String, ConnectionSpec>,
 }
 
-/// One skill: metadata the model discovers, a body it loads on use, and the
-/// files the body references.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Skill {
     pub name: String,
     pub description: String,
-    /// The SKILL.md markdown after the frontmatter.
+    /// SKILL.md after the frontmatter.
     pub body: String,
-    /// Skill-relative path → UTF-8 content. Binary files are not carried:
-    /// a notice says what was left behind.
+    /// Skill-relative path → UTF-8 content.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, String>,
 }
@@ -52,7 +41,6 @@ impl PluginBundle {
         self.skills.iter().find(|s| s.name == name)
     }
 
-    /// The metadata half the wire config carries.
     pub fn skill_metas(&self) -> Vec<SkillMeta> {
         self.skills
             .iter()
@@ -63,7 +51,6 @@ impl PluginBundle {
             .collect()
     }
 
-    /// Content hash, stable across field order and machines.
     pub fn hash(&self) -> String {
         use sha2::{Digest, Sha256};
         let bytes = serde_json::to_vec(self).unwrap_or_default();
@@ -71,25 +58,19 @@ impl PluginBundle {
     }
 }
 
-/// The bundles an engine serves, keyed by plugin id — the runtime's read-only
-/// copy of what the config declared.
+/// Bundles keyed by plugin id.
 pub type PluginSet = BTreeMap<String, PluginBundle>;
 
-/// Where a plugin id turns into its bundle, per tenant — the seam the cloud
-/// swaps for a database, the way `ConnectionRegistry` works.
 #[async_trait::async_trait]
 pub trait PluginResolver: Send + Sync {
     async fn resolve(&self, tenant_id: &str, plugin_id: &str) -> Option<PluginBundle>;
 
-    /// Whether any plugin could resolve here, read once at startup to decide
-    /// whether the answering subsystem runs at all.
     fn serves_any(&self) -> bool {
         true
     }
 }
 
-/// Every bundle a local engine loaded at startup, served to its single
-/// tenant.
+/// Serves one fixed set to every tenant.
 #[derive(Default)]
 pub struct StaticPlugins(PluginSet);
 
@@ -110,23 +91,20 @@ impl PluginResolver for StaticPlugins {
     }
 }
 
-/// What loading dropped and why. Every notice is a fact for the operator, not
-/// an error: the bundle that rides along is still whole.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Loaded {
     pub bundle: PluginBundle,
+    /// What loading dropped. Not errors.
     pub notices: Vec<String>,
 }
 
-/// The id a plugin's server resolves under in the connection registry.
-/// `<plugin>-<server>`: an id prefixes tool names, so `.` is not available.
+/// The connection id of a plugin's server.
 pub fn server_id(plugin_id: &str, server_name: &str) -> String {
     format!("{plugin_id}-{server_name}")
 }
 
-/// Read one plugin directory into a bundle, per the agent-plugins layout.
-/// A broken component is skipped with a notice; only a broken `plugin.json`
-/// rejects the plugin.
+/// Read a plugin directory. A broken component gives a notice; only a broken
+/// `plugin.json` is an error.
 pub fn load_dir(root: &Path) -> Result<Loaded> {
     let mut notices = Vec::new();
     let manifest_path = root.join("plugin.json");
@@ -152,8 +130,6 @@ pub fn load_dir(root: &Path) -> Result<Loaded> {
         skills,
         servers,
     };
-    // Caught here, with the file names, rather than as a deployment's opaque
-    // 413 after the upload.
     let bytes = content_bytes(&bundle);
     if bytes > MAX_BUNDLE_BYTES {
         bail!(
@@ -175,8 +151,6 @@ fn content_bytes(bundle: &PluginBundle) -> usize {
         .sum()
 }
 
-/// `plugin.json`. Unknown fields are allowed, per the spec: they warn there,
-/// and here they are simply not read.
 #[derive(Debug, Deserialize)]
 struct PluginManifest {
     name: String,
@@ -231,7 +205,6 @@ fn load_skill(dir: &Path, notices: &mut Vec<String>) -> Result<Skill> {
     })
 }
 
-/// The frontmatter block between the leading `---` fences.
 fn split_frontmatter(text: &str) -> Result<(&str, &str)> {
     let rest = text
         .strip_prefix("---")
@@ -241,14 +214,12 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str)> {
     Ok((&rest[..end], body))
 }
 
-/// One top-level `key: value` scalar. The spec's frontmatter is YAML; the two
-/// fields read here are required to be plain scalars, and a skill that writes
-/// them another way is skipped with a notice rather than half-read.
+/// One top-level `key: value`. Plain scalars only.
 fn frontmatter_value(front: &str, key: &str) -> Option<String> {
     front.lines().find_map(|line| {
         let rest = line.strip_prefix(key)?.trim_start().strip_prefix(':')?;
         let value = rest.trim().trim_matches('"').trim_matches('\'');
-        // A block-scalar indicator is the value's absence, not the value.
+        // A YAML block indicator is not a value.
         if matches!(value, ">" | "|" | ">-" | "|-" | ">+" | "|+") {
             return None;
         }
@@ -256,8 +227,6 @@ fn frontmatter_value(front: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Why `key` could not be read: absent, or written in a YAML form the plain
-/// reader does not take — the notice should say which.
 fn unreadable_key(front: &str, key: &str) -> anyhow::Error {
     let written = front.lines().any(|l| {
         l.strip_prefix(key)
@@ -272,7 +241,6 @@ fn unreadable_key(front: &str, key: &str) -> anyhow::Error {
     }
 }
 
-/// The Agent Skills `name` rules, which also keep it usable in a tool-ish name.
 fn check_skill_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
@@ -300,8 +268,7 @@ fn collect_files(
         .collect();
     entries.sort();
     for path in entries {
-        // A symlink may point outside the plugin; the spec allows only
-        // inside-root targets, and not following any is the simple safe read.
+        // A symlink can point out of the plugin.
         if path.is_symlink() {
             notices.push(format!("{} is a symlink and was ignored", path.display()));
             continue;
@@ -325,8 +292,6 @@ fn collect_files(
     Ok(())
 }
 
-/// `mcp.json`. Remote servers become [`ConnectionSpec`]s; everything a
-/// deployment cannot honor is a notice.
 fn load_servers(
     path: &Path,
     notices: &mut Vec<String>,
@@ -386,8 +351,8 @@ struct McpFileServer {
     headers: BTreeMap<String, String>,
 }
 
-/// Author-controlled text that lands near a prompt: escape sequences and
-/// control characters out, one line only.
+/// Plugin text goes into prompts. Remove escapes and control characters, and
+/// keep one line.
 fn sanitize_line(text: &str) -> String {
     strip_escapes(text)
         .chars()
@@ -397,7 +362,6 @@ fn sanitize_line(text: &str) -> String {
         .to_string()
 }
 
-/// Body text keeps its shape; only the invisible is removed.
 fn sanitize_text(text: &str) -> String {
     strip_escapes(text)
         .chars()
@@ -405,8 +369,6 @@ fn sanitize_text(text: &str) -> String {
         .collect()
 }
 
-/// Whole ANSI sequences, not just the ESC: dropping the ESC alone leaves the
-/// parameters as visible junk.
 fn strip_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();

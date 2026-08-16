@@ -36,11 +36,10 @@ pub struct PromptContext {
     pub content: String,
 }
 
-/// A source of engine-derived context, pure over [`SessionState`].
 pub type Contributor = fn(&SessionState, Option<&str>, &str) -> Vec<PromptContext>;
 
-/// Every source, in a fixed order — two replays that disagreed would send two
-/// different prompts. A new source is one entry here.
+/// The order is fixed: two replays that disagreed would send two different
+/// prompts.
 const CONTRIBUTORS: &[Contributor] = &[plugin_catalog, announce_servers];
 
 /// Everything the engine owes this call.
@@ -51,8 +50,7 @@ pub fn owed(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<Prom
         .collect()
 }
 
-/// The connections this path has not announced yet — a plugin's servers
-/// included, since they behave as `mcp` entries.
+/// The connections this path has not announced yet.
 ///
 /// Once means once in the prompt. The record is the context id on an earlier
 /// call of this path, so a fork that never held the server announces it.
@@ -81,10 +79,8 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
         .collect()
 }
 
-/// One catalog entry per plugin the path has not seen: what it is, its
-/// skills, and that the `skill` tool is the way in. Each plugin is its own
-/// context, so one declared mid-session introduces itself through the ladder
-/// without touching what an earlier call cached.
+/// One context per plugin the path has not seen. A plugin added mid-session
+/// gets its own entry and does not change what an earlier call cached.
 fn plugin_catalog(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<PromptContext> {
     let Some(config) = state.resolve_agent_for(leaf) else {
         return Vec::new();
@@ -120,7 +116,7 @@ fn plugin_catalog(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Ve
         .collect()
 }
 
-/// Struct, not a `json!` map: key order is the wire contract's stability.
+/// A struct, not a `json!` map, to keep the key order stable.
 #[derive(serde::Serialize)]
 struct PluginListing<'a> {
     plugin: &'a str,

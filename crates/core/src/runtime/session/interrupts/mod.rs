@@ -1,10 +1,6 @@
-//! Interrupt kinds the engine itself authors, keyed by an id prefix.
-//!
-//! A kind owns its id namespace, the engine's continuation when its interrupt
-//! resumes, and the actions that ride along when a channel resolves one. Ids
-//! reach the wire unchanged, so a kind's format is a compatibility surface.
-//! Adding a kind is one module plus one entry in [`KINDS`]; `propose` and the
-//! channel proposers dispatch through here and name no kind directly.
+//! Interrupts the engine authors, keyed by an id prefix. A new kind is one
+//! module and one entry in [`KINDS`]. Ids go on the wire unchanged, so a
+//! prefix is a compatibility surface.
 
 pub mod approval;
 pub mod auth;
@@ -18,8 +14,8 @@ pub trait InterruptKind: Sync {
     /// The id namespace, colon included.
     fn prefix(&self) -> &'static str;
 
-    /// The engine's continuation when this interrupt resumes. `None` falls
-    /// through to the generic resume (re-prompt over the recorded path).
+    /// What the engine does when this interrupt resumes. `None` falls through
+    /// to the generic resume.
     fn resumed(
         &self,
         _tail: &str,
@@ -29,7 +25,7 @@ pub trait InterruptKind: Sync {
         None
     }
 
-    /// Actions a channel adds alongside resolving this interrupt.
+    /// Actions that go with resolving this interrupt.
     fn on_resolved(&self, _tail: &str) -> Vec<DecisionAction> {
         Vec::new()
     }
@@ -45,8 +41,7 @@ pub fn kind_for(interrupt_id: &str) -> Option<(&'static dyn InterruptKind, &str)
     })
 }
 
-/// What resolving `interrupt_id` runs besides the resolution itself.
-/// Ids no kind owns — a worker's own prompts — add nothing.
+/// An id that no kind owns adds nothing.
 pub fn resolve_followups(interrupt_id: &str) -> Vec<DecisionAction> {
     kind_for(interrupt_id)
         .map(|(kind, tail)| kind.on_resolved(tail))

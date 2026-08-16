@@ -87,8 +87,7 @@ pub struct ProjectConfig {
     /// holds the credential, so `auth` is the engine's half alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, ConnectionSpec>,
-    /// Agent plugins this project declares, each a directory `path` the CLI
-    /// resolves to data.
+    /// Agent plugins this project declares, each a directory the CLI reads.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin: BTreeMap<String, PluginSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,9 +150,8 @@ impl ProjectConfig {
         }
     }
 
-    /// The manifest with every plugin's bundle loaded from its `path`,
-    /// resolved against this file's directory. What a local engine starts on
-    /// and what `subs apply` sends.
+    /// The manifest with every plugin's bundle loaded, against this file's
+    /// directory.
     pub fn resolved_manifest(&self) -> anyhow::Result<(Manifest, Vec<String>)> {
         let mut manifest = self.manifest();
         let base = self
@@ -166,10 +164,8 @@ impl ProjectConfig {
         Ok((manifest, notices))
     }
 
-    /// Every connection the file reaches, with each plugin's servers resolved
-    /// from its directory — so `subs mcp login pdf-renderer` works on a
-    /// connection a plugin brought. Reads the plugin directories: named for
-    /// the cost.
+    /// Every connection the file reaches, a plugin's servers included. Reads
+    /// the plugin directories.
     pub fn resolved_connections(&self) -> anyhow::Result<BTreeMap<String, ConnectionSpec>> {
         Ok(self.resolved_manifest()?.0.connections())
     }
@@ -254,8 +250,7 @@ impl ProjectConfig {
         moved_keys(&value, &at)?;
         let mut config: ProjectConfig =
             value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
-        // A file writes `path`; the bundle is resolved data. A committed
-        // bundle would silently shadow the directory it was resolved from.
+        // A committed bundle would shadow the directory it came from.
         for (id, spec) in &config.plugin {
             if spec.bundle.is_some() {
                 return Err(anyhow!(

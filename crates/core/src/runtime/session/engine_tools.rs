@@ -1,17 +1,12 @@
-//! The engine's own tools, one module each: a constant definition (in
-//! [`filter`]) and an answer read from state, so a replay answers the same.
-//!
-//! The dispatch is an exhaustive match on [`ConnectorToolKind`] — a new engine
-//! tool is a new kind, a new definition, and a new arm here, and the compiler
-//! holds the three together.
+//! The engine's own tools. Each answer is a function of [`SessionState`], so a
+//! replay gives the same answer. Definitions live in [`filter`].
 
 use super::state::{LocalAnswer, SessionState};
 use crate::connectors::filter;
 use crate::plugins::PluginBundle;
 use crate::protocol::ConnectorToolKind;
 
-/// The engine's answer to one of its own tools. `None` hands the call to its
-/// target.
+/// `None` hands the call to its target.
 pub fn answer(
     state: &SessionState,
     kind: ConnectorToolKind,
@@ -22,12 +17,12 @@ pub fn answer(
         ConnectorToolKind::Remote => None,
         ConnectorToolKind::Find => Some(find(state, leaf, arguments)),
         ConnectorToolKind::Call => Some(call(state, leaf, arguments)),
-        // Needs the bundle, which lives with the executor, not in state.
+        // The bundle is not in state; the executor answers this one.
         ConnectorToolKind::Skill => None,
     }
 }
 
-/// `tool_search`: BM25 over every tool the agent can reach, from state alone.
+/// BM25 over every tool the agent can reach.
 fn find(state: &SessionState, leaf: Option<&str>, arguments: &str) -> LocalAnswer {
     LocalAnswer::Result(filter::find_answer(
         &state.searchable_tools(leaf),
@@ -40,7 +35,7 @@ fn find(state: &SessionState, leaf: Option<&str>, arguments: &str) -> LocalAnswe
     ))
 }
 
-/// `call_tool` reaching here could not be routed; the fault says why.
+/// A `call_tool` that gets here could not be routed.
 fn call(state: &SessionState, leaf: Option<&str>, arguments: &str) -> LocalAnswer {
     LocalAnswer::Error(
         state
@@ -56,16 +51,14 @@ fn argument(arguments: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The two halves of a `<plugin>:<skill>` name — the one split rule, shared
-/// by the routing that freezes the plugin and the answer that reads it. A
-/// name without a colon has no plugin half.
+/// The two halves of a `<plugin>:<skill>` name. Without a colon, the plugin
+/// half is empty.
 pub fn split_skill(named: &str) -> (&str, &str) {
     named.split_once(':').unwrap_or(("", named))
 }
 
-/// `skill`: a body or a file out of the bundle the resolver found for the
-/// call's own plugin. Every fault carries the list the model needed — the
-/// error is the directory.
+/// A skill body, or one of its files. Each fault lists what the model can ask
+/// for.
 pub fn skill_answer(
     state: &SessionState,
     bundle: Option<&PluginBundle>,

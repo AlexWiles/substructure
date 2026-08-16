@@ -71,8 +71,6 @@ struct Applied {
     changes: Vec<ConfigEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notices: Vec<Notice>,
-    /// What resolving the plugin directories dropped, said by this CLI: the
-    /// deployment never saw what was left behind.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     plugin_notices: Vec<String>,
 }
@@ -105,10 +103,8 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         }
     };
 
-    // The file's own manifest with every plugin resolved to data, minus the
-    // fields that name things on this machine: env variables, and the plugin
-    // paths the bundles were read from. A deployment holds only what it can
-    // resolve.
+    // `for_wire` drops what only this machine can resolve: the env variable
+    // names and the plugin paths.
     let (resolved, plugin_notices) = config.resolved_manifest()?;
     let mut manifest = resolved.for_wire();
     manifest.name = manifest

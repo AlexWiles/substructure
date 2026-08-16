@@ -102,8 +102,6 @@ impl Manifest {
         for section in wire.agent.values_mut() {
             section.signing_secret_env = None;
         }
-        // A deployment gets the resolved bundle; the path names a directory on
-        // this machine.
         for spec in wire.plugin.values_mut() {
             spec.path = None;
         }
@@ -124,8 +122,7 @@ impl Manifest {
             };
             (id.clone(), spec)
         });
-        // A plugin's servers are ordinary MCP connections under derived ids;
-        // only the pairing with an agent knows they came from a plugin.
+        // A plugin's servers join the registry as ordinary connections.
         let from_plugins = self.plugin.iter().flat_map(|(pid, spec)| {
             spec.bundle.iter().flat_map(move |b| {
                 b.servers.iter().map(move |(name, server)| {
@@ -141,10 +138,8 @@ impl Manifest {
         declared.chain(from_plugins).collect()
     }
 
-    /// Load each plugin's bundle from its `path`, for the halves of the CLI
-    /// that need the data: the local engine at startup, `subs apply` before
-    /// the wire copy. Returns the loaders' notices. Entries already carrying
-    /// a bundle are left alone.
+    /// Load each plugin's bundle from its `path`, relative to `base`. Entries
+    /// that already have a bundle do not change. Returns the load notices.
     pub fn resolve_plugins(&mut self, base: &std::path::Path) -> Result<Vec<String>> {
         let mut notices = Vec::new();
         for (id, spec) in &mut self.plugin {
@@ -165,7 +160,7 @@ impl Manifest {
             spec.hash = Some(loaded.bundle.hash());
             spec.bundle = Some(loaded.bundle);
         }
-        // What the bundles brought is part of the declaration.
+        // The bundles add servers, which the checks must see.
         self.validate()?;
         Ok(notices)
     }
@@ -382,12 +377,7 @@ impl AgentSection {
     }
 }
 
-/// One `[plugin.<id>]`: an agent-plugins directory resolved to data.
-///
-/// `path` is where the CLI reads it; `bundle` is what a deployment holds.
-/// A file writes only `path` — `subs apply` stamps the bundle onto the wire
-/// copy, and a local engine loads it at startup, so the two halves never
-/// coexist in a committed file.
+/// One `[plugin.<id>]`. A file writes `path`; the wire copy carries `bundle`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PluginSpec {
@@ -395,20 +385,14 @@ pub struct PluginSpec {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<PluginBundle>,
-    /// Per-server auth override, `<server> = "oauth" | "token" | "none"` —
-    /// what `mcp.json` has no field for. `none` is the one that matters: it
-    /// clears the standing "authorize this" notice a credential-less server
-    /// would otherwise keep raising.
+    /// Per-server auth, `<server> = "oauth" | "token" | "none"`. `mcp.json`
+    /// has no field for it.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub auth: BTreeMap<String, AuthKind>,
-    /// The bundle's content hash, stamped when the bundle is resolved. What a
-    /// deployment stores and diffs on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,
 }
 
-/// What of a plugin can be checked from what is present: the id always, the
-/// bundle's servers once a bundle is there.
 fn check_plugin(id: &str, spec: &PluginSpec, manifest: &Manifest) -> Result<()> {
     check_id(id)?;
     if spec.path.is_none() && spec.bundle.is_none() {
@@ -532,20 +516,16 @@ impl McpRef {
     }
 }
 
-/// One plugin an agent uses: a bare id, or a table with the knobs.
-///
-/// Same two spellings as [`McpRef`], for the same reason: the policy belongs
-/// to the pair, so one `[plugin.<id>]` serves two agents that read its servers
-/// differently.
+/// One plugin an agent uses: a bare id, or a table. Same two spellings as
+/// [`McpRef`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum PluginRef {
     All(String),
     Configured(PluginEntry),
 }
 
-/// The table form of a [`PluginRef`]. `deny_unknown_fields` for the reason
-/// [`McpEntry`] has it. `tools`, `auth_failure`, and `approve` apply to the
-/// plugin's servers.
+/// The table form of a [`PluginRef`]. `tools`, `auth_failure`, and `approve`
+/// apply to each of the plugin's servers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginEntry {
@@ -566,9 +546,7 @@ impl PluginRef {
         }
     }
 
-    /// The wire form, stamped from the bundle the manifest holds: the model's
-    /// catalog metadata and the derived server ids ride the config, so the
-    /// engine never re-reads a bundle to know what an agent reaches.
+    /// The wire form, stamped from the bundle the manifest holds.
     fn to_wire(&self, manifest: &Manifest) -> AgentPlugin {
         let id = self.id();
         let bundle = manifest.plugin.get(id).and_then(|s| s.bundle.as_ref());
@@ -602,7 +580,7 @@ impl PluginRef {
 }
 
 impl Serialize for PluginRef {
-    /// Written back as it was written: a bare id stays bare.
+    /// A bare id stays bare.
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::All(id) => s.serialize_str(id),
@@ -612,8 +590,7 @@ impl Serialize for PluginRef {
 }
 
 impl<'de> Deserialize<'de> for PluginRef {
-    /// Dispatched on the shape written, like [`McpRef`], so a misspelled field
-    /// is named rather than answered with "matched no variant".
+    /// Dispatched on the shape written, so a misspelled field is named.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct V;
 
@@ -1576,7 +1553,6 @@ defer_tools = { strategy = "sometimes" }
             "the plugin's server joins the registry under the derived id"
         );
 
-        // The wire copy carries the bundle, never the path.
         let wire = m.for_wire();
         assert!(wire.plugin["pdf"].path.is_none());
         assert!(wire.plugin["pdf"].bundle.is_some());

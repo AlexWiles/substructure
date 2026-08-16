@@ -1,5 +1,5 @@
-//! Approval: a call a connection gates stops before it runs. One question per
-//! call; the answer runs it or records a refusal.
+//! Approval: a gated call stops before it runs. One question per call. The
+//! answer runs the call or records a refusal.
 
 use serde_json::Value;
 
@@ -22,7 +22,7 @@ impl InterruptKind for Approval {
         PREFIX
     }
 
-    /// Answer the call this approval held, then ask about the next.
+    /// Answer the held call, then ask about the next one.
     fn resumed(&self, tail: &str, payload: &Value, p: &Proposing<'_>) -> Option<DecisionResponse> {
         let &Proposing {
             transcript,
@@ -43,7 +43,6 @@ impl InterruptKind for Approval {
             });
         };
 
-        // Nothing ran, so a decline has no effect to fail. The refusal is the result.
         let approved = approved(payload);
         let refusals = match approved {
             true => Vec::new(),
@@ -69,7 +68,7 @@ impl InterruptKind for Approval {
             ),
         }
 
-        // The last answer prompts the model. A call in flight does this when it settles.
+        // The last answer prompts the model.
         if actions.is_empty() && pending_calls == 0 && siblings_answered(&call.id, transcript) {
             actions.extend(reissue(&call.id, &refusals, transcript, llm_calls));
         }
@@ -90,7 +89,7 @@ pub fn needed(call: &ToolCall, connector_tools: &[ConnectorTool]) -> bool {
 pub fn ask(held: &ToolCall, connector_tools: &[ConnectorTool], remaining: usize) -> DecisionAction {
     let name = ran_name(held, connector_tools);
     let arguments = ran_arguments(held, connector_tools);
-    // Slack's mrkdwn renders a language tag as a line of the block.
+    // Slack mrkdwn shows a language tag as a line of the block.
     let shown = match &arguments {
         Value::Object(o) if o.is_empty() => String::new(),
         Value::Null => String::new(),
@@ -168,7 +167,6 @@ fn ran_arguments(call: &ToolCall, connector_tools: &[ConnectorTool]) -> Value {
     serde_json::from_str(&inner).unwrap_or(Value::String(inner))
 }
 
-/// The tool the call runs.
 fn target_of<'a>(
     call: &ToolCall,
     connector_tools: &'a [ConnectorTool],

@@ -1,6 +1,5 @@
-//! Auth: a connection lost its access and a person must restore it. The
-//! prompt's channel renders the message; resolving it re-fetches the tools,
-//! because a replaced credential reaches the agent only through a new fetch.
+//! Auth: a connection lost its access and a person must restore it. Resolving
+//! the interrupt re-fetches the tools with the new credential.
 
 use super::InterruptKind;
 use crate::connectors::AuthNeed;
@@ -23,15 +22,12 @@ impl InterruptKind for Auth {
     }
 }
 
-/// Derived from the connection, so a redelivery proposes the same id and the
-/// engine keeps one prompt.
+/// Derived from the connection, so a redelivery keeps one prompt.
 pub fn interrupt_id(connection: &str) -> String {
     format!("{PREFIX}{connection}")
 }
 
 /// The first connection that needs a person and has not been asked about.
-/// A connection configured to degrade never stops the session. A plugin's
-/// servers are covered under the plugin's own policy.
 pub fn needing(state: &SessionState) -> Option<(String, AuthNeed)> {
     let leaf = state.head_id.clone();
     let config = state.resolve_agent_for(leaf.as_deref())?;
