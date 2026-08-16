@@ -11,9 +11,6 @@ plugins = ["runbooks"]
 
 [plugin.runbooks]
 path = "./plugins/runbooks"
-# The file server wants no credential; saying so keeps it out of every report
-# of what is left to authorize.
-auth = { files = "none" }
 
 [run]
 agent = "oncall"
