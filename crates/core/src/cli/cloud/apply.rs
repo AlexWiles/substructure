@@ -74,7 +74,6 @@ struct Applied {
     notices: Vec<Notice>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     plugin_notices: Vec<String>,
-    /// The plugins this apply had to send first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     plugins: Vec<PluginPushed>,
 }
@@ -107,16 +106,15 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         }
     };
 
-    // `for_wire` drops what only this machine can resolve: the env variable
-    // names, the plugin paths, and the plugin content the push below sends.
+    // `for_wire` drops what only this machine resolves: the env variable
+    // names, the plugin paths, and the content the push below sends.
     let (local, resolved) = config.resolved_manifest()?;
     let mut manifest = local.for_wire();
     manifest.name = manifest
         .name
         .or_else(|| created.as_ref().map(|c| c.name.clone()));
 
-    // Before the config: a document may name a plugin, so the plugin has to be
-    // there for the document to mean anything.
+    // The config names plugins by hash, so they go first.
     let plugins = plugins::push_missing(&ctx, &project_id, &local, &resolved).await?;
 
     let applied: ApplyResponse = ctx

@@ -35,13 +35,12 @@ pub struct Skill {
     /// Skill-relative path → UTF-8 content.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, String>,
-    /// Skill-relative path → a file that is not text. The bytes are in blob
-    /// storage; the bundle holds the ref.
+    /// Skill-relative path → a non-text file, by blob ref.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub binaries: BTreeMap<String, Binary>,
 }
 
-/// A skill's non-text file, once it is stored.
+/// A stored non-text file.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Binary {
     /// `blob://…`
@@ -50,8 +49,7 @@ pub struct Binary {
     pub size: u64,
 }
 
-/// A binary read from the directory and not yet stored. Never part of a
-/// bundle: bytes must not travel with the config.
+/// A binary read from the directory, not yet stored.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pending {
     pub skill: String,
@@ -120,14 +118,13 @@ pub struct Loaded {
     pub bundle: PluginBundle,
     /// What loading dropped. Not errors.
     pub notices: Vec<String>,
-    /// Binaries waiting for a blob store. Empty once [`store_binaries`] runs.
+    /// Binaries waiting for a blob store.
     pub pending: Vec<Pending>,
 }
 
 impl Loaded {
-    /// What the directory holds, binaries included. Taken before they are
-    /// stored: a ref is minted per put, so a hash over the refs would differ
-    /// on every load of an unchanged plugin.
+    /// Taken before the binaries are stored: a ref is minted per put, so a
+    /// hash over refs would change on every load.
     pub fn hash(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut digest = Sha256::new();
@@ -198,15 +195,14 @@ pub fn load_dir(root: &Path) -> Result<Loaded> {
     })
 }
 
-/// Skill text rides in the prompt, so this budget is small.
+/// Skill text goes in the prompt, so this budget is small.
 const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
 
-/// A binary never rides in the prompt. It only has to be stored.
+/// A binary does not go in the prompt; it only has to be stored.
 const MAX_BINARY_BYTES: usize = 100 * 1024 * 1024;
 
-/// Put each pending binary in blob storage and stamp the ref on its skill. A
-/// file that will not store is dropped with a notice, the way loading drops
-/// one it cannot read.
+/// Put each pending binary in blob storage and stamp the ref on its skill.
+/// One that will not store is dropped with a notice.
 pub async fn store_binaries(
     bundle: &mut PluginBundle,
     pending: Vec<Pending>,
@@ -278,7 +274,7 @@ fn load_skills(
         .collect();
     dirs.sort();
     for skill_dir in dirs {
-        // A skill that fails leaves nothing behind, its binaries included.
+        // A failed skill leaves nothing behind.
         let mut found = Vec::new();
         match load_skill(&skill_dir, &mut found, notices) {
             Ok(skill) => {
@@ -410,13 +406,11 @@ fn collect_files(
                 continue;
             }
         };
-        // The name decides first. A small PDF holds no byte a `String` will
-        // refuse, and reading one as text puts its markup in the prompt.
+        // The name decides first: a small PDF is valid UTF-8 and still not text.
         if let Some(mime) = named_mime(&rel) {
             binaries.push((rel, mime.to_string(), bytes));
             continue;
         }
-        // An extension that says nothing: text if it reads as text.
         match String::from_utf8(bytes) {
             Ok(text) => {
                 files.insert(rel, sanitize_text(&text));
@@ -427,8 +421,7 @@ fn collect_files(
     Ok(())
 }
 
-/// The mime of a skill file whose extension says it is not text. `None` for
-/// an extension that says nothing, the bytes deciding instead.
+/// The mime of a skill file whose extension says it is not text.
 fn named_mime(path: &str) -> Option<&'static str> {
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())?;
     let mime = match ext.as_str() {
@@ -606,7 +599,6 @@ mod tests {
         );
     }
 
-    /// Bytes no `String` will hold.
     fn png(root: &Path, rel: &str) {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -314,7 +314,7 @@ pub struct ApplyResponse {
     pub notices: Vec<Notice>,
 }
 
-/// A plugin a deployment holds, by the hash of the directory it came from.
+/// A plugin a deployment holds, and the hash of the directory it came from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginHead {
@@ -329,24 +329,18 @@ pub struct PluginHeads {
     pub plugins: Vec<PluginHead>,
 }
 
-/// One plugin, whole, as apply sends it before the config. The config that
-/// names this plugin carries the hash and nothing else, so the deployment
-/// must hold this before the document that references it.
-///
-/// The deployment puts each binary in its blob store and stamps the ref onto
-/// the matching skill. Bytes belong in neither the config nor the bundle.
+/// A plugin's content. Sent before the config, which names it by hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginPush {
     pub hash: String,
-    /// The bundle as the directory read: skills, their text files, and the
-    /// `mcp.json` servers. Binary refs are absent — the deployment stamps them.
+    /// The bundle without binary refs. The deployment adds them.
     pub bundle: serde_json::Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binaries: Vec<PluginBinary>,
 }
 
-/// A skill's non-text file, in flight. `bytes` is standard base64.
+/// A skill's non-text file. `bytes` is base64.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginBinary {
@@ -363,7 +357,6 @@ pub struct PluginPushed {
     pub id: String,
     #[serde(default)]
     pub hash: String,
-    /// How many binaries the deployment stored.
     #[serde(default)]
     pub binaries: usize,
 }

@@ -247,8 +247,7 @@ pub(crate) async fn start_engine(
         .iter()
         .filter_map(|(id, spec)| Some((id.clone(), spec.bundle.clone()?)))
         .collect();
-    // The bytes go to the blob store, never to the bundle: a skill's file is
-    // a ref by the time anything can ask for it.
+    // Stored before anything can ask for the file.
     for (id, bundle) in &mut bundles {
         let Some(pending) = resolved.pending.remove(id) else {
             continue;

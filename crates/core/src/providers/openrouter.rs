@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -49,9 +50,9 @@ impl From<&LlmTool> for WireTool {
 /// it rather than ours.
 #[derive(Serialize)]
 struct WireMessage<'a> {
-    role: &'a Role,
+    role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<&'a PromptContent>,
+    content: Option<Cow<'a, PromptContent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<&'a Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,8 +66,8 @@ struct WireMessage<'a> {
 impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
     fn from(m: &'a PromptMessage) -> Self {
         WireMessage {
-            role: &m.role,
-            content: m.content.as_ref(),
+            role: m.role.clone(),
+            content: m.content.as_ref().map(Cow::Borrowed),
             tool_calls: m.tool_calls.as_ref(),
             tool_call_id: m.tool_call_id.as_ref(),
             name: m.name.as_ref(),
@@ -77,6 +78,28 @@ impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
                 .unwrap_or_default(),
         }
     }
+}
+
+/// The router takes the OpenAI shape. See [`super::openai::turns`].
+fn wire_messages(messages: &[PromptMessage]) -> Vec<WireMessage<'_>> {
+    super::openai::turns(messages)
+        .into_iter()
+        .map(|turn| match turn {
+            super::openai::Turn::Message(m) => WireMessage::from(m),
+            super::openai::Turn::ToolText(m, text) => WireMessage {
+                content: Some(Cow::Owned(PromptContent::Text(text))),
+                ..WireMessage::from(m)
+            },
+            super::openai::Turn::Media(parts) => WireMessage {
+                role: Role::User,
+                content: Some(Cow::Owned(PromptContent::Parts(parts))),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning_details: &[],
+            },
+        })
+        .collect()
 }
 
 /// Folds streamed `reasoning_details`. They arrive as fragments that share an
@@ -406,7 +429,7 @@ impl OpenRouterClient {
         };
         WireBody {
             model: &request.model,
-            messages: request.messages.iter().map(WireMessage::from).collect(),
+            messages: wire_messages(&request.messages),
             tools: request
                 .offered_tools(search)
                 .map(|ts| ts.into_iter().map(WireTool::from).collect()),

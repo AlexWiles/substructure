@@ -190,8 +190,7 @@ async fn handle_task(
                 );
                 return;
             };
-            // Settled by the path a connection's call takes: one shape, one
-            // reading of `is_error`, whoever answered.
+            // Settled like a connection's call: one reading of `is_error`.
             submit(
                 store,
                 &session_id,

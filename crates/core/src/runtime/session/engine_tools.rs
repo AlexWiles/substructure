@@ -1,8 +1,6 @@
 //! The engine's own tools. Each answer is a function of [`SessionState`], so a
 //! replay gives the same answer. Definitions live in [`filter`].
-//!
-//! An answer is a [`StoredResult`], the shape a connection and a worker
-//! settle with, so the model cannot tell the three apart.
+//! An answer is a [`StoredResult`], the same as a connection's or a worker's.
 
 use super::state::SessionState;
 use crate::connectors::filter;
@@ -128,8 +126,7 @@ pub fn skill_answer(
     }
 }
 
-/// A text file inlines. A binary answers with its blob, the same content a
-/// connection returns for an image or a document.
+/// Text inlines; a binary answers with its blob.
 fn file_answer(skill: &Skill, named: &str, path: &str) -> StoredResult {
     if let Some(content) = skill.files.get(path) {
         return StoredResult::text(content.clone());
@@ -148,8 +145,7 @@ fn file_answer(skill: &Skill, named: &str, path: &str) -> StoredResult {
     }
 }
 
-/// Text files by path, binaries with what they are — the model reads the mime
-/// before it decides to ask.
+/// Text files by path, binaries with what they are.
 fn skill_files(skill: &Skill) -> String {
     let text = skill.files.keys().map(|path| format!("- {path}"));
     let binaries = skill

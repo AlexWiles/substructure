@@ -1,9 +1,5 @@
-//! Plugin content, sent as a unit and named by its hash.
-//!
-//! A plugin is the only thing in a project that is bytes rather than a
-//! declaration, so it travels on its own: the config names a plugin by hash,
-//! and this is what puts the thing the hash names where the deployment can
-//! read it. Apply does both, in that order.
+//! Plugin content, sent as a unit and named by its hash. Apply sends it
+//! before the config that names it.
 
 use anyhow::{Context as _, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -15,8 +11,7 @@ use crate::plugins::Pending;
 
 use super::context::Context;
 
-/// Send each plugin the deployment does not already hold, and answer with what
-/// was sent. An unchanged directory sends nothing.
+/// Send each plugin the deployment does not already hold.
 pub async fn push_missing(
     ctx: &Context,
     project_id: &str,
@@ -26,8 +21,7 @@ pub async fn push_missing(
     if manifest.plugin.is_empty() {
         return Ok(Vec::new());
     }
-    // A deployment that does not answer is one that holds none; the push
-    // below reports what it thinks of that with its own status.
+    // No answer means it holds none.
     let held = ctx
         .client
         .get::<PluginHeads>(&format!("/api/v1/projects/{project_id}/plugins"))

@@ -180,8 +180,7 @@ impl RequestBlock {
     }
 }
 
-/// A tool's answer. Text stays a string, the shape every tool result had
-/// before one could carry an image or a document.
+/// Text stays a string; media sends blocks.
 #[derive(Serialize)]
 #[serde(untagged)]
 enum ToolResultContent {
@@ -572,8 +571,6 @@ fn build_body(
             }
             Role::Tool => {
                 let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
-                // A tool that answered with an image or a document sends its
-                // blocks; text alone stays a string.
                 let blocks = content_to_blocks(msg.content.as_ref());
                 let media = blocks
                     .iter()

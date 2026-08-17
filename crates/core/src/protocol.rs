@@ -208,8 +208,7 @@ impl StoredResult {
         }
     }
 
-    /// A tool that ran and reported failure. Settles the same way a
-    /// connection's `is_error` does.
+    /// A tool that ran and reported failure.
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             is_error: true,

@@ -102,8 +102,7 @@ impl Manifest {
         for section in wire.agent.values_mut() {
             section.signing_secret_env = None;
         }
-        // A plugin travels as a unit, named by `hash`. The config says which
-        // plugin it means; apply sends the plugin itself before this.
+        // The content is sent separately; `hash` names it.
         for spec in wire.plugin.values_mut() {
             spec.path = None;
             spec.bundle = None;
@@ -388,8 +387,7 @@ impl AgentSection {
 pub struct ResolvedPlugins {
     /// What loading dropped. Not errors.
     pub notices: Vec<String>,
-    /// Binaries to store, keyed by plugin id. Bytes, so they must not be
-    /// written into the manifest — only the ref a store returns belongs there.
+    /// Binaries to store, keyed by plugin id. Never written into the manifest.
     pub pending: BTreeMap<String, Vec<crate::plugins::Pending>>,
 }
 
@@ -411,8 +409,7 @@ pub struct PluginSpec {
 
 fn check_plugin(id: &str, spec: &PluginSpec, manifest: &Manifest) -> Result<()> {
     check_id(id)?;
-    // A file declares a directory; the wire copy declares a hash, and the
-    // deployment reads the plugin that hash names.
+    // A file declares a directory; the wire copy declares a hash.
     if spec.path.is_none() && spec.bundle.is_none() && spec.hash.is_none() {
         bail!("declares nothing. Set `path` to the plugin's directory.");
     }
