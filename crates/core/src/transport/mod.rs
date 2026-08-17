@@ -3,6 +3,7 @@ pub mod ag_ui;
 pub mod auth;
 pub mod channel;
 pub mod client_http;
+pub mod consent;
 pub mod http;
 pub mod http_push;
 pub mod mcp_auth;

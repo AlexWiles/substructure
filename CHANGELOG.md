@@ -15,6 +15,10 @@ together at the same version.
 - Add agent-plugins support https://agent-plugins.org/
 - Support per-user MCP credentials
 
+### Changed
+
+- Auth refactor
+
 ### Fixed
 
 ## [0.6.0] - 2026-08-14

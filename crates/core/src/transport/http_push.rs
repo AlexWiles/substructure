@@ -426,11 +426,12 @@ async fn publish_worker_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{Issuer, Requester, Subject};
     use std::sync::Mutex;
 
     use tokio::sync::mpsc;
 
-    use crate::protocol::{LlmRequest, OwnerKind, SessionOwner};
+    use crate::protocol::{LlmRequest, SessionOwner};
     use crate::runtime::span::SpanContext;
 
     #[derive(Default)]
@@ -454,10 +455,11 @@ mod tests {
             decision_id: "dec-1".to_string(),
             agent_id: "agent-1".to_string(),
             identity: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
-                id: Some("user-1".to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
                 metadata: Default::default(),
             },
             trigger: DecisionTrigger::LlmExecute {

@@ -601,26 +601,84 @@ pub struct RetryConfig {
 
 // ── Identity ─────────────────────────────────────────────────────────────
 
-/// What kind of caller owns a session. Part of the identity: only `frontend` is
-/// an end user, and an ownership check grants access to no other kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(title = "OwnerKind")]
-pub enum OwnerKind {
-    #[default]
-    Frontend,
-    Operator,
-    ApiKey,
-    System,
+/// Where a person's name comes from — `slack`, `app`, `cli`, or whatever a
+/// deployment registers. Stamped by whatever authenticated the request, and
+/// never read out of one: a caller free to name its own issuer could name
+/// another source's people.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+#[schemars(title = "Issuer")]
+pub struct Issuer(String);
+
+impl Issuer {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The one person at an installation nothing authenticates.
+    pub fn cli() -> Self {
+        Self("cli".into())
+    }
+
+    pub fn slack() -> Self {
+        Self("slack".into())
+    }
+
+    /// A login on this deployment: whoever configures it.
+    pub fn operator() -> Self {
+        Self("operator".into())
+    }
+
+    /// An end user of the project's own application, named in a client token.
+    pub fn app() -> Self {
+        Self("app".into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Issuer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One identity, as the source that authenticated it named it: OIDC's
+/// `(iss, sub)`. An id means nothing without its issuer, because it is only
+/// unique within one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "Subject")]
+pub struct Subject {
+    pub issuer: Issuer,
+    pub id: String,
+}
+
+impl Subject {
+    pub fn new(issuer: Issuer, id: impl Into<String>) -> Self {
+        Self {
+            issuer,
+            id: id.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Subject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.issuer, self.id)
+    }
 }
 
 /// Who can read what a session says. The transport sets it once, at the
 /// session's start; everything absent or unknown reads as `shared`, because
 /// `shared` is the value that never selects a personal credential.
+///
+/// Not OAuth's `aud`, which names a resource server rather than a readership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(title = "Audience")]
-pub enum Audience {
+#[schemars(title = "Visibility")]
+pub enum Visibility {
     /// More than one person can read the answer.
     #[default]
     Shared,
@@ -628,15 +686,49 @@ pub enum Audience {
     Private,
 }
 
+/// Who a session runs for. No subject is a schedule, a key, or the engine
+/// itself — nobody whose own credential could apply.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "Requester")]
+pub struct Requester {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Subject>,
+    #[serde(default)]
+    pub visibility: Visibility,
+}
+
+impl Requester {
+    /// Nobody in particular.
+    pub fn machine() -> Self {
+        Self::default()
+    }
+
+    /// The requester a session runs for. A session with no owner is nobody's.
+    pub fn of_owner(owner: Option<&SessionOwner>) -> Self {
+        owner.map(|o| o.requester.clone()).unwrap_or_default()
+    }
+
+    /// One person, in a conversation only they can read.
+    pub fn private(subject: Subject) -> Self {
+        Self {
+            subject: Some(subject),
+            visibility: Visibility::Private,
+        }
+    }
+
+    pub fn new(subject: Subject, visibility: Visibility) -> Self {
+        Self {
+            subject: Some(subject),
+            visibility,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOwner {
     pub tenant_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub kind: OwnerKind,
-    #[serde(default)]
-    pub audience: Audience,
+    #[serde(flatten)]
+    pub requester: Requester,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
 }
@@ -646,12 +738,8 @@ pub struct SessionOwner {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "WorkerIdentity")]
 pub struct WorkerIdentity {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub kind: OwnerKind,
-    #[serde(default)]
-    pub audience: Audience,
+    #[serde(flatten)]
+    pub requester: Requester,
     pub metadata: HashMap<String, String>,
 }
 

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::mcp::auth_headers;
 use super::oauth::{refresh, require_secure, same_origin, OauthError, Tokens};
 use super::registry::{AuthKind, ConnectionSpec, CredentialResolver};
-use super::{AuthNeed, ConnectorError, Subject};
+use super::{AuthNeed, ConnectorError, Slot};
 
 /// What the store holds for one connection.
 ///
@@ -43,12 +43,8 @@ impl Credential {
 /// are two accounts.
 #[async_trait::async_trait]
 pub trait CredentialStore: Send + Sync {
-    async fn get(
-        &self,
-        tenant_id: &str,
-        connection_id: &str,
-        subject: &Subject,
-    ) -> Option<Credential>;
+    async fn get(&self, tenant_id: &str, connection_id: &str, subject: &Slot)
+        -> Option<Credential>;
     /// Called on every refresh too, because a rotated refresh token invalidates
     /// the one it replaced. A failure to persist is reported, not swallowed:
     /// silently dropping a rotated token locks the connection out.
@@ -56,7 +52,7 @@ pub trait CredentialStore: Send + Sync {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: &Subject,
+        subject: &Slot,
         credential: Credential,
     ) -> Result<(), String>;
 }
@@ -97,7 +93,7 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: &Subject,
+        subject: &Slot,
         url: &str,
     ) -> Result<Option<String>, OauthError> {
         let tokens = match self.grant(tenant_id, connection_id, subject, url).await? {
@@ -127,7 +123,7 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: &Subject,
+        subject: &Slot,
         url: &str,
     ) -> Result<bool, OauthError> {
         let Held::Grant(tokens) = self.grant(tenant_id, connection_id, subject, url).await? else {
@@ -148,7 +144,7 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: &Subject,
+        subject: &Slot,
         url: &str,
     ) -> Result<Held, OauthError> {
         let tokens = match self.store.get(tenant_id, connection_id, subject).await {
@@ -174,7 +170,7 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: &Subject,
+        subject: &Slot,
         held: &Tokens,
     ) -> Result<String, OauthError> {
         let gate = {
@@ -215,7 +211,7 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         id: &str,
-        subject: &Subject,
+        subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<Option<HeaderMap>, ConnectorError> {
         match self.access_token(tenant_id, id, subject, &spec.url).await {
@@ -239,7 +235,7 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         id: &str,
-        subject: &Subject,
+        subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError> {
         match self.store.get(tenant_id, id, subject).await {
@@ -266,7 +262,7 @@ impl CredentialResolver for StoredCredentials {
         &self,
         tenant_id: &str,
         id: &str,
-        subject: &Subject,
+        subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError> {
         match spec.auth {
@@ -292,7 +288,7 @@ impl CredentialResolver for StoredCredentials {
         &self,
         tenant_id: &str,
         id: &str,
-        subject: &Subject,
+        subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<bool, ConnectorError> {
         match spec.auth {
@@ -348,14 +344,14 @@ mod tests {
     use crate::protocol::ConnectorProtocol;
     use std::sync::Arc;
 
-    struct Slot(Option<Credential>);
+    struct Vault(Option<Credential>);
 
     #[async_trait::async_trait]
-    impl CredentialStore for Slot {
-        async fn get(&self, _: &str, _: &str, _: &Subject) -> Option<Credential> {
+    impl CredentialStore for Vault {
+        async fn get(&self, _: &str, _: &str, _: &Slot) -> Option<Credential> {
             self.0.clone()
         }
-        async fn put(&self, _: &str, _: &str, _: &Subject, _: Credential) -> Result<(), String> {
+        async fn put(&self, _: &str, _: &str, _: &Slot, _: Credential) -> Result<(), String> {
             Ok(())
         }
     }
@@ -372,7 +368,7 @@ mod tests {
     }
 
     fn resolver(held: Option<Credential>) -> StoredCredentials {
-        StoredCredentials::new(Arc::new(Slot(held)))
+        StoredCredentials::new(Arc::new(Vault(held)))
     }
 
     fn stored_token() -> Credential {
@@ -403,7 +399,7 @@ mod tests {
             .resolve(
                 "t",
                 "github",
-                &Subject::Shared,
+                &Slot::Shared,
                 &spec(Some(AuthKind::Token), None),
             )
             .await
@@ -417,7 +413,7 @@ mod tests {
             .resolve(
                 "t",
                 "sentry",
-                &Subject::Shared,
+                &Slot::Shared,
                 &spec(Some(AuthKind::Token), Some("sentry-bearer")),
             )
             .await
@@ -432,7 +428,7 @@ mod tests {
             .resolve(
                 "t",
                 "github",
-                &Subject::Shared,
+                &Slot::Shared,
                 &spec(Some(AuthKind::Token), None),
             )
             .await
@@ -451,7 +447,7 @@ mod tests {
             .resolve(
                 "t",
                 "sentry",
-                &Subject::Shared,
+                &Slot::Shared,
                 &spec(Some(AuthKind::Oauth), None),
             )
             .await
@@ -502,13 +498,13 @@ mod tests {
     #[tokio::test]
     async fn an_undeclared_connection_sends_what_it_holds_or_nothing() {
         let headers = resolver(None)
-            .resolve("t", "open", &Subject::Shared, &spec(None, None))
+            .resolve("t", "open", &Slot::Shared, &spec(None, None))
             .await
             .unwrap();
         assert!(headers.is_empty());
 
         let headers = resolver(Some(granted()))
-            .resolve("t", "linear", &Subject::Shared, &spec(None, None))
+            .resolve("t", "linear", &Slot::Shared, &spec(None, None))
             .await
             .unwrap();
         assert_eq!(headers.get("authorization").unwrap(), "Bearer at");
@@ -520,7 +516,7 @@ mod tests {
             .resolve(
                 "t",
                 "open",
-                &Subject::Shared,
+                &Slot::Shared,
                 &spec(Some(AuthKind::None), None),
             )
             .await
@@ -533,7 +529,7 @@ mod tests {
         let mut spec = spec(Some(AuthKind::Token), None);
         spec.url = "http://example.test/mcp".to_string();
         let err = resolver(Some(stored_token()))
-            .resolve("t", "github", &Subject::Shared, &spec)
+            .resolve("t", "github", &Slot::Shared, &spec)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not https"), "got {err}");

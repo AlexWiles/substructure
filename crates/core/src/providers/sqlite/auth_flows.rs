@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::OptionalExtension;
 
-use crate::connectors::Subject;
+use crate::connectors::Slot;
 use crate::event_store::StoreError;
 use crate::runtime::secret::SecretRef;
 
@@ -26,7 +26,7 @@ pub struct Link {
     pub link_hash: String,
     pub tenant_id: String,
     pub connection_id: String,
-    pub subject: Subject,
+    pub subject: Slot,
 }
 
 /// A claimed flow, ready to redeem.
@@ -35,7 +35,7 @@ pub struct Flow {
     pub link_hash: String,
     pub tenant_id: String,
     pub connection_id: String,
-    pub subject: Subject,
+    pub subject: Slot,
     /// The PKCE half of the flow, in the secret store.
     pub pending_secret: SecretRef,
 }
@@ -48,7 +48,7 @@ fn internal<E: std::fmt::Display>(e: E) -> StoreError {
     StoreError::Internal(e.to_string())
 }
 
-fn subject_of(column: &str) -> Result<Subject, StoreError> {
+fn subject_of(column: &str) -> Result<Slot, StoreError> {
     serde_json::from_str(column).map_err(internal)
 }
 
@@ -305,6 +305,7 @@ impl SqliteAuthFlows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{Issuer, Subject};
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -327,7 +328,7 @@ mod tests {
             link_hash: hash.to_string(),
             tenant_id: "default".to_string(),
             connection_id: "gmail".to_string(),
-            subject: Subject::Person("slack:U1".to_string()),
+            subject: Slot::Of(Subject::new(Issuer::slack(), "T1:U1")),
         }
     }
 
@@ -354,7 +355,10 @@ mod tests {
             .await
             .unwrap();
         let claimed = flows.claim("S1", now).await.unwrap().expect("first claim");
-        assert_eq!(claimed.subject, Subject::Person("slack:U1".to_string()));
+        assert_eq!(
+            claimed.subject,
+            Slot::Of(Subject::new(Issuer::slack(), "T1:U1"))
+        );
 
         assert!(
             flows.claim("S1", now).await.unwrap().is_none(),

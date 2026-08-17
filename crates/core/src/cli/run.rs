@@ -11,7 +11,7 @@ use super::run_remote;
 use super::target::target;
 use super::{local, DEFAULT_TENANT};
 use crate::event_store::Seq;
-use crate::protocol::{ClientInput, Content, DraftMessage, OwnerKind, Role, SessionOwner};
+use crate::protocol::{ClientInput, Content, DraftMessage, Role, SessionOwner};
 use crate::providers::sqlite::{SqliteBlobStore, SqliteDb};
 use crate::session::events::EventPayload;
 use crate::session::index::SessionFilter;
@@ -189,9 +189,10 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
         // Only this path names an unauthenticated person. A `[remote]` run
         // is the caller's account, and a served engine is the token's
         // subject.
-        id: Some(super::LOCAL_SUBJECT.to_string()),
-        kind: OwnerKind::Frontend,
-        audience: crate::protocol::Audience::Private,
+        requester: crate::protocol::Requester::private(crate::protocol::Subject::new(
+            crate::protocol::Issuer::cli(),
+            super::LOCAL_SUBJECT,
+        )),
         metadata: Default::default(),
     };
 

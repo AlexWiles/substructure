@@ -210,22 +210,6 @@
         ],
         "title": "Approve"
       },
-      "Audience": {
-        "description": "Who can read what a session says. The transport sets it once, at the\nsession's start; everything absent or unknown reads as `shared`, because\n`shared` is the value that never selects a personal credential.",
-        "oneOf": [
-          {
-            "const": "shared",
-            "description": "More than one person can read the answer.",
-            "type": "string"
-          },
-          {
-            "const": "private",
-            "description": "One person only.",
-            "type": "string"
-          }
-        ],
-        "title": "Audience"
-      },
       "AuthFailure": {
         "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
         "oneOf": [
@@ -1540,6 +1524,11 @@
         ],
         "title": "Handler"
       },
+      "Issuer": {
+        "description": "Where a person's name comes from — `slack`, `app`, `cli`, or whatever a\ndeployment registers. Stamped by whatever authenticated the request, and\nnever read out of one: a caller free to name its own issuer could name\nanother source's people.",
+        "title": "Issuer",
+        "type": "string"
+      },
       "LlmFormat": {
         "description": "The wire shape of a worker-run LLM call, declared on a `type = \"worker\"`\n`[llm.*]` block. Absent ⇒ the engine's neutral format. Set ⇒ `llm.execute`\ncarries the provider's native request body, and `llm.result`/\n`llm.token.delta` accept the provider's native response and stream events.",
         "oneOf": [
@@ -1751,17 +1740,6 @@
         ],
         "title": "MessageTree",
         "type": "object"
-      },
-      "OwnerKind": {
-        "description": "What kind of caller owns a session. Part of the identity: only `frontend` is\nan end user, and an ownership check grants access to no other kind.",
-        "enum": [
-          "frontend",
-          "operator",
-          "api_key",
-          "system"
-        ],
-        "title": "OwnerKind",
-        "type": "string"
       },
       "Reasoning": {
         "additionalProperties": false,
@@ -2112,6 +2090,24 @@
         "title": "SubAgent",
         "type": "object"
       },
+      "Subject": {
+        "additionalProperties": false,
+        "description": "One identity, as the source that authenticated it named it: OIDC's\n`(iss, sub)`. An id means nothing without its issuer, because it is only\nunique within one.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "issuer": {
+            "$ref": "#/components/schemas/Issuer"
+          }
+        },
+        "required": [
+          "issuer",
+          "id"
+        ],
+        "title": "Subject",
+        "type": "object"
+      },
       "ToolCall": {
         "additionalProperties": false,
         "properties": {
@@ -2374,27 +2370,44 @@
         "title": "Usage",
         "type": "object"
       },
+      "Visibility": {
+        "description": "Who can read what a session says. The transport sets it once, at the\nsession's start; everything absent or unknown reads as `shared`, because\n`shared` is the value that never selects a personal credential.\n\nNot OAuth's `aud`, which names a resource server rather than a readership.",
+        "oneOf": [
+          {
+            "const": "shared",
+            "description": "More than one person can read the answer.",
+            "type": "string"
+          },
+          {
+            "const": "private",
+            "description": "One person only.",
+            "type": "string"
+          }
+        ],
+        "title": "Visibility"
+      },
       "WorkerIdentity": {
         "additionalProperties": false,
         "description": "The owner as delivered to the worker on `DecisionRequest.identity`, without\nthe tenant. Read `kind` with `id`: only `frontend` is an end user.",
         "properties": {
-          "audience": {
-            "$ref": "#/components/schemas/Audience"
-          },
-          "id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "kind": {
-            "$ref": "#/components/schemas/OwnerKind"
-          },
           "metadata": {
             "additionalProperties": {
               "type": "string"
             },
             "type": "object"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Subject"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
           }
         },
         "required": [

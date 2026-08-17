@@ -30,7 +30,7 @@ use crate::api::v1::{McpAuthorizeResponse, McpConnection, McpDeclareRequest, Mcp
 use crate::connectors::credential::{Credential, CredentialStore};
 use crate::connectors::oauth;
 use crate::connectors::registry::{AuthKind, ConnectionSpec, CredentialScope};
-use crate::connectors::Subject;
+use crate::connectors::Slot;
 use crate::providers::sqlite::{SqliteCredentialStore, SqliteDb, SqliteSecretStore};
 use crate::runtime::secret::SecretCipher;
 
@@ -147,10 +147,13 @@ fn require_auth(id: &str, spec: &ConnectionSpec, want: AuthKind) -> Result<()> {
 
 /// Whose slot a local command reads or writes. Consent given here is
 /// whoever ran the command, so no other person's slot is reachable.
-fn local_subject(spec: &ConnectionSpec) -> Subject {
+fn local_slot(spec: &ConnectionSpec) -> Slot {
     match spec.effective_scope() {
-        CredentialScope::Shared => Subject::Shared,
-        CredentialScope::User => Subject::Person(LOCAL_SUBJECT.to_string()),
+        CredentialScope::Shared => Slot::Shared,
+        CredentialScope::User => Slot::Of(crate::protocol::Subject::new(
+            crate::protocol::Issuer::cli(),
+            LOCAL_SUBJECT,
+        )),
     }
 }
 
@@ -226,7 +229,7 @@ fn open_existing_db(cfg: &ProjectConfig) -> Result<Option<SqliteDb>> {
 async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -> Result<()> {
     let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
     require_auth(&id, &spec, AuthKind::Oauth)?;
-    let subject = local_subject(&spec);
+    let subject = local_slot(&spec);
 
     let http = reqwest::Client::new();
 
@@ -325,7 +328,7 @@ async fn set_token_local(
 ) -> Result<()> {
     let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
     require_auth(&id, &spec, AuthKind::Token)?;
-    let subject = local_subject(&spec);
+    let subject = local_slot(&spec);
 
     let token = match &env {
         Some(var) => super::env_value(var)
@@ -360,7 +363,7 @@ async fn delete_token_local(id: Option<String>, cfg: ProjectConfig) -> Result<()
 async fn store_credential(
     cfg: &ProjectConfig,
     id: &str,
-    subject: &Subject,
+    subject: &Slot,
     credential: Credential,
 ) -> Result<()> {
     let store = open_store(open_db(cfg)?)?;
@@ -382,9 +385,7 @@ async fn list_local(cfg: ProjectConfig) -> Result<()> {
     for (id, spec) in &connections {
         if spec.effective_scope() == CredentialScope::Shared || spec.auth == Some(AuthKind::None) {
             let held = match &store {
-                Some(store) => {
-                    CredentialStore::get(store, DEFAULT_TENANT, id, &Subject::Shared).await
-                }
+                Some(store) => CredentialStore::get(store, DEFAULT_TENANT, id, &Slot::Shared).await,
                 None => None,
             };
             println!("{id}\t{}\t{}", spec.url, describe(spec, held.as_ref()));
@@ -484,7 +485,7 @@ pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<(Strin
     let http = reqwest::Client::new();
     let mut out = Vec::new();
     for (id, spec) in declared {
-        let slot = local_subject(&spec);
+        let slot = local_slot(&spec);
         let held = match &store {
             Some(store) => CredentialStore::get(store, DEFAULT_TENANT, &id, &slot).await,
             None => None,
@@ -902,7 +903,7 @@ mod tests {
 
         let store = open_store(open_db(&cfg).unwrap()).unwrap();
         assert_eq!(
-            CredentialStore::get(&store, DEFAULT_TENANT, "github", &Subject::Shared).await,
+            CredentialStore::get(&store, DEFAULT_TENANT, "github", &Slot::Shared).await,
             Some(Credential::Static {
                 token: "ghp_written".into()
             })
@@ -913,7 +914,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            CredentialStore::get(&store, DEFAULT_TENANT, "github", &Subject::Shared)
+            CredentialStore::get(&store, DEFAULT_TENANT, "github", &Slot::Shared)
                 .await
                 .is_none()
         );

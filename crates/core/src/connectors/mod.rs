@@ -12,50 +12,21 @@ pub mod mcp;
 pub mod oauth;
 pub mod registry;
 
-use crate::protocol::{Audience, OwnerKind, SessionOwner};
+pub use crate::protocol::{Issuer, Requester, Subject, Visibility};
 
-/// Whose credential slot a call reads: the deployment's one credential, or
-/// one person's.
+/// Which credential a call reads: the deployment's one, or one person's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Subject {
+pub enum Slot {
     Shared,
-    Person(String),
+    Of(Subject),
 }
 
-impl std::fmt::Display for Subject {
+impl std::fmt::Display for Slot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Subject::Shared => f.write_str("shared"),
-            Subject::Person(id) => write!(f, "subject `{id}`"),
-        }
-    }
-}
-
-/// Who a call runs for, resolved from the session owner at execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Principal {
-    /// No person: a schedule, an API key, or the system.
-    Machine,
-    /// One person, and the audience of the conversation they asked in.
-    Person { subject: String, audience: Audience },
-}
-
-impl Principal {
-    /// The deployment's owner→subject map. A single-deployment engine maps
-    /// the surface-native owner id to itself; the cloud resolves through its
-    /// identities instead.
-    pub fn of_owner(owner: Option<&SessionOwner>) -> Self {
-        match owner {
-            Some(o) if o.kind == OwnerKind::Frontend => match &o.id {
-                Some(id) => Principal::Person {
-                    subject: id.clone(),
-                    audience: o.audience,
-                },
-                None => Principal::Machine,
-            },
-            _ => Principal::Machine,
+            Slot::Shared => f.write_str("shared"),
+            Slot::Of(subject) => write!(f, "subject `{subject}`"),
         }
     }
 }

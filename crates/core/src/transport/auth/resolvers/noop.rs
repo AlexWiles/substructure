@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 
-use crate::transport::auth::{AuthError, AuthPrincipal, AuthResolver};
+use crate::transport::auth::{AuthError, AuthRequester, AuthResolver};
 
 pub struct NoopAuthResolver {
     tenant_id: String,
@@ -30,8 +30,8 @@ impl NoopAuthResolver {
 
 #[async_trait]
 impl AuthResolver for NoopAuthResolver {
-    async fn resolve(&self, _headers: &HeaderMap) -> Result<AuthPrincipal, AuthError> {
-        Ok(AuthPrincipal {
+    async fn resolve(&self, _headers: &HeaderMap) -> Result<AuthRequester, AuthError> {
+        Ok(AuthRequester {
             tenant_id: self.tenant_id.clone(),
             source: self.source,
             subject: self.subject.clone(),

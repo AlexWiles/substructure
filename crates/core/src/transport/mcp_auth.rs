@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::connectors::credential::{Credential, CredentialStore};
 use crate::connectors::registry::{ConnectionSpec, Connections};
-use crate::connectors::{oauth, Principal, Subject};
+use crate::connectors::{oauth, Requester, Slot};
 use crate::providers::sqlite::{Flow, Link, SqliteAuthFlows, SqliteCredentialStore};
 use crate::runtime::secret::{SecretRef, SecretStore};
 
@@ -79,13 +79,13 @@ impl AuthorizeLinks {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        principal: &Principal,
+        principal: &Requester,
         now: DateTime<Utc>,
     ) -> Result<Option<String>, String> {
         let Some(spec) = self.connections.get(connection_id) else {
             return Ok(None);
         };
-        let Ok(subject) = Connections::subject_for(connection_id, spec, principal) else {
+        let Ok(subject) = Connections::slot_for(connection_id, spec, principal) else {
             return Ok(None);
         };
         self.mint(tenant_id, connection_id, subject, now).await
@@ -97,7 +97,7 @@ impl AuthorizeLinks {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: Subject,
+        subject: Slot,
         now: DateTime<Utc>,
     ) -> Result<Option<String>, String> {
         if !self.connections.contains_key(connection_id) {
@@ -336,7 +336,8 @@ pub fn spawn_sweeper(
 mod tests {
     use super::*;
     use crate::connectors::registry::CredentialScope;
-    use crate::protocol::{Audience, ConnectorProtocol};
+    use crate::protocol::{ConnectorProtocol, Visibility};
+    use crate::protocol::{Issuer, Subject};
     use crate::providers::sqlite::SqliteDb;
 
     fn spec(credential: Option<CredentialScope>) -> ConnectionSpec {
@@ -384,10 +385,7 @@ mod tests {
             .mint_for(
                 "default",
                 "gmail",
-                &Principal::Person {
-                    subject: "slack:U1".into(),
-                    audience: Audience::Private,
-                },
+                &Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Visibility::Private),
                 now,
             )
             .await
@@ -400,7 +398,10 @@ mod tests {
         assert!(!token.contains("gmail"), "no connection in the token");
 
         let link = flows.resolve(&hash(token), now).await.unwrap().unwrap();
-        assert_eq!(link.subject, Subject::Person("slack:U1".into()));
+        assert_eq!(
+            link.subject,
+            Slot::Of(Subject::new(Issuer::slack(), "T1:U1".to_string()))
+        );
         assert_eq!(link.connection_id, "gmail");
         assert_eq!(link.tenant_id, "default");
         cleanup(&path);
@@ -411,11 +412,8 @@ mod tests {
     async fn a_principal_the_call_would_refuse_gets_no_link() {
         let (links, _, path) = links(Some(CredentialScope::User));
         for refused in [
-            Principal::Machine,
-            Principal::Person {
-                subject: "slack:U1".into(),
-                audience: Audience::Shared,
-            },
+            Requester::machine(),
+            Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Visibility::Shared),
         ] {
             assert!(links
                 .mint_for("default", "gmail", &refused, Utc::now())
@@ -432,7 +430,7 @@ mod tests {
         let (links, flows, path) = links(None);
         let now = Utc::now();
         let url = links
-            .mint_for("default", "gmail", &Principal::Machine, now)
+            .mint_for("default", "gmail", &Requester::machine(), now)
             .await
             .unwrap()
             .expect("a shared connection has a slot for anybody");
@@ -441,7 +439,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(link.subject, Subject::Shared);
+        assert_eq!(link.subject, Slot::Shared);
         cleanup(&path);
     }
 
@@ -449,7 +447,7 @@ mod tests {
     async fn an_undeclared_connection_mints_nothing() {
         let (links, _, path) = links(None);
         assert!(links
-            .mint_for("default", "nope", &Principal::Machine, Utc::now())
+            .mint_for("default", "nope", &Requester::machine(), Utc::now())
             .await
             .unwrap()
             .is_none());
@@ -462,12 +460,12 @@ mod tests {
         let (links, _, path) = links(None);
         let now = Utc::now();
         let one = links
-            .mint_for("default", "gmail", &Principal::Machine, now)
+            .mint_for("default", "gmail", &Requester::machine(), now)
             .await
             .unwrap()
             .unwrap();
         let two = links
-            .mint_for("default", "gmail", &Principal::Machine, now)
+            .mint_for("default", "gmail", &Requester::machine(), now)
             .await
             .unwrap()
             .unwrap();

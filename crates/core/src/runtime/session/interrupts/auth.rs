@@ -2,7 +2,7 @@
 //! the interrupt re-fetches the tools with the new credential.
 
 use super::InterruptKind;
-use crate::connectors::{AuthNeed, Principal};
+use crate::connectors::{AuthNeed, Requester};
 use crate::protocol::{AuthFailure, DecisionAction};
 use crate::runtime::session::state::SessionState;
 
@@ -14,7 +14,7 @@ pub const PREFIX: &str = "mcp-auth:";
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Authorize {
     pub connection: String,
-    pub principal: Principal,
+    pub principal: Requester,
 }
 
 pub struct Auth;

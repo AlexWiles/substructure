@@ -3,7 +3,7 @@ use axum::http::HeaderMap;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::transport::auth::{AuthError, AuthPrincipal, AuthResolver};
+use crate::transport::auth::{AuthError, AuthRequester, AuthResolver};
 
 #[derive(Debug, Clone)]
 pub struct ApiKeyBinding {
@@ -46,19 +46,19 @@ impl BearerHashedApiKeyAuthResolver {
 
 #[async_trait]
 impl AuthResolver for BearerHashedApiKeyAuthResolver {
-    async fn resolve(&self, headers: &HeaderMap) -> Result<AuthPrincipal, AuthError> {
+    async fn resolve(&self, headers: &HeaderMap) -> Result<AuthRequester, AuthError> {
         self.resolve_headers(headers)
     }
 }
 
 impl BearerHashedApiKeyAuthResolver {
-    fn resolve_headers(&self, headers: &HeaderMap) -> Result<AuthPrincipal, AuthError> {
+    fn resolve_headers(&self, headers: &HeaderMap) -> Result<AuthRequester, AuthError> {
         let key = extract_api_key(headers).ok_or(AuthError::MissingCredentials)?;
         let key_hash = Sha256::digest(key.as_bytes());
 
         for binding in &self.bindings {
             if key_hash.ct_eq(&binding.key_hash).unwrap_u8() == 1 {
-                return Ok(AuthPrincipal {
+                return Ok(AuthRequester {
                     tenant_id: binding.tenant_id.clone(),
                     source: crate::transport::auth::SOURCE_API_KEY,
                     subject: Some(binding.key_id.clone()),

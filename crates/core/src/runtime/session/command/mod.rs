@@ -900,10 +900,8 @@ impl Working {
                 },
             ) => {
                 SessionState::ensure_tenant_matches(caller, &owner.tenant_id)?;
-                if let Caller::Frontend { user_id, .. } = caller {
-                    if owner.id.as_deref() != Some(user_id.as_str()) {
-                        return Err(SessionError::SessionAccessDenied);
-                    }
+                if matches!(caller, Caller::Frontend { .. }) && !caller.owns(&owner) {
+                    return Err(SessionError::SessionAccessDenied);
                 }
                 self.emit(EventPayload::SessionCreated(Box::new(SessionCreated {
                     agent_id,

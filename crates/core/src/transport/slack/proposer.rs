@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::activity::TurnActivity;
 use super::render::{self, StepStatus, StepView};
 use super::{display_of, with_footer, ButtonValue};
-use crate::connectors::{AuthNeed, Principal};
+use crate::connectors::{AuthNeed, Requester};
 use crate::protocol::{
     DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution, InterruptResponder,
     Message, ResumeStatus,
@@ -93,7 +93,7 @@ impl SlackProposer {
     fn authorize_prompt(&self, state: &SessionState) -> Option<DecisionResponse> {
         let (connection, need) = auth::needing(state)?;
         let authorize = auth::Authorize {
-            principal: Principal::of_owner(state.owner.as_ref()),
+            principal: Requester::of_owner(state.owner.as_ref()),
             connection: connection.clone(),
         };
 
@@ -308,9 +308,8 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
 mod tests {
     use super::*;
     use crate::protocol::StoredResult;
-    use crate::protocol::{
-        AgentConfig, AuthFailure, InterruptOrigin, McpServer, OwnerKind, RetryPolicy,
-    };
+    use crate::protocol::{AgentConfig, AuthFailure, InterruptOrigin, McpServer, RetryPolicy};
+    use crate::protocol::{Issuer, Subject};
     use crate::runtime::session::state::OpenInterrupt;
     use crate::session::events::{AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested};
     use crate::session::events::{ToolCallCompleted, ToolCallRequested, TurnStarted};
@@ -348,10 +347,8 @@ mod tests {
     fn state() -> SessionState {
         let mut s = SessionState::new(SESSION.to_string());
         s.owner = Some(crate::protocol::SessionOwner {
-            kind: OwnerKind::Frontend,
-            audience: Default::default(),
             tenant_id: "t".to_string(),
-            id: Some("slack:U1".to_string()),
+            requester: Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Default::default()),
             metadata: std::collections::HashMap::from_iter([
                 ("slack_channel".to_string(), "C1".to_string()),
                 ("slack_thread_ts".to_string(), "1.0".to_string()),
@@ -540,10 +537,7 @@ mod tests {
                 assert_eq!(authorize.connection, "sentry");
                 assert_eq!(
                     authorize.principal,
-                    Principal::Person {
-                        subject: "slack:U1".to_string(),
-                        audience: Default::default(),
-                    }
+                    Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Default::default())
                 );
             }
             other => panic!("expected one interrupt; got {other:?}"),

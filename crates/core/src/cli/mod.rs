@@ -36,7 +36,7 @@ pub(crate) const DEFAULT_TENANT: &str = "default";
 /// The one person at an installation nothing authenticates. `subs run` acts
 /// as this, and `subs mcp login` fills its slot. Prefixed so it cannot
 /// collide with a subject an identity source issues.
-pub(crate) const LOCAL_SUBJECT: &str = "cli:local";
+pub(crate) const LOCAL_SUBJECT: &str = "local";
 
 impl Command {
     /// The project file this invocation will read, for callers that need it

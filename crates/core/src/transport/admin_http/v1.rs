@@ -129,7 +129,11 @@ async fn run(
     let session_id = req
         .session_id
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    let owner = caller.as_owner();
+    let owner = crate::protocol::SessionOwner {
+        tenant_id: caller.tenant_id().to_string(),
+        requester: crate::protocol::Requester::machine(),
+        metadata: Default::default(),
+    };
 
     // Subscribe before the input, or the first events have no listener.
     let spec = SessionSubscriptionSpec {
