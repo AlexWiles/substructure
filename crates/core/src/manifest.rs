@@ -434,6 +434,21 @@ fn check_plugin(id: &str, spec: &PluginSpec, manifest: &Manifest) -> Result<()> 
                  already declares"
             );
         }
+        // `<plugin>-<server>` is ambiguous: `a` + `b-c` and `a-b` + `c` derive
+        // the same id, and one connection would answer for both.
+        for (other, spec) in manifest.plugin.iter().filter(|(other, _)| *other != id) {
+            let taken = spec
+                .bundle
+                .iter()
+                .flat_map(|b| b.servers.keys())
+                .any(|n| crate::plugins::server_id(other, n) == derived);
+            if taken {
+                bail!(
+                    "server `{name}` resolves to connection id `{derived}`, which \
+                     `[plugin.{other}]` also declares"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1580,6 +1595,44 @@ defer_tools = { strategy = "sometimes" }
                 .contains("form-filling"),
             "and nothing of it is left behind"
         );
+    }
+
+    #[test]
+    fn two_plugins_cannot_derive_one_connection_id() {
+        let mut m = plugin_manifest(r#"["pdf"]"#);
+        let server = |url: &str| ConnectionSpec {
+            url: url.into(),
+            protocol: ConnectorProtocol::Mcp,
+            auth: None,
+            header: None,
+            prefix_tools: true,
+        };
+        // `pdf` + `tools-render` and `pdf-tools` + `render` both derive
+        // `pdf-tools-render`.
+        m.plugin.get_mut("pdf").unwrap().bundle = Some(crate::plugins::PluginBundle {
+            name: "pdf-tools".into(),
+            servers: [(
+                "tools-render".to_string(),
+                server("https://a.example.com/mcp"),
+            )]
+            .into(),
+            ..Default::default()
+        });
+        m.plugin.insert(
+            "pdf-tools".to_string(),
+            PluginSpec {
+                bundle: Some(crate::plugins::PluginBundle {
+                    name: "other".into(),
+                    servers: [("render".to_string(), server("https://b.example.com/mcp"))].into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let e = m
+            .validate()
+            .expect_err("one id cannot answer for two servers");
+        assert!(e.to_string().contains("pdf-tools-render"), "{e}");
     }
 
     #[test]

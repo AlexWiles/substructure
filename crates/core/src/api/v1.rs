@@ -334,8 +334,8 @@ pub struct PluginHeads {
 #[serde(rename_all = "camelCase")]
 pub struct PluginPush {
     pub hash: String,
-    /// The bundle without binary refs. The deployment adds them.
-    pub bundle: serde_json::Value,
+    /// Without binary refs. The deployment adds them.
+    pub bundle: crate::plugins::PluginBundle,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binaries: Vec<PluginBinary>,
 }

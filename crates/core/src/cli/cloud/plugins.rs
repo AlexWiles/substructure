@@ -39,7 +39,7 @@ pub async fn push_missing(
         }
         let body = PluginPush {
             hash: hash.clone(),
-            bundle: serde_json::to_value(bundle)?,
+            bundle: bundle.clone(),
             binaries: binaries(resolved.pending.get(id)),
         };
         let sent: PluginPushed = ctx
