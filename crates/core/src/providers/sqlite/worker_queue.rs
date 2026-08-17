@@ -154,6 +154,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             identity: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: tenant_id.to_string(),
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),

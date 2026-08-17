@@ -142,8 +142,9 @@ pub struct Discovered {
 }
 
 /// Everything the caller must hold between opening the browser and the
-/// redirect coming back. Short-lived and single-use.
-#[derive(Debug, Clone)]
+/// redirect coming back. Short-lived and single-use. Serialized only into the
+/// secret store, for a flow whose redirect lands on a later request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {
     pub url: String,
     pub state: String,

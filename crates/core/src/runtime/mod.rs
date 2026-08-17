@@ -47,6 +47,7 @@ pub mod event_store;
 pub mod llm;
 pub mod processor;
 pub mod retry;
+pub mod secret;
 pub mod session;
 pub mod span;
 pub mod sub_agent;

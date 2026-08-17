@@ -57,9 +57,9 @@ subs mcp set-token github --env GITHUB_TOKEN
 gh auth token | subs mcp set-token github
 ```
 
-`subs mcp delete-token <id>` empties a connection's credential without undeclaring
-it. Deleting the `[mcp.<id>]` section disconnects it for good, and the credential
-goes with it.
+`subs mcp logout <id>` empties a connection's credentials — every holder's —
+without undeclaring it. Deleting the `[mcp.<id>]` section disconnects it for
+good, and the credentials go with it.
 
 The credential belongs to the id. Declare one server twice to connect two
 accounts. Authorize each id on its own.

@@ -614,6 +614,20 @@ pub enum OwnerKind {
     System,
 }
 
+/// Who can read what a session says. The transport sets it once, at the
+/// session's start; everything absent or unknown reads as `shared`, because
+/// `shared` is the value that never selects a personal credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "Audience")]
+pub enum Audience {
+    /// More than one person can read the answer.
+    #[default]
+    Shared,
+    /// One person only.
+    Private,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOwner {
     pub tenant_id: String,
@@ -621,6 +635,8 @@ pub struct SessionOwner {
     pub id: Option<String>,
     #[serde(default)]
     pub kind: OwnerKind,
+    #[serde(default)]
+    pub audience: Audience,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
 }
@@ -634,6 +650,8 @@ pub struct WorkerIdentity {
     pub id: Option<String>,
     #[serde(default)]
     pub kind: OwnerKind,
+    #[serde(default)]
+    pub audience: Audience,
     pub metadata: HashMap<String, String>,
 }
 

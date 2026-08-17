@@ -1,6 +1,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::connectors::Principal;
 use crate::runtime::span::SpanContext;
 
 /// Work the engine owes a connection, dispatched off the events that request
@@ -14,6 +15,8 @@ pub enum ConnectorTask {
         session_id: String,
         tenant_id: String,
         connection_id: String,
+        /// Resolved from the session owner at dispatch, never persisted.
+        principal: Principal,
         attempt: u32,
         span: SpanContext,
     },
@@ -25,6 +28,7 @@ pub enum ConnectorTask {
         tool_call_id: String,
         attempt: u32,
         connection_id: String,
+        principal: Principal,
         /// The name the connection knows the tool by, not the model's alias.
         remote_name: String,
         arguments: Value,

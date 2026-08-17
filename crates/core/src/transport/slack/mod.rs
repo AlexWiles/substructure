@@ -6,7 +6,7 @@ mod socket;
 mod state;
 mod webhook;
 
-pub use bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
+pub use bot::{Consent, Routing, SlackBot, Workspace, WorkspaceResolver};
 pub use proposer::SlackProposer;
 pub use render::{
     context_block, section_block, PromptOption, PromptView, Rendered, StepStatus, StepView,

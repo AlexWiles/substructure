@@ -224,6 +224,7 @@ impl Trace {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
                     kind: OwnerKind::Frontend,
+                    audience: Default::default(),
                     tenant_id: TENANT.to_string(),
                     id: Some(USER.to_string()),
                     metadata: HashMap::new(),

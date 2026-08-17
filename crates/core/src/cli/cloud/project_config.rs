@@ -136,6 +136,12 @@ pub struct ServeConfig {
     /// machine can reach.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<bool>,
+    /// The HTTPS address this engine is reachable at from a browser. Setting
+    /// it is what lets an agent hand a person an authorize *link* for an MCP
+    /// connection; without one, consent needs `subs mcp login` on this
+    /// machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
 }
 
 impl ProjectConfig {

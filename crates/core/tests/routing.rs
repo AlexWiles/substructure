@@ -281,6 +281,7 @@ async fn drain(
             caller: caller.clone(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: TENANT.to_string(),
                 id: Some("user-1".to_string()),
                 metadata: Default::default(),

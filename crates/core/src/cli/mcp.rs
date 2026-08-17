@@ -25,12 +25,14 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use super::cloud::context::Context as CloudContext;
 use super::cloud::project_config::{self, ProjectConfig};
 use super::cloud::{notices, pickers, CloudGlobals, ProjectScope};
-use super::DEFAULT_TENANT;
+use super::{DEFAULT_TENANT, LOCAL_SUBJECT};
 use crate::api::v1::{McpAuthorizeResponse, McpConnection, McpDeclareRequest, McpTokenRequest};
 use crate::connectors::credential::{Credential, CredentialStore};
 use crate::connectors::oauth;
-use crate::connectors::registry::{AuthKind, ConnectionSpec};
-use crate::providers::sqlite::{SqliteCredentialStore, SqliteDb};
+use crate::connectors::registry::{AuthKind, ConnectionSpec, CredentialScope};
+use crate::connectors::Subject;
+use crate::providers::sqlite::{SqliteCredentialStore, SqliteDb, SqliteSecretStore};
+use crate::runtime::secret::SecretCipher;
 
 /// How long the listener waits for the browser before giving up.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -64,9 +66,10 @@ pub enum McpCommand {
         #[command(flatten)]
         scope: ProjectScope,
     },
-    /// Forget a connection's credential, whichever way it was obtained. Calls
-    /// on it fail until another is set.
-    DeleteToken {
+    /// Forget a connection's credentials — every holder's, whichever way they
+    /// were obtained. Calls on it fail until somebody connects again.
+    #[command(name = "logout")]
+    Logout {
         id: Option<String>,
         #[command(flatten)]
         scope: ProjectScope,
@@ -93,7 +96,7 @@ pub async fn run(command: McpCommand) -> Result<()> {
             cfg if cfg.remote.is_none() => set_token_local(id, env, &scope.globals, cfg).await,
             cfg => set_token_remote(id, env, scope, cfg).await,
         },
-        McpCommand::DeleteToken { id, scope } => match environment(&scope.globals)? {
+        McpCommand::Logout { id, scope } => match environment(&scope.globals)? {
             cfg if cfg.remote.is_none() => delete_token_local(id, cfg).await,
             cfg => delete_token_remote(id, scope, cfg).await,
         },
@@ -102,6 +105,21 @@ pub async fn run(command: McpCommand) -> Result<()> {
             cfg => list_remote(scope, cfg).await,
         },
     }
+}
+
+/// The cipher the environment configures, with a set-and-wrong variable
+/// reported rather than read as "no cipher".
+fn cipher() -> Result<Option<Arc<SecretCipher>>> {
+    Ok(SecretCipher::from_env()
+        .map_err(|e| anyhow::anyhow!(e))?
+        .map(Arc::new))
+}
+
+/// The two stores every local command reads and writes through: references in
+/// `connector_credentials`, material in `secrets`.
+fn open_store(db: SqliteDb) -> Result<SqliteCredentialStore> {
+    let secrets = Arc::new(SqliteSecretStore::new(db.clone(), cipher()?));
+    Ok(SqliteCredentialStore::new(db, secrets)?)
 }
 
 /// Checked before a command that only makes sense under one method. A file that
@@ -125,6 +143,15 @@ fn require_auth(id: &str, spec: &ConnectionSpec, want: AuthKind) -> Result<()> {
         AuthKind::None => "it declares that it needs no credential".to_string(),
     };
     bail!("`{id}` declares `auth = \"{}\"`: {fix}", declared.as_str())
+}
+
+/// Whose slot a local command reads or writes. Consent given here is
+/// whoever ran the command, so no other person's slot is reachable.
+fn local_subject(spec: &ConnectionSpec) -> Subject {
+    match spec.effective_scope() {
+        CredentialScope::Shared => Subject::Shared,
+        CredentialScope::User => Subject::Person(LOCAL_SUBJECT.to_string()),
+    }
 }
 
 /// A server whose OAuth needs an app somebody registered by hand.
@@ -199,6 +226,7 @@ fn open_existing_db(cfg: &ProjectConfig) -> Result<Option<SqliteDb>> {
 async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -> Result<()> {
     let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
     require_auth(&id, &spec, AuthKind::Oauth)?;
+    let subject = local_subject(&spec);
 
     let http = reqwest::Client::new();
 
@@ -275,7 +303,7 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -
 
     let refreshable = tokens.refreshable();
     // Keyed by id, not by URL: two ids naming one server are two accounts.
-    store_credential(&cfg, &id, Credential::Oauth(Box::new(tokens))).await?;
+    store_credential(&cfg, &id, &subject, Credential::Oauth(Box::new(tokens))).await?;
 
     println!("Authorized `{id}` in {}.", cfg.db_path());
     if !refreshable {
@@ -297,6 +325,7 @@ async fn set_token_local(
 ) -> Result<()> {
     let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
     require_auth(&id, &spec, AuthKind::Token)?;
+    let subject = local_subject(&spec);
 
     let token = match &env {
         Some(var) => super::env_value(var)
@@ -309,7 +338,7 @@ async fn set_token_local(
         bail!("no token given. Pipe it in, or pass --env <VAR>.");
     }
 
-    store_credential(&cfg, &id, Credential::Static { token }).await?;
+    store_credential(&cfg, &id, &subject, Credential::Static { token }).await?;
     println!("Token set for `{id}` in {}.", cfg.db_path());
     Ok(())
 }
@@ -320,7 +349,7 @@ async fn delete_token_local(id: Option<String>, cfg: ProjectConfig) -> Result<()
         println!("`{id}` holds no credential.");
         return Ok(());
     };
-    let store = SqliteCredentialStore::new(db)?;
+    let store = open_store(db)?;
     match store.delete(DEFAULT_TENANT, &id).await? {
         true => println!("Forgot the credential for `{id}`."),
         false => println!("`{id}` holds no credential."),
@@ -328,9 +357,14 @@ async fn delete_token_local(id: Option<String>, cfg: ProjectConfig) -> Result<()
     Ok(())
 }
 
-async fn store_credential(cfg: &ProjectConfig, id: &str, credential: Credential) -> Result<()> {
-    let store = SqliteCredentialStore::new(open_db(cfg)?)?;
-    CredentialStore::put(&store, DEFAULT_TENANT, id, credential)
+async fn store_credential(
+    cfg: &ProjectConfig,
+    id: &str,
+    subject: &Subject,
+    credential: Credential,
+) -> Result<()> {
+    let store = open_store(open_db(cfg)?)?;
+    CredentialStore::put(&store, DEFAULT_TENANT, id, subject, credential)
         .await
         .map_err(|e| anyhow::anyhow!("storing the credential: {e}"))
 }
@@ -341,18 +375,36 @@ async fn list_local(cfg: ProjectConfig) -> Result<()> {
         bail!("substructure.toml declares no connections under `[mcp.<id>]`");
     }
     let store = match open_existing_db(&cfg)? {
-        Some(db) => Some(SqliteCredentialStore::new(db)?),
+        Some(db) => Some(open_store(db)?),
         None => None,
     };
 
     for (id, spec) in &connections {
-        let held = match &store {
-            Some(store) => CredentialStore::get(store, DEFAULT_TENANT, id).await,
-            None => None,
+        if spec.effective_scope() == CredentialScope::Shared || spec.auth == Some(AuthKind::None) {
+            let held = match &store {
+                Some(store) => {
+                    CredentialStore::get(store, DEFAULT_TENANT, id, &Subject::Shared).await
+                }
+                None => None,
+            };
+            println!("{id}\t{}\t{}", spec.url, describe(spec, held.as_ref()));
+            continue;
+        }
+
+        let holders = match &store {
+            Some(store) => store.holders(DEFAULT_TENANT, id).await?,
+            None => Vec::new(),
         };
-        println!("{id}\t{}\t{}", spec.url, describe(spec, held.as_ref()));
+        println!("{id}\t{}\t{}", spec.url, connected(holders.len()));
     }
     Ok(())
+}
+
+fn connected(holders: usize) -> String {
+    match holders {
+        0 => "nobody connected".to_string(),
+        n => format!("{n} connected"),
+    }
 }
 
 /// What one connection's slot holds, read against what the file declares.
@@ -423,7 +475,7 @@ pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<(Strin
         .filter(|(_, spec)| spec.auth != Some(AuthKind::None))
         .collect();
     let store = match open_existing_db(cfg)? {
-        Some(db) => Some(SqliteCredentialStore::new(db)?),
+        Some(db) => Some(open_store(db)?),
         // No engine has ever run here, so nothing is authorized — and a
         // database is not worth creating to say so.
         None => None,
@@ -432,8 +484,9 @@ pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<(Strin
     let http = reqwest::Client::new();
     let mut out = Vec::new();
     for (id, spec) in declared {
+        let slot = local_subject(&spec);
         let held = match &store {
-            Some(store) => CredentialStore::get(store, DEFAULT_TENANT, &id).await,
+            Some(store) => CredentialStore::get(store, DEFAULT_TENANT, &id, &slot).await,
             None => None,
         };
         let usable = match &held {
@@ -741,6 +794,7 @@ mod tests {
             protocol: ConnectorProtocol::Mcp,
             auth,
             header: None,
+            credential: None,
             prefix_tools: true,
         }
     }
@@ -846,9 +900,9 @@ mod tests {
         .await
         .unwrap();
 
-        let store = SqliteCredentialStore::new(open_db(&cfg).unwrap()).unwrap();
+        let store = open_store(open_db(&cfg).unwrap()).unwrap();
         assert_eq!(
-            CredentialStore::get(&store, DEFAULT_TENANT, "github").await,
+            CredentialStore::get(&store, DEFAULT_TENANT, "github", &Subject::Shared).await,
             Some(Credential::Static {
                 token: "ghp_written".into()
             })
@@ -858,9 +912,11 @@ mod tests {
         delete_token_local(Some("github".into()), cfg)
             .await
             .unwrap();
-        assert!(CredentialStore::get(&store, DEFAULT_TENANT, "github")
-            .await
-            .is_none());
+        assert!(
+            CredentialStore::get(&store, DEFAULT_TENANT, "github", &Subject::Shared)
+                .await
+                .is_none()
+        );
     }
 
     /// A declared connection is answered from the file and the store alone.

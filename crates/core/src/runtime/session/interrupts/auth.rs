@@ -2,11 +2,20 @@
 //! the interrupt re-fetches the tools with the new credential.
 
 use super::InterruptKind;
-use crate::connectors::AuthNeed;
+use crate::connectors::{AuthNeed, Principal};
 use crate::protocol::{AuthFailure, DecisionAction};
 use crate::runtime::session::state::SessionState;
 
 pub const PREFIX: &str = "mcp-auth:";
+
+/// What a channel builds a way in from: which connection, and who is
+/// asking. Never a link. One is minted when the prompt is delivered, so the
+/// log holds none.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Authorize {
+    pub connection: String,
+    pub principal: Principal,
+}
 
 pub struct Auth;
 
