@@ -3,7 +3,7 @@ use axum::http::HeaderMap;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::transport::auth::{AuthError, AuthRequester, AuthResolver};
+use crate::transport::auth::{AuthError, AuthResolver, Authenticated};
 
 #[derive(Debug, Clone)]
 pub struct ApiKeyBinding {
@@ -46,19 +46,19 @@ impl BearerHashedApiKeyAuthResolver {
 
 #[async_trait]
 impl AuthResolver for BearerHashedApiKeyAuthResolver {
-    async fn resolve(&self, headers: &HeaderMap) -> Result<AuthRequester, AuthError> {
+    async fn resolve(&self, headers: &HeaderMap) -> Result<Authenticated, AuthError> {
         self.resolve_headers(headers)
     }
 }
 
 impl BearerHashedApiKeyAuthResolver {
-    fn resolve_headers(&self, headers: &HeaderMap) -> Result<AuthRequester, AuthError> {
+    fn resolve_headers(&self, headers: &HeaderMap) -> Result<Authenticated, AuthError> {
         let key = extract_api_key(headers).ok_or(AuthError::MissingCredentials)?;
         let key_hash = Sha256::digest(key.as_bytes());
 
         for binding in &self.bindings {
             if key_hash.ct_eq(&binding.key_hash).unwrap_u8() == 1 {
-                return Ok(AuthRequester {
+                return Ok(Authenticated {
                     tenant_id: binding.tenant_id.clone(),
                     source: crate::transport::auth::SOURCE_API_KEY,
                     subject: Some(binding.key_id.clone()),
@@ -132,8 +132,8 @@ mod tests {
             "Bearer dev-worker-key".parse().unwrap(),
         );
 
-        let principal = resolver.resolve(&headers).await.unwrap();
-        assert_eq!(principal.tenant_id, "tenant-a");
+        let authenticated = resolver.resolve(&headers).await.unwrap();
+        assert_eq!(authenticated.tenant_id, "tenant-a");
     }
 
     #[tokio::test]

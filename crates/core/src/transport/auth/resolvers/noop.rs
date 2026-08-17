@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 
-use crate::transport::auth::{AuthError, AuthRequester, AuthResolver};
+use crate::transport::auth::{AuthError, AuthResolver, Authenticated};
 
 pub struct NoopAuthResolver {
     tenant_id: String,
@@ -18,10 +18,9 @@ impl NoopAuthResolver {
         }
     }
 
-    /// Override the principal `source` and `subject` returned for every
-    /// request. Used by dev-mode wiring to make machine endpoints (which
-    /// require an api_key principal) pass without real auth.
-    pub fn with_principal(mut self, source: &'static str, subject: impl Into<String>) -> Self {
+    /// What every request reads as. Used by dev-mode wiring to make machine
+    /// endpoints, which require a key, pass without real auth.
+    pub fn with_subject(mut self, source: &'static str, subject: impl Into<String>) -> Self {
         self.source = source;
         self.subject = Some(subject.into());
         self
@@ -30,8 +29,8 @@ impl NoopAuthResolver {
 
 #[async_trait]
 impl AuthResolver for NoopAuthResolver {
-    async fn resolve(&self, _headers: &HeaderMap) -> Result<AuthRequester, AuthError> {
-        Ok(AuthRequester {
+    async fn resolve(&self, _headers: &HeaderMap) -> Result<Authenticated, AuthError> {
+        Ok(Authenticated {
             tenant_id: self.tenant_id.clone(),
             source: self.source,
             subject: self.subject.clone(),
