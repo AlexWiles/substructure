@@ -8,7 +8,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::transport::auth::{AuthError, AuthRequester, AuthResolver};
+use crate::transport::auth::{AuthError, AuthResolver, Authenticated};
 
 #[derive(Debug, Clone)]
 pub struct ClientTokenIssuerConfig {
@@ -102,7 +102,7 @@ impl JwtHs256ClientTokenAuthResolver {
 
 #[async_trait]
 impl AuthResolver for JwtHs256ClientTokenAuthResolver {
-    async fn resolve(&self, headers: &HeaderMap) -> Result<AuthRequester, AuthError> {
+    async fn resolve(&self, headers: &HeaderMap) -> Result<Authenticated, AuthError> {
         let token = extract_bearer_token(headers).ok_or(AuthError::MissingCredentials)?;
 
         let mut validation = Validation::new(Algorithm::HS256);
@@ -118,7 +118,7 @@ impl AuthResolver for JwtHs256ClientTokenAuthResolver {
             return Err(AuthError::InvalidCredentials);
         }
 
-        Ok(AuthRequester {
+        Ok(Authenticated {
             tenant_id: decoded.claims.tenant_id,
             source: "client_token",
             subject: Some(decoded.claims.sub),

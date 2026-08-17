@@ -16,8 +16,11 @@ pub const SOURCE_API_KEY: &str = "api_key";
 /// A login, rather than a key.
 pub const SOURCE_USER: &str = "user";
 
+/// What a credential proved: which tenant, how it was presented, and who it
+/// names. A resolver returns this, and the callers and owners built from it
+/// are what the rest of the engine sees.
 #[derive(Debug, Clone)]
-pub struct AuthRequester {
+pub struct Authenticated {
     pub tenant_id: String,
     pub source: &'static str,
     pub subject: Option<String>,
@@ -26,7 +29,7 @@ pub struct AuthRequester {
     pub attrs: HashMap<String, String>,
 }
 
-impl AuthRequester {
+impl Authenticated {
     /// A worker is a program, so this is always a key.
     pub fn api_key_caller(&self) -> Option<Caller> {
         self.named_subject().map(|key_id| Caller::ApiKey {
@@ -92,15 +95,15 @@ pub enum AuthError {
 
 #[async_trait]
 pub trait AuthResolver: Send + Sync {
-    async fn resolve(&self, headers: &HeaderMap) -> Result<AuthRequester, AuthError>;
+    async fn resolve(&self, headers: &HeaderMap) -> Result<Authenticated, AuthError>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn principal(source: &'static str, subject: Option<&str>) -> AuthRequester {
-        AuthRequester {
+    fn authenticated(source: &'static str, subject: Option<&str>) -> Authenticated {
+        Authenticated {
             tenant_id: "tenant-a".to_string(),
             source,
             subject: subject.map(str::to_string),
@@ -110,13 +113,13 @@ mod tests {
 
     #[test]
     fn the_credential_decides_which_operator_it_is() {
-        let user = principal(SOURCE_USER, Some("alex@example.test"));
+        let user = authenticated(SOURCE_USER, Some("alex@example.test"));
         assert!(matches!(
             user.operator_caller(),
             Some(Caller::Operator { subject, .. }) if subject.id == "alex@example.test"
         ));
 
-        let key = principal(SOURCE_API_KEY, Some("key-1"));
+        let key = authenticated(SOURCE_API_KEY, Some("key-1"));
         assert!(matches!(
             key.operator_caller(),
             Some(Caller::ApiKey { key_id, .. }) if key_id == "key-1"
@@ -125,23 +128,27 @@ mod tests {
 
     #[test]
     fn the_worker_surface_is_always_a_key() {
-        let user = principal(SOURCE_USER, Some("alex@example.test"));
+        let user = authenticated(SOURCE_USER, Some("alex@example.test"));
         assert!(matches!(user.api_key_caller(), Some(Caller::ApiKey { .. })));
     }
 
     #[test]
     fn a_machine_subject_must_name_something() {
-        assert!(principal(SOURCE_API_KEY, None).operator_caller().is_none());
-        assert!(principal(SOURCE_API_KEY, Some(""))
+        assert!(authenticated(SOURCE_API_KEY, None)
             .operator_caller()
             .is_none());
-        assert!(principal(SOURCE_USER, Some("")).api_key_caller().is_none());
+        assert!(authenticated(SOURCE_API_KEY, Some(""))
+            .operator_caller()
+            .is_none());
+        assert!(authenticated(SOURCE_USER, Some(""))
+            .api_key_caller()
+            .is_none());
     }
 
     #[test]
     fn an_unknown_source_is_a_key() {
         assert!(matches!(
-            principal("something-new", Some("s")).operator_caller(),
+            authenticated("something-new", Some("s")).operator_caller(),
             Some(Caller::ApiKey { .. })
         ));
     }

@@ -33,10 +33,10 @@ impl AuthWiring {
         Self {
             client: issuer.clone(),
             worker: Arc::new(
-                NoopAuthResolver::new(DEFAULT_TENANT).with_principal(SOURCE_API_KEY, "dev-worker"),
+                NoopAuthResolver::new(DEFAULT_TENANT).with_subject(SOURCE_API_KEY, "dev-worker"),
             ),
             admin: Arc::new(
-                NoopAuthResolver::new(DEFAULT_TENANT).with_principal(SOURCE_API_KEY, "dev-admin"),
+                NoopAuthResolver::new(DEFAULT_TENANT).with_subject(SOURCE_API_KEY, "dev-admin"),
             ),
             issuer,
         }
