@@ -28,7 +28,7 @@ impl AuthWiring {
             &secret,
         ));
         // A dev server has no credential to read, so it presents a key: the
-        // machine-only operations need a machine principal. Client endpoints
+        // machine-only operations need a key. Client endpoints
         // still validate the JWT `issuer` mints.
         Self {
             client: issuer.clone(),

@@ -14,10 +14,20 @@ together at the same version.
 - Support approval interrupts on destructive MCP tools.
 - Add agent-plugins support https://agent-plugins.org/
 - Support per-user MCP credentials
+- A client token says who else can read the session it starts, as
+  `identity.visibility`. Only its minter knows what surface it is for, and it
+  decides whether that person's own credentials may answer there.
 
 ### Changed
 
-- Auth refactor
+- Auth refactor. Two contract changes it carries: a worker reading
+  `identity.kind` reads `identity.subject` instead — absent means no person is
+  behind the session, and `issuer` says which population they are from — and
+  `identity.visibility` defaults to `shared` when minting a client token, which
+  reaches no personal credential. Tokens minted before the field keep answering
+  as `private`. An auth interrupt's payload names `authorize.requester` rather
+  than `authorize.principal`, which only a channel building its own way in
+  reads.
 
 ### Fixed
 

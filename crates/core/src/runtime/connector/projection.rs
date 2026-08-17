@@ -29,7 +29,7 @@ impl EventProcessor for ConnectorDispatchProjection {
     async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
         let task = match &event.payload {
             // Fetches are prerequisites, never queued: requested is dispatched.
-            // The principal is derived from the owner here, at dispatch, and
+            // The requester is the owner's, read here at dispatch, and
             // rides the task — it never reaches an event.
             EventPayload::ConnectorSyncRequested(req) => {
                 let session = self
@@ -44,7 +44,7 @@ impl EventProcessor for ConnectorDispatchProjection {
                     session_id: event.session_id.clone(),
                     tenant_id: event.tenant_id.clone(),
                     connection_id: req.id.clone(),
-                    principal: Requester::of_owner(session.state.owner.as_ref()),
+                    requester: Requester::of_owner(session.state.owner.as_ref()),
                     attempt: req.attempt,
                     span: event.span,
                 }
@@ -82,7 +82,7 @@ impl EventProcessor for ConnectorDispatchProjection {
                         tool_call_id: d.id.clone(),
                         attempt: d.attempt,
                         connection_id: target.connector.clone(),
-                        principal: Requester::of_owner(session.state.owner.as_ref()),
+                        requester: Requester::of_owner(session.state.owner.as_ref()),
                         remote_name: target.remote_name.clone(),
                         // The recorded arguments are the tool's own: a `call_tool`
                         // was unwrapped into the real call before it was

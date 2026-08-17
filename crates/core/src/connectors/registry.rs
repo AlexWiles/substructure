@@ -382,10 +382,10 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
-        principal: &Requester,
+        requester: &Requester,
     ) -> Result<Offer, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
-        let subject = Self::slot_for(id, &spec, principal)?;
+        let subject = Self::slot_for(id, &spec, requester)?;
         let (tools, instructions) = self
             .attempt(tenant_id, id, &subject, &spec, |client| async move {
                 let tools = client.list_tools().await?;
@@ -403,12 +403,12 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
-        principal: &Requester,
+        requester: &Requester,
         name: &str,
         arguments: &Value,
     ) -> Result<StoredResult, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
-        let subject = Self::slot_for(id, &spec, principal)?;
+        let subject = Self::slot_for(id, &spec, requester)?;
         self.attempt(tenant_id, id, &subject, &spec, |client| async move {
             client.call_tool(name, arguments).await
         })
@@ -834,7 +834,7 @@ mod tests {
     /// the company slot for anybody; a personal one answers only for a person
     /// in a private conversation, and refuses the rest with the reason.
     #[test]
-    fn the_scope_and_principal_decide_whose_slot_a_call_reads() {
+    fn the_scope_and_requester_decide_whose_slot_a_call_reads() {
         use crate::protocol::Visibility;
         let shared = ConnectionSpec {
             url: "https://mcp.sentry.dev/mcp".into(),
@@ -851,13 +851,13 @@ mod tests {
         let person =
             |visibility| Requester::new(Subject::new(Issuer::slack(), "T1:U1"), visibility);
 
-        for principal in [
+        for requester in [
             Requester::machine(),
             person(Visibility::Private),
             person(Visibility::Shared),
         ] {
             assert_eq!(
-                Connections::slot_for("sentry", &shared, &principal).unwrap(),
+                Connections::slot_for("sentry", &shared, &requester).unwrap(),
                 Slot::Shared
             );
         }

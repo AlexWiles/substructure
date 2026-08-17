@@ -98,6 +98,11 @@ pub struct MintClientTokenRequest {
 #[derive(Debug, Deserialize)]
 pub struct MintClientTokenIdentity {
     pub id: String,
+    /// Whether anyone but this person can read the session. Only you know
+    /// what surface the token is for, and it decides whether their own
+    /// credentials may answer there.
+    #[serde(default)]
+    pub visibility: crate::protocol::Visibility,
     #[serde(default)]
     pub metadata: std::collections::HashMap<String, String>,
 }

@@ -2623,10 +2623,10 @@ mod tests {
         use crate::transport::mcp_auth::AuthorizeLinks;
         use std::sync::Arc;
 
-        fn payload(principal: Requester) -> serde_json::Value {
+        fn payload(requester: Requester) -> serde_json::Value {
             serde_json::json!({
                 "message": "*gmail* is not authorized yet.",
-                "authorize": auth::Authorize { connection: "gmail".into(), principal },
+                "authorize": auth::Authorize { connection: "gmail".into(), requester },
             })
         }
 
@@ -2694,7 +2694,7 @@ mod tests {
         /// The mint applies the same decision the call makes, so whoever
         /// could not read the credential is offered no way to store one.
         #[tokio::test]
-        async fn a_principal_the_call_would_refuse_gets_no_link() {
+        async fn a_requester_the_call_would_refuse_gets_no_link() {
             let path = temp();
             let bot = bot(engine(&path));
             for refused in [Requester::machine(), person(Visibility::Shared)] {

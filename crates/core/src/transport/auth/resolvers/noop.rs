@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 
+use crate::protocol::Visibility;
 use crate::transport::auth::{AuthError, AuthResolver, Authenticated};
 
 pub struct NoopAuthResolver {
@@ -34,6 +35,7 @@ impl AuthResolver for NoopAuthResolver {
             tenant_id: self.tenant_id.clone(),
             source: self.source,
             subject: self.subject.clone(),
+            visibility: Visibility::Shared,
             attrs: std::collections::HashMap::new(),
         })
     }

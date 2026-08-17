@@ -26,7 +26,7 @@ pub trait Consent: Send + Sync {
 }
 
 /// A page that works out who is asking from their session, so the link carries
-/// no principal.
+/// no requester.
 pub struct DashboardConsent(pub String);
 
 #[async_trait::async_trait]
@@ -50,7 +50,7 @@ impl Consent for EngineConsent {
             .mint_for(
                 tenant_id,
                 &authorize.connection,
-                &authorize.principal,
+                &authorize.requester,
                 chrono::Utc::now(),
             )
             .await;

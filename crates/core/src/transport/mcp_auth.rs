@@ -79,13 +79,13 @@ impl AuthorizeLinks {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        principal: &Requester,
+        requester: &Requester,
         now: DateTime<Utc>,
     ) -> Result<Option<String>, String> {
         let Some(spec) = self.connections.get(connection_id) else {
             return Ok(None);
         };
-        let Ok(subject) = Connections::slot_for(connection_id, spec, principal) else {
+        let Ok(subject) = Connections::slot_for(connection_id, spec, requester) else {
             return Ok(None);
         };
         self.mint(tenant_id, connection_id, subject, now).await
@@ -409,7 +409,7 @@ mod tests {
 
     /// Whoever could not read the credential gets no link to store one.
     #[tokio::test]
-    async fn a_principal_the_call_would_refuse_gets_no_link() {
+    async fn a_requester_the_call_would_refuse_gets_no_link() {
         let (links, _, path) = links(Some(CredentialScope::User));
         for refused in [
             Requester::machine(),

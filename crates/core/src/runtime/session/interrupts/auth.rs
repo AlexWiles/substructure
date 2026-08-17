@@ -14,7 +14,7 @@ pub const PREFIX: &str = "mcp-auth:";
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Authorize {
     pub connection: String,
-    pub principal: Requester,
+    pub requester: Requester,
 }
 
 pub struct Auth;

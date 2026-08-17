@@ -39,13 +39,21 @@ key.
 POST /api/machine/client-tokens
 Authorization: Bearer <SUBSTRUCTURE_API_KEY>
 
-{ "identity": { "id": "user_42" }, "ttl_seconds": 600 }
+{ "identity": { "id": "user_42", "visibility": "private" }, "ttl_seconds": 600 }
 ```
 
 `identity.id` is required. It names the person the session runs for, under the
 `app` issuer — the one your application vouches for. You choose the id and we
-sign it, so a browser holding the token cannot rename itself. The response
-holds the token and its expiry in Unix seconds.
+sign it, so a browser holding the token cannot rename itself.
+
+`identity.visibility` says whether anyone but that person can read the session,
+and it decides whether their own credentials may answer there. Only you know
+what surface the token is for: a chat window is `private`, an agent embedded in
+a shared team inbox is not. It defaults to `shared`, which reaches no personal
+credential, so a mistake is a refusal rather than one user's mailbox answering
+in front of their colleagues.
+
+The response holds the token and its expiry in Unix seconds.
 
 ```json
 { "token": "<jwt>", "expires_at": 1784000000 }
