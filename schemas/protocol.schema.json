@@ -47,6 +47,13 @@
         "model": {
           "type": "string"
         },
+        "plugins": {
+          "description": "Plugins this agent uses.",
+          "items": {
+            "$ref": "#/$defs/AgentPlugin"
+          },
+          "type": "array"
+        },
         "retry": {
           "anyOf": [
             {
@@ -83,6 +90,53 @@
         "model"
       ],
       "title": "AgentConfig",
+      "type": "object"
+    },
+    "AgentPlugin": {
+      "additionalProperties": false,
+      "description": "A plugin an agent uses. The skills and servers are stamped from the bundle\nwhen the config loads. To enable a plugin, write it into the config.",
+      "properties": {
+        "approve": {
+          "$ref": "#/$defs/Approve"
+        },
+        "auth_failure": {
+          "$ref": "#/$defs/AuthFailure"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "servers": {
+          "description": "Connection-registry ids of this plugin's servers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/SkillMeta"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpTools"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Applied to each of the plugin's servers."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "AgentPlugin",
       "type": "object"
     },
     "AgentTool": {
@@ -2713,6 +2767,23 @@
       ],
       "title": "Role",
       "type": "string"
+    },
+    "SkillMeta": {
+      "additionalProperties": false,
+      "description": "What the model sees of a skill before it loads it.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "SkillMeta",
+      "type": "object"
     },
     "StoredContent": {
       "oneOf": [

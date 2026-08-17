@@ -10,9 +10,10 @@ use super::render::{self, StepStatus, StepView};
 use super::{display_of, with_footer, ButtonValue};
 use crate::connectors::AuthNeed;
 use crate::protocol::{
-    AuthFailure, DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution,
-    InterruptResponder, Message, ResumeStatus,
+    DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution, InterruptResponder,
+    Message, ResumeStatus,
 };
+use crate::runtime::session::interrupts::{self, auth};
 use crate::runtime::session::state::SessionState;
 use crate::runtime::worker::ChannelProposer;
 use crate::session::events::EventPayload;
@@ -27,16 +28,6 @@ impl SlackProposer {
     pub fn new(authorize_page: Option<String>) -> Self {
         Self { authorize_page }
     }
-}
-
-/// Derived from the connection, so a redelivery proposes the same id and the
-/// engine keeps one prompt.
-fn auth_interrupt_id(connection: &str) -> String {
-    format!("mcp-auth:{connection}")
-}
-
-fn auth_connection(interrupt_id: &str) -> Option<&str> {
-    interrupt_id.strip_prefix("mcp-auth:")
 }
 
 /// Whether Slack owns this session: its owner records a Slack channel.
@@ -99,25 +90,14 @@ impl SlackProposer {
     /// The prompt for the first connection that needs a person. It replaces
     /// the proposal, because the session stops here.
     fn authorize_prompt(&self, state: &SessionState) -> Option<DecisionResponse> {
-        let config = state.resolve_agent_for(state.head_id.as_deref())?;
-        let (connection, need) = config.mcp.iter().find_map(|server| {
-            if server.auth_failure == AuthFailure::Degrade {
-                return None;
-            }
-            let need = state.connector_sync(&server.id)?.auth?;
-            let id = auth_interrupt_id(&server.id);
-            state
-                .open_interrupt(&id)
-                .is_none()
-                .then_some((&server.id, need))
-        })?;
+        let (connection, need) = auth::needing(state)?;
 
         Some(DecisionResponse {
             actions: vec![DecisionAction::Interrupt {
-                interrupt_id: Some(auth_interrupt_id(connection)),
+                interrupt_id: Some(auth::interrupt_id(&connection)),
                 reason: format!("connection `{connection}` needs authorizing"),
                 payload: serde_json::json!({
-                    "message": self.ask(connection, need),
+                    "message": self.ask(&connection, need),
                     "metadata": { "options": [{
                         "label": "Retry",
                         "value": { "connection": connection },
@@ -289,16 +269,13 @@ fn click_proposal(state: &SessionState, args: &Value) -> Option<DecisionResponse
             style: option.style,
         }),
     };
-    // The replaced credential reaches the agent only through a new fetch.
-    let resync = auth_connection(&interrupt_id).map(|connection| DecisionAction::SyncConnector {
-        id: connection.to_string(),
-    });
+    let followups = interrupts::resolve_followups(&interrupt_id);
     Some(DecisionResponse {
         actions: std::iter::once(DecisionAction::ResolveInterrupt {
             interrupt_id,
             payload: serde_json::to_value(resolution).unwrap_or_default(),
         })
-        .chain(resync)
+        .chain(followups)
         .collect(),
         ..Default::default()
     })
@@ -330,7 +307,9 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
 mod tests {
     use super::*;
     use crate::protocol::StoredResult;
-    use crate::protocol::{AgentConfig, InterruptOrigin, McpServer, OwnerKind, RetryPolicy};
+    use crate::protocol::{
+        AgentConfig, AuthFailure, InterruptOrigin, McpServer, OwnerKind, RetryPolicy,
+    };
     use crate::runtime::session::state::OpenInterrupt;
     use crate::session::events::{AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested};
     use crate::session::events::{ToolCallCompleted, ToolCallRequested, TurnStarted};
@@ -410,6 +389,7 @@ mod tests {
                         mcp: vec![],
                         defer_tools: None,
                         announce_mcp: Default::default(),
+                        plugins: Vec::new(),
                         effort: None,
                     }
                 },

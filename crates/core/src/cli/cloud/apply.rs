@@ -11,12 +11,13 @@ use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
-use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, Page, Project};
+use crate::api::v1::{ApplyResponse, ConfigEvent, Notice, Page, PluginPushed, Project};
 
 use super::context::Context;
 use super::credentials;
 use super::notices;
 use super::pickers;
+use super::plugins;
 use super::print;
 use super::project_config::{self, ProjectConfig};
 use super::CloudGlobals;
@@ -71,6 +72,10 @@ struct Applied {
     changes: Vec<ConfigEvent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notices: Vec<Notice>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    plugin_notices: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    plugins: Vec<PluginPushed>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,13 +106,16 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         }
     };
 
-    // The file's own manifest, minus the two fields that name variables on this
-    // machine. A deployment holds its own key and mints its own secret, so
-    // sending either would be sending a name it cannot resolve.
-    let mut manifest = config.manifest().for_wire();
+    // `for_wire` drops what only this machine resolves: the env variable
+    // names, the plugin paths, and the content the push below sends.
+    let (local, resolved) = config.resolved_manifest()?;
+    let mut manifest = local.for_wire();
     manifest.name = manifest
         .name
         .or_else(|| created.as_ref().map(|c| c.name.clone()));
+
+    // The config names plugins by hash, so they go first.
+    let plugins = plugins::push_missing(&ctx, &project_id, &local, &resolved).await?;
 
     let applied: ApplyResponse = ctx
         .client
@@ -120,6 +128,8 @@ pub async fn run(cmd: ApplyCommand) -> Result<()> {
         created,
         changes: applied.changes,
         notices: applied.notices,
+        plugin_notices: resolved.notices,
+        plugins,
     };
     if cmd.globals.json {
         return print::json(&result);
@@ -224,6 +234,16 @@ fn report(result: &Applied, path: &std::path::Path, globals: &CloudGlobals) {
     // Whatever ran before this — a login, most of it a browser's — is not part
     // of the report.
     println!();
+    for notice in &result.plugin_notices {
+        println!("note: {notice}");
+    }
+    for plugin in &result.plugins {
+        let files = match plugin.binaries {
+            0 => String::new(),
+            n => format!(" with {n} file(s)"),
+        };
+        println!("Pushed plugin {}{files}", plugin.id);
+    }
     if let Some(created) = &result.created {
         println!(
             "Created project {} ({}) in {}",

@@ -1,0 +1,17 @@
+name = "example"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.oncall]
+llm = "openrouter"
+model = "anthropic/claude-haiku-4.5"
+system = "You are the on-call assistant. Use the tools. Be terse."
+plugins = ["runbooks"]
+
+[plugin.runbooks]
+path = "./plugins/runbooks"
+
+[run]
+agent = "oncall"
+output = "pretty"

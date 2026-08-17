@@ -810,6 +810,8 @@ pub struct RuntimeDeps {
     pub llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
     pub sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>>,
     pub connections: Option<Arc<Connections>>,
+    /// Where this deployment reads plugin bundles from.
+    pub plugins: Arc<dyn crate::plugins::PluginResolver>,
     pub connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>>,
     pub worker_queue: Arc<dyn WorkerQueue>,
     pub channel_proposers: Vec<Arc<dyn worker::ChannelProposer>>,
@@ -828,6 +830,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         llm_task_queue,
         sub_agent_task_queue,
         connections,
+        plugins,
         connector_task_queue,
         worker_queue,
         channel_proposers,
@@ -861,10 +864,10 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         ));
     }
 
-    // McpServer work only exists where connections are configured; with none,
-    // nothing can name one, so the subsystem is skipped entirely.
+    // Connector work needs connections or plugins. With neither, nothing can
+    // queue it, so the subsystem is skipped.
     let mut connector_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    if let Some(connections) = connections {
+    if connections.is_some() || plugins.serves_any() {
         connector_handles.push(spawn_connector_dispatch_processor(
             store.clone(),
             cursor_store.clone(),
@@ -874,6 +877,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         connector_handles.extend(spawn_connector_task_executor(
             store.clone(),
             connections,
+            plugins,
             connector_task_queue,
             config.connector_executor_workers,
             cancel.clone(),

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,7 +10,7 @@ use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
 use crate::protocol::{
-    DeferToolsStrategy, ErrorCode, LlmResponse, LlmTool, PromptContent, PromptMessage,
+    ContentPart, DeferToolsStrategy, ErrorCode, LlmResponse, LlmTool, PromptContent, PromptMessage,
     PromptRequest, Reasoning, ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta,
     ToolCall, ToolCallChunk, ToolCallFunction, Usage,
 };
@@ -81,9 +82,9 @@ struct StreamOptions {
 /// back — are not part of this API, and a strict server rejects an unknown key.
 #[derive(Serialize)]
 struct WireMessage<'a> {
-    role: &'a Role,
+    role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<&'a PromptContent>,
+    content: Option<Cow<'a, PromptContent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<&'a Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,11 +96,112 @@ struct WireMessage<'a> {
 impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
     fn from(m: &'a PromptMessage) -> Self {
         WireMessage {
-            role: &m.role,
-            content: m.content.as_ref(),
+            role: m.role.clone(),
+            content: m.content.as_ref().map(Cow::Borrowed),
             tool_calls: m.tool_calls.as_ref(),
             tool_call_id: m.tool_call_id.as_ref(),
             name: m.name.as_ref(),
+        }
+    }
+}
+
+/// One turn as an OpenAI-shaped API takes it. Shared with the router.
+pub(super) enum Turn<'a> {
+    Message(&'a PromptMessage),
+    /// A tool message with its media lifted out, and the text to send.
+    ToolText(&'a PromptMessage, String),
+    /// The media of the tool run that just ended, for a user turn.
+    Media(Vec<ContentPart>),
+}
+
+/// The transcript with a tool's media moved to a user turn, which is where the
+/// API accepts it. The move waits for the run of tool messages to end, so every
+/// `tool_call_id` still answers back to back. Not recorded.
+pub(super) fn turns(messages: &[PromptMessage]) -> Vec<Turn<'_>> {
+    let mut out = Vec::with_capacity(messages.len());
+    let mut carried: Vec<ContentPart> = Vec::new();
+    for message in messages {
+        if message.role != Role::Tool {
+            flush_media(&mut carried, &mut out);
+            out.push(Turn::Message(message));
+            continue;
+        }
+        let (text, media) = split_media(message.content.as_ref());
+        if media.is_empty() {
+            out.push(Turn::Message(message));
+            continue;
+        }
+        let said = match text.is_empty() {
+            true => {
+                "This tool answered with attachments. They follow in the next message.".to_string()
+            }
+            false => format!("{text}\n\nAttachments follow in the next message."),
+        };
+        out.push(Turn::ToolText(message, said));
+        carried.push(ContentPart::Text {
+            text: format!("Attachment from {}:", names(message)),
+        });
+        carried.extend(media);
+    }
+    flush_media(&mut carried, &mut out);
+    out
+}
+
+fn flush_media<'a>(carried: &mut Vec<ContentPart>, out: &mut Vec<Turn<'a>>) {
+    if !carried.is_empty() {
+        out.push(Turn::Media(std::mem::take(carried)));
+    }
+}
+
+fn wire_messages(messages: &[PromptMessage]) -> Vec<WireMessage<'_>> {
+    turns(messages)
+        .into_iter()
+        .map(|turn| match turn {
+            Turn::Message(m) => WireMessage::from(m),
+            Turn::ToolText(m, text) => WireMessage {
+                content: Some(Cow::Owned(PromptContent::Text(text))),
+                ..WireMessage::from(m)
+            },
+            Turn::Media(parts) => WireMessage {
+                role: Role::User,
+                content: Some(Cow::Owned(PromptContent::Parts(parts))),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        })
+        .collect()
+}
+
+/// Which call an attachment answers.
+fn names(message: &PromptMessage) -> String {
+    match (&message.name, &message.tool_call_id) {
+        (Some(name), Some(id)) => format!("the `{name}` tool ({id})"),
+        (Some(name), None) => format!("the `{name}` tool"),
+        (None, Some(id)) => format!("tool call {id}"),
+        (None, None) => "the tool result above".to_string(),
+    }
+}
+
+fn split_media(content: Option<&PromptContent>) -> (String, Vec<ContentPart>) {
+    match content {
+        None => (String::new(), Vec::new()),
+        Some(PromptContent::Text(text)) => (text.clone(), Vec::new()),
+        Some(PromptContent::Parts(parts)) => {
+            let text = parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let media = parts
+                .iter()
+                .filter(|p| !matches!(p, ContentPart::Text { .. }))
+                .cloned()
+                .collect();
+            (text, media)
         }
     }
 }
@@ -234,7 +336,7 @@ impl<'a> WireBody<'a> {
 
         WireBody {
             model: &request.model,
-            messages: request.messages.iter().map(WireMessage::from).collect(),
+            messages: wire_messages(&request.messages),
             tools: request
                 .offered_tools(search)
                 .map(|ts| ts.into_iter().map(WireTool::from).collect()),
@@ -1072,6 +1174,116 @@ mod tests {
         assert!(long.starts_with(key));
         assert_eq!(cache_key("sess_1"), Some("sess_1"));
         assert_eq!(cache_key(""), None);
+    }
+
+    fn tool_message(id: &str, content: PromptContent) -> PromptMessage {
+        PromptMessage {
+            role: Role::Tool,
+            content: Some(content),
+            tool_calls: None,
+            tool_call_id: Some(id.to_string()),
+            name: Some("skill".to_string()),
+            reasoning: None,
+        }
+    }
+
+    fn image() -> ContentPart {
+        ContentPart::ImageUrl {
+            image_url: crate::protocol::ImageUrl {
+                url: "data:image/png;base64,AAAA".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_tool_that_answered_with_media_sends_it_on_a_user_turn() {
+        let mut r = req("gpt-4o");
+        r.messages.push(tool_message(
+            "call_1",
+            PromptContent::Parts(vec![
+                ContentPart::Text {
+                    text: "the diagram".to_string(),
+                },
+                image(),
+            ]),
+        ));
+        let v = serde_json::to_value(WireBody::build(
+            &r,
+            DeferToolsStrategy::Search,
+            Some(false),
+            CacheOpts::default(),
+        ))
+        .unwrap();
+        let m = v["messages"].as_array().unwrap();
+
+        assert_eq!(m.len(), 3, "the user turn is added, not substituted");
+        assert_eq!(m[1]["role"], "tool");
+        assert_eq!(m[1]["tool_call_id"], "call_1");
+        let said = m[1]["content"].as_str().expect("a tool answers in text");
+        assert!(said.starts_with("the diagram"), "{said}");
+        assert!(said.contains("next message"), "{said}");
+
+        assert_eq!(m[2]["role"], "user");
+        assert!(m[2].get("tool_call_id").is_none());
+        assert_eq!(m[2]["content"][0]["type"], "text");
+        assert!(m[2]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("call_1"));
+        assert_eq!(m[2]["content"][1]["type"], "image_url");
+        assert_eq!(
+            m[2]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
+
+    #[test]
+    fn parallel_tool_answers_stay_together_and_share_one_user_turn() {
+        let mut r = req("gpt-4o");
+        r.messages
+            .push(tool_message("call_1", PromptContent::Parts(vec![image()])));
+        r.messages.push(tool_message(
+            "call_2",
+            PromptContent::Text("plain".to_string()),
+        ));
+        r.messages
+            .push(tool_message("call_3", PromptContent::Parts(vec![image()])));
+        let v = serde_json::to_value(WireBody::build(
+            &r,
+            DeferToolsStrategy::Search,
+            Some(false),
+            CacheOpts::default(),
+        ))
+        .unwrap();
+        let m = v["messages"].as_array().unwrap();
+
+        // Every call answers back to back; the media waits for the run to end.
+        let roles: Vec<&str> = m.iter().map(|x| x["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "tool", "tool", "tool", "user"]);
+        assert_eq!(m[2]["content"], "plain", "a text answer is untouched");
+        let parts = m[4]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 4, "a label and an image for each of the two");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[3]["type"], "image_url");
+    }
+
+    #[test]
+    fn a_text_only_transcript_is_unchanged() {
+        let mut r = req("gpt-4o");
+        r.messages.push(tool_message(
+            "call_1",
+            PromptContent::Text("72F".to_string()),
+        ));
+        let v = serde_json::to_value(WireBody::build(
+            &r,
+            DeferToolsStrategy::Search,
+            Some(false),
+            CacheOpts::default(),
+        ))
+        .unwrap();
+        let m = v["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[1]["content"], "72F");
     }
 
     #[test]

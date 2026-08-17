@@ -12,6 +12,7 @@ together at the same version.
 ### Added
 
 - Support approval interrupts on destructive MCP tools.
+- Add agent-plugins support https://agent-plugins.org/
 
 ### Fixed
 

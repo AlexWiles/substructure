@@ -9,7 +9,9 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::cli::env::{OutputFormat, ProviderBinding, ProviderKind};
 use crate::connectors::registry::ConnectionSpec;
-use crate::manifest::{AgentSection, Manifest, ProviderSpec, SlackConfig};
+use crate::manifest::{
+    AgentSection, Manifest, PluginSpec, ProviderSpec, ResolvedPlugins, SlackConfig,
+};
 use crate::runtime::llm::LlmBlocks;
 use crate::runtime::worker::AgentEntry;
 
@@ -87,6 +89,9 @@ pub struct ProjectConfig {
     /// holds the credential, so `auth` is the engine's half alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, ConnectionSpec>,
+    /// Agent plugins this project declares, each a directory the CLI reads.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugin: BTreeMap<String, PluginSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<Remote>,
 }
@@ -142,12 +147,29 @@ impl ProjectConfig {
             llm: self.llm.clone(),
             agent: self.agent.clone(),
             mcp: self.mcp.clone(),
+            plugin: self.plugin.clone(),
             slack: self.slack.clone(),
         }
     }
 
-    pub fn connections(&self) -> BTreeMap<String, ConnectionSpec> {
-        self.manifest().connections()
+    /// The manifest with every plugin's bundle loaded, against this file's
+    /// directory.
+    pub fn resolved_manifest(&self) -> anyhow::Result<(Manifest, ResolvedPlugins)> {
+        let mut manifest = self.manifest();
+        let base = self
+            .source
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let resolved = manifest.resolve_plugins(&base)?;
+        Ok((manifest, resolved))
+    }
+
+    /// Every connection the file reaches, a plugin's servers included. Reads
+    /// the plugin directories.
+    pub fn resolved_connections(&self) -> anyhow::Result<BTreeMap<String, ConnectionSpec>> {
+        Ok(self.resolved_manifest()?.0.connections())
     }
 
     /// The engine's database, beside the file that names it. One file is one
@@ -230,6 +252,15 @@ impl ProjectConfig {
         moved_keys(&value, &at)?;
         let mut config: ProjectConfig =
             value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
+        // A committed bundle would shadow the directory it came from.
+        for (id, spec) in &config.plugin {
+            if spec.bundle.is_some() {
+                return Err(anyhow!(
+                    "{at}: [plugin.{id}]: `bundle` is resolved data and does not belong in the \
+                     file. Write `path` and let the CLI resolve it."
+                ));
+            }
+        }
         config
             .manifest()
             .validate()
@@ -1243,5 +1274,26 @@ mod tests {
             find_from(&nested).unwrap().unwrap().config.org(),
             Some("inner")
         );
+    }
+}
+
+#[cfg(test)]
+mod plugin_file_tests {
+    use super::*;
+
+    #[test]
+    fn a_committed_bundle_is_a_parse_error() {
+        let err = ProjectConfig::parse(
+            r#"
+            [plugin.pdf]
+            path = "./plugins/pdf"
+            [plugin.pdf.bundle]
+            name = "pdf-tools"
+            "#,
+            Path::new("substructure.toml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("resolved data"), "{err}");
     }
 }

@@ -314,6 +314,53 @@ pub struct ApplyResponse {
     pub notices: Vec<Notice>,
 }
 
+/// A plugin a deployment holds, and the hash of the directory it came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHead {
+    pub id: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHeads {
+    #[serde(default)]
+    pub plugins: Vec<PluginHead>,
+}
+
+/// A plugin's content. Sent before the config, which names it by hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPush {
+    pub hash: String,
+    /// Without binary refs. The deployment adds them.
+    pub bundle: crate::plugins::PluginBundle,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binaries: Vec<PluginBinary>,
+}
+
+/// A skill's non-text file. `bytes` is base64.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginBinary {
+    pub skill: String,
+    pub path: String,
+    pub mime: String,
+    pub bytes: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPushed {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub binaries: usize,
+}
+
 /// What a project still needs, as it stands. Its own response rather than a
 /// bare list, so a deployment that learns to report something beside the
 /// notices has somewhere to put it.

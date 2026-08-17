@@ -35,16 +35,14 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use super::state::{inner_arguments, EffectState};
+use super::interrupts::{self, approval};
+use super::state::EffectState;
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::StoredContent;
 use crate::protocol::{
-    AgentConfig, ClientContext, ConnectorTool, ConnectorToolKind, Content, DecisionAction,
-    DecisionResponse, DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, StoredResult,
-    ToolCall,
+    AgentConfig, ClientContext, ConnectorTool, Content, DecisionAction, DecisionResponse,
+    DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, StoredResult, ToolCall,
 };
-
-const APPROVAL: &str = "mcp-approve:";
 
 pub struct Proposing<'a> {
     /// The recorded path to the head.
@@ -155,20 +153,15 @@ pub fn propose(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionR
             }],
             ..Default::default()
         }),
-        DecisionTrigger::InterruptResumed { resumption }
-            if resumption.interrupt_id.starts_with(APPROVAL) =>
-        {
-            Some(approval_resumed(
-                &resumption.payload,
-                &resumption.interrupt_id,
-                p,
-            ))
+        // An engine-authored kind answers its own resume. Anything else picks
+        // the turn back up where it stopped: re-issue the model call over the
+        // current transcript. Without this, nothing would author the next call
+        // after an interrupt.
+        DecisionTrigger::InterruptResumed { resumption } => {
+            interrupts::kind_for(&resumption.interrupt_id)
+                .and_then(|(kind, tail)| kind.resumed(tail, &resumption.payload, p))
+                .or_else(|| config.map(|c| resumed(transcript, c)))
         }
-        // Pick the turn back up where it stopped: re-issue the model call over
-        // the current transcript. Without this an engine-hosted session that
-        // ever interrupts — after `llm.failed`, say — could never be resumed,
-        // because nothing else would author the next call.
-        DecisionTrigger::InterruptResumed { .. } => config.map(|c| resumed(transcript, c)),
         // The config a worker declares here is the app's, not the session's, so
         // the engine cannot derive it from state: the directory seeds it at
         // delivery (`runtime::worker::handler`) instead.
@@ -178,7 +171,7 @@ pub fn propose(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionR
 }
 
 /// Prompt the model again over everything recorded so far, per the config.
-fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionResponse {
+pub(super) fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionResponse {
     let view = recorded(transcript);
     DecisionResponse {
         messages: view.clone(),
@@ -212,14 +205,14 @@ fn llm_finished(
     let tool_calls = message.tool_calls.as_deref().unwrap_or_default();
     let mut held = tool_calls
         .iter()
-        .filter(|call| approval_needed(call, connector_tools));
+        .filter(|call| approval::needed(call, connector_tools));
     let first_held = held.next();
     let actions = if tool_calls.is_empty() {
         vec![DecisionAction::Done {
             data: serde_json::to_value(&message.content).unwrap_or_default(),
         }]
     } else if let Some(first) = first_held {
-        vec![ask(first, connector_tools, held.count())]
+        vec![approval::ask(first, connector_tools, held.count())]
     } else {
         tool_calls
             .iter()
@@ -233,112 +226,8 @@ fn llm_finished(
     }
 }
 
-fn ask(held: &ToolCall, connector_tools: &[ConnectorTool], remaining: usize) -> DecisionAction {
-    let name = ran_name(held, connector_tools);
-    let arguments = ran_arguments(held, connector_tools);
-    // Slack's mrkdwn renders a language tag as a line of the block.
-    let shown = match &arguments {
-        serde_json::Value::Object(o) if o.is_empty() => String::new(),
-        serde_json::Value::Null => String::new(),
-        value => format!(
-            "\n\n```\n{}\n```",
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        ),
-    };
-    let after = match remaining {
-        0 => String::new(),
-        1 => "\n\nOne more call waits behind it.".to_string(),
-        n => format!("\n\n{n} more calls wait behind it."),
-    };
-    DecisionAction::Interrupt {
-        interrupt_id: Some(format!("{APPROVAL}{}", held.id)),
-        reason: format!("`{name}` needs approval before it runs"),
-        payload: serde_json::json!({
-            "message": format!("Run `{name}`?{shown}{after}"),
-            "tool_call_id": held.id,
-            "metadata": {
-                "type": "tool.approval",
-                "tool": name,
-                "arguments": arguments,
-                "remaining": remaining,
-                "options": [
-                    { "label": "Run it", "value": { "approved": true }, "style": "primary" },
-                    { "label": "Decline", "value": { "approved": false }, "style": "danger" },
-                ],
-            },
-        }),
-    }
-}
-
-/// Answer the call this approval held, then ask about the next.
-fn approval_resumed(
-    payload: &serde_json::Value,
-    interrupt_id: &str,
-    p: &Proposing<'_>,
-) -> DecisionResponse {
-    let &Proposing {
-        transcript,
-        llm_calls,
-        pending_calls,
-        dispatched,
-        config,
-        connector_tools,
-        decision_id,
-    } = p;
-    let asked = interrupt_id.trim_start_matches(APPROVAL);
-    let Some((at, call)) = asked_about(asked, transcript, dispatched) else {
-        return match config {
-            Some(c) => resumed(transcript, c),
-            None => DecisionResponse {
-                messages: recorded(transcript),
-                ..Default::default()
-            },
-        };
-    };
-
-    // Nothing ran, so a decline has no effect to fail. The refusal is the result.
-    let approved = approved(payload);
-    let refusals = match approved {
-        true => Vec::new(),
-        false => vec![refusal(call)],
-    };
-    let mut actions = match approved {
-        true => route_tool_call(call, config, decision_id),
-        false => Vec::new(),
-    };
-
-    let waiting: Vec<&ToolCall> = transcript[at]
-        .tool_calls
-        .iter()
-        .filter(|c| c.id != call.id && !settled(&c.id, at, transcript, dispatched))
-        .collect();
-    let mut gated = waiting
-        .iter()
-        .filter(|c| approval_needed(c, connector_tools));
-    match gated.next() {
-        Some(next) => actions.push(ask(next, connector_tools, gated.count())),
-        None => actions.extend(
-            waiting
-                .iter()
-                .flat_map(|c| route_tool_call(c, config, decision_id)),
-        ),
-    }
-
-    // The last answer prompts the model. A call in flight does this when it settles.
-    if actions.is_empty() && pending_calls == 0 && siblings_answered(&call.id, transcript) {
-        actions.extend(reissue(&call.id, &refusals, transcript, llm_calls));
-    }
-    let mut messages = recorded(transcript);
-    messages.extend(refusals);
-    DecisionResponse {
-        messages,
-        actions,
-        ..Default::default()
-    }
-}
-
 /// Nothing once the call is settled, so a repeated answer runs nothing.
-fn asked_about<'a>(
+pub(super) fn asked_about<'a>(
     tool_call_id: &str,
     transcript: &'a [Message],
     dispatched: &[String],
@@ -353,11 +242,16 @@ fn asked_about<'a>(
     (!settled(tool_call_id, at, transcript, dispatched)).then_some((at, call))
 }
 
-fn settled(tool_call_id: &str, at: usize, transcript: &[Message], dispatched: &[String]) -> bool {
+pub(super) fn settled(
+    tool_call_id: &str,
+    at: usize,
+    transcript: &[Message],
+    dispatched: &[String],
+) -> bool {
     answered(tool_call_id, at, transcript) || dispatched.iter().any(|id| id == tool_call_id)
 }
 
-fn siblings_answered(tool_call_id: &str, transcript: &[Message]) -> bool {
+pub(super) fn siblings_answered(tool_call_id: &str, transcript: &[Message]) -> bool {
     let Some(at) = transcript
         .iter()
         .rposition(|m| m.tool_calls.iter().any(|c| c.id == tool_call_id))
@@ -376,80 +270,11 @@ fn answered(tool_call_id: &str, at: usize, transcript: &[Message]) -> bool {
         .any(|m| m.tool_call_id.as_deref() == Some(tool_call_id))
 }
 
-fn refusal(call: &ToolCall) -> DraftMessage {
-    DraftMessage {
-        id: None,
-        role: Role::Tool,
-        content: Some(Content::Text(
-            "A person declined this call. Do not try it again; \
-             say what you were going to do and why it stopped."
-                .to_string(),
-        )),
-        tool_calls: None,
-        tool_call_id: Some(call.id.clone()),
-        name: Some(call.function.name.clone()),
-        reasoning: None,
-    }
-}
-
-fn approved(payload: &serde_json::Value) -> bool {
-    if payload.get("status").and_then(|s| s.as_str()) == Some("cancelled") {
-        return false;
-    }
-    payload
-        .get("payload")
-        .unwrap_or(payload)
-        .get("approved")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
-
-fn approval_needed(call: &ToolCall, connector_tools: &[ConnectorTool]) -> bool {
-    target_of(call, connector_tools).is_some_and(|tool| tool.approve)
-}
-
-fn ran_name<'a>(call: &'a ToolCall, connector_tools: &'a [ConnectorTool]) -> &'a str {
-    target_of(call, connector_tools)
-        .map(|t| t.name.as_str())
-        .unwrap_or(&call.function.name)
-}
-
-fn ran_arguments(call: &ToolCall, connector_tools: &[ConnectorTool]) -> serde_json::Value {
-    let written = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
-        .unwrap_or_else(|_| serde_json::Value::String(call.function.arguments.clone()));
-    if target_of(call, connector_tools).is_none_or(|t| t.name == call.function.name) {
-        return written;
-    }
-    let inner = inner_arguments(&written);
-    serde_json::from_str(&inner).unwrap_or(serde_json::Value::String(inner))
-}
-
-/// The tool the call runs.
-fn target_of<'a>(
-    call: &ToolCall,
-    connector_tools: &'a [ConnectorTool],
-) -> Option<&'a ConnectorTool> {
-    let named = connector_tools
-        .iter()
-        .find(|t| t.name == call.function.name)?;
-    if named.kind != ConnectorToolKind::Call {
-        return Some(named);
-    }
-    let inner = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
-        .ok()?
-        .get("name")?
-        .as_str()?
-        .to_string();
-    connector_tools
-        .iter()
-        .find(|t| t.name == inner && t.kind.is_remote())
-}
-
 /// Dispatch one model tool call per config: a sub-agent spawn (paired with the
 /// message that delegates to it) when the called name is a declared sub-agent,
 /// else a `tool.call` handled per the tool's `handler` (worker being the default
 /// and the no-config behavior).
-fn route_tool_call(
+pub(super) fn route_tool_call(
     call: &ToolCall,
     config: Option<&AgentConfig>,
     decision_id: &str,
@@ -707,7 +532,7 @@ fn tool_finished(
 /// recorded path from the assistant message on, plus the tool results this
 /// decision adds. The parent is named by lineage: the tool call id appears in
 /// exactly one assistant message, recorded under its llm.call's id.
-fn reissue(
+pub(super) fn reissue(
     tool_call_id: &str,
     tool_messages: &[DraftMessage],
     transcript: &[Message],
@@ -749,7 +574,7 @@ fn reissue(
     })
 }
 
-fn recorded(transcript: &[Message]) -> Vec<DraftMessage> {
+pub(super) fn recorded(transcript: &[Message]) -> Vec<DraftMessage> {
     transcript.iter().cloned().map(DraftMessage::from).collect()
 }
 
@@ -795,10 +620,12 @@ mod tests {
 
     use chrono::Utc;
 
+    use super::approval::PREFIX as APPROVAL;
     use super::*;
     use crate::protocol::ErrorCode;
     use crate::protocol::{
-        AgentTool, Handler, LlmRequest, RetryPolicy, SubAgent, ToolCallFunction, ToolInput,
+        AgentTool, ConnectorToolKind, Handler, LlmRequest, RetryPolicy, SubAgent, ToolCallFunction,
+        ToolInput,
     };
     use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
@@ -1408,6 +1235,7 @@ mod tests {
             mcp: Vec::new(),
             defer_tools: None,
             announce_mcp: Default::default(),
+            plugins: Vec::new(),
             effort: None,
         }
     }

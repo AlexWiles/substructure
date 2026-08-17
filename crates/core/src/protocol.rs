@@ -208,6 +208,14 @@ impl StoredResult {
         }
     }
 
+    /// A tool that ran and reported failure.
+    pub fn error(text: impl Into<String>) -> Self {
+        Self {
+            is_error: true,
+            ..Self::text(text)
+        }
+    }
+
     pub fn as_text(&self) -> String {
         self.content
             .iter()
@@ -675,6 +683,9 @@ pub struct AgentConfig {
     /// MCP servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
+    /// Plugins this agent uses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<AgentPlugin>,
     /// Defer every tool this agent offers, from any source, unless the tool or
     /// the connection says otherwise. Absent ⇒ the agent defers nothing of its
     /// own; a connection may still defer on its own account.
@@ -880,6 +891,8 @@ pub enum ConnectorToolKind {
     Find,
     /// Run the tool the arguments name.
     Call,
+    /// Load a skill's instructions from a plugin bundle.
+    Skill,
 }
 
 impl ConnectorToolKind {
@@ -984,6 +997,49 @@ pub struct McpTools {
     /// Absent ⇒ the agent's `defer_tools`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer: Option<bool>,
+}
+
+/// A plugin an agent uses. The skills and servers are stamped from the bundle
+/// when the config loads. To enable a plugin, write it into the config.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "AgentPlugin")]
+pub struct AgentPlugin {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillMeta>,
+    /// Connection-registry ids of this plugin's servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
+    /// Applied to each of the plugin's servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<McpTools>,
+    #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
+    pub auth_failure: AuthFailure,
+    #[serde(default, skip_serializing_if = "Approve::is_default")]
+    pub approve: Approve,
+}
+
+impl AgentPlugin {
+    /// One of the plugin's servers, with the plugin's policy on it.
+    pub fn server(&self, id: &str) -> McpServer {
+        McpServer {
+            id: id.to_string(),
+            tools: self.tools.clone(),
+            auth_failure: self.auth_failure,
+            approve: self.approve,
+        }
+    }
+}
+
+/// What the model sees of a skill before it loads it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "SkillMeta")]
+pub struct SkillMeta {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,

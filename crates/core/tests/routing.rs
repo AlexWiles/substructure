@@ -126,6 +126,7 @@ fn config(llm: &str) -> AgentConfig {
         mcp: Vec::new(),
         defer_tools: None,
         announce_mcp: Default::default(),
+        plugins: Vec::new(),
         effort: None,
     }
 }
@@ -205,6 +206,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
                 config.sub_agent_executor_workers as u32,
             )) as Arc<dyn TaskQueue<SubAgentTask>>,
             connections: None,
+            plugins: std::sync::Arc::new(substructure_core::plugins::StaticPlugins::default()),
             connector_task_queue: Arc::new(ShardedInMemoryQueue::new(
                 config.connector_executor_workers as u32,
             )) as Arc<dyn TaskQueue<ConnectorTask>>,

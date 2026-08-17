@@ -33,7 +33,7 @@ use super::prompt_context;
 use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{
-    AgentTool, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, Handler, McpServer,
+    AgentTool, ConnectorTool, DeferToolsStrategy, Handler, McpServer, StoredResult,
 };
 
 /// One connection as the engine's own tools see it: what the agent declared,
@@ -86,11 +86,11 @@ pub(in crate::runtime::session) fn inner_arguments(raw: &serde_json::Value) -> S
     }
 }
 
-/// What the engine answers for one of its own connector tools.
 #[derive(Debug, Clone, PartialEq)]
-pub enum LocalAnswer {
-    Result(String),
-    Error(String),
+pub struct SkillCall {
+    pub leaf: Option<String>,
+    pub plugin_id: String,
+    pub arguments: String,
 }
 use rust_decimal::Decimal;
 
@@ -1822,8 +1822,8 @@ impl SessionState {
     }
 
     pub fn connector_tools_for_config(&self, config: &AgentConfig) -> filter::Merged {
-        let mut resolutions: Vec<filter::Resolution> = config
-            .mcp
+        let servers = self.servers_for(config);
+        let mut resolutions: Vec<filter::Resolution> = servers
             .iter()
             .filter_map(|connector| {
                 let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
@@ -1841,14 +1841,22 @@ impl SessionState {
         // From the config alone: a fetch that has not settled must not decide
         // whether a tool definition exists. An agent that says `search` thus
         // gets these from its first turn, and a connection added later moves
-        // no definition.
+        // no definition. A plugin's servers count the same way.
         let defers = config.defers_tools()
             || config.tools.iter().any(|t| t.defer == Some(true))
-            || config.mcp.iter().any(|c| filter::defers(c, false));
+            || config.mcp.iter().any(|c| filter::defers(c, false))
+            || config.plugins.iter().any(|p| {
+                p.servers
+                    .iter()
+                    .any(|id| filter::defers(&p.server(id), false))
+            });
         if defers {
             resolutions.push(filter::Resolution::of(filter::search_tools(
                 config.defer_strategy(),
             )));
+        }
+        if !config.plugins.is_empty() {
+            resolutions.push(filter::Resolution::of(vec![filter::skill_tool()]));
         }
         let taken: Vec<&str> = config
             .tools
@@ -1863,7 +1871,10 @@ impl SessionState {
     /// session recorded.
     fn connector_source(&self, connector_id: &str, leaf: Option<&str>) -> Option<Source> {
         let config = self.resolve_agent_for(leaf)?;
-        let server = config.mcp.into_iter().find(|c| c.id == connector_id)?;
+        let server = self
+            .servers_for(&config)
+            .into_iter()
+            .find(|c| c.id == connector_id)?;
         let sync = self.connector_sync(connector_id)?;
         Some(Source {
             server,
@@ -1885,8 +1896,7 @@ impl SessionState {
         let Some(config) = self.resolve_agent_for(leaf) else {
             return Vec::new();
         };
-        config
-            .mcp
+        self.servers_for(&config)
             .iter()
             .filter(|c| {
                 self.effect(EffectKind::ConnectorSync, &c.id)
@@ -1898,35 +1908,25 @@ impl SessionState {
 
     /// The engine's answer to one of its own tools, or `None` when the call is
     /// the connection's. Read from state, so a replay answers the same.
-    pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<LocalAnswer> {
+    pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<StoredResult> {
         let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
         let leaf = effect.anchor.clone();
         let tc = effect.tool()?;
         let target = tc.target.as_ref()?;
-        if target.kind.is_remote() {
-            return None;
-        }
-        let argument = |key: &str| {
-            serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                .ok()
-                .and_then(|v| v.get(key)?.as_str().map(str::to_string))
-                .unwrap_or_default()
-        };
-        match target.kind {
-            ConnectorToolKind::Remote => None,
-            ConnectorToolKind::Find => Some(LocalAnswer::Result(filter::find_answer(
-                &self.searchable_tools(leaf.as_deref()),
-                &argument("query"),
-                self.resolve_agent_for(leaf.as_deref())
-                    .map(|c| c.defer_settings())
-                    .unwrap_or_default()
-                    .max_matches,
-            ))),
-            ConnectorToolKind::Call => Some(LocalAnswer::Error(
-                self.call_tool_fault(&tc.arguments, leaf.as_deref())
-                    .unwrap_or_else(|| "the call could not be routed".to_string()),
-            )),
-        }
+        super::engine_tools::answer(self, target.kind, leaf.as_deref(), &tc.arguments)
+    }
+
+    /// A skill call's branch, plugin, and arguments. `None` for every other
+    /// call. The plugin is the one frozen on the call.
+    pub fn skill_call(&self, tool_call_id: &str) -> Option<SkillCall> {
+        let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
+        let tc = effect.tool()?;
+        let target = tc.target.as_ref()?;
+        (target.kind == crate::protocol::ConnectorToolKind::Skill).then(|| SkillCall {
+            leaf: effect.anchor.clone(),
+            plugin_id: target.connector.clone(),
+            arguments: tc.arguments.clone(),
+        })
     }
 
     /// Every tool the agent can reach, deferred or not, as the model would see
@@ -2094,8 +2094,7 @@ impl SessionState {
         let Some(config) = self.resolve_agent_for(leaf) else {
             return Vec::new();
         };
-        config
-            .mcp
+        self.servers_for(&config)
             .iter()
             .filter(|c| !self.has_effect(EffectKind::ConnectorSync, &c.id))
             .map(|c| c.id.clone())
@@ -2114,7 +2113,7 @@ impl SessionState {
         let Some(config) = self.resolve_agent_for(leaf) else {
             return false;
         };
-        config.mcp.iter().any(|c| {
+        self.servers_for(&config).iter().any(|c| {
             self.tracking(EffectKind::ConnectorSync, &c.id)
                 .is_some_and(EffectTracking::is_in_flight)
         })
@@ -2133,6 +2132,17 @@ impl SessionState {
     pub fn resolve_agent_for(&self, leaf: Option<&str>) -> Option<AgentConfig> {
         let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
         resolve_on_path(&self.agent_versions, &on_path).map(|v| v.value.clone())
+    }
+
+    /// Every server `config` reaches: its `mcp` entries, then each plugin's
+    /// servers under the plugin's own policy. The one place a plugin's servers
+    /// join the `mcp` machinery.
+    pub fn servers_for(&self, config: &AgentConfig) -> Vec<McpServer> {
+        let plugin_servers = config
+            .plugins
+            .iter()
+            .flat_map(|p| p.servers.iter().map(|id| p.server(id)));
+        config.mcp.iter().cloned().chain(plugin_servers).collect()
     }
 
     pub fn message_tree(&self) -> MessageTree {
@@ -2608,6 +2618,7 @@ mod agent_version_tests {
             mcp: Vec::new(),
             defer_tools: None,
             announce_mcp: Default::default(),
+            plugins: Vec::new(),
             effort: None,
         }
     }

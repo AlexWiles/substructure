@@ -8,7 +8,7 @@ use crate::runtime::session::reconcile::plan_reconcile;
 use chrono::Utc;
 
 use super::super::aggregate::{CommitContext, SessionAggregate};
-use super::super::state::{AgentVersion, LocalAnswer, Logged};
+use super::super::state::{AgentVersion, Logged};
 use super::*;
 use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
@@ -6424,6 +6424,7 @@ fn agent_config(model: &str) -> AgentConfig {
         mcp: Vec::new(),
         defer_tools: None,
         announce_mcp: Default::default(),
+        plugins: Vec::new(),
         effort: None,
     }
 }
@@ -7238,13 +7239,12 @@ fn a_search_answers_at_the_anchor_of_the_call() {
         "the head has dropped the connection, so a new call would find nothing"
     );
 
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         answer["tools"][0]["name"], "sentry__search_issues",
@@ -7399,13 +7399,12 @@ fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
         "the engine answers it; the worker is not asked to; got {events:?}"
     );
 
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result, not an error");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result, not an error");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(answer["tools"][0]["name"], "sentry__search_issues");
     assert_eq!(answer["matched"], 1);
@@ -7502,13 +7501,12 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
         "call_tool",
         r#"{"name":"sentry__resolve_issue","arguments":{}}"#,
     );
-    let LocalAnswer::Error(message) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a refused name is an error, not a result");
-    };
+        .expect("the engine answers this one");
+    assert!(settled.is_error, "a refused name is an error, not a result");
+    let message = settled.as_text();
     assert!(
         message.contains("resolve_issue"),
         "the message names what the model asked for: {message}"
@@ -7548,13 +7546,12 @@ fn two_searched_connections_share_one_pair_and_one_search() {
     );
 
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result, not an error");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result, not an error");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         answer["tools"][0]["name"], "linear__search_issues",
@@ -7597,13 +7594,12 @@ fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
     );
 
     call(&mut agg, "tc-9", "tool_search", r#"{"query":"issues"}"#);
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-9")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         answer["tools"][0]["name"], "linear__search_issues",
@@ -7654,13 +7650,12 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
     );
 
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         answer["tools"][0]["name"], "sentry__search_issues",
@@ -7749,6 +7744,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
         Some(AgentConfig {
             defer_tools: Some(DeferTools::default()),
             announce_mcp: Default::default(),
+            plugins: Vec::new(),
             mcp: vec![],
             ..agent_config("m1")
         }),
@@ -7771,6 +7767,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
             agent: Some(AgentConfig {
                 defer_tools: Some(DeferTools::default()),
                 announce_mcp: Default::default(),
+                plugins: Vec::new(),
                 mcp: vec![McpServer {
                     id: "sentry".to_string(),
                     tools: None,
@@ -7801,6 +7798,7 @@ fn a_connection_overrides_the_agents_default() {
         Some(AgentConfig {
             defer_tools: Some(DeferTools::default()),
             announce_mcp: Default::default(),
+            plugins: Vec::new(),
             mcp: vec![McpServer {
                 id: "sentry".to_string(),
                 tools: Some(McpTools {
@@ -7865,13 +7863,12 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
         "call_tool",
         r#"{"name":"sentry__search_issues","arguments":{"query":7}}"#,
     );
-    let LocalAnswer::Error(message) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("bad arguments are an error");
-    };
+        .expect("the engine answers this one");
+    assert!(settled.is_error, "bad arguments are an error");
+    let message = settled.as_text();
     assert!(
         message.contains("query"),
         "the message names the field: {message}"
@@ -8018,13 +8015,12 @@ fn a_worker_tool_can_defer_and_the_search_finds_it() {
 
     // The search reaches a tool no connection owns.
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"email"}"#);
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a search is a result");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a search is a result");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(answer["tools"][0]["name"], "send_email");
     assert_eq!(
@@ -8075,13 +8071,12 @@ fn a_deferred_worker_tool_still_checks_its_arguments() {
         "call_tool",
         r#"{"name":"send_email","arguments":{"to":7}}"#,
     );
-    let LocalAnswer::Error(message) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("bad arguments are an error");
-    };
+        .expect("the engine answers this one");
+    assert!(settled.is_error, "bad arguments are an error");
+    let message = settled.as_text();
     assert!(
         message.contains("to"),
         "the provider never saw this schema, so the engine checks it: {message}"
@@ -8109,13 +8104,12 @@ fn call_tool_refuses_a_connection_this_agent_does_not_have() {
         "call_tool",
         r#"{"name":"github__search_issues","arguments":{}}"#,
     );
-    let LocalAnswer::Error(message) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("an unknown connection is an error");
-    };
+        .expect("the engine answers this one");
+    assert!(settled.is_error, "an unknown connection is an error");
+    let message = settled.as_text();
     assert!(
         message.contains("github__search_issues"),
         "the message names what was asked for: {message}"
@@ -10865,4 +10859,154 @@ fn an_admin_caller_raises_an_admin_interrupt() {
         SessionState::caller_interrupt_origin(&machine()),
         InterruptOrigin::Machine
     ));
+}
+
+// ── Plugins ──────────────────────────────────────────────────────────
+
+fn plugin_config() -> AgentConfig {
+    AgentConfig {
+        plugins: vec![crate::protocol::AgentPlugin {
+            id: "pdf".to_string(),
+            description: "PDF work.".to_string(),
+            skills: vec![crate::protocol::SkillMeta {
+                name: "form-filling".to_string(),
+                description: "Fill out PDF forms.".to_string(),
+            }],
+            servers: vec!["pdf-renderer".to_string()],
+            tools: None,
+            auth_failure: Default::default(),
+            approve: Default::default(),
+        }],
+        ..agent_config("m1")
+    }
+}
+
+fn plugin_session() -> SessionAggregate {
+    create_session_with_config("sess-1", "tenant-a", "user-1", Some(plugin_config()))
+}
+
+#[test]
+fn a_declared_plugin_offers_the_skill_tool_and_fetches_its_servers() {
+    let mut agg = plugin_session();
+    assert!(
+        offered(&agg).contains(&"skill".to_string()),
+        "the skill tool is offered from turn 1: {:?}",
+        offered(&agg)
+    );
+    assert!(
+        agg.state
+            .has_effect(EffectKind::ConnectorSync, "pdf-renderer"),
+        "naming a plugin is what turns it on"
+    );
+    settle_sync(&mut agg, "pdf-renderer", &["fill_form"]);
+    assert!(
+        held(&agg).contains(&"pdf_renderer__fill_form".to_string()),
+        "the server's tools join under the derived id: {:?}",
+        held(&agg)
+    );
+}
+
+#[test]
+fn using_a_skill_only_freezes_the_call() {
+    let mut agg = plugin_session();
+    call(&mut agg, "tc-1", "skill", r#"{"name":"pdf:form-filling"}"#);
+    assert!(
+        agg.state.skill_call("tc-1").is_some(),
+        "the call is frozen as a skill call for the executor"
+    );
+}
+
+#[test]
+fn the_catalog_rides_the_first_prompt_once() {
+    let mut agg = plugin_session();
+    // A call waits for the plugin's servers, so settle them first.
+    settle_sync(&mut agg, "pdf-renderer", &["fill_form"]);
+    let prompt = |agg: &mut SessionAggregate, id: &str| {
+        dispatch(
+            agg,
+            CommandPayload::RequestLlmCall {
+                llm: "claude".to_string(),
+                call_id: id.to_string(),
+                request: request_with(vec![]),
+                stream: false,
+                retry: RetryPolicy::no_retry(),
+                handler: LlmHandler::Server,
+                format: None,
+            },
+            &system(),
+        );
+        agg.state.llm_call(id).unwrap().prompt.clone()
+    };
+
+    let first = prompt(&mut agg, "call-1");
+    let notice = first.first().expect("the catalog rides the prompt");
+    assert_eq!(notice.role, Role::System);
+    let text = match notice.content.as_ref().expect("content") {
+        Content::Text(t) => t.clone(),
+        _ => panic!("a catalog entry is text"),
+    };
+    assert!(
+        text.starts_with("{\"plugin\":\"pdf\""),
+        "the name leads: {text}"
+    );
+    assert!(text.contains("pdf:form-filling"), "{text}");
+    assert!(text.contains("Fill out PDF forms."), "{text}");
+
+    let second = prompt(&mut agg, "call-2");
+    assert!(
+        second.is_empty(),
+        "a plugin is cataloged once per path: {second:?}"
+    );
+}
+
+#[test]
+fn a_worker_adding_a_plugin_mid_session_wakes_its_servers() {
+    let mut agg =
+        create_session_with_config("sess-1", "tenant-a", "user-1", Some(agent_config("m1")));
+    assert!(!agg
+        .state
+        .has_effect(EffectKind::ConnectorSync, "pdf-renderer"));
+
+    let d = open_decision(&mut agg, "hi");
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![node_msg("u1", Role::User, "hi")],
+            actions: vec![],
+            state: None,
+            agent: Some(plugin_config()),
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+    assert_eq!(
+        sync_requests(&events),
+        ["pdf-renderer"],
+        "the config write reads its own plugins"
+    );
+}
+
+#[test]
+fn a_declared_tool_named_skill_shadows_the_engines_and_is_a_collision() {
+    let mut cfg = plugin_config();
+    cfg.tools.push(AgentTool {
+        name: "skill".to_string(),
+        description: String::new(),
+        input: None,
+        output: None,
+        handler: Some(Handler::Client),
+        defer: None,
+    });
+    let agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(cfg));
+    let merged = agg.state.connector_tools(None);
+    assert!(
+        merged.collisions.contains(&"skill".to_string()),
+        "reported, so the warning has something to say: {:?}",
+        merged.collisions
+    );
+    assert!(
+        !merged.tools.iter().any(|t| t.name == "skill"),
+        "the declared tool wins; the engine's is not offered"
+    );
 }
