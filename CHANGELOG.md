@@ -14,29 +14,12 @@ together at the same version.
 - Support approval interrupts on destructive MCP tools.
 - Add agent-plugins support https://agent-plugins.org/
 - Support per-user MCP credentials
-- A person is named by the source that authenticated them: a subject is an
-  issuer and an id, as OIDC's `(iss, sub)`. A credential belongs to that pair,
-  so one application's `bob` and one workspace's `bob` are two people. Adding a
-  chat surface adds a name, not a type.
-- Where a person authorizes a connection is a trait, so a deployment that is
-  neither a static page nor this engine can mint its own links.
 
 ### Changed
 
-- **Breaking.** A session's owner carries a requester — a subject and who may
-  read the conversation — in place of `id`, `kind`, and `audience`. A worker
-  reading `identity.kind` reads `identity.subject` instead: absent means no
-  person is behind the session, and `issuer` says which population they are
-  from. `audience` is `visibility`, because OAuth's `aud` means something else.
-- **Breaking.** Credentials are keyed by issuer as well as subject. A personal
-  credential stored by the previous release is dropped rather than guessed at,
-  and is authorized again.
+- Auth refactor
 
 ### Fixed
-
-- A caller no longer becomes the owner of the session it starts. A key acting
-  for one of a project's users named the key, so the call reached no personal
-  credential; an operator's id and an end user's id shared one namespace.
 
 ## [0.6.0] - 2026-08-14
 
