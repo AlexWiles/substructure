@@ -157,7 +157,7 @@ enum RequestBlock {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ToolResultContent,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
@@ -178,6 +178,15 @@ impl RequestBlock {
             | RequestBlock::Document { cache_control, .. } => *cache_control = Some(control),
         }
     }
+}
+
+/// A tool's answer. Text stays a string, the shape every tool result had
+/// before one could carry an image or a document.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<RequestBlock>),
 }
 
 #[derive(Serialize)]
@@ -563,11 +572,21 @@ fn build_body(
             }
             Role::Tool => {
                 let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
-                let content = msg
-                    .content
-                    .as_ref()
-                    .map(|c| c.text_owned())
-                    .unwrap_or_default();
+                // A tool that answered with an image or a document sends its
+                // blocks; text alone stays a string.
+                let blocks = content_to_blocks(msg.content.as_ref());
+                let media = blocks
+                    .iter()
+                    .any(|b| !matches!(b, RequestBlock::Text { .. }));
+                let content = match media {
+                    true => ToolResultContent::Blocks(blocks),
+                    false => ToolResultContent::Text(
+                        msg.content
+                            .as_ref()
+                            .map(|c| c.text_owned())
+                            .unwrap_or_default(),
+                    ),
+                };
                 push_turn(
                     &mut turns,
                     "user",

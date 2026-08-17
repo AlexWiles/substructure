@@ -410,44 +410,47 @@ fn collect_files(
                 continue;
             }
         };
-        // Text inlines in the answer; anything else becomes a blob.
+        // The name decides first. A small PDF holds no byte a `String` will
+        // refuse, and reading one as text puts its markup in the prompt.
+        if let Some(mime) = named_mime(&rel) {
+            binaries.push((rel, mime.to_string(), bytes));
+            continue;
+        }
+        // An extension that says nothing: text if it reads as text.
         match String::from_utf8(bytes) {
             Ok(text) => {
                 files.insert(rel, sanitize_text(&text));
             }
-            Err(e) => {
-                let mime = mime_for(&rel);
-                binaries.push((rel, mime, e.into_bytes()));
-            }
+            Err(e) => binaries.push((rel, OCTET_STREAM.to_string(), e.into_bytes())),
         }
     }
     Ok(())
 }
 
-/// The mime of a skill file, from its extension. Only what a skill plausibly
-/// carries; anything else is bytes.
-fn mime_for(path: &str) -> String {
-    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-    match ext.as_deref() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("bmp") => "image/bmp",
-        Some("ico") => "image/vnd.microsoft.icon",
-        Some("tif" | "tiff") => "image/tiff",
-        Some("pdf") => "application/pdf",
-        Some("zip") => "application/zip",
-        Some("gz") => "application/gzip",
-        Some("mp3") => "audio/mpeg",
-        Some("wav") => "audio/wav",
-        Some("mp4") => "video/mp4",
-        Some("woff2") => "font/woff2",
-        Some("woff") => "font/woff",
-        Some("ttf") => "font/ttf",
-        _ => OCTET_STREAM,
-    }
-    .to_string()
+/// The mime of a skill file whose extension says it is not text. `None` for
+/// an extension that says nothing, the bytes deciding instead.
+fn named_mime(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())?;
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/vnd.microsoft.icon",
+        "tif" | "tiff" => "image/tiff",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        _ => return None,
+    };
+    Some(mime)
 }
 
 fn load_servers(
@@ -651,6 +654,25 @@ mod tests {
                 .contains("PNG"),
             "the bytes do not travel with the config"
         );
+    }
+
+    #[test]
+    fn a_named_format_is_binary_whatever_its_bytes_say() {
+        let dir = plugin_dir();
+        // Valid UTF-8, and still a document.
+        write(
+            dir.path(),
+            "skills/form-filling/references/policy.pdf",
+            "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\n",
+        );
+        let loaded = load_dir(dir.path()).unwrap();
+        assert!(
+            !loaded.bundle.skills[0]
+                .files
+                .contains_key("references/policy.pdf"),
+            "a PDF does not inline as text"
+        );
+        assert_eq!(loaded.pending[0].mime, "application/pdf");
     }
 
     #[test]
