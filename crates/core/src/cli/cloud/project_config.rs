@@ -9,7 +9,9 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::cli::env::{OutputFormat, ProviderBinding, ProviderKind};
 use crate::connectors::registry::ConnectionSpec;
-use crate::manifest::{AgentSection, Manifest, PluginSpec, ProviderSpec, SlackConfig};
+use crate::manifest::{
+    AgentSection, Manifest, PluginSpec, ProviderSpec, ResolvedPlugins, SlackConfig,
+};
 use crate::runtime::llm::LlmBlocks;
 use crate::runtime::worker::AgentEntry;
 
@@ -152,7 +154,7 @@ impl ProjectConfig {
 
     /// The manifest with every plugin's bundle loaded, against this file's
     /// directory.
-    pub fn resolved_manifest(&self) -> anyhow::Result<(Manifest, Vec<String>)> {
+    pub fn resolved_manifest(&self) -> anyhow::Result<(Manifest, ResolvedPlugins)> {
         let mut manifest = self.manifest();
         let base = self
             .source
@@ -160,8 +162,8 @@ impl ProjectConfig {
             .filter(|d| !d.as_os_str().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        let notices = manifest.resolve_plugins(&base)?;
-        Ok((manifest, notices))
+        let resolved = manifest.resolve_plugins(&base)?;
+        Ok((manifest, resolved))
     }
 
     /// Every connection the file reaches, a plugin's servers included. Reads

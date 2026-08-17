@@ -32,7 +32,9 @@ use super::events::*;
 use super::prompt_context;
 use super::tool_contract::classify_arguments;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
-use crate::protocol::{AgentTool, ConnectorTool, DeferToolsStrategy, Handler, McpServer};
+use crate::protocol::{
+    AgentTool, ConnectorTool, DeferToolsStrategy, Handler, McpServer, StoredResult,
+};
 
 /// One connection as the engine's own tools see it: what the agent declared,
 /// what the connection offered, and what it said it is for.
@@ -82,13 +84,6 @@ pub(in crate::runtime::session) fn inner_arguments(raw: &serde_json::Value) -> S
         Some(value) => value.to_string(),
         None => "{}".to_string(),
     }
-}
-
-/// What the engine answers for one of its own connector tools.
-#[derive(Debug, Clone, PartialEq)]
-pub enum LocalAnswer {
-    Result(String),
-    Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1913,7 +1908,7 @@ impl SessionState {
 
     /// The engine's answer to one of its own tools, or `None` when the call is
     /// the connection's. Read from state, so a replay answers the same.
-    pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<LocalAnswer> {
+    pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<StoredResult> {
         let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
         let leaf = effect.anchor.clone();
         let tc = effect.tool()?;

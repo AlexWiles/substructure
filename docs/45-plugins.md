@@ -45,6 +45,22 @@ The answer is the skill's instructions and its file listing. Passing `file`
 reads one of the listed files. A wrong name answers with the directory — the
 plugin's skills, or the agent's plugins — so one round trip corrects it.
 
+An answer is a tool result like any other, so what a skill holds decides its
+shape. A text file inlines. Anything else — an image, a PDF — is listed with
+its mime and its size, and reads back as an attachment the model sees the way
+it sees a connection's. The bytes go to blob storage; the skill keeps a
+reference, so nothing large travels with the config.
+
+A plugin is content, not a declaration, so it travels on its own and is named
+by the hash of the directory it came from. `subs apply` sends the plugin
+first and the config after — the config names a plugin by hash, so the plugin
+has to be there for the document to mean anything. Only what the deployment
+does not already hold goes up, so an unchanged directory sends nothing, and
+apply reports what it sent.
+
+A local engine needs none of this. It reads the directory at startup and
+stores the binaries as it goes.
+
 ## Enabling
 
 Naming a plugin is what turns it on. The engine fetches its MCP servers, the

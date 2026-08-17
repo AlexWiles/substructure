@@ -238,18 +238,29 @@ pub(crate) async fn start_engine(
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
     // The engine serves skills from this copy, so a change on disk does not
     // move a live session.
-    let (manifest, plugin_notices) = cfg.resolved_manifest()?;
-    for notice in plugin_notices {
+    let (manifest, mut resolved) = cfg.resolved_manifest()?;
+    for notice in &resolved.notices {
         tracing::warn!("{notice}");
     }
+    let mut bundles: crate::plugins::PluginSet = manifest
+        .plugin
+        .iter()
+        .filter_map(|(id, spec)| Some((id.clone(), spec.bundle.clone()?)))
+        .collect();
+    // The bytes go to the blob store, never to the bundle: a skill's file is
+    // a ref by the time anything can ask for it.
+    for (id, bundle) in &mut bundles {
+        let Some(pending) = resolved.pending.remove(id) else {
+            continue;
+        };
+        let notices =
+            crate::plugins::store_binaries(bundle, pending, DEFAULT_TENANT, blobs.as_ref()).await;
+        for notice in notices {
+            tracing::warn!("[plugin.{id}]: {notice}");
+        }
+    }
     let plugins: Arc<dyn crate::plugins::PluginResolver> =
-        Arc::new(crate::plugins::StaticPlugins::new(
-            manifest
-                .plugin
-                .iter()
-                .filter_map(|(id, spec)| Some((id.clone(), spec.bundle.clone()?)))
-                .collect(),
-        ));
+        Arc::new(crate::plugins::StaticPlugins::new(bundles));
     let connectors = manifest.connections();
     let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
     let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);

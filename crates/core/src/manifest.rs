@@ -102,8 +102,11 @@ impl Manifest {
         for section in wire.agent.values_mut() {
             section.signing_secret_env = None;
         }
+        // A plugin travels as a unit, named by `hash`. The config says which
+        // plugin it means; apply sends the plugin itself before this.
         for spec in wire.plugin.values_mut() {
             spec.path = None;
+            spec.bundle = None;
         }
         wire
     }
@@ -139,9 +142,9 @@ impl Manifest {
     }
 
     /// Load each plugin's bundle from its `path`, relative to `base`. Entries
-    /// that already have a bundle do not change. Returns the load notices.
-    pub fn resolve_plugins(&mut self, base: &std::path::Path) -> Result<Vec<String>> {
-        let mut notices = Vec::new();
+    /// that already have a bundle do not change.
+    pub fn resolve_plugins(&mut self, base: &std::path::Path) -> Result<ResolvedPlugins> {
+        let mut resolved = ResolvedPlugins::default();
         for (id, spec) in &mut self.plugin {
             if spec.bundle.is_some() {
                 continue;
@@ -151,18 +154,21 @@ impl Manifest {
             };
             let loaded = crate::plugins::load_dir(&base.join(path))
                 .map_err(|e| anyhow::anyhow!("[plugin.{id}]: {e}"))?;
-            notices.extend(
+            spec.hash = Some(loaded.hash());
+            resolved.notices.extend(
                 loaded
                     .notices
                     .into_iter()
                     .map(|n| format!("[plugin.{id}]: {n}")),
             );
-            spec.hash = Some(loaded.bundle.hash());
             spec.bundle = Some(loaded.bundle);
+            if !loaded.pending.is_empty() {
+                resolved.pending.insert(id.clone(), loaded.pending);
+            }
         }
         // The bundles add servers, which the checks must see.
         self.validate()?;
-        Ok(notices)
+        Ok(resolved)
     }
 
     /// The declared blocks as the engine reads them: venue and wire shape,
@@ -377,6 +383,16 @@ impl AgentSection {
     }
 }
 
+/// What resolving the plugin directories produced beside the bundles.
+#[derive(Debug, Default)]
+pub struct ResolvedPlugins {
+    /// What loading dropped. Not errors.
+    pub notices: Vec<String>,
+    /// Binaries to store, keyed by plugin id. Bytes, so they must not be
+    /// written into the manifest — only the ref a store returns belongs there.
+    pub pending: BTreeMap<String, Vec<crate::plugins::Pending>>,
+}
+
 /// One `[plugin.<id>]`. A file writes `path`; the wire copy carries `bundle`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -395,7 +411,9 @@ pub struct PluginSpec {
 
 fn check_plugin(id: &str, spec: &PluginSpec, manifest: &Manifest) -> Result<()> {
     check_id(id)?;
-    if spec.path.is_none() && spec.bundle.is_none() {
+    // A file declares a directory; the wire copy declares a hash, and the
+    // deployment reads the plugin that hash names.
+    if spec.path.is_none() && spec.bundle.is_none() && spec.hash.is_none() {
         bail!("declares nothing. Set `path` to the plugin's directory.");
     }
     let Some(bundle) = &spec.bundle else {
@@ -1526,7 +1544,7 @@ defer_tools = { strategy = "sometimes" }
                 name: "form-filling".into(),
                 description: "Fill forms.".into(),
                 body: "…".into(),
-                files: Default::default(),
+                ..Default::default()
             }],
             servers: [(
                 "renderer".to_string(),
@@ -1555,7 +1573,29 @@ defer_tools = { strategy = "sometimes" }
 
         let wire = m.for_wire();
         assert!(wire.plugin["pdf"].path.is_none());
-        assert!(wire.plugin["pdf"].bundle.is_some());
+        assert!(
+            wire.plugin["pdf"].bundle.is_none(),
+            "the content travels as a plugin, not inside the config"
+        );
+        assert!(
+            !serde_json::to_string(&wire)
+                .unwrap()
+                .contains("form-filling"),
+            "and nothing of it is left behind"
+        );
+    }
+
+    #[test]
+    fn a_wire_plugin_declares_itself_with_its_hash_alone() {
+        let mut m = plugin_manifest(r#"["pdf"]"#);
+        let spec = m.plugin.get_mut("pdf").unwrap();
+        spec.path = None;
+        spec.hash = Some("d0d0".into());
+        m.validate()
+            .expect("the deployment reads the plugin the hash names");
+
+        m.plugin.get_mut("pdf").unwrap().hash = None;
+        assert!(m.validate().is_err(), "and nothing at all is nothing");
     }
 
     #[test]

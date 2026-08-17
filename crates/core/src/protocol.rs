@@ -208,6 +208,15 @@ impl StoredResult {
         }
     }
 
+    /// A tool that ran and reported failure. Settles the same way a
+    /// connection's `is_error` does.
+    pub fn error(text: impl Into<String>) -> Self {
+        Self {
+            is_error: true,
+            ..Self::text(text)
+        }
+    }
+
     pub fn as_text(&self) -> String {
         self.content
             .iter()

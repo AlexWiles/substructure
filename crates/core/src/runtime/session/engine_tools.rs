@@ -1,10 +1,13 @@
 //! The engine's own tools. Each answer is a function of [`SessionState`], so a
 //! replay gives the same answer. Definitions live in [`filter`].
+//!
+//! An answer is a [`StoredResult`], the shape a connection and a worker
+//! settle with, so the model cannot tell the three apart.
 
-use super::state::{LocalAnswer, SessionState};
+use super::state::SessionState;
 use crate::connectors::filter;
-use crate::plugins::PluginBundle;
-use crate::protocol::ConnectorToolKind;
+use crate::plugins::{PluginBundle, Skill};
+use crate::protocol::{ConnectorToolKind, StoredContent, StoredResult};
 
 /// `None` hands the call to its target.
 pub fn answer(
@@ -12,7 +15,7 @@ pub fn answer(
     kind: ConnectorToolKind,
     leaf: Option<&str>,
     arguments: &str,
-) -> Option<LocalAnswer> {
+) -> Option<StoredResult> {
     match kind {
         ConnectorToolKind::Remote => None,
         ConnectorToolKind::Find => Some(find(state, leaf, arguments)),
@@ -23,8 +26,8 @@ pub fn answer(
 }
 
 /// BM25 over every tool the agent can reach.
-fn find(state: &SessionState, leaf: Option<&str>, arguments: &str) -> LocalAnswer {
-    LocalAnswer::Result(filter::find_answer(
+fn find(state: &SessionState, leaf: Option<&str>, arguments: &str) -> StoredResult {
+    StoredResult::text(filter::find_answer(
         &state.searchable_tools(leaf),
         &argument(arguments, "query"),
         state
@@ -36,8 +39,8 @@ fn find(state: &SessionState, leaf: Option<&str>, arguments: &str) -> LocalAnswe
 }
 
 /// A `call_tool` that gets here could not be routed.
-fn call(state: &SessionState, leaf: Option<&str>, arguments: &str) -> LocalAnswer {
-    LocalAnswer::Error(
+fn call(state: &SessionState, leaf: Option<&str>, arguments: &str) -> StoredResult {
+    StoredResult::error(
         state
             .call_tool_fault(arguments, leaf)
             .unwrap_or_else(|| "the call could not be routed".to_string()),
@@ -64,11 +67,11 @@ pub fn skill_answer(
     bundle: Option<&PluginBundle>,
     leaf: Option<&str>,
     arguments: &str,
-) -> LocalAnswer {
+) -> StoredResult {
     let named = argument(arguments, "name");
     let file = Some(argument(arguments, "file")).filter(|f| !f.is_empty());
     let Some(config) = state.resolve_agent_for(leaf) else {
-        return LocalAnswer::Error("this agent has no config on this branch".to_string());
+        return StoredResult::error("this agent has no config on this branch");
     };
     let catalog = || {
         config
@@ -81,20 +84,20 @@ pub fn skill_answer(
 
     let (plugin_id, skill_name) = split_skill(&named);
     if plugin_id.is_empty() {
-        return LocalAnswer::Error(format!(
+        return StoredResult::error(format!(
             "`{named}` is not a skill name. Skills are named `<plugin>:<skill>`; this agent's \
              plugins: {}.",
             catalog()
         ));
     }
     let Some(plugin) = config.plugins.iter().find(|p| p.id == plugin_id) else {
-        return LocalAnswer::Error(format!(
+        return StoredResult::error(format!(
             "no plugin `{plugin_id}` for this agent. Declared: {}.",
             catalog()
         ));
     };
     let Some(bundle) = bundle else {
-        return LocalAnswer::Error(format!(
+        return StoredResult::error(format!(
             "plugin `{plugin_id}` has no data on this engine; re-apply the project"
         ));
     };
@@ -105,39 +108,55 @@ pub fn skill_answer(
             .map(|s| format!("{}:{} — {}", plugin.id, s.name, s.description))
             .collect::<Vec<_>>()
             .join("\n");
-        return LocalAnswer::Error(format!(
+        return StoredResult::error(format!(
             "no skill `{skill_name}` in plugin `{plugin_id}`. Its skills:\n{listed}"
         ));
     };
 
     match file {
-        Some(path) => match skill.files.get(&path) {
-            Some(content) => LocalAnswer::Result(content.clone()),
-            None => LocalAnswer::Error(format!(
-                "no file `{path}` in skill `{named}`. Its files:\n{}",
-                skill_files(skill)
-            )),
-        },
+        Some(path) => file_answer(skill, &named, &path),
         None => {
             let mut answer = format!("Skill {named} — {}\n\n{}", skill.description, skill.body);
-            if !skill.files.is_empty() {
+            let listed = skill_files(skill);
+            if !listed.is_empty() {
                 answer.push_str(&format!(
-                    "\n\nFiles (read one with `skill` and `file`):\n{}",
-                    skill_files(skill)
+                    "\n\nFiles (read one with `skill` and `file`):\n{listed}"
                 ));
             }
-            LocalAnswer::Result(answer)
+            StoredResult::text(answer)
         }
     }
 }
 
-fn skill_files(skill: &crate::plugins::Skill) -> String {
-    skill
-        .files
-        .keys()
-        .map(|k| format!("- {k}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// A text file inlines. A binary answers with its blob, the same content a
+/// connection returns for an image or a document.
+fn file_answer(skill: &Skill, named: &str, path: &str) -> StoredResult {
+    if let Some(content) = skill.files.get(path) {
+        return StoredResult::text(content.clone());
+    }
+    match skill.binaries.get(path) {
+        Some(binary) => StoredResult {
+            content: vec![StoredContent::Blob {
+                uri: binary.uri.clone(),
+            }],
+            ..Default::default()
+        },
+        None => StoredResult::error(format!(
+            "no file `{path}` in skill `{named}`. Its files:\n{}",
+            skill_files(skill)
+        )),
+    }
+}
+
+/// Text files by path, binaries with what they are — the model reads the mime
+/// before it decides to ask.
+fn skill_files(skill: &Skill) -> String {
+    let text = skill.files.keys().map(|path| format!("- {path}"));
+    let binaries = skill
+        .binaries
+        .iter()
+        .map(|(path, b)| format!("- {path} ({}, {} bytes)", b.mime, b.size));
+    text.chain(binaries).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]
@@ -196,6 +215,15 @@ mod tests {
                     description: "Fill out PDF forms.".to_string(),
                     body: "Read references/FORMS.md first.".to_string(),
                     files: [("references/FORMS.md".to_string(), "field rules".to_string())].into(),
+                    binaries: [(
+                        "references/sample.pdf".to_string(),
+                        crate::plugins::Binary {
+                            uri: "blob://t1/1?mime=application/pdf&size=3".to_string(),
+                            mime: "application/pdf".to_string(),
+                            size: 3,
+                        },
+                    )]
+                    .into(),
                 }],
                 ..Default::default()
             },
@@ -211,11 +239,14 @@ mod tests {
             None,
             r#"{"name":"pdf:form-filling"}"#,
         );
-        let LocalAnswer::Result(text) = answer else {
-            panic!("expected a result; got {answer:?}");
-        };
+        assert!(!answer.is_error, "expected a result; got {answer:?}");
+        let text = answer.as_text();
         assert!(text.contains("Read references/FORMS.md first."), "{text}");
         assert!(text.contains("- references/FORMS.md"), "{text}");
+        assert!(
+            text.contains("- references/sample.pdf (application/pdf, 3 bytes)"),
+            "a binary is listed with what it is: {text}"
+        );
     }
 
     #[test]
@@ -226,7 +257,25 @@ mod tests {
             None,
             r#"{"name":"pdf:form-filling","file":"references/FORMS.md"}"#,
         );
-        assert!(matches!(answer, LocalAnswer::Result(t) if t == "field rules"));
+        assert_eq!(answer, StoredResult::text("field rules"));
+    }
+
+    #[test]
+    fn a_binary_answers_with_its_blob() {
+        let answer = skill_answer(
+            &state_with_plugin(),
+            bundles().get("pdf"),
+            None,
+            r#"{"name":"pdf:form-filling","file":"references/sample.pdf"}"#,
+        );
+        assert_eq!(
+            answer.content,
+            vec![StoredContent::Blob {
+                uri: "blob://t1/1?mime=application/pdf&size=3".to_string()
+            }],
+            "the bytes reach the model the way a connection's do"
+        );
+        assert!(!answer.is_error);
     }
 
     #[test]
@@ -245,9 +294,11 @@ mod tests {
         ];
         for (arguments, expected) in cases {
             let answer = skill_answer(&state_with_plugin(), bundles().get("pdf"), None, arguments);
-            let LocalAnswer::Error(text) = answer else {
-                panic!("{arguments}: expected a fault; got {answer:?}");
-            };
+            assert!(
+                answer.is_error,
+                "{arguments}: expected a fault; got {answer:?}"
+            );
+            let text = answer.as_text();
             assert!(text.contains(expected), "{arguments}: {text}");
         }
     }

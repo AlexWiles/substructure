@@ -12,6 +12,7 @@ pub mod notices;
 pub mod open;
 pub mod orgs;
 pub(crate) mod pickers;
+pub(crate) mod plugins;
 pub(crate) mod print;
 pub(crate) mod project_config;
 pub mod projects;

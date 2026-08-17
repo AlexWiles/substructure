@@ -11,7 +11,7 @@ use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
 use crate::runtime::session::engine_tools;
-use crate::runtime::session::state::{EffectKind, LocalAnswer};
+use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteInput};
 use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
@@ -190,19 +190,13 @@ async fn handle_task(
                 );
                 return;
             };
-            let outcome = match answer {
-                LocalAnswer::Result(result) => Outcome::Tool {
-                    result: StoredResult::text(result),
-                },
-                LocalAnswer::Error(message) => {
-                    SettleError::new(ErrorInfo::new(ErrorCode::HandlerError, message), false).into()
-                }
-            };
+            // Settled by the path a connection's call takes: one shape, one
+            // reading of `is_error`, whoever answered.
             submit(
                 store,
                 &session_id,
                 &tenant_id,
-                CommandPayload::settle(EffectKind::ToolCall, tool_call_id, Some(attempt), outcome),
+                settle_call(tool_call_id, attempt, Ok(answer)),
                 span,
                 "connector_answer",
             )

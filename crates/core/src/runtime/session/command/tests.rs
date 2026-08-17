@@ -8,7 +8,7 @@ use crate::runtime::session::reconcile::plan_reconcile;
 use chrono::Utc;
 
 use super::super::aggregate::{CommitContext, SessionAggregate};
-use super::super::state::{AgentVersion, LocalAnswer, Logged};
+use super::super::state::{AgentVersion, Logged};
 use super::*;
 use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
@@ -7239,13 +7239,12 @@ fn a_search_answers_at_the_anchor_of_the_call() {
         "the head has dropped the connection, so a new call would find nothing"
     );
 
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         answer["tools"][0]["name"], "sentry__search_issues",
@@ -7400,13 +7399,12 @@ fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
         "the engine answers it; the worker is not asked to; got {events:?}"
     );
 
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result, not an error");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result, not an error");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(answer["tools"][0]["name"], "sentry__search_issues");
     assert_eq!(answer["matched"], 1);
@@ -7503,13 +7501,12 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
         "call_tool",
         r#"{"name":"sentry__resolve_issue","arguments":{}}"#,
     );
-    let LocalAnswer::Error(message) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a refused name is an error, not a result");
-    };
+        .expect("the engine answers this one");
+    assert!(settled.is_error, "a refused name is an error, not a result");
+    let message = settled.as_text();
     assert!(
         message.contains("resolve_issue"),
         "the message names what the model asked for: {message}"
@@ -7549,13 +7546,12 @@ fn two_searched_connections_share_one_pair_and_one_search() {
     );
 
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result, not an error");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result, not an error");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         answer["tools"][0]["name"], "linear__search_issues",
@@ -7598,13 +7594,12 @@ fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
     );
 
     call(&mut agg, "tc-9", "tool_search", r#"{"query":"issues"}"#);
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-9")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         answer["tools"][0]["name"], "linear__search_issues",
@@ -7655,13 +7650,12 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
     );
 
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a find is a result");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a find is a result");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(
         answer["tools"][0]["name"], "sentry__search_issues",
@@ -7869,13 +7863,12 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
         "call_tool",
         r#"{"name":"sentry__search_issues","arguments":{"query":7}}"#,
     );
-    let LocalAnswer::Error(message) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("bad arguments are an error");
-    };
+        .expect("the engine answers this one");
+    assert!(settled.is_error, "bad arguments are an error");
+    let message = settled.as_text();
     assert!(
         message.contains("query"),
         "the message names the field: {message}"
@@ -8022,13 +8015,12 @@ fn a_worker_tool_can_defer_and_the_search_finds_it() {
 
     // The search reaches a tool no connection owns.
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"email"}"#);
-    let LocalAnswer::Result(result) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("a search is a result");
-    };
+        .expect("the engine answers this one");
+    assert!(!settled.is_error, "a search is a result");
+    let result = settled.as_text();
     let answer: serde_json::Value = serde_json::from_str(&result).expect("json");
     assert_eq!(answer["tools"][0]["name"], "send_email");
     assert_eq!(
@@ -8079,13 +8071,12 @@ fn a_deferred_worker_tool_still_checks_its_arguments() {
         "call_tool",
         r#"{"name":"send_email","arguments":{"to":7}}"#,
     );
-    let LocalAnswer::Error(message) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("bad arguments are an error");
-    };
+        .expect("the engine answers this one");
+    assert!(settled.is_error, "bad arguments are an error");
+    let message = settled.as_text();
     assert!(
         message.contains("to"),
         "the provider never saw this schema, so the engine checks it: {message}"
@@ -8113,13 +8104,12 @@ fn call_tool_refuses_a_connection_this_agent_does_not_have() {
         "call_tool",
         r#"{"name":"github__search_issues","arguments":{}}"#,
     );
-    let LocalAnswer::Error(message) = agg
+    let settled = agg
         .state
         .local_connector_answer("tc-1")
-        .expect("the engine answers this one")
-    else {
-        panic!("an unknown connection is an error");
-    };
+        .expect("the engine answers this one");
+    assert!(settled.is_error, "an unknown connection is an error");
+    let message = settled.as_text();
     assert!(
         message.contains("github__search_issues"),
         "the message names what was asked for: {message}"

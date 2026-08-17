@@ -49,18 +49,19 @@ subs run "the database is down, what do I do?"
 
 ## What happens
 
-The model's system prompt carries a catalog entry: the plugin, its skills,
-and their descriptions. Nothing else — the file server has not been dialled.
+The agent names the plugin, so the engine fetches its server before the first
+model call and announces it once. The system prompt carries the plugin's
+catalog entry — the plugin, its skills, and their descriptions — and the
+server's tools. The skills themselves stay out until one is asked for.
 
 The incident matches the skill, so the model calls
-`skill({name: "runbooks:respond"})`. That one call loads the skill's
-instructions, **enables the plugin**, and connects its server. The skill says
-to answer from the runbooks, so the model lists them, reads the matching one,
-and reads the bundled escalation policy with the same `skill` tool and a
+`skill({name: "runbooks:respond"})` and gets the instructions back. The skill
+says to answer from the runbooks, so the model lists them, reads the matching
+one, and reads the bundled escalation policy with the same `skill` tool and a
 `file` argument.
 
-Enabling is recorded where it happened: a fork of the session from before the
-call does not inherit it, and an unused plugin never dials anything.
+The model does not turn the plugin on; naming it in the config did that.
+`skill` reads a skill and nothing else.
 
 ## The plugin's server is a connection
 

@@ -9,7 +9,8 @@ use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::connectors::registry::ConnectionSpec;
-use crate::protocol::{ConnectorProtocol, SkillMeta};
+use crate::protocol::{ConnectorProtocol, SkillMeta, OCTET_STREAM};
+use crate::runtime::blob::{BlobStore, NewBlob};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PluginBundle {
@@ -34,6 +35,29 @@ pub struct Skill {
     /// Skill-relative path → UTF-8 content.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, String>,
+    /// Skill-relative path → a file that is not text. The bytes are in blob
+    /// storage; the bundle holds the ref.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub binaries: BTreeMap<String, Binary>,
+}
+
+/// A skill's non-text file, once it is stored.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Binary {
+    /// `blob://…`
+    pub uri: String,
+    pub mime: String,
+    pub size: u64,
+}
+
+/// A binary read from the directory and not yet stored. Never part of a
+/// bundle: bytes must not travel with the config.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pending {
+    pub skill: String,
+    pub path: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
 }
 
 impl PluginBundle {
@@ -96,6 +120,26 @@ pub struct Loaded {
     pub bundle: PluginBundle,
     /// What loading dropped. Not errors.
     pub notices: Vec<String>,
+    /// Binaries waiting for a blob store. Empty once [`store_binaries`] runs.
+    pub pending: Vec<Pending>,
+}
+
+impl Loaded {
+    /// What the directory holds, binaries included. Taken before they are
+    /// stored: a ref is minted per put, so a hash over the refs would differ
+    /// on every load of an unchanged plugin.
+    pub fn hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(self.bundle.hash());
+        for file in &self.pending {
+            digest.update(&file.skill);
+            digest.update(&file.path);
+            digest.update(&file.mime);
+            digest.update(&file.bytes);
+        }
+        format!("{:x}", digest.finalize())
+    }
 }
 
 /// The connection id of a plugin's server.
@@ -116,7 +160,8 @@ pub fn load_dir(root: &Path) -> Result<Loaded> {
         bail!("{}: `name` is empty", manifest_path.display());
     }
 
-    let skills = load_skills(&root.join("skills"), &mut notices)?;
+    let mut pending = Vec::new();
+    let skills = load_skills(&root.join("skills"), &mut pending, &mut notices)?;
     let servers = load_servers(&root.join("mcp.json"), &mut notices)?;
 
     if root.join("hooks").is_dir() {
@@ -138,10 +183,68 @@ pub fn load_dir(root: &Path) -> Result<Loaded> {
             root.display()
         );
     }
-    Ok(Loaded { bundle, notices })
+    let binary_bytes: usize = pending.iter().map(|p| p.bytes.len()).sum();
+    if binary_bytes > MAX_BINARY_BYTES {
+        bail!(
+            "{} holds {binary_bytes} bytes of binary skill files; the limit is \
+             {MAX_BINARY_BYTES}. Serve files this large from a server instead.",
+            root.display()
+        );
+    }
+    Ok(Loaded {
+        bundle,
+        notices,
+        pending,
+    })
 }
 
+/// Skill text rides in the prompt, so this budget is small.
 const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
+
+/// A binary never rides in the prompt. It only has to be stored.
+const MAX_BINARY_BYTES: usize = 100 * 1024 * 1024;
+
+/// Put each pending binary in blob storage and stamp the ref on its skill. A
+/// file that will not store is dropped with a notice, the way loading drops
+/// one it cannot read.
+pub async fn store_binaries(
+    bundle: &mut PluginBundle,
+    pending: Vec<Pending>,
+    tenant_id: &str,
+    blobs: &dyn BlobStore,
+) -> Vec<String> {
+    let mut notices = Vec::new();
+    for file in pending {
+        let size = file.bytes.len() as u64;
+        let put = blobs
+            .put(NewBlob {
+                tenant_id: tenant_id.to_string(),
+                mime: file.mime.clone(),
+                name: file.path.rsplit('/').next().map(str::to_string),
+                bytes: file.bytes,
+            })
+            .await;
+        match put {
+            Ok(stored) => {
+                if let Some(skill) = bundle.skills.iter_mut().find(|s| s.name == file.skill) {
+                    skill.binaries.insert(
+                        file.path,
+                        Binary {
+                            uri: stored.uri(),
+                            mime: file.mime,
+                            size,
+                        },
+                    );
+                }
+            }
+            Err(e) => notices.push(format!(
+                "{} in skill `{}` was not stored and is unreadable: {e}",
+                file.path, file.skill
+            )),
+        }
+    }
+    notices
+}
 
 fn content_bytes(bundle: &PluginBundle) -> usize {
     bundle
@@ -160,7 +263,11 @@ struct PluginManifest {
     description: String,
 }
 
-fn load_skills(dir: &Path, notices: &mut Vec<String>) -> Result<Vec<Skill>> {
+fn load_skills(
+    dir: &Path,
+    pending: &mut Vec<Pending>,
+    notices: &mut Vec<String>,
+) -> Result<Vec<Skill>> {
     let mut skills = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(skills);
@@ -171,15 +278,20 @@ fn load_skills(dir: &Path, notices: &mut Vec<String>) -> Result<Vec<Skill>> {
         .collect();
     dirs.sort();
     for skill_dir in dirs {
-        match load_skill(&skill_dir, notices) {
-            Ok(skill) => skills.push(skill),
+        // A skill that fails leaves nothing behind, its binaries included.
+        let mut found = Vec::new();
+        match load_skill(&skill_dir, &mut found, notices) {
+            Ok(skill) => {
+                skills.push(skill);
+                pending.append(&mut found);
+            }
             Err(e) => notices.push(format!("skill {} skipped: {e}", skill_dir.display())),
         }
     }
     Ok(skills)
 }
 
-fn load_skill(dir: &Path, notices: &mut Vec<String>) -> Result<Skill> {
+fn load_skill(dir: &Path, pending: &mut Vec<Pending>, notices: &mut Vec<String>) -> Result<Skill> {
     let text = std::fs::read_to_string(dir.join("SKILL.md")).context("no SKILL.md")?;
     let (front, body) = split_frontmatter(&text)?;
     let name = frontmatter_value(front, "name").ok_or_else(|| unreadable_key(front, "name"))?;
@@ -194,14 +306,22 @@ fn load_skill(dir: &Path, notices: &mut Vec<String>) -> Result<Skill> {
     }
 
     let mut files = BTreeMap::new();
-    collect_files(dir, dir, &mut files, notices)?;
+    let mut found = Vec::new();
+    collect_files(dir, dir, &mut files, &mut found, notices)?;
     files.remove("SKILL.md");
+    pending.extend(found.into_iter().map(|(path, mime, bytes)| Pending {
+        skill: name.clone(),
+        path,
+        mime,
+        bytes,
+    }));
 
     Ok(Skill {
         name,
         description: sanitize_line(&description),
         body: sanitize_text(body),
         files,
+        binaries: BTreeMap::new(),
     })
 }
 
@@ -260,6 +380,7 @@ fn collect_files(
     root: &Path,
     dir: &Path,
     files: &mut BTreeMap<String, String>,
+    binaries: &mut Vec<(String, String, Vec<u8>)>,
     notices: &mut Vec<String>,
 ) -> Result<()> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -274,7 +395,7 @@ fn collect_files(
             continue;
         }
         if path.is_dir() {
-            collect_files(root, &path, files, notices)?;
+            collect_files(root, &path, files, binaries, notices)?;
             continue;
         }
         let rel = path
@@ -282,14 +403,51 @@ fn collect_files(
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        match std::fs::read_to_string(&path) {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                notices.push(format!("{rel} was not read and was left behind: {e}"));
+                continue;
+            }
+        };
+        // Text inlines in the answer; anything else becomes a blob.
+        match String::from_utf8(bytes) {
             Ok(text) => {
                 files.insert(rel, sanitize_text(&text));
             }
-            Err(_) => notices.push(format!("{rel} is not UTF-8 text and was left behind")),
+            Err(e) => {
+                let mime = mime_for(&rel);
+                binaries.push((rel, mime, e.into_bytes()));
+            }
         }
     }
     Ok(())
+}
+
+/// The mime of a skill file, from its extension. Only what a skill plausibly
+/// carries; anything else is bytes.
+fn mime_for(path: &str) -> String {
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/vnd.microsoft.icon",
+        Some("tif" | "tiff") => "image/tiff",
+        Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        Some("gz") => "application/gzip",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("mp4") => "video/mp4",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        _ => OCTET_STREAM,
+    }
+    .to_string()
 }
 
 fn load_servers(
@@ -443,6 +601,69 @@ mod tests {
             !skill.files.contains_key("SKILL.md"),
             "the body is not a file"
         );
+    }
+
+    /// Bytes no `String` will hold.
+    fn png(root: &Path, rel: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, [0x89, b'P', b'N', b'G', 0xff, 0xfe]).unwrap();
+    }
+
+    #[test]
+    fn a_binary_skill_file_waits_for_a_blob_store() {
+        let dir = plugin_dir();
+        png(dir.path(), "skills/form-filling/references/form.png");
+        let loaded = load_dir(dir.path()).unwrap();
+        let skill = &loaded.bundle.skills[0];
+        assert!(
+            !skill.files.contains_key("references/form.png"),
+            "a binary is not skill text"
+        );
+        assert!(
+            skill.binaries.is_empty(),
+            "nothing is stamped before it is stored"
+        );
+        assert_eq!(loaded.pending.len(), 1);
+        let pending = &loaded.pending[0];
+        assert_eq!(pending.skill, "form-filling");
+        assert_eq!(pending.path, "references/form.png");
+        assert_eq!(pending.mime, "image/png");
+    }
+
+    #[tokio::test]
+    async fn storing_a_binary_leaves_the_bundle_holding_a_ref() {
+        let dir = plugin_dir();
+        png(dir.path(), "skills/form-filling/references/form.png");
+        let mut loaded = load_dir(dir.path()).unwrap();
+        let blobs = crate::runtime::blob::MemoryBlobStore::new();
+        let notices = store_binaries(&mut loaded.bundle, loaded.pending, "t1", &blobs).await;
+        assert!(notices.is_empty(), "got {notices:?}");
+
+        let binary = &loaded.bundle.skills[0].binaries["references/form.png"];
+        assert_eq!(binary.mime, "image/png");
+        assert_eq!(binary.size, 6);
+        let stored = crate::runtime::blob::BlobRef::parse(&binary.uri).expect("a ref");
+        assert_eq!(blobs.get(&stored).await.unwrap().len(), 6);
+        assert!(
+            !serde_json::to_string(&loaded.bundle)
+                .unwrap()
+                .contains("PNG"),
+            "the bytes do not travel with the config"
+        );
+    }
+
+    #[test]
+    fn the_hash_follows_a_binary_that_changed() {
+        let dir = plugin_dir();
+        png(dir.path(), "skills/form-filling/references/form.png");
+        let before = load_dir(dir.path()).unwrap().hash();
+        std::fs::write(
+            dir.path().join("skills/form-filling/references/form.png"),
+            [0x89, b'P', b'N', b'G', 0x00, 0x01],
+        )
+        .unwrap();
+        assert_ne!(before, load_dir(dir.path()).unwrap().hash());
     }
 
     #[test]

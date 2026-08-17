@@ -155,9 +155,8 @@ pub fn skill_tool() -> ConnectorTool {
     engine_tool(
         SKILL,
         "Load a skill's instructions. The plugin catalog lists each plugin and its skills; \
-         name one as `<plugin>:<skill>` and follow what comes back. Using a skill activates \
-         its plugin, which also connects the plugin's tools. Pass `file` to read one of the \
-         files the instructions reference."
+         name one as `<plugin>:<skill>` and follow what comes back. Pass `file` to read one \
+         of the files the instructions reference."
             .to_string(),
         serde_json::json!({
             "type": "object",

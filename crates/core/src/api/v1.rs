@@ -314,6 +314,60 @@ pub struct ApplyResponse {
     pub notices: Vec<Notice>,
 }
 
+/// A plugin a deployment holds, by the hash of the directory it came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHead {
+    pub id: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHeads {
+    #[serde(default)]
+    pub plugins: Vec<PluginHead>,
+}
+
+/// One plugin, whole, as apply sends it before the config. The config that
+/// names this plugin carries the hash and nothing else, so the deployment
+/// must hold this before the document that references it.
+///
+/// The deployment puts each binary in its blob store and stamps the ref onto
+/// the matching skill. Bytes belong in neither the config nor the bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPush {
+    pub hash: String,
+    /// The bundle as the directory read: skills, their text files, and the
+    /// `mcp.json` servers. Binary refs are absent — the deployment stamps them.
+    pub bundle: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binaries: Vec<PluginBinary>,
+}
+
+/// A skill's non-text file, in flight. `bytes` is standard base64.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginBinary {
+    pub skill: String,
+    pub path: String,
+    pub mime: String,
+    pub bytes: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPushed {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub hash: String,
+    /// How many binaries the deployment stored.
+    #[serde(default)]
+    pub binaries: usize,
+}
+
 /// What a project still needs, as it stands. Its own response rather than a
 /// bare list, so a deployment that learns to report something beside the
 /// notices has somewhere to put it.
