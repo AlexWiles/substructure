@@ -2,7 +2,7 @@ use crate::protocol::StoredResult;
 use std::collections::HashMap;
 
 use crate::protocol::{
-    Announce, ClientAppend, ClientMessage, ClientMessages, DeferTools, NewMessage, OwnerKind,
+    Announce, ClientAppend, ClientMessage, ClientMessages, DeferTools, NewMessage,
 };
 use crate::runtime::session::reconcile::plan_reconcile;
 use chrono::Utc;
@@ -58,10 +58,11 @@ fn create_session_with_config(
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: tenant_id.to_string(),
-                id: Some(user_id.to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), user_id.to_string()),
+                    Default::default(),
+                ),
                 metadata: HashMap::new(),
             },
             ancestry: vec![],
@@ -151,7 +152,7 @@ fn frontend_can_complete_own_client_handled_tool_call() {
         ),
         &Caller::Frontend {
             tenant_id: "tenant-a".to_string(),
-            user_id: "user-1".to_string(),
+            subject: Subject::new(Issuer::app(), "user-1".to_string()),
             attrs: HashMap::new(),
         },
     );
@@ -196,7 +197,7 @@ fn frontend_with_mismatched_user_id_is_denied() {
 
     let caller = Caller::Frontend {
         tenant_id: "tenant-a".to_string(),
-        user_id: "other-user".to_string(),
+        subject: Subject::new(Issuer::app(), "other-user".to_string()),
         attrs: HashMap::new(),
     };
 
@@ -238,7 +239,7 @@ fn frontend_cannot_complete_worker_handled_tool_call() {
 
     let caller = Caller::Frontend {
         tenant_id: "tenant-a".to_string(),
-        user_id: "user-1".to_string(),
+        subject: Subject::new(Issuer::app(), "user-1".to_string()),
         attrs: HashMap::new(),
     };
 
@@ -2977,7 +2978,7 @@ fn system() -> Caller {
 fn frontend() -> Caller {
     Caller::Frontend {
         tenant_id: "tenant-a".to_string(),
-        user_id: "user-1".to_string(),
+        subject: Subject::new(Issuer::app(), "user-1".to_string()),
         attrs: HashMap::new(),
     }
 }
@@ -2985,7 +2986,7 @@ fn frontend() -> Caller {
 fn admin() -> Caller {
     Caller::Operator {
         tenant_id: "tenant-a".to_string(),
-        user_id: "alex@example.test".to_string(),
+        subject: Subject::new(Issuer::operator(), "alex@example.test".to_string()),
     }
 }
 
@@ -3641,7 +3642,7 @@ fn machine_resumes_machine_interrupt() {
 fn frontend_caller(tenant_id: &str, user_id: &str) -> Caller {
     Caller::Frontend {
         tenant_id: tenant_id.to_string(),
-        user_id: user_id.to_string(),
+        subject: Subject::new(Issuer::app(), user_id.to_string()),
         attrs: HashMap::new(),
     }
 }
@@ -4770,7 +4771,7 @@ fn frontend_caller_with_mismatched_tenant_on_create_session_is_denied() {
 
     let caller = Caller::Frontend {
         tenant_id: "tenant-a".to_string(),
-        user_id: "user-1".to_string(),
+        subject: Subject::new(Issuer::app(), "user-1".to_string()),
         attrs: HashMap::new(),
     };
 
@@ -4779,10 +4780,11 @@ fn frontend_caller_with_mismatched_tenant_on_create_session_is_denied() {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
-                    kind: OwnerKind::Frontend,
-                    audience: Default::default(),
                     tenant_id: "tenant-b".to_string(),
-                    id: Some("user-1".to_string()),
+                    requester: Requester::new(
+                        Subject::new(Issuer::app(), "user-1".to_string()),
+                        Default::default(),
+                    ),
                     metadata: HashMap::new(),
                 },
                 ancestry: vec![],
@@ -5673,10 +5675,11 @@ fn create_session_with_retry(retry: RetryPolicy) -> SessionAggregate {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
-                id: Some("user-1".to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
                 metadata: HashMap::new(),
             },
             ancestry: vec![],
@@ -6244,6 +6247,7 @@ fn turn_finished_deadline_completes_when_exhausted() {
 
 // ── Branch-scoped worker state ───────────────────────────────────────
 
+use crate::protocol::{Issuer, Requester, Subject};
 use serde_json::json;
 
 fn open_decision(agg: &mut SessionAggregate, text: &str) -> String {
@@ -8603,10 +8607,11 @@ fn create_session_emits_session_start_before_client_input() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
-                id: Some("user-1".to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
                 metadata: HashMap::new(),
             },
             ancestry: vec![],
@@ -8639,10 +8644,11 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
-                id: Some("user-1".to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
                 metadata: HashMap::new(),
             },
             ancestry: vec![],
@@ -8729,10 +8735,11 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
-                id: Some("user-1".to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
                 metadata: HashMap::new(),
             },
             ancestry: vec![],
@@ -8860,10 +8867,11 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
-                id: Some("user-1".to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
                 metadata: HashMap::new(),
             },
             ancestry: vec![],
@@ -9713,10 +9721,11 @@ fn fork_drops_a_retrying_settle_decision() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
-                id: Some("user-1".to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
                 metadata: HashMap::new(),
             },
             ancestry: vec![],
@@ -10251,10 +10260,11 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
         CommandPayload::CreateSession {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
-                id: Some("user-1".to_string()),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
                 metadata: HashMap::new(),
             },
             ancestry: vec![],

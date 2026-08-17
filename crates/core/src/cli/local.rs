@@ -108,13 +108,13 @@ fn authorize_page(cfg: &ProjectConfig) -> Option<String> {
 fn consent(
     mcp_auth: &Option<Arc<McpAuthDeps>>,
     cfg: &ProjectConfig,
-) -> crate::transport::slack::Consent {
-    use crate::transport::slack::Consent;
+) -> Arc<dyn crate::transport::consent::Consent> {
+    use crate::transport::consent::{CliConsent, DashboardConsent, EngineConsent};
     match mcp_auth {
-        Some(deps) => Consent::Engine(deps.links.clone()),
+        Some(deps) => Arc::new(EngineConsent(deps.links.clone())),
         None => match authorize_page(cfg) {
-            Some(page) => Consent::Dashboard(page),
-            None => Consent::Cli,
+            Some(page) => Arc::new(DashboardConsent(page)),
+            None => Arc::new(CliConsent),
         },
     }
 }
@@ -333,10 +333,10 @@ pub(crate) async fn start_engine(
         let holders = token_store.holders(DEFAULT_TENANT, id).await?;
         let scope = spec.effective_scope();
         let stranded = match scope {
-            CredentialScope::User => holders.contains(&crate::connectors::Subject::Shared),
+            CredentialScope::User => holders.contains(&crate::connectors::Slot::Shared),
             CredentialScope::Shared => holders
                 .iter()
-                .any(|h| matches!(h, crate::connectors::Subject::Person(_))),
+                .any(|h| matches!(h, crate::connectors::Slot::Of(_))),
         };
         if stranded {
             tracing::warn!(

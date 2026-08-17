@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use super::mcp::McpClient;
 use super::oauth::Probed;
-use super::{AuthNeed, ConnectorError, CredentialSource, Principal, RemoteTool, Subject};
+use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, Requester, Slot, Visibility};
 use crate::protocol::ConnectorProtocol;
 use crate::protocol::StoredResult;
 use crate::runtime::blob::BlobStore;
@@ -259,7 +259,7 @@ pub trait CredentialResolver: Send + Sync {
         &self,
         tenant_id: &str,
         id: &str,
-        subject: &Subject,
+        subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError>;
 
@@ -269,7 +269,7 @@ pub trait CredentialResolver: Send + Sync {
         &self,
         _tenant_id: &str,
         _id: &str,
-        _subject: &Subject,
+        _subject: &Slot,
         _spec: &ConnectionSpec,
     ) -> Result<bool, ConnectorError> {
         Ok(false)
@@ -280,7 +280,7 @@ struct Resolved {
     credentials: Arc<dyn CredentialResolver>,
     tenant_id: String,
     id: String,
-    subject: Subject,
+    subject: Slot,
     spec: ConnectionSpec,
 }
 
@@ -325,7 +325,7 @@ pub struct Connections {
     /// Keyed by the credential's identity, not the connection's: two persons
     /// on one connection are two credentials, and one client would send the
     /// first person's to the second.
-    clients: Mutex<HashMap<(String, String, Subject), CachedClient>>,
+    clients: Mutex<HashMap<(String, String, Slot), CachedClient>>,
     /// What each server answered an unauthenticated call with, keyed by URL:
     /// one server gives one answer however many connections name it, and the
     /// answer is the same for every person, so sharing it is correct.
@@ -348,32 +348,28 @@ impl Connections {
         }
     }
 
-    /// Whose credential slot this call reads, or why it must not read any.
-    /// The one decision point: every call and every fetch passes here.
-    pub(crate) fn subject_for(
+    /// Which credential this call reads, or why it must read none. The one
+    /// decision point: every call and every fetch passes here, and an outside
+    /// implementation applies it rather than restating it.
+    pub fn slot_for(
         id: &str,
         spec: &ConnectionSpec,
-        principal: &Principal,
-    ) -> Result<Subject, ConnectorError> {
-        use crate::protocol::Audience;
-        match (spec.effective_scope(), principal) {
-            (CredentialScope::Shared, _) => Ok(Subject::Shared),
-            (
-                CredentialScope::User,
-                Principal::Person {
-                    subject,
-                    audience: Audience::Private,
-                },
-            ) => Ok(Subject::Person(subject.clone())),
-            (CredentialScope::User, Principal::Person { .. }) => {
-                Err(ConnectorError::permanent(format!(
-                    "connection `{id}` uses your personal credential, and other people can \
-                     read this conversation. Continue in a direct message."
-                )))
-            }
-            (CredentialScope::User, Principal::Machine) => Err(ConnectorError::permanent(format!(
+        requester: &Requester,
+    ) -> Result<Slot, ConnectorError> {
+        if spec.effective_scope() == CredentialScope::Shared {
+            return Ok(Slot::Shared);
+        }
+        let Some(subject) = &requester.subject else {
+            return Err(ConnectorError::permanent(format!(
                 "connection `{id}` uses a personal credential, and no person is behind \
                  this session"
+            )));
+        };
+        match requester.visibility {
+            Visibility::Private => Ok(Slot::Of(subject.clone())),
+            Visibility::Shared => Err(ConnectorError::permanent(format!(
+                "connection `{id}` uses your personal credential, and other people can \
+                 read this conversation. Continue in a direct message."
             ))),
         }
     }
@@ -386,10 +382,10 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
-        principal: &Principal,
+        principal: &Requester,
     ) -> Result<Offer, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
-        let subject = Self::subject_for(id, &spec, principal)?;
+        let subject = Self::slot_for(id, &spec, principal)?;
         let (tools, instructions) = self
             .attempt(tenant_id, id, &subject, &spec, |client| async move {
                 let tools = client.list_tools().await?;
@@ -407,12 +403,12 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
-        principal: &Principal,
+        principal: &Requester,
         name: &str,
         arguments: &Value,
     ) -> Result<StoredResult, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
-        let subject = Self::subject_for(id, &spec, principal)?;
+        let subject = Self::slot_for(id, &spec, principal)?;
         self.attempt(tenant_id, id, &subject, &spec, |client| async move {
             client.call_tool(name, arguments).await
         })
@@ -428,7 +424,7 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
-        subject: &Subject,
+        subject: &Slot,
         spec: &ConnectionSpec,
         op: F,
     ) -> Result<T, ConnectorError>
@@ -460,7 +456,7 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
-        subject: &Subject,
+        subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<Arc<McpClient>, ConnectorError> {
         let key = (tenant_id.to_string(), id.to_string(), subject.clone());
@@ -502,7 +498,7 @@ impl Connections {
 
     /// Drop idle clients, then the least recently used past the cap. Dropping
     /// the map's `Arc` is the whole eviction: a call in flight holds its own.
-    fn evict(clients: &mut HashMap<(String, String, Subject), CachedClient>) {
+    fn evict(clients: &mut HashMap<(String, String, Slot), CachedClient>) {
         let now = std::time::Instant::now();
         clients.retain(|_, c| now.duration_since(c.last_used) < CLIENT_IDLE);
         while clients.len() >= MAX_CLIENTS {
@@ -583,6 +579,7 @@ impl Connections {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{Issuer, Subject};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn serve_accepting(accepted: &'static str) -> String {
@@ -664,7 +661,7 @@ mod tests {
             &self,
             _: &str,
             _: &str,
-            _: &Subject,
+            _: &Slot,
             _: &ConnectionSpec,
         ) -> Result<HeaderMap, ConnectorError> {
             crate::connectors::mcp::auth_headers(None, &self.current.lock().await.clone())
@@ -674,7 +671,7 @@ mod tests {
             &self,
             _: &str,
             _: &str,
-            _: &Subject,
+            _: &Slot,
             _: &ConnectionSpec,
         ) -> Result<bool, ConnectorError> {
             self.refreshes.fetch_add(1, Ordering::SeqCst);
@@ -713,7 +710,7 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", Some("fresh")));
         let offer = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry", &Principal::Machine)
+            .list_tools("t", "sentry", &Requester::machine())
             .await
             .expect("the retry carries the refreshed token");
 
@@ -728,7 +725,7 @@ mod tests {
         let connections = connections(url, credentials.clone()).await;
 
         connections
-            .list_tools("t", "sentry", &Principal::Machine)
+            .list_tools("t", "sentry", &Requester::machine())
             .await
             .expect_err("the stored credential is refused and cannot be refreshed");
 
@@ -736,7 +733,7 @@ mod tests {
         *credentials.current.lock().await = "fresh".to_string();
 
         let offer = connections
-            .list_tools("t", "sentry", &Principal::Machine)
+            .list_tools("t", "sentry", &Requester::machine())
             .await
             .expect("the credential written elsewhere goes out on the next request");
 
@@ -754,7 +751,7 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", Some("also-stale")));
         let err = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry", &Principal::Machine)
+            .list_tools("t", "sentry", &Requester::machine())
             .await
             .expect_err("the second refusal stands");
 
@@ -785,7 +782,7 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", None));
         let err = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry", &Principal::Machine)
+            .list_tools("t", "sentry", &Requester::machine())
             .await
             .expect_err("a refusal it cannot correct");
 
@@ -838,7 +835,7 @@ mod tests {
     /// in a private conversation, and refuses the rest with the reason.
     #[test]
     fn the_scope_and_principal_decide_whose_slot_a_call_reads() {
-        use crate::protocol::Audience;
+        use crate::protocol::Visibility;
         let shared = ConnectionSpec {
             url: "https://mcp.sentry.dev/mcp".into(),
             protocol: ConnectorProtocol::Mcp,
@@ -851,34 +848,31 @@ mod tests {
             credential: Some(CredentialScope::User),
             ..shared.clone()
         };
-        let person = |audience| Principal::Person {
-            subject: "slack:U1".to_string(),
-            audience,
-        };
+        let person =
+            |visibility| Requester::new(Subject::new(Issuer::slack(), "T1:U1"), visibility);
 
         for principal in [
-            Principal::Machine,
-            person(Audience::Private),
-            person(Audience::Shared),
+            Requester::machine(),
+            person(Visibility::Private),
+            person(Visibility::Shared),
         ] {
             assert_eq!(
-                Connections::subject_for("sentry", &shared, &principal).unwrap(),
-                Subject::Shared
+                Connections::slot_for("sentry", &shared, &principal).unwrap(),
+                Slot::Shared
             );
         }
 
         assert_eq!(
-            Connections::subject_for("gmail", &personal, &person(Audience::Private)).unwrap(),
-            Subject::Person("slack:U1".to_string())
+            Connections::slot_for("gmail", &personal, &person(Visibility::Private)).unwrap(),
+            Slot::Of(Subject::new(Issuer::slack(), "T1:U1"))
         );
 
         let refused =
-            Connections::subject_for("gmail", &personal, &person(Audience::Shared)).unwrap_err();
+            Connections::slot_for("gmail", &personal, &person(Visibility::Shared)).unwrap_err();
         assert!(refused.to_string().contains("direct message"), "{refused}");
         assert!(!refused.retryable);
 
-        let machine =
-            Connections::subject_for("gmail", &personal, &Principal::Machine).unwrap_err();
+        let machine = Connections::slot_for("gmail", &personal, &Requester::machine()).unwrap_err();
         assert!(machine.to_string().contains("no person"), "{machine}");
         assert!(machine.to_string().contains("gmail"), "names it: {machine}");
     }
@@ -887,11 +881,11 @@ mod tests {
     /// pulled out from under a call.
     #[test]
     fn the_client_map_stays_bounded_and_evicts_the_least_recent() {
-        let mut clients: HashMap<(String, String, Subject), CachedClient> = HashMap::new();
+        let mut clients: HashMap<(String, String, Slot), CachedClient> = HashMap::new();
         let now = std::time::Instant::now();
         for i in 0..MAX_CLIENTS + 5 {
             clients.insert(
-                ("t".into(), format!("c{i}"), Subject::Shared),
+                ("t".into(), format!("c{i}"), Slot::Shared),
                 CachedClient {
                     client: Arc::new(McpClient::new(
                         reqwest::Client::new(),
@@ -900,7 +894,7 @@ mod tests {
                             credentials: Arc::new(Rotating::new("x", None)),
                             tenant_id: "t".into(),
                             id: format!("c{i}"),
-                            subject: Subject::Shared,
+                            subject: Slot::Shared,
                             spec: ConnectionSpec {
                                 url: "https://example.test/mcp".into(),
                                 protocol: ConnectorProtocol::Mcp,
@@ -920,7 +914,7 @@ mod tests {
         Connections::evict(&mut clients);
         assert!(clients.len() < MAX_CLIENTS, "bounded: {}", clients.len());
         assert!(
-            clients.contains_key(&("t".to_string(), "c0".to_string(), Subject::Shared)),
+            clients.contains_key(&("t".to_string(), "c0".to_string(), Slot::Shared)),
             "the most recently used stays"
         );
     }
@@ -1005,7 +999,7 @@ mod tests {
                 &self,
                 _: &str,
                 _: &str,
-                _: &Subject,
+                _: &Slot,
                 _: &ConnectionSpec,
             ) -> Result<HeaderMap, ConnectorError> {
                 Ok(HeaderMap::new())

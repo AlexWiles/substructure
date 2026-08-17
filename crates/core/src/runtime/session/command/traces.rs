@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::protocol::{ErrorCode, LlmResponse, OwnerKind};
+use crate::protocol::{ErrorCode, LlmResponse};
 
 use super::super::aggregate::{CommitContext, SessionAggregate};
 use super::super::decision::Trigger;
@@ -26,6 +26,7 @@ use crate::protocol::{
     AgentConfig, AgentTool, ClientMessage, ClientPayload, Content, DraftMessage, Handler,
     McpServer, Role, ToolCall, ToolCallFunction,
 };
+use crate::protocol::{Issuer, Requester, Subject};
 use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
 
@@ -41,7 +42,7 @@ fn system() -> Caller {
 fn frontend() -> Caller {
     Caller::Frontend {
         tenant_id: TENANT.to_string(),
-        user_id: USER.to_string(),
+        subject: Subject::new(Issuer::app(), USER.to_string()),
         attrs: HashMap::new(),
     }
 }
@@ -223,10 +224,11 @@ impl Trace {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
-                    kind: OwnerKind::Frontend,
-                    audience: Default::default(),
                     tenant_id: TENANT.to_string(),
-                    id: Some(USER.to_string()),
+                    requester: Requester::new(
+                        Subject::new(Issuer::app(), USER.to_string()),
+                        Default::default(),
+                    ),
                     metadata: HashMap::new(),
                 },
                 ancestry: vec![],

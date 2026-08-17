@@ -53,10 +53,11 @@ CREATE TABLE blobs (
 CREATE TABLE "connector_credentials" (
             tenant_id     TEXT NOT NULL,
             connection_id TEXT NOT NULL,
+            issuer        TEXT NOT NULL,
             subject       TEXT NOT NULL,
             secret_id     TEXT NOT NULL,
-            PRIMARY KEY (tenant_id, connection_id, subject)
-        );
+            PRIMARY KEY (tenant_id, connection_id, issuer, subject)
+         );
 
 CREATE TABLE engine_worker_queue (
     decision_id  TEXT PRIMARY KEY,

@@ -82,7 +82,7 @@ impl SlackChannel {
     }
 
     /// Where this deployment sends a person to authorize a connection.
-    pub fn with_consent(mut self, consent: super::bot::Consent) -> Self {
+    pub fn with_consent(mut self, consent: Arc<dyn crate::transport::consent::Consent>) -> Self {
         self.bot = self.bot.with_consent(consent);
         self
     }

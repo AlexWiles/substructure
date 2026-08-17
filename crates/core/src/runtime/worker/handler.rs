@@ -285,11 +285,10 @@ mod tests {
 
     use super::{extract, AgentDirectory};
     use crate::connectors::RemoteTool;
-    use crate::protocol::OwnerKind;
     use crate::protocol::{
         AgentConfig, Approve, ClientMessage, ClientPayload, Content, DraftMessage, EffectKind,
-        LlmRequest, LlmResponse, McpServer, RetryPolicy, Role, SessionOwner, StoredResult,
-        ToolCall, ToolCallFunction,
+        Issuer, LlmRequest, LlmResponse, McpServer, Requester, RetryPolicy, Role, SessionOwner,
+        StoredResult, Subject, ToolCall, ToolCallFunction,
     };
     use crate::runtime::event_store::{
         AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, StoreError,
@@ -418,10 +417,11 @@ mod tests {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
-                    kind: OwnerKind::Frontend,
-                    audience: Default::default(),
                     tenant_id: "tenant-a".to_string(),
-                    id: Some("user-1".to_string()),
+                    requester: Requester::new(
+                        Subject::new(Issuer::app(), "user-1".to_string()),
+                        Default::default(),
+                    ),
                     metadata: HashMap::new(),
                 },
                 ancestry: vec![],
@@ -493,10 +493,11 @@ mod tests {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
-                    kind: OwnerKind::Frontend,
-                    audience: Default::default(),
                     tenant_id: "tenant-a".to_string(),
-                    id: Some("user-1".to_string()),
+                    requester: Requester::new(
+                        Subject::new(Issuer::app(), "user-1".to_string()),
+                        Default::default(),
+                    ),
                     metadata: HashMap::new(),
                 },
                 ancestry: vec![],
@@ -644,10 +645,11 @@ mod tests {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
-                    kind: OwnerKind::Frontend,
-                    audience: Default::default(),
                     tenant_id: "tenant-a".to_string(),
-                    id: Some("user-1".to_string()),
+                    requester: Requester::new(
+                        Subject::new(Issuer::app(), "user-1".to_string()),
+                        Default::default(),
+                    ),
                     metadata: HashMap::new(),
                 },
                 ancestry: vec![],

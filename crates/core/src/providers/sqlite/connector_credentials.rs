@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::connectors::credential::{Credential, CredentialStore};
-use crate::connectors::Subject;
+use crate::connectors::{Issuer, Slot, Subject};
 use crate::event_store::StoreError;
 use crate::runtime::secret::{SecretRef, SecretStore};
 
@@ -22,12 +22,12 @@ pub struct SqliteCredentialStore {
 }
 
 /// The column encoding of a subject. SQLite forbids NULL inside a composite
-/// primary key, so the shared slot is spelled as the empty string here and
-/// nowhere else.
-fn subject_column(subject: &Subject) -> &str {
-    match subject {
-        Subject::Shared => "",
-        Subject::Person(id) => id,
+/// primary key, so the shared slot is spelled as a pair of empty strings here
+/// and nowhere else.
+fn slot_columns(slot: &Slot) -> (&str, &str) {
+    match slot {
+        Slot::Shared => ("", ""),
+        Slot::Of(subject) => (subject.issuer.as_str(), &subject.id),
     }
 }
 
@@ -89,7 +89,7 @@ impl SqliteCredentialStore {
         &self,
         tenant_id: &str,
         connection_id: &str,
-    ) -> Result<Vec<Subject>, StoreError> {
+    ) -> Result<Vec<Slot>, StoreError> {
         let (tenant_id, connection_id) = (tenant_id.to_string(), connection_id.to_string());
         let reader = self.db.reader.clone();
         tokio::task::spawn_blocking(move || {
@@ -98,22 +98,21 @@ impl SqliteCredentialStore {
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT subject FROM connector_credentials
+                    "SELECT issuer, subject FROM connector_credentials
                      WHERE tenant_id = ?1 AND connection_id = ?2",
                 )
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             let rows = stmt
                 .query_map(rusqlite::params![tenant_id, connection_id], |row| {
-                    row.get::<_, String>(0)
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-            rows.map(|column| {
-                column
-                    .map(|c| match c.is_empty() {
-                        true => Subject::Shared,
-                        false => Subject::Person(c),
-                    })
-                    .map_err(|e| StoreError::Internal(e.to_string()))
+            rows.map(|held| {
+                held.map(|(issuer, id)| match issuer.is_empty() {
+                    true => Slot::Shared,
+                    false => Slot::Of(Subject::new(Issuer::new(issuer), id)),
+                })
+                .map_err(|e| StoreError::Internal(e.to_string()))
             })
             .collect()
         })
@@ -127,20 +126,24 @@ impl SqliteCredentialStore {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: Option<&Subject>,
+        subject: Option<&Slot>,
     ) -> Result<Vec<SecretRef>, StoreError> {
         let (tenant_id, connection_id) = (tenant_id.to_string(), connection_id.to_string());
-        let subject = subject.map(|s| subject_column(s).to_string());
+        let slot = subject.map(|s| {
+            let (issuer, id) = slot_columns(s);
+            (issuer.to_string(), id.to_string())
+        });
         let reader = self.db.reader.clone();
         tokio::task::spawn_blocking(move || {
             let conn = reader
                 .open()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-            let (sql, params): (&str, Vec<String>) = match subject {
-                Some(subject) => (
+            let (sql, params): (&str, Vec<String>) = match slot {
+                Some((issuer, id)) => (
                     "SELECT secret_id FROM connector_credentials
-                     WHERE tenant_id = ?1 AND connection_id = ?2 AND subject = ?3",
-                    vec![tenant_id, connection_id, subject],
+                     WHERE tenant_id = ?1 AND connection_id = ?2
+                       AND issuer = ?3 AND subject = ?4",
+                    vec![tenant_id, connection_id, issuer, id],
                 ),
                 None => (
                     "SELECT secret_id FROM connector_credentials
@@ -166,23 +169,27 @@ impl SqliteCredentialStore {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: Option<&Subject>,
+        subject: Option<&Slot>,
     ) -> Result<bool, StoreError> {
         // The reference goes first: a row pointing at a deleted secret reads
         // as no credential, while a secret nothing references only lingers.
         let secret_refs = self.secret_refs(tenant_id, connection_id, subject).await?;
         let (tenant, connection) = (tenant_id.to_string(), connection_id.to_string());
-        let subject = subject.map(|s| subject_column(s).to_string());
+        let slot = subject.map(|s| {
+            let (issuer, id) = slot_columns(s);
+            (issuer.to_string(), id.to_string())
+        });
         let writer = self.db.writer.clone();
         let removed = tokio::task::spawn_blocking(move || {
             let conn = writer
                 .lock()
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
-            let removed = match subject {
-                Some(subject) => conn.execute(
+            let removed = match slot {
+                Some((issuer, id)) => conn.execute(
                     "DELETE FROM connector_credentials
-                     WHERE tenant_id = ?1 AND connection_id = ?2 AND subject = ?3",
-                    rusqlite::params![tenant, connection, subject],
+                     WHERE tenant_id = ?1 AND connection_id = ?2
+                       AND issuer = ?3 AND subject = ?4",
+                    rusqlite::params![tenant, connection, issuer, id],
                 ),
                 None => conn.execute(
                     "DELETE FROM connector_credentials
@@ -211,13 +218,15 @@ impl SqliteCredentialStore {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: &Subject,
+        subject: &Slot,
         secret_ref: &SecretRef,
     ) -> Result<(), StoreError> {
-        let (tenant_id, connection_id, subject, secret_id) = (
+        let (issuer, id) = slot_columns(subject);
+        let (tenant_id, connection_id, issuer, id, secret_id) = (
             tenant_id.to_string(),
             connection_id.to_string(),
-            subject_column(subject).to_string(),
+            issuer.to_string(),
+            id.to_string(),
             secret_ref.as_str().to_string(),
         );
         let writer = self.db.writer.clone();
@@ -227,11 +236,11 @@ impl SqliteCredentialStore {
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
             conn.execute(
                 "INSERT INTO connector_credentials
-                     (tenant_id, connection_id, subject, secret_id)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(tenant_id, connection_id, subject)
+                     (tenant_id, connection_id, issuer, subject, secret_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(tenant_id, connection_id, issuer, subject)
                  DO UPDATE SET secret_id = excluded.secret_id",
-                rusqlite::params![tenant_id, connection_id, subject, secret_id],
+                rusqlite::params![tenant_id, connection_id, issuer, id, secret_id],
             )
             .map_err(|e| StoreError::Internal(e.to_string()))?;
             Ok(())
@@ -247,7 +256,7 @@ impl CredentialStore for SqliteCredentialStore {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: &Subject,
+        subject: &Slot,
     ) -> Option<Credential> {
         let secret_ref = self
             .secret_refs(tenant_id, connection_id, Some(subject))
@@ -270,11 +279,11 @@ impl CredentialStore for SqliteCredentialStore {
         &self,
         tenant_id: &str,
         connection_id: &str,
-        subject: &Subject,
+        subject: &Slot,
         credential: Credential,
     ) -> Result<(), String> {
-        if matches!(subject, Subject::Person(id) if id.is_empty()) {
-            return Err("a person's subject cannot be empty".to_string());
+        if matches!(subject, Slot::Of(s) if s.id.is_empty() || s.issuer.as_str().is_empty()) {
+            return Err("a person's subject names both a source and an id".to_string());
         }
         // A slot keeps its secret id across rotations, so a refresh replaces
         // the value in place and nothing else moves.
@@ -366,28 +375,28 @@ mod tests {
         let (store, db, path) = temp_store();
 
         assert!(store
-            .get("default", "linear", &Subject::Shared)
+            .get("default", "linear", &Slot::Shared)
             .await
             .is_none());
 
         let first = oauth("access-1");
         store
-            .put("default", "linear", &Subject::Shared, first.clone())
+            .put("default", "linear", &Slot::Shared, first.clone())
             .await
             .unwrap();
         assert_eq!(
-            store.get("default", "linear", &Subject::Shared).await,
+            store.get("default", "linear", &Slot::Shared).await,
             Some(first)
         );
 
         // Rotation overwrites in place rather than accumulating rows.
         let second = oauth("access-2");
         store
-            .put("default", "linear", &Subject::Shared, second.clone())
+            .put("default", "linear", &Slot::Shared, second.clone())
             .await
             .unwrap();
         assert_eq!(
-            store.get("default", "linear", &Subject::Shared).await,
+            store.get("default", "linear", &Slot::Shared).await,
             Some(second)
         );
         assert_eq!(secret_count(&db), 1, "one slot is one secret");
@@ -399,8 +408,8 @@ mod tests {
     #[tokio::test]
     async fn each_holder_of_a_connection_has_their_own_slot() {
         let (store, db, path) = temp_store();
-        let alex = Subject::Person("slack:U1".to_string());
-        let sam = Subject::Person("slack:U2".to_string());
+        let alex = Slot::Of(Subject::new(Issuer::slack(), "T1:U1"));
+        let sam = Slot::Of(Subject::new(Issuer::slack(), "T1:U2"));
 
         store
             .put("default", "gmail", &alex, oauth("alex-token"))
@@ -420,10 +429,7 @@ mod tests {
             Some("sam-token".into())
         );
         assert!(
-            store
-                .get("default", "gmail", &Subject::Shared)
-                .await
-                .is_none(),
+            store.get("default", "gmail", &Slot::Shared).await.is_none(),
             "nobody filled the shared slot"
         );
 
@@ -439,12 +445,12 @@ mod tests {
         let (store, _db, path) = temp_store();
 
         store
-            .put("default", "github", &Subject::Shared, token("ghp_1"))
+            .put("default", "github", &Slot::Shared, token("ghp_1"))
             .await
             .unwrap();
         assert_eq!(
             store
-                .get("default", "github", &Subject::Shared)
+                .get("default", "github", &Slot::Shared)
                 .await
                 .map(access)
                 .unwrap(),
@@ -453,11 +459,11 @@ mod tests {
 
         let granted = oauth("access-1");
         store
-            .put("default", "github", &Subject::Shared, granted.clone())
+            .put("default", "github", &Slot::Shared, granted.clone())
             .await
             .unwrap();
         assert_eq!(
-            store.get("default", "github", &Subject::Shared).await,
+            store.get("default", "github", &Slot::Shared).await,
             Some(granted)
         );
         cleanup(&path);
@@ -468,21 +474,21 @@ mod tests {
         let (store, _db, path) = temp_store();
 
         store
-            .put("a", "linear", &Subject::Shared, oauth("a-linear"))
+            .put("a", "linear", &Slot::Shared, oauth("a-linear"))
             .await
             .unwrap();
         store
-            .put("b", "linear", &Subject::Shared, oauth("b-linear"))
+            .put("b", "linear", &Slot::Shared, oauth("b-linear"))
             .await
             .unwrap();
         store
-            .put("a", "sentry", &Subject::Shared, oauth("a-sentry"))
+            .put("a", "sentry", &Slot::Shared, oauth("a-sentry"))
             .await
             .unwrap();
 
         assert_eq!(
             store
-                .get("a", "linear", &Subject::Shared)
+                .get("a", "linear", &Slot::Shared)
                 .await
                 .map(access)
                 .unwrap(),
@@ -490,13 +496,13 @@ mod tests {
         );
         assert_eq!(
             store
-                .get("b", "linear", &Subject::Shared)
+                .get("b", "linear", &Slot::Shared)
                 .await
                 .map(access)
                 .unwrap(),
             "b-linear"
         );
-        assert!(store.get("b", "sentry", &Subject::Shared).await.is_none());
+        assert!(store.get("b", "sentry", &Slot::Shared).await.is_none());
         cleanup(&path);
     }
 
@@ -507,14 +513,14 @@ mod tests {
         let (store, db, path) = temp_store();
 
         store
-            .put("default", "sentry", &Subject::Shared, oauth("company"))
+            .put("default", "sentry", &Slot::Shared, oauth("company"))
             .await
             .unwrap();
         store
             .put(
                 "default",
                 "gmail",
-                &Subject::Person("slack:U1".to_string()),
+                &Slot::Of(Subject::new(Issuer::slack(), "T1:U1")),
                 oauth("personal"),
             )
             .await
@@ -526,11 +532,15 @@ mod tests {
             .unwrap();
         assert_eq!(forgotten, ["gmail"]);
         assert!(store
-            .get("default", "gmail", &Subject::Person("slack:U1".to_string()))
+            .get(
+                "default",
+                "gmail",
+                &Slot::Of(Subject::new(Issuer::slack(), "T1:U1"))
+            )
             .await
             .is_none());
         assert!(store
-            .get("default", "sentry", &Subject::Shared)
+            .get("default", "sentry", &Slot::Shared)
             .await
             .is_some());
         assert_eq!(secret_count(&db), 1, "the secret went with the reference");

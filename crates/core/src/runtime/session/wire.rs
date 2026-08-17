@@ -86,9 +86,7 @@ impl<'a> From<&'a WorkerDecisionRequest> for DecisionRequest<'a> {
             decision_id: &r.decision_id,
             agent_id: &r.agent_id,
             identity: WorkerIdentity {
-                id: r.identity.id.clone(),
-                kind: r.identity.kind,
-                audience: r.identity.audience,
+                requester: r.identity.requester.clone(),
                 metadata: r.identity.metadata.clone(),
             },
             trigger: &r.trigger,

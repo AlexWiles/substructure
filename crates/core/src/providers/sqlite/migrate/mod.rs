@@ -11,6 +11,7 @@ mod m002_slack_files;
 mod m003_blobs;
 mod m004_secret_store;
 mod m005_auth_flows;
+mod m006_subject_issuer;
 
 use chrono::Utc;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -53,6 +54,11 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "auth_flows",
         up: m005_auth_flows::up,
+    },
+    Migration {
+        version: 6,
+        name: "subject_issuer",
+        up: m006_subject_issuer::up,
     },
 ];
 

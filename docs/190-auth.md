@@ -29,8 +29,8 @@ ApiKey may. An admin administers a session and does not run the model for it.
 A client calls the client API with `Authorization: Bearer <jwt>`.
 
 The engine verifies the token as HS256 against the configured issuer and
-audience, using `CLIENT_TOKEN_HS256_SECRET`. It reads the session owner from the
-`sub` claim.
+audience, using `CLIENT_TOKEN_HS256_SECRET`. The `sub` claim names the person;
+the issuer is stamped here, never read from the token.
 
 Your backend creates these tokens through the machine API, using its own API
 key.
@@ -42,8 +42,10 @@ Authorization: Bearer <SUBSTRUCTURE_API_KEY>
 { "identity": { "id": "user_42" }, "ttl_seconds": 600 }
 ```
 
-`identity.id` is required. It becomes the session owner. The response holds the
-token and its expiry in Unix seconds.
+`identity.id` is required. It names the person the session runs for, under the
+`app` issuer — the one your application vouches for. You choose the id and we
+sign it, so a browser holding the token cannot rename itself. The response
+holds the token and its expiry in Unix seconds.
 
 ```json
 { "token": "<jwt>", "expires_at": 1784000000 }
@@ -60,24 +62,31 @@ The engine fixes a session's owner when it creates the session. It checks every
 later input against that owner. The tenant must match, and a Frontend caller
 must own the session.
 
-The worker receives that owner as `DecisionRequest.identity`. It holds the id,
-the kind, and the metadata, not the tenant.
+The worker receives that owner as `DecisionRequest.identity`. It holds who the
+session is for and the metadata, not the tenant.
 
 ```typescript
-type OwnerKind = "frontend" | "operator" | "api_key" | "system"
+type Subject = {
+    /** Which source named this person: "slack", "app", "operator", "cli", … */
+    issuer: string
+    /** That source's own name for them. Never parsed. */
+    id: string
+}
 type WorkerIdentity = {
-    id?: string
-    kind: OwnerKind
+    /** Absent ⇒ nobody is behind this session: a schedule, a key, the engine. */
+    subject?: Subject
+    /** Whether anyone else can read the conversation. */
+    visibility: "shared" | "private"
     metadata?: Record<string, string>
 }
 ```
 
 The engine sets this once and vouches for it. Read it without verifying it. It
-is the owner, not the caller of this request.
+is who the session is for, not the caller of this request.
 
-`kind` is part of the identity. Only `frontend` is an end user: an operator who
-runs a turn owns the session as `operator` or `api_key`. Two owners with the same
-`id` and different kinds are different owners.
+The issuer is half the name. An id is only unique within the source that minted
+it, so your application's `bob` and a workspace's `bob` are two people, and
+comparing ids alone would conflate them.
 
 ## Patterns
 
@@ -88,16 +97,16 @@ give it to the browser. That user owns every session the browser opens.
 
 ### Limit by identity
 
-Read `identity` on each decision to give an owner only their own data. Check
-`kind` as well as `id`: an operator is not the end user with that name.
+Read `identity` on each decision to give an owner only their own data. Check the
+issuer as well as the id: an operator is not the end user with that name.
 
 ```javascript
 function decide({ trigger, proposed, identity }) {
     if (trigger.type === "tool.execute" && trigger.name === "list_files") {
-        if (identity.kind !== "frontend") {
+        if (identity.subject?.issuer !== "app") {
             return { actions: [{ type: "tool.error", error: "not an end user" }] };
         }
-        const text = filesFor(identity.id);
+        const text = filesFor(identity.subject.id);
         return { actions: [{ type: "tool.result", result: { content: [{ type: "text", text: text }] } }] };
     }
     return proposed;

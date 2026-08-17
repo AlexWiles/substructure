@@ -15,7 +15,7 @@ use super::{
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
 use crate::protocol::{
-    Audience, ClientInput, Content, OwnerKind, Role, SessionOwner, StoredContent,
+    ClientInput, Content, Issuer, Requester, Role, SessionOwner, StoredContent, Subject, Visibility,
 };
 use crate::runtime::blob::{
     audio_format, text_like, video_playable, BlobError, BlobRef, BlobStore, NewBlob,
@@ -26,6 +26,7 @@ use crate::session::events::EventPayload;
 use crate::session::state::SessionStatus;
 use crate::session::SessionEvent;
 use crate::transport::channel::ChannelContext;
+use crate::transport::consent::{CliConsent, Consent, WayIn};
 use crate::{Caller, HandleClientInput, RuntimeError};
 
 /// Anthropic's own cap; a larger image fails the call anyway.
@@ -50,10 +51,10 @@ const STATUS_REFRESH: Duration = Duration::from_secs(90);
 /// one person reads it, and `dm_message` never matches it anyway. Read from
 /// the channel id rather than `conversations.info` — the installed scopes do
 /// not cover that call, and a lookup that fails must read as shared.
-fn audience_of(channel: &str) -> Audience {
+fn audience_of(channel: &str) -> Visibility {
     match channel.starts_with('D') {
-        true => Audience::Private,
-        false => Audience::Shared,
+        true => Visibility::Private,
+        false => Visibility::Shared,
     }
 }
 
@@ -522,20 +523,7 @@ pub struct SlackBot {
     streams: Arc<Streams>,
     store: Option<Arc<StreamStore>>,
     blobs: Option<Arc<dyn BlobStore>>,
-    consent: Consent,
-}
-
-/// Where a person gives consent for a connection this deployment dials. The
-/// channel holds it because it decides what the prompt says.
-#[derive(Clone, Default)]
-pub enum Consent {
-    /// The cloud dashboard's connections page.
-    Dashboard(String),
-    /// This engine hosts the flow: a link per prompt, on `/mcp/authorize`.
-    Engine(Arc<crate::transport::mcp_auth::AuthorizeLinks>),
-    /// Nothing a browser can reach, so the prompt names the command.
-    #[default]
-    Cli,
+    consent: Arc<dyn Consent>,
 }
 
 impl SlackBot {
@@ -556,39 +544,49 @@ impl SlackBot {
             streams: Arc::new(Streams::default()),
             store: store.map(Arc::new),
             blobs,
-            consent: Consent::Cli,
+            consent: Arc::new(CliConsent),
+        }
+    }
+
+    /// A Slack person is named within their workspace: `U1` in two workspaces
+    /// is two people. The team comes from the signed payload, or from the
+    /// install itself; with neither we name nobody rather than conflate them.
+    async fn requester(
+        &self,
+        ws: &Workspace,
+        team: Option<&str>,
+        user: &str,
+        visibility: Visibility,
+    ) -> Requester {
+        let team = match team {
+            Some(team) => Some(team.to_string()),
+            None => self.identity(ws).await.and_then(|i| i.team.clone()),
+        };
+        match team {
+            Some(team) => Requester::new(
+                Subject::new(Issuer::slack(), format!("{team}:{user}")),
+                visibility,
+            ),
+            None => Requester::machine(),
         }
     }
 
     /// Where this deployment sends a person to authorize a connection.
-    pub fn with_consent(mut self, consent: Consent) -> Self {
+    pub fn with_consent(mut self, consent: Arc<dyn Consent>) -> Self {
         self.consent = consent;
         self
     }
 
     /// The line telling a person how to authorize, appended when a prompt
-    /// carries the facts. A link is minted here, at delivery, so the event
-    /// log holds none.
+    /// carries the facts. A link is minted at delivery, so the event log
+    /// holds none, and Slack's markup is applied here rather than by whoever
+    /// decided where to send them.
     async fn way_in(&self, tenant_id: &str, payload: &serde_json::Value) -> Option<String> {
-        let a: Authorize = serde_json::from_value(payload.get("authorize")?.clone()).ok()?;
-        let cli = || format!("Run `subs mcp login {}` to authorize it.", a.connection);
-        Some(match &self.consent {
-            Consent::Dashboard(page) => format!("<{page}|Authorize it in the dashboard>"),
-            Consent::Cli => cli(),
-            Consent::Engine(links) => {
-                match links
-                    .mint_for(tenant_id, &a.connection, &a.principal, chrono::Utc::now())
-                    .await
-                {
-                    Ok(Some(url)) => format!("<{url}|Authorize {}>", a.connection),
-                    // A principal the call would refuse gets no link.
-                    Ok(None) => cli(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, connection = %a.connection, "minting an authorize link failed");
-                        cli()
-                    }
-                }
-            }
+        let authorize: Authorize =
+            serde_json::from_value(payload.get("authorize")?.clone()).ok()?;
+        Some(match self.consent.way_in(tenant_id, &authorize).await? {
+            WayIn::Link { url, label } => format!("<{url}|{label}>"),
+            WayIn::Command(words) => words,
         })
     }
 
@@ -676,6 +674,9 @@ impl SlackBot {
             .session
             .clone()
             .unwrap_or_else(|| format!("slack:{}:{}", click.channel, click.thread_ts));
+        let clicked = self
+            .requester(ws, None, &click.user, audience_of(&click.channel))
+            .await;
         let submitted = ctx
             .handle_client_input(HandleClientInput {
                 session_id: session_id.clone(),
@@ -685,10 +686,8 @@ impl SlackBot {
                 // Used only if the click starts the session; an existing
                 // session keeps its owner.
                 owner: SessionOwner {
-                    kind: OwnerKind::Frontend,
                     tenant_id: ws.tenant_id.clone(),
-                    id: Some(format!("slack:{}", click.user)),
-                    audience: audience_of(&click.channel),
+                    requester: clicked,
                     metadata: HashMap::from_iter([
                         ("slack_channel".to_string(), click.channel.clone()),
                         ("slack_thread_ts".to_string(), click.thread_ts.clone()),
@@ -1125,6 +1124,14 @@ impl SlackBot {
                 }
             }
         };
+        let inbound_requester = self
+            .requester(
+                ws,
+                inbound.team.as_deref(),
+                &inbound.user,
+                audience_of(&inbound.channel),
+            )
+            .await;
         let submitted = ctx
             .handle_client_input(HandleClientInput {
                 session_id: session_id.clone(),
@@ -1132,10 +1139,8 @@ impl SlackBot {
                     tenant_id: ws.tenant_id.clone(),
                 },
                 owner: SessionOwner {
-                    kind: OwnerKind::Frontend,
                     tenant_id: ws.tenant_id.clone(),
-                    id: Some(format!("slack:{}", inbound.user)),
-                    audience: audience_of(&inbound.channel),
+                    requester: inbound_requester,
                     metadata: HashMap::from_iter(
                         [
                             Some(("slack_channel".into(), inbound.channel.clone())),
@@ -1858,7 +1863,7 @@ impl SlackBot {
             EventPayload::TurnStarted(t) => {
                 let owner = event.meta.owner.as_ref();
                 let recipient = owner
-                    .and_then(|o| o.id.as_deref())
+                    .and_then(|o| o.requester.subject.as_ref().map(|s| s.id.as_str()))
                     .and_then(|id| id.strip_prefix("slack:"))
                     .map(str::to_string);
                 let recipient_team = owner.and_then(|o| o.metadata.get("slack_team")).cloned();
@@ -2259,7 +2264,7 @@ impl SlackBot {
             owner.and_then(|o| o.metadata.get("slack_thread_ts"))?,
         );
         let recipient = owner
-            .and_then(|o| o.id.as_deref())
+            .and_then(|o| o.requester.subject.as_ref().map(|s| s.id.as_str()))
             .and_then(|id| id.strip_prefix("slack:"))
             .map(str::to_string);
         let recipient_team = owner.and_then(|o| o.metadata.get("slack_team")).cloned();
@@ -2418,11 +2423,11 @@ mod tests {
     /// so is anything unrecognized — the safe value is the fallback.
     #[test]
     fn only_a_direct_message_is_private() {
-        use crate::protocol::Audience;
-        assert_eq!(super::audience_of("D0AAAAAAA"), Audience::Private);
-        assert_eq!(super::audience_of("C0AAAAAAA"), Audience::Shared);
-        assert_eq!(super::audience_of("G0AAAAAAA"), Audience::Shared, "mpim");
-        assert_eq!(super::audience_of(""), Audience::Shared);
+        use crate::protocol::Visibility;
+        assert_eq!(super::audience_of("D0AAAAAAA"), Visibility::Private);
+        assert_eq!(super::audience_of("C0AAAAAAA"), Visibility::Shared);
+        assert_eq!(super::audience_of("G0AAAAAAA"), Visibility::Shared, "mpim");
+        assert_eq!(super::audience_of(""), Visibility::Shared);
     }
 
     #[test]
@@ -2608,29 +2613,28 @@ mod tests {
 
     /// What the bot appends to an auth prompt, per deployment.
     mod way_in {
-        use super::super::{Consent, SlackBot};
-        use crate::connectors::Principal;
-        use crate::protocol::{Audience, ConnectorProtocol};
+        use super::super::SlackBot;
+        use crate::connectors::Requester;
+        use crate::protocol::{ConnectorProtocol, Visibility};
+        use crate::protocol::{Issuer, Subject};
         use crate::providers::sqlite::{SqliteAuthFlows, SqliteDb};
         use crate::runtime::session::interrupts::auth;
+        use crate::transport::consent::{CliConsent, Consent, DashboardConsent, EngineConsent};
         use crate::transport::mcp_auth::AuthorizeLinks;
         use std::sync::Arc;
 
-        fn payload(principal: Principal) -> serde_json::Value {
+        fn payload(principal: Requester) -> serde_json::Value {
             serde_json::json!({
                 "message": "*gmail* is not authorized yet.",
                 "authorize": auth::Authorize { connection: "gmail".into(), principal },
             })
         }
 
-        fn person(audience: Audience) -> Principal {
-            Principal::Person {
-                subject: "slack:U1".into(),
-                audience,
-            }
+        fn person(audience: Visibility) -> Requester {
+            Requester::new(Subject::new(Issuer::slack(), "T1:U1"), audience)
         }
 
-        fn bot(consent: Consent) -> SlackBot {
+        fn bot(consent: Arc<dyn Consent>) -> SlackBot {
             SlackBot::new(
                 Arc::new(super::OneWorkspace(Arc::new(super::Workspace::new(
                     "xoxb-test".into(),
@@ -2644,7 +2648,7 @@ mod tests {
             .with_consent(consent)
         }
 
-        fn engine(path: &std::path::Path) -> Consent {
+        fn engine(path: &std::path::Path) -> Arc<dyn Consent> {
             let db =
                 SqliteDb::open(path.to_str().unwrap(), std::time::Duration::from_secs(5)).unwrap();
             let spec = crate::connectors::registry::ConnectionSpec {
@@ -2655,11 +2659,11 @@ mod tests {
                 credential: Some(crate::connectors::registry::CredentialScope::User),
                 prefix_tools: true,
             };
-            Consent::Engine(Arc::new(AuthorizeLinks::new(
+            Arc::new(EngineConsent(Arc::new(AuthorizeLinks::new(
                 "https://agent.test",
                 Arc::new(SqliteAuthFlows::new(db)),
                 [("gmail".to_string(), spec)].into(),
-            )))
+            ))))
         }
 
         fn temp() -> std::path::PathBuf {
@@ -2677,7 +2681,7 @@ mod tests {
             let path = temp();
             let bot = bot(engine(&path));
             let how = bot
-                .way_in("t", &payload(person(Audience::Private)))
+                .way_in("t", &payload(person(Visibility::Private)))
                 .await
                 .expect("a private person gets a link");
             assert!(
@@ -2693,7 +2697,7 @@ mod tests {
         async fn a_principal_the_call_would_refuse_gets_no_link() {
             let path = temp();
             let bot = bot(engine(&path));
-            for refused in [Principal::Machine, person(Audience::Shared)] {
+            for refused in [Requester::machine(), person(Visibility::Shared)] {
                 let how = bot.way_in("t", &payload(refused)).await.unwrap();
                 assert_eq!(how, "Run `subs mcp login gmail` to authorize it.");
             }
@@ -2702,17 +2706,19 @@ mod tests {
 
         #[tokio::test]
         async fn a_hosted_project_points_at_the_dashboard_and_a_laptop_at_the_command() {
-            let dashboard = bot(Consent::Dashboard("https://app.test/overview".into()));
+            let dashboard = bot(Arc::new(DashboardConsent(
+                "https://app.test/overview".into(),
+            )));
             assert_eq!(
                 dashboard
-                    .way_in("t", &payload(person(Audience::Private)))
+                    .way_in("t", &payload(person(Visibility::Private)))
                     .await
                     .unwrap(),
                 "<https://app.test/overview|Authorize it in the dashboard>"
             );
             assert_eq!(
-                bot(Consent::Cli)
-                    .way_in("t", &payload(person(Audience::Private)))
+                bot(Arc::new(CliConsent))
+                    .way_in("t", &payload(person(Visibility::Private)))
                     .await
                     .unwrap(),
                 "Run `subs mcp login gmail` to authorize it."
@@ -2723,7 +2729,7 @@ mod tests {
         /// static token is one; every other interrupt is another.
         #[tokio::test]
         async fn a_prompt_without_the_facts_is_left_alone() {
-            let bot = bot(Consent::Cli);
+            let bot = bot(Arc::new(CliConsent));
             let bare = serde_json::json!({ "message": "*gmail* rejected its token." });
             assert_eq!(bot.way_in("t", &bare).await, None);
         }
@@ -2735,16 +2741,16 @@ mod tests {
             let bot = bot(engine(&path));
 
             let first = bot
-                .way_in("t", &payload(person(Audience::Private)))
+                .way_in("t", &payload(person(Visibility::Private)))
                 .await
                 .unwrap();
             let second = bot
                 .way_in(
                     "t",
-                    &payload(Principal::Person {
-                        subject: "slack:U2".into(),
-                        audience: Audience::Private,
-                    }),
+                    &payload(Requester::new(
+                        Subject::new(Issuer::slack(), "T1:U2"),
+                        Visibility::Private,
+                    )),
                 )
                 .await
                 .unwrap();
@@ -3387,10 +3393,8 @@ mod tests {
             status,
             wake_at: None,
             owner: Some(SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "t".into(),
-                id: None,
+                requester: Requester::machine(),
                 metadata: [
                     ("slack_channel".to_string(), "C1".to_string()),
                     ("slack_thread_ts".to_string(), "1.0".to_string()),
@@ -3517,10 +3521,8 @@ mod tests {
             status: crate::session::state::SessionStatus::Idle,
             wake_at: None,
             owner: Some(SessionOwner {
-                kind: OwnerKind::Frontend,
-                audience: Default::default(),
                 tenant_id: "t".into(),
-                id: None,
+                requester: Requester::machine(),
                 metadata: metadata
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))

@@ -25,8 +25,9 @@ use super::super::events::EventPayload;
 use super::super::state::ApplyContext;
 use super::*;
 use crate::protocol::{
-    AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, McpServer, OwnerKind, Role,
+    AgentConfig, ClientMessage, ClientPayload, Content, DraftMessage, McpServer, Role,
 };
+use crate::protocol::{Issuer, Requester, Subject};
 use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
 
@@ -42,7 +43,7 @@ fn system() -> Caller {
 fn frontend() -> Caller {
     Caller::Frontend {
         tenant_id: TENANT.to_string(),
-        user_id: USER.to_string(),
+        subject: Subject::new(Issuer::app(), USER.to_string()),
         attrs: HashMap::new(),
     }
 }
@@ -191,10 +192,11 @@ impl World {
             CommandPayload::CreateSession {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
-                    kind: OwnerKind::Frontend,
-                    audience: Default::default(),
                     tenant_id: TENANT.to_string(),
-                    id: Some(USER.to_string()),
+                    requester: Requester::new(
+                        Subject::new(Issuer::app(), USER.to_string()),
+                        Default::default(),
+                    ),
                     metadata: HashMap::new(),
                 },
                 ancestry: vec![],

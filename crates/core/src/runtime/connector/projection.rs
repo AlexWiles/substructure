@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::connectors::Principal;
+use crate::connectors::Requester;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::processor::{
@@ -44,7 +44,7 @@ impl EventProcessor for ConnectorDispatchProjection {
                     session_id: event.session_id.clone(),
                     tenant_id: event.tenant_id.clone(),
                     connection_id: req.id.clone(),
-                    principal: Principal::of_owner(session.state.owner.as_ref()),
+                    principal: Requester::of_owner(session.state.owner.as_ref()),
                     attempt: req.attempt,
                     span: event.span,
                 }
@@ -82,7 +82,7 @@ impl EventProcessor for ConnectorDispatchProjection {
                         tool_call_id: d.id.clone(),
                         attempt: d.attempt,
                         connection_id: target.connector.clone(),
-                        principal: Principal::of_owner(session.state.owner.as_ref()),
+                        principal: Requester::of_owner(session.state.owner.as_ref()),
                         remote_name: target.remote_name.clone(),
                         // The recorded arguments are the tool's own: a `call_tool`
                         // was unwrapped into the real call before it was

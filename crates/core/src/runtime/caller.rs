@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
-use crate::protocol::{OwnerKind, SessionOwner};
+use crate::protocol::{SessionOwner, Subject};
 
 /// Who is acting, in descending privilege. A program holds a key, a person logs
 /// in. Only a worker answers a decision, so only `ApiKey` may.
+///
+/// Separate from who a session is *for*: a key may act on behalf of one of the
+/// project's own users, and a person acting on their own behalf is the special
+/// case rather than the rule.
 #[derive(Debug, Clone)]
 pub enum Caller {
     System {
@@ -15,11 +19,11 @@ pub enum Caller {
     },
     Operator {
         tenant_id: String,
-        user_id: String,
+        subject: Subject,
     },
     Frontend {
         tenant_id: String,
-        user_id: String,
+        subject: Subject,
         attrs: HashMap<String, String>,
     },
 }
@@ -34,133 +38,89 @@ impl Caller {
         }
     }
 
-    pub fn subject(&self) -> Option<&str> {
+    /// The person this caller is, where it is one. A key is a program and
+    /// names nobody, however it may name someone else on a request.
+    pub fn subject(&self) -> Option<&Subject> {
         match self {
-            Caller::System { .. } => None,
-            Caller::ApiKey { key_id, .. } => Some(key_id),
-            Caller::Operator { user_id, .. } | Caller::Frontend { user_id, .. } => Some(user_id),
+            Caller::System { .. } | Caller::ApiKey { .. } => None,
+            Caller::Operator { subject, .. } | Caller::Frontend { subject, .. } => Some(subject),
         }
     }
 
-    pub fn owner_kind(&self) -> OwnerKind {
-        match self {
-            Caller::System { .. } => OwnerKind::System,
-            Caller::ApiKey { .. } => OwnerKind::ApiKey,
-            Caller::Operator { .. } => OwnerKind::Operator,
-            Caller::Frontend { .. } => OwnerKind::Frontend,
-        }
-    }
-
-    /// This caller as the owner of a session it starts. The counterpart of
-    /// [`owns`](Self::owns): what this writes, that matches.
-    pub fn as_owner(&self) -> SessionOwner {
-        SessionOwner {
-            tenant_id: self.tenant_id().to_string(),
-            id: self.subject().map(str::to_string),
-            kind: self.owner_kind(),
-            // A caller says nothing about who reads the answers, so the safe
-            // value stands; a transport that knows sets it on its own owner.
-            audience: Default::default(),
-            metadata: HashMap::new(),
-        }
-    }
-
-    /// The kind must agree as well as the name. Names come from different
-    /// issuers, so the same name is not the same owner.
+    /// Whether this caller is the person a session belongs to. The issuer is
+    /// half the comparison: one source's `bob` is not another's.
     pub fn owns(&self, owner: &SessionOwner) -> bool {
         let Some(subject) = self.subject() else {
             return false;
         };
-        owner.kind == self.owner_kind()
-            && owner.tenant_id == self.tenant_id()
-            && owner.id.as_deref() == Some(subject)
+        owner.tenant_id == self.tenant_id() && owner.requester.subject.as_ref() == Some(subject)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::Issuer;
+    use crate::protocol::Requester;
 
-    fn owner(kind: OwnerKind, id: &str) -> SessionOwner {
+    fn owner(issuer: Issuer, id: &str) -> SessionOwner {
         SessionOwner {
             tenant_id: "tenant-a".to_string(),
-            id: Some(id.to_string()),
-            kind,
-            audience: Default::default(),
+            requester: Requester::private(Subject::new(issuer, id)),
             metadata: HashMap::new(),
         }
     }
 
-    fn frontend(user_id: &str) -> Caller {
+    fn frontend(id: &str) -> Caller {
         Caller::Frontend {
             tenant_id: "tenant-a".to_string(),
-            user_id: user_id.to_string(),
+            subject: Subject::new(Issuer::app(), id),
             attrs: HashMap::new(),
         }
     }
 
+    /// The point of naming the source: one issuer's `alex` is not another's,
+    /// so an end user cannot reach an operator's session by sharing an id.
     #[test]
-    fn one_kind_of_owner_does_not_match_another() {
-        let name = "alex@example.test";
-        assert!(frontend(name).owns(&owner(OwnerKind::Frontend, name)));
-        assert!(!frontend(name).owns(&owner(OwnerKind::Operator, name)));
-        assert!(!frontend(name).owns(&owner(OwnerKind::ApiKey, name)));
-        assert!(!frontend(name).owns(&owner(OwnerKind::System, name)));
+    fn the_same_id_from_another_source_is_another_person() {
+        assert!(frontend("alex").owns(&owner(Issuer::app(), "alex")));
+        assert!(!frontend("alex").owns(&owner(Issuer::operator(), "alex")));
+        assert!(!frontend("alex").owns(&owner(Issuer::slack(), "alex")));
+        assert!(!frontend("alex").owns(&owner(Issuer::app(), "sam")));
     }
 
     #[test]
-    fn an_operator_owns_only_its_own_sessions() {
-        let operator = Caller::Operator {
-            tenant_id: "tenant-a".to_string(),
-            user_id: "alex".to_string(),
+    fn a_session_in_another_tenant_is_never_ours() {
+        let other = SessionOwner {
+            tenant_id: "tenant-b".to_string(),
+            requester: Requester::private(Subject::new(Issuer::app(), "alex")),
+            metadata: HashMap::new(),
         };
-        assert!(operator.owns(&owner(OwnerKind::Operator, "alex")));
-        assert!(!operator.owns(&owner(OwnerKind::Operator, "sam")));
-        assert!(!operator.owns(&owner(OwnerKind::Frontend, "alex")));
-    }
-
-    #[test]
-    fn an_owner_in_another_tenant_is_not_this_one() {
-        let mut other = owner(OwnerKind::Frontend, "alex");
-        other.tenant_id = "tenant-b".to_string();
         assert!(!frontend("alex").owns(&other));
     }
 
-    /// What a caller writes as an owner is what it matches as one.
+    /// A key is a program: it may act for someone, and is nobody itself.
     #[test]
-    fn a_caller_owns_the_sessions_it_starts() {
-        for caller in [
-            frontend("alex"),
-            Caller::Operator {
-                tenant_id: "tenant-a".to_string(),
-                user_id: "alex".to_string(),
-            },
-            Caller::ApiKey {
-                tenant_id: "tenant-a".to_string(),
-                key_id: "alex".to_string(),
-            },
-        ] {
-            assert!(
-                caller.owns(&caller.as_owner()),
-                "{caller:?} does not own what it starts"
-            );
-        }
-    }
-
-    /// The engine names nobody. Privilege lets it past a check, not a match.
-    #[test]
-    fn the_engine_owns_nothing() {
+    fn a_machine_owns_nothing() {
+        let key = Caller::ApiKey {
+            tenant_id: "tenant-a".to_string(),
+            key_id: "key-1".to_string(),
+        };
         let system = Caller::System {
             tenant_id: "tenant-a".to_string(),
         };
-        assert!(!system.owns(&owner(OwnerKind::System, "anything")));
+        assert!(key.subject().is_none());
+        assert!(!key.owns(&owner(Issuer::app(), "key-1")));
+        assert!(!system.owns(&owner(Issuer::app(), "anything")));
     }
 
+    /// An owner naming no source names no person, so nobody owns it and no
+    /// personal credential is within its reach.
     #[test]
-    fn a_stored_owner_without_a_kind_reads_as_an_end_user() {
-        let stored = r#"{"tenant_id":"tenant-a","id":"alex"}"#;
+    fn an_owner_without_a_subject_is_nobodys() {
+        let stored = r#"{"tenant_id":"tenant-a"}"#;
         let owner: SessionOwner = serde_json::from_str(stored).unwrap();
-        assert_eq!(owner.kind, OwnerKind::Frontend);
-        assert!(frontend("alex").owns(&owner));
+        assert!(owner.requester.subject.is_none());
+        assert!(!frontend("alex").owns(&owner));
     }
 }
