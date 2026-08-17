@@ -14,10 +14,13 @@ use super::{
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
-use crate::protocol::{ClientInput, Content, OwnerKind, Role, SessionOwner, StoredContent};
+use crate::protocol::{
+    Audience, ClientInput, Content, OwnerKind, Role, SessionOwner, StoredContent,
+};
 use crate::runtime::blob::{
     audio_format, text_like, video_playable, BlobError, BlobRef, BlobStore, NewBlob,
 };
+use crate::runtime::session::interrupts::auth::Authorize;
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
 use crate::session::state::SessionStatus;
@@ -42,6 +45,17 @@ const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
 /// Shown as `<app> is typing…`.
 /// Slack removes a status after two minutes. Set it again on this cadence.
 const STATUS_REFRESH: Duration = Duration::from_secs(90);
+
+/// Only an `im` channel (`D…`) is one person's. A group DM is not: more than
+/// one person reads it, and `dm_message` never matches it anyway. Read from
+/// the channel id rather than `conversations.info` — the installed scopes do
+/// not cover that call, and a lookup that fails must read as shared.
+fn audience_of(channel: &str) -> Audience {
+    match channel.starts_with('D') {
+        true => Audience::Private,
+        false => Audience::Shared,
+    }
+}
 
 /// Which agent answers where. Three separate questions, so three settings:
 /// who takes DMs, who takes a mention in a channel nobody named, and who takes
@@ -508,6 +522,20 @@ pub struct SlackBot {
     streams: Arc<Streams>,
     store: Option<Arc<StreamStore>>,
     blobs: Option<Arc<dyn BlobStore>>,
+    consent: Consent,
+}
+
+/// Where a person gives consent for a connection this deployment dials. The
+/// channel holds it because it decides what the prompt says.
+#[derive(Clone, Default)]
+pub enum Consent {
+    /// The cloud dashboard's connections page.
+    Dashboard(String),
+    /// This engine hosts the flow: a link per prompt, on `/mcp/authorize`.
+    Engine(Arc<crate::transport::mcp_auth::AuthorizeLinks>),
+    /// Nothing a browser can reach, so the prompt names the command.
+    #[default]
+    Cli,
 }
 
 impl SlackBot {
@@ -528,7 +556,40 @@ impl SlackBot {
             streams: Arc::new(Streams::default()),
             store: store.map(Arc::new),
             blobs,
+            consent: Consent::Cli,
         }
+    }
+
+    /// Where this deployment sends a person to authorize a connection.
+    pub fn with_consent(mut self, consent: Consent) -> Self {
+        self.consent = consent;
+        self
+    }
+
+    /// The line telling a person how to authorize, appended when a prompt
+    /// carries the facts. A link is minted here, at delivery, so the event
+    /// log holds none.
+    async fn way_in(&self, tenant_id: &str, payload: &serde_json::Value) -> Option<String> {
+        let a: Authorize = serde_json::from_value(payload.get("authorize")?.clone()).ok()?;
+        let cli = || format!("Run `subs mcp login {}` to authorize it.", a.connection);
+        Some(match &self.consent {
+            Consent::Dashboard(page) => format!("<{page}|Authorize it in the dashboard>"),
+            Consent::Cli => cli(),
+            Consent::Engine(links) => {
+                match links
+                    .mint_for(tenant_id, &a.connection, &a.principal, chrono::Utc::now())
+                    .await
+                {
+                    Ok(Some(url)) => format!("<{url}|Authorize {}>", a.connection),
+                    // A principal the call would refuse gets no link.
+                    Ok(None) => cli(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, connection = %a.connection, "minting an authorize link failed");
+                        cli()
+                    }
+                }
+            }
+        })
     }
 
     /// Start the outbound processor and the activity worker.
@@ -627,6 +688,7 @@ impl SlackBot {
                     kind: OwnerKind::Frontend,
                     tenant_id: ws.tenant_id.clone(),
                     id: Some(format!("slack:{}", click.user)),
+                    audience: audience_of(&click.channel),
                     metadata: HashMap::from_iter([
                         ("slack_channel".to_string(), click.channel.clone()),
                         ("slack_thread_ts".to_string(), click.thread_ts.clone()),
@@ -1073,6 +1135,7 @@ impl SlackBot {
                     kind: OwnerKind::Frontend,
                     tenant_id: ws.tenant_id.clone(),
                     id: Some(format!("slack:{}", inbound.user)),
+                    audience: audience_of(&inbound.channel),
                     metadata: HashMap::from_iter(
                         [
                             Some(("slack_channel".into(), inbound.channel.clone())),
@@ -1691,12 +1754,16 @@ impl SlackBot {
             None => match display_of(&p.payload) {
                 Some(display) => {
                     let options = prompt_options(&display, &p.interrupt_id);
+                    let message = match self.way_in(&ws.tenant_id, &p.payload).await {
+                        Some(how) => format!("{}\n\n{how}", display.message),
+                        None => display.message.clone(),
+                    };
                     let blocks = render::prompt_blocks(&PromptView {
-                        message: &display.message,
+                        message: &message,
                         options: &options,
                         expires_at: display.expires_at.as_deref(),
                     });
-                    (display.message.clone(), blocks)
+                    (message, blocks)
                 }
                 None => {
                     let text = format!("Paused: {}", p.reason);
@@ -2347,6 +2414,17 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
+    /// Only an `im` is one person's. A group DM and a channel are shared, and
+    /// so is anything unrecognized — the safe value is the fallback.
+    #[test]
+    fn only_a_direct_message_is_private() {
+        use crate::protocol::Audience;
+        assert_eq!(super::audience_of("D0AAAAAAA"), Audience::Private);
+        assert_eq!(super::audience_of("C0AAAAAAA"), Audience::Shared);
+        assert_eq!(super::audience_of("G0AAAAAAA"), Audience::Shared, "mpim");
+        assert_eq!(super::audience_of(""), Audience::Shared);
+    }
+
     #[test]
     fn audio_and_video_are_accepted_within_their_caps() {
         assert_eq!(super::attachment_cap("audio/mpeg"), Some(MAX_AUDIO_BYTES));
@@ -2525,6 +2603,153 @@ mod tests {
             turn_cost: Default::default(),
             turn_token_usage: Default::default(),
             error: Some(error),
+        }
+    }
+
+    /// What the bot appends to an auth prompt, per deployment.
+    mod way_in {
+        use super::super::{Consent, SlackBot};
+        use crate::connectors::Principal;
+        use crate::protocol::{Audience, ConnectorProtocol};
+        use crate::providers::sqlite::{SqliteAuthFlows, SqliteDb};
+        use crate::runtime::session::interrupts::auth;
+        use crate::transport::mcp_auth::AuthorizeLinks;
+        use std::sync::Arc;
+
+        fn payload(principal: Principal) -> serde_json::Value {
+            serde_json::json!({
+                "message": "*gmail* is not authorized yet.",
+                "authorize": auth::Authorize { connection: "gmail".into(), principal },
+            })
+        }
+
+        fn person(audience: Audience) -> Principal {
+            Principal::Person {
+                subject: "slack:U1".into(),
+                audience,
+            }
+        }
+
+        fn bot(consent: Consent) -> SlackBot {
+            SlackBot::new(
+                Arc::new(super::OneWorkspace(Arc::new(super::Workspace::new(
+                    "xoxb-test".into(),
+                    "t".into(),
+                    super::Routing::new().dm(Some("a".into())),
+                )))),
+                "http://127.0.0.1:1".into(),
+                None,
+                None,
+            )
+            .with_consent(consent)
+        }
+
+        fn engine(path: &std::path::Path) -> Consent {
+            let db =
+                SqliteDb::open(path.to_str().unwrap(), std::time::Duration::from_secs(5)).unwrap();
+            let spec = crate::connectors::registry::ConnectionSpec {
+                url: "https://mcp.gmail.test/mcp".into(),
+                protocol: ConnectorProtocol::Mcp,
+                auth: None,
+                header: None,
+                credential: Some(crate::connectors::registry::CredentialScope::User),
+                prefix_tools: true,
+            };
+            Consent::Engine(Arc::new(AuthorizeLinks::new(
+                "https://agent.test",
+                Arc::new(SqliteAuthFlows::new(db)),
+                [("gmail".to_string(), spec)].into(),
+            )))
+        }
+
+        fn temp() -> std::path::PathBuf {
+            std::env::temp_dir().join(format!("core-way-in-{}.db", uuid::Uuid::now_v7()))
+        }
+
+        fn cleanup(path: &std::path::Path) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+            }
+        }
+
+        #[tokio::test]
+        async fn an_engine_that_hosts_the_flow_mints_a_link() {
+            let path = temp();
+            let bot = bot(engine(&path));
+            let how = bot
+                .way_in("t", &payload(person(Audience::Private)))
+                .await
+                .expect("a private person gets a link");
+            assert!(
+                how.starts_with("<https://agent.test/mcp/authorize/"),
+                "got {how}"
+            );
+            cleanup(&path);
+        }
+
+        /// The mint applies the same decision the call makes, so whoever
+        /// could not read the credential is offered no way to store one.
+        #[tokio::test]
+        async fn a_principal_the_call_would_refuse_gets_no_link() {
+            let path = temp();
+            let bot = bot(engine(&path));
+            for refused in [Principal::Machine, person(Audience::Shared)] {
+                let how = bot.way_in("t", &payload(refused)).await.unwrap();
+                assert_eq!(how, "Run `subs mcp login gmail` to authorize it.");
+            }
+            cleanup(&path);
+        }
+
+        #[tokio::test]
+        async fn a_hosted_project_points_at_the_dashboard_and_a_laptop_at_the_command() {
+            let dashboard = bot(Consent::Dashboard("https://app.test/overview".into()));
+            assert_eq!(
+                dashboard
+                    .way_in("t", &payload(person(Audience::Private)))
+                    .await
+                    .unwrap(),
+                "<https://app.test/overview|Authorize it in the dashboard>"
+            );
+            assert_eq!(
+                bot(Consent::Cli)
+                    .way_in("t", &payload(person(Audience::Private)))
+                    .await
+                    .unwrap(),
+                "Run `subs mcp login gmail` to authorize it."
+            );
+        }
+
+        /// A prompt carrying no facts gets nothing appended. A rejected
+        /// static token is one; every other interrupt is another.
+        #[tokio::test]
+        async fn a_prompt_without_the_facts_is_left_alone() {
+            let bot = bot(Consent::Cli);
+            let bare = serde_json::json!({ "message": "*gmail* rejected its token." });
+            assert_eq!(bot.way_in("t", &bare).await, None);
+        }
+
+        /// Two people on one connection get two links.
+        #[tokio::test]
+        async fn each_person_gets_their_own_link() {
+            let path = temp();
+            let bot = bot(engine(&path));
+
+            let first = bot
+                .way_in("t", &payload(person(Audience::Private)))
+                .await
+                .unwrap();
+            let second = bot
+                .way_in(
+                    "t",
+                    &payload(Principal::Person {
+                        subject: "slack:U2".into(),
+                        audience: Audience::Private,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_ne!(first, second);
+            cleanup(&path);
         }
     }
 
@@ -3163,6 +3388,7 @@ mod tests {
             wake_at: None,
             owner: Some(SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "t".into(),
                 id: None,
                 metadata: [
@@ -3292,6 +3518,7 @@ mod tests {
             wake_at: None,
             owner: Some(SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "t".into(),
                 id: None,
                 metadata: metadata

@@ -59,6 +59,7 @@ fn create_session_with_config(
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: tenant_id.to_string(),
                 id: Some(user_id.to_string()),
                 metadata: HashMap::new(),
@@ -4779,6 +4780,7 @@ fn frontend_caller_with_mismatched_tenant_on_create_session_is_denied() {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
                     kind: OwnerKind::Frontend,
+                    audience: Default::default(),
                     tenant_id: "tenant-b".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),
@@ -5672,6 +5674,7 @@ fn create_session_with_retry(retry: RetryPolicy) -> SessionAggregate {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -8601,6 +8604,7 @@ fn create_session_emits_session_start_before_client_input() {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -8636,6 +8640,7 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -8725,6 +8730,7 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -8855,6 +8861,7 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -9707,6 +9714,7 @@ fn fork_drops_a_retrying_settle_decision() {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),
@@ -10244,6 +10252,7 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
             agent_id: "agent-1".to_string(),
             owner: SessionOwner {
                 kind: OwnerKind::Frontend,
+                audience: Default::default(),
                 tenant_id: "tenant-a".to_string(),
                 id: Some("user-1".to_string()),
                 metadata: HashMap::new(),

@@ -177,7 +177,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
     let blobs = Arc::new(SqliteBlobStore::new(db.clone()));
-    let (rt, _adapter) = local::start_engine(db, blobs, env.providers, &cfg).await?;
+    let (rt, _adapter, _mcp_auth) = local::start_engine(db, blobs, env.providers, &cfg).await?;
 
     let session_id = args.session.unwrap_or_else(|| Uuid::now_v7().to_string());
 
@@ -186,8 +186,12 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     };
     let owner = SessionOwner {
         tenant_id: DEFAULT_TENANT.to_string(),
-        id: Some("dev".to_string()),
+        // Only this path names an unauthenticated person. A `[remote]` run
+        // is the caller's account, and a served engine is the token's
+        // subject.
+        id: Some(super::LOCAL_SUBJECT.to_string()),
         kind: OwnerKind::Frontend,
+        audience: crate::protocol::Audience::Private,
         metadata: Default::default(),
     };
 

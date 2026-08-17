@@ -13,6 +13,7 @@ together at the same version.
 
 - Support approval interrupts on destructive MCP tools.
 - Add agent-plugins support https://agent-plugins.org/
+- Support per-user MCP credentials
 
 ### Fixed
 

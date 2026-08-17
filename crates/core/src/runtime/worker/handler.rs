@@ -419,6 +419,7 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
                     kind: OwnerKind::Frontend,
+                    audience: Default::default(),
                     tenant_id: "tenant-a".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),
@@ -493,6 +494,7 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
                     kind: OwnerKind::Frontend,
+                    audience: Default::default(),
                     tenant_id: "tenant-a".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),
@@ -643,6 +645,7 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 owner: SessionOwner {
                     kind: OwnerKind::Frontend,
+                    audience: Default::default(),
                     tenant_id: "tenant-a".to_string(),
                     id: Some("user-1".to_string()),
                     metadata: HashMap::new(),

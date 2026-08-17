@@ -5,6 +5,7 @@ pub mod channel;
 pub mod client_http;
 pub mod http;
 pub mod http_push;
+pub mod mcp_auth;
 pub mod push;
 pub mod server;
 pub mod session_sse;

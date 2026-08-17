@@ -1,3 +1,7 @@
+CREATE INDEX idx_auth_flows_expiry ON auth_flows (expires_at);
+
+CREATE INDEX idx_auth_flows_oauth ON auth_flows (state_hash);
+
 CREATE INDEX idx_engine_worker_queue_tenant_agent_order
     ON engine_worker_queue (tenant_id, agent_id, enqueued_at, decision_id);
 
@@ -22,6 +26,19 @@ CREATE INDEX idx_snapshots_wake_at ON snapshots (wake_at);
 
 CREATE INDEX idx_wake_schedule_wake_at ON wake_schedule (wake_at);
 
+CREATE TABLE auth_flows (
+            link_hash      TEXT PRIMARY KEY,
+            tenant_id      TEXT NOT NULL,
+            connection_id  TEXT NOT NULL,
+            subject        TEXT NOT NULL,
+            state          TEXT NOT NULL,
+            state_hash     TEXT,
+            pending_secret TEXT,
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL,
+            expires_at     TEXT NOT NULL
+        );
+
 CREATE TABLE blobs (
     tenant_id  TEXT NOT NULL,
     id         TEXT NOT NULL,
@@ -33,12 +50,13 @@ CREATE TABLE blobs (
     PRIMARY KEY (tenant_id, id)
 );
 
-CREATE TABLE connector_credentials (
-    tenant_id     TEXT NOT NULL,
-    connection_id TEXT NOT NULL,
-    tokens        TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, connection_id)
-);
+CREATE TABLE "connector_credentials" (
+            tenant_id     TEXT NOT NULL,
+            connection_id TEXT NOT NULL,
+            subject       TEXT NOT NULL,
+            secret_id     TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, connection_id, subject)
+        );
 
 CREATE TABLE engine_worker_queue (
     decision_id  TEXT PRIMARY KEY,
@@ -95,6 +113,16 @@ CREATE TABLE projection_seeds (
     projection_name TEXT PRIMARY KEY,
     created_at      TEXT NOT NULL
 );
+
+CREATE TABLE secrets (
+            tenant_id   TEXT NOT NULL,
+            id          TEXT NOT NULL,
+            data        TEXT NOT NULL,
+            key_version INTEGER,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, id)
+        );
 
 CREATE TABLE session_index (
     tenant_id       TEXT NOT NULL,

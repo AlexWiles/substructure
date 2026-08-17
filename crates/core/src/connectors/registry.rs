@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use super::mcp::McpClient;
 use super::oauth::Probed;
-use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool};
+use super::{AuthNeed, ConnectorError, CredentialSource, Principal, RemoteTool, Subject};
 use crate::protocol::ConnectorProtocol;
 use crate::protocol::StoredResult;
 use crate::runtime::blob::BlobStore;
@@ -44,6 +44,11 @@ pub struct ConnectionSpec {
     /// Only under `auth = "token"`: OAuth binds its own header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
+    /// Whose credential this connection dials with. Absent is `shared`, and
+    /// stays absent so a rewrite does not stamp the default into every
+    /// section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<CredentialScope>,
     /// Whether the model sees `<id>__<tool>` rather than the connection's own
     /// tool names. On by default, and the operator's call rather than the agent
     /// author's: only whoever configured the connections knows whether their
@@ -71,6 +76,29 @@ impl ConnectionSpec {
     /// offers its tools under their own names.
     pub fn prefix_for<'a>(&self, id: &'a str) -> Option<&'a str> {
         self.prefix_tools.then_some(id)
+    }
+
+    pub fn effective_scope(&self) -> CredentialScope {
+        self.credential.unwrap_or(CredentialScope::Shared)
+    }
+}
+
+/// Whose credential a connection dials with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialScope {
+    /// One credential for the whole deployment.
+    Shared,
+    /// One credential per person, usable only in a private conversation.
+    User,
+}
+
+impl CredentialScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::User => "user",
+        }
     }
 }
 
@@ -226,10 +254,12 @@ pub trait CredentialResolver: Send + Sync {
     /// The credential headers for one connection, resolved at call time. The
     /// cloud implementation reads a vault and refreshes an expired token here;
     /// this is the seam that keeps tokens out of the event store.
+    ///
     async fn resolve(
         &self,
         tenant_id: &str,
         id: &str,
+        subject: &Subject,
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError>;
 
@@ -239,6 +269,7 @@ pub trait CredentialResolver: Send + Sync {
         &self,
         _tenant_id: &str,
         _id: &str,
+        _subject: &Subject,
         _spec: &ConnectionSpec,
     ) -> Result<bool, ConnectorError> {
         Ok(false)
@@ -249,6 +280,7 @@ struct Resolved {
     credentials: Arc<dyn CredentialResolver>,
     tenant_id: String,
     id: String,
+    subject: Subject,
     spec: ConnectionSpec,
 }
 
@@ -256,7 +288,7 @@ struct Resolved {
 impl CredentialSource for Resolved {
     async fn headers(&self) -> Result<HeaderMap, ConnectorError> {
         self.credentials
-            .resolve(&self.tenant_id, &self.id, &self.spec)
+            .resolve(&self.tenant_id, &self.id, &self.subject, &self.spec)
             .await
     }
 }
@@ -270,17 +302,33 @@ pub struct Offer {
     pub instructions: Option<String>,
 }
 
+/// One live client and when it last carried a call, for the idle sweep.
+struct CachedClient {
+    client: Arc<McpClient>,
+    last_used: std::time::Instant,
+}
+
+/// One client per person per connection grows without limit, so the map is
+/// bounded. Eviction only drops the map's `Arc`; a call in flight holds its
+/// own and the transport closes on the last drop.
+const MAX_CLIENTS: usize = 64;
+const CLIENT_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// The engine's handle on its connections. Holds one live client per resolved
-/// connection so an agent's calls reuse a single connector session; a rejected
+/// credential so an agent's calls reuse a single connector session; a rejected
 /// credential drops the client so the next call resolves a fresh one.
 pub struct Connections {
     registry: Arc<dyn ConnectionRegistry>,
     credentials: Arc<dyn CredentialResolver>,
     blobs: Arc<dyn BlobStore>,
     http: reqwest::Client,
-    clients: Mutex<HashMap<(String, String), Arc<McpClient>>>,
+    /// Keyed by the credential's identity, not the connection's: two persons
+    /// on one connection are two credentials, and one client would send the
+    /// first person's to the second.
+    clients: Mutex<HashMap<(String, String, Subject), CachedClient>>,
     /// What each server answered an unauthenticated call with, keyed by URL:
-    /// one server gives one answer however many connections name it.
+    /// one server gives one answer however many connections name it, and the
+    /// answer is the same for every person, so sharing it is correct.
     probed: Mutex<HashMap<String, Probed>>,
 }
 
@@ -300,14 +348,50 @@ impl Connections {
         }
     }
 
+    /// Whose credential slot this call reads, or why it must not read any.
+    /// The one decision point: every call and every fetch passes here.
+    pub(crate) fn subject_for(
+        id: &str,
+        spec: &ConnectionSpec,
+        principal: &Principal,
+    ) -> Result<Subject, ConnectorError> {
+        use crate::protocol::Audience;
+        match (spec.effective_scope(), principal) {
+            (CredentialScope::Shared, _) => Ok(Subject::Shared),
+            (
+                CredentialScope::User,
+                Principal::Person {
+                    subject,
+                    audience: Audience::Private,
+                },
+            ) => Ok(Subject::Person(subject.clone())),
+            (CredentialScope::User, Principal::Person { .. }) => {
+                Err(ConnectorError::permanent(format!(
+                    "connection `{id}` uses your personal credential, and other people can \
+                     read this conversation. Continue in a direct message."
+                )))
+            }
+            (CredentialScope::User, Principal::Machine) => Err(ConnectorError::permanent(format!(
+                "connection `{id}` uses a personal credential, and no person is behind \
+                 this session"
+            ))),
+        }
+    }
+
     /// What a connection offers, with the prefix its tools expand under. The
     /// prefix rides along so the caller can record it with the offer rather than
     /// reading config again at prompt time, where a since-edited file would
     /// rename tools underneath a live session.
-    pub async fn list_tools(&self, tenant_id: &str, id: &str) -> Result<Offer, ConnectorError> {
+    pub async fn list_tools(
+        &self,
+        tenant_id: &str,
+        id: &str,
+        principal: &Principal,
+    ) -> Result<Offer, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
+        let subject = Self::subject_for(id, &spec, principal)?;
         let (tools, instructions) = self
-            .attempt(tenant_id, id, &spec, |client| async move {
+            .attempt(tenant_id, id, &subject, &spec, |client| async move {
                 let tools = client.list_tools().await?;
                 Ok((tools, client.instructions().await))
             })
@@ -323,11 +407,13 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
+        principal: &Principal,
         name: &str,
         arguments: &Value,
     ) -> Result<StoredResult, ConnectorError> {
         let spec = self.registry.resolve(tenant_id, id).await?;
-        self.attempt(tenant_id, id, &spec, |client| async move {
+        let subject = Self::subject_for(id, &spec, principal)?;
+        self.attempt(tenant_id, id, &subject, &spec, |client| async move {
             client.call_tool(name, arguments).await
         })
         .await
@@ -342,6 +428,7 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
+        subject: &Subject,
         spec: &ConnectionSpec,
         op: F,
     ) -> Result<T, ConnectorError>
@@ -349,15 +436,19 @@ impl Connections {
         F: Fn(Arc<McpClient>) -> Fut,
         Fut: std::future::Future<Output = Result<T, ConnectorError>>,
     {
-        let first = op(self.client(tenant_id, id, spec).await?).await;
+        let first = op(self.client(tenant_id, id, subject, spec).await?).await;
         let Err(err) = first else {
             return first;
         };
         if err.auth.is_none() {
             return Err(err);
         }
-        if self.credentials.refresh(tenant_id, id, spec).await? {
-            let retried = op(self.client(tenant_id, id, spec).await?).await;
+        if self
+            .credentials
+            .refresh(tenant_id, id, subject, spec)
+            .await?
+        {
+            let retried = op(self.client(tenant_id, id, subject, spec).await?).await;
             if !matches!(&retried, Err(again) if again.auth.is_some()) {
                 return retried;
             }
@@ -369,17 +460,20 @@ impl Connections {
         &self,
         tenant_id: &str,
         id: &str,
+        subject: &Subject,
         spec: &ConnectionSpec,
     ) -> Result<Arc<McpClient>, ConnectorError> {
-        let key = (tenant_id.to_string(), id.to_string());
-        if let Some(client) = self.clients.lock().await.get(&key) {
-            return Ok(client.clone());
+        let key = (tenant_id.to_string(), id.to_string(), subject.clone());
+        if let Some(cached) = self.clients.lock().await.get_mut(&key) {
+            cached.last_used = std::time::Instant::now();
+            return Ok(cached.client.clone());
         }
 
         let source = Arc::new(Resolved {
             credentials: self.credentials.clone(),
             tenant_id: tenant_id.to_string(),
             id: id.to_string(),
+            subject: subject.clone(),
             spec: spec.clone(),
         });
         let client = match spec.protocol {
@@ -393,9 +487,34 @@ impl Connections {
         };
 
         let mut clients = self.clients.lock().await;
+        Self::evict(&mut clients);
         // Another caller may have won the race; keep whichever landed first so
-        // one connection means one session.
-        Ok(clients.entry(key).or_insert(client).clone())
+        // one credential means one session.
+        Ok(clients
+            .entry(key)
+            .or_insert(CachedClient {
+                client,
+                last_used: std::time::Instant::now(),
+            })
+            .client
+            .clone())
+    }
+
+    /// Drop idle clients, then the least recently used past the cap. Dropping
+    /// the map's `Arc` is the whole eviction: a call in flight holds its own.
+    fn evict(clients: &mut HashMap<(String, String, Subject), CachedClient>) {
+        let now = std::time::Instant::now();
+        clients.retain(|_, c| now.duration_since(c.last_used) < CLIENT_IDLE);
+        while clients.len() >= MAX_CLIENTS {
+            let oldest = clients
+                .iter()
+                .min_by_key(|(_, c)| c.last_used)
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(key) => clients.remove(&key),
+                None => break,
+            };
+        }
     }
 
     ///
@@ -545,6 +664,7 @@ mod tests {
             &self,
             _: &str,
             _: &str,
+            _: &Subject,
             _: &ConnectionSpec,
         ) -> Result<HeaderMap, ConnectorError> {
             crate::connectors::mcp::auth_headers(None, &self.current.lock().await.clone())
@@ -554,6 +674,7 @@ mod tests {
             &self,
             _: &str,
             _: &str,
+            _: &Subject,
             _: &ConnectionSpec,
         ) -> Result<bool, ConnectorError> {
             self.refreshes.fetch_add(1, Ordering::SeqCst);
@@ -573,6 +694,7 @@ mod tests {
             protocol: ConnectorProtocol::Mcp,
             auth: Some(AuthKind::Oauth),
             header: None,
+            credential: None,
             prefix_tools: true,
         };
         Connections::new(
@@ -591,7 +713,7 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", Some("fresh")));
         let offer = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry")
+            .list_tools("t", "sentry", &Principal::Machine)
             .await
             .expect("the retry carries the refreshed token");
 
@@ -606,7 +728,7 @@ mod tests {
         let connections = connections(url, credentials.clone()).await;
 
         connections
-            .list_tools("t", "sentry")
+            .list_tools("t", "sentry", &Principal::Machine)
             .await
             .expect_err("the stored credential is refused and cannot be refreshed");
 
@@ -614,7 +736,7 @@ mod tests {
         *credentials.current.lock().await = "fresh".to_string();
 
         let offer = connections
-            .list_tools("t", "sentry")
+            .list_tools("t", "sentry", &Principal::Machine)
             .await
             .expect("the credential written elsewhere goes out on the next request");
 
@@ -632,7 +754,7 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", Some("also-stale")));
         let err = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry")
+            .list_tools("t", "sentry", &Principal::Machine)
             .await
             .expect_err("the second refusal stands");
 
@@ -663,7 +785,7 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", None));
         let err = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry")
+            .list_tools("t", "sentry", &Principal::Machine)
             .await
             .expect_err("a refusal it cannot correct");
 
@@ -709,6 +831,115 @@ mod tests {
             spec.auth, None,
             "a bare connection is discovered, not assumed"
         );
+    }
+
+    /// The one decision point, row by row: a shared connection answers with
+    /// the company slot for anybody; a personal one answers only for a person
+    /// in a private conversation, and refuses the rest with the reason.
+    #[test]
+    fn the_scope_and_principal_decide_whose_slot_a_call_reads() {
+        use crate::protocol::Audience;
+        let shared = ConnectionSpec {
+            url: "https://mcp.sentry.dev/mcp".into(),
+            protocol: ConnectorProtocol::Mcp,
+            auth: None,
+            header: None,
+            credential: None,
+            prefix_tools: true,
+        };
+        let personal = ConnectionSpec {
+            credential: Some(CredentialScope::User),
+            ..shared.clone()
+        };
+        let person = |audience| Principal::Person {
+            subject: "slack:U1".to_string(),
+            audience,
+        };
+
+        for principal in [
+            Principal::Machine,
+            person(Audience::Private),
+            person(Audience::Shared),
+        ] {
+            assert_eq!(
+                Connections::subject_for("sentry", &shared, &principal).unwrap(),
+                Subject::Shared
+            );
+        }
+
+        assert_eq!(
+            Connections::subject_for("gmail", &personal, &person(Audience::Private)).unwrap(),
+            Subject::Person("slack:U1".to_string())
+        );
+
+        let refused =
+            Connections::subject_for("gmail", &personal, &person(Audience::Shared)).unwrap_err();
+        assert!(refused.to_string().contains("direct message"), "{refused}");
+        assert!(!refused.retryable);
+
+        let machine =
+            Connections::subject_for("gmail", &personal, &Principal::Machine).unwrap_err();
+        assert!(machine.to_string().contains("no person"), "{machine}");
+        assert!(machine.to_string().contains("gmail"), "names it: {machine}");
+    }
+
+    /// Eviction drops the map's `Arc` only: a bounded map, and never a client
+    /// pulled out from under a call.
+    #[test]
+    fn the_client_map_stays_bounded_and_evicts_the_least_recent() {
+        let mut clients: HashMap<(String, String, Subject), CachedClient> = HashMap::new();
+        let now = std::time::Instant::now();
+        for i in 0..MAX_CLIENTS + 5 {
+            clients.insert(
+                ("t".into(), format!("c{i}"), Subject::Shared),
+                CachedClient {
+                    client: Arc::new(McpClient::new(
+                        reqwest::Client::new(),
+                        "https://example.test/mcp".to_string(),
+                        Arc::new(Resolved {
+                            credentials: Arc::new(Rotating::new("x", None)),
+                            tenant_id: "t".into(),
+                            id: format!("c{i}"),
+                            subject: Subject::Shared,
+                            spec: ConnectionSpec {
+                                url: "https://example.test/mcp".into(),
+                                protocol: ConnectorProtocol::Mcp,
+                                auth: None,
+                                header: None,
+                                credential: None,
+                                prefix_tools: true,
+                            },
+                        }),
+                        Arc::new(crate::runtime::blob::MemoryBlobStore::new()),
+                        "t",
+                    )),
+                    last_used: now - std::time::Duration::from_secs(i as u64),
+                },
+            );
+        }
+        Connections::evict(&mut clients);
+        assert!(clients.len() < MAX_CLIENTS, "bounded: {}", clients.len());
+        assert!(
+            clients.contains_key(&("t".to_string(), "c0".to_string(), Subject::Shared)),
+            "the most recently used stays"
+        );
+    }
+
+    #[test]
+    fn the_scope_is_read_from_the_file_and_defaults_to_shared() {
+        let bare: ConnectionSpec = toml::from_str(r#"url = "https://mcp.sentry.dev/mcp""#).unwrap();
+        assert_eq!(bare.effective_scope(), CredentialScope::Shared);
+        assert!(
+            !toml::to_string(&bare).unwrap().contains("credential"),
+            "the default is not written back"
+        );
+
+        let personal: ConnectionSpec =
+            toml::from_str("url = \"https://mcp.sentry.dev/mcp\"\ncredential = \"user\"").unwrap();
+        assert_eq!(personal.effective_scope(), CredentialScope::User);
+        assert!(toml::to_string(&personal)
+            .unwrap()
+            .contains("credential = \"user\""));
     }
 
     #[test]
@@ -774,6 +1005,7 @@ mod tests {
                 &self,
                 _: &str,
                 _: &str,
+                _: &Subject,
                 _: &ConnectionSpec,
             ) -> Result<HeaderMap, ConnectorError> {
                 Ok(HeaderMap::new())
@@ -785,6 +1017,7 @@ mod tests {
             protocol: ConnectorProtocol::Mcp,
             auth: None,
             header: None,
+            credential: None,
             prefix_tools: true,
         };
         let connections = Connections::new(

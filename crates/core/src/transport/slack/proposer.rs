@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::activity::TurnActivity;
 use super::render::{self, StepStatus, StepView};
 use super::{display_of, with_footer, ButtonValue};
-use crate::connectors::AuthNeed;
+use crate::connectors::{AuthNeed, Principal};
 use crate::protocol::{
     DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution, InterruptResponder,
     Message, ResumeStatus,
@@ -19,14 +19,12 @@ use crate::runtime::worker::ChannelProposer;
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
-pub struct SlackProposer {
-    /// Absent leaves the prompt naming the command instead.
-    authorize_page: Option<String>,
-}
+#[derive(Default)]
+pub struct SlackProposer;
 
 impl SlackProposer {
-    pub fn new(authorize_page: Option<String>) -> Self {
-        Self { authorize_page }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -89,15 +87,23 @@ impl ChannelProposer for SlackProposer {
 impl SlackProposer {
     /// The prompt for the first connection that needs a person. It replaces
     /// the proposal, because the session stops here.
+    ///
+    /// It writes why, and the facts a way in is built from. How to authorize
+    /// is the delivering channel's to add, so no link is written here.
     fn authorize_prompt(&self, state: &SessionState) -> Option<DecisionResponse> {
         let (connection, need) = auth::needing(state)?;
+        let authorize = auth::Authorize {
+            principal: Principal::of_owner(state.owner.as_ref()),
+            connection: connection.clone(),
+        };
 
         Some(DecisionResponse {
             actions: vec![DecisionAction::Interrupt {
                 interrupt_id: Some(auth::interrupt_id(&connection)),
                 reason: format!("connection `{connection}` needs authorizing"),
                 payload: serde_json::json!({
-                    "message": self.ask(&connection, need),
+                    "message": ask(&connection, need),
+                    "authorize": authorize,
                     "metadata": { "options": [{
                         "label": "Retry",
                         "value": { "connection": connection },
@@ -107,27 +113,22 @@ impl SlackProposer {
             ..Default::default()
         })
     }
+}
 
-    fn ask(&self, connection: &str, need: AuthNeed) -> String {
-        let why = match need {
-            AuthNeed::NeverAuthorized => {
-                format!("*{connection}* is not authorized yet, so I cannot use it.")
-            }
-            AuthNeed::Reauthorize => {
-                format!("*{connection}* needs to be authorized again. Its access expired.")
-            }
-            AuthNeed::TokenRejected => {
-                return format!(
-                    "*{connection}* rejected its token. An operator must set a new one \
-                     with `subs mcp set-token {connection}`."
-                )
-            }
-        };
-        match &self.authorize_page {
-            Some(page) => format!("{why}\n\n<{page}|Authorize it in the dashboard>"),
-            // Nobody else can open a browser flow that lands on this machine.
-            None => format!("{why}\n\nRun `subs mcp login {connection}` to authorize it."),
+/// Why the session stopped. A rejected token names its fix here, because no
+/// consent flow can replace a static token.
+fn ask(connection: &str, need: AuthNeed) -> String {
+    match need {
+        AuthNeed::NeverAuthorized => {
+            format!("*{connection}* is not authorized yet, so I cannot use it.")
         }
+        AuthNeed::Reauthorize => {
+            format!("*{connection}* needs to be authorized again. Its access expired.")
+        }
+        AuthNeed::TokenRejected => format!(
+            "*{connection}* rejected its token. An operator must set a new one \
+             with `subs mcp set-token {connection}`."
+        ),
     }
 }
 
@@ -325,10 +326,7 @@ mod tests {
         events: &[SessionEvent],
         proposed: DecisionResponse,
     ) -> DecisionResponse {
-        SlackProposer::new(Some(
-            "https://app.subs.test/projects/proj_1/overview".to_string(),
-        ))
-        .propose(session_id, trigger, state, events, &[], proposed)
+        SlackProposer::new().propose(session_id, trigger, state, events, &[], proposed)
     }
 
     fn action(value: &str) -> DecisionTrigger {
@@ -351,6 +349,7 @@ mod tests {
         let mut s = SessionState::new(SESSION.to_string());
         s.owner = Some(crate::protocol::SessionOwner {
             kind: OwnerKind::Frontend,
+            audience: Default::default(),
             tenant_id: "t".to_string(),
             id: Some("slack:U1".to_string()),
             metadata: std::collections::HashMap::from_iter([
@@ -533,9 +532,18 @@ mod tests {
                 assert_eq!(interrupt_id.as_deref(), Some("mcp-auth:sentry"));
                 let message = payload["message"].as_str().unwrap();
                 assert!(message.contains("authorized again"), "got {message}");
-                assert!(
-                    message.contains("https://app.subs.test/projects/proj_1/overview"),
-                    "got {message}"
+                // Why, and the facts a way in is built from. The link itself
+                // is minted by whoever delivers this.
+                assert!(!message.contains("http"), "got {message}");
+                let authorize: auth::Authorize =
+                    serde_json::from_value(payload["authorize"].clone()).unwrap();
+                assert_eq!(authorize.connection, "sentry");
+                assert_eq!(
+                    authorize.principal,
+                    Principal::Person {
+                        subject: "slack:U1".to_string(),
+                        audience: Default::default(),
+                    }
                 );
             }
             other => panic!("expected one interrupt; got {other:?}"),

@@ -69,6 +69,8 @@ impl AuthPrincipal {
             tenant_id: self.tenant_id.clone(),
             id: Some(id),
             kind: OwnerKind::Frontend,
+            // A token names one person, and this session is their own UI.
+            audience: crate::protocol::Audience::Private,
             metadata: HashMap::new(),
         })
     }

@@ -476,6 +476,7 @@ fn load_servers(
                         protocol: ConnectorProtocol::Mcp,
                         auth: None,
                         header: None,
+                        credential: None,
                         prefix_tools: true,
                     },
                 );

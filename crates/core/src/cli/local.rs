@@ -9,7 +9,7 @@ use crate::cli::cloud::{credentials, print};
 use crate::cli::env::{EnvVars, ProviderEnv, ProviderKind};
 use crate::cli::DEFAULT_TENANT;
 use crate::connectors::credential::StoredCredentials;
-use crate::connectors::registry::{Connections, LocalRegistry};
+use crate::connectors::registry::{Connections, CredentialScope, LocalRegistry};
 use crate::llm::{LlmProviderRegistry, LlmProviderTrait, LlmTask};
 use crate::manifest;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
@@ -17,17 +17,20 @@ use crate::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use crate::providers::openai::{OpenAiConfig, OpenAiProvider};
 use crate::providers::openrouter::{OpenRouterConfig, OpenRouterProvider};
 use crate::providers::sqlite::{
-    SqliteBlobStore, SqliteCredentialStore, SqliteCursorStore, SqliteDb, SqliteEventStore,
-    SqliteSessionIndexStore, SqliteWakeStore, SqliteWorkerQueue,
+    SqliteAuthFlows, SqliteBlobStore, SqliteCredentialStore, SqliteCursorStore, SqliteDb,
+    SqliteEventStore, SqliteSecretStore, SqliteSessionIndexStore, SqliteWakeStore,
+    SqliteWorkerQueue,
 };
 use crate::runtime::blob::{BlobResolvingLlm, BlobStore};
 use crate::runtime::connector::ConnectorTask;
+use crate::runtime::secret::SecretCipher;
 use crate::sub_agent::SubAgentTask;
 use crate::transport::admin_http::{self, AdminHttpState};
 use crate::transport::ag_ui::channel::AgUiChannel;
 use crate::transport::channel::{start_channels, Channel, ChannelContext};
 use crate::transport::client_http::{self, ClientHttpState};
 use crate::transport::http_push::http_transport;
+use crate::transport::mcp_auth::{self, AuthorizeLinks, McpAuthDeps};
 use crate::transport::push::PushAdapter;
 use crate::transport::server::SubstructureServer;
 use crate::transport::slack::{Routing, SlackChannel, StreamStore};
@@ -100,6 +103,22 @@ fn authorize_page(cfg: &ProjectConfig) -> Option<String> {
     hosted.then(|| format!("{}/overview", print::admin_url(&api_url, project)))
 }
 
+/// Where a person authorizes: this engine when it hosts the flow, the
+/// dashboard for a hosted project, otherwise the command.
+fn consent(
+    mcp_auth: &Option<Arc<McpAuthDeps>>,
+    cfg: &ProjectConfig,
+) -> crate::transport::slack::Consent {
+    use crate::transport::slack::Consent;
+    match mcp_auth {
+        Some(deps) => Consent::Engine(deps.links.clone()),
+        None => match authorize_page(cfg) {
+            Some(page) => Consent::Dashboard(page),
+            None => Consent::Cli,
+        },
+    }
+}
+
 pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     start_server(args).await
 }
@@ -146,7 +165,9 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     };
 
     // Held for the process's life: dropping it aborts the decision loops.
-    let (rt, _adapter) = start_engine(db, blobs.clone(), env.providers, &cfg).await?;
+    let (rt, _adapter, mcp_auth) = start_engine(db, blobs.clone(), env.providers, &cfg).await?;
+    // Whether this engine hosts the consent flow is known only now.
+    let slack = slack.map(|s| s.with_consent(consent(&mcp_auth, &cfg)));
     announce_agents(&cfg);
 
     let auth = match env.auth {
@@ -194,6 +215,10 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     let channel_ctx = ChannelContext::new(rt.clone(), shutdown.clone());
 
     let mut routers = vec![admin_routes, client_routes, worker_routes, v1_routes];
+    if let Some(deps) = mcp_auth {
+        routers.push(mcp_auth::router(deps.clone()));
+        mcp_auth::spawn_sweeper(deps, shutdown.clone());
+    }
     routers.extend(start_channels(channels, channel_ctx));
     let server = SubstructureServer::new(routers);
 
@@ -235,12 +260,15 @@ pub(crate) async fn start_engine(
     blobs: Arc<dyn BlobStore>,
     providers: Vec<ProviderEnv>,
     cfg: &ProjectConfig,
-) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>)> {
+) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>, Option<Arc<McpAuthDeps>>)> {
     // The engine serves skills from this copy, so a change on disk does not
     // move a live session.
     let (manifest, mut resolved) = cfg.resolved_manifest()?;
     for notice in &resolved.notices {
         tracing::warn!("{notice}");
+    }
+    for notice in manifest.scope_notices() {
+        eprintln!("{notice}");
     }
     let mut bundles: crate::plugins::PluginSet = manifest
         .plugin
@@ -261,12 +289,34 @@ pub(crate) async fn start_engine(
     let plugins: Arc<dyn crate::plugins::PluginResolver> =
         Arc::new(crate::plugins::StaticPlugins::new(bundles));
     let connectors = manifest.connections();
+    let cipher = SecretCipher::from_env()
+        .map_err(|e| anyhow::anyhow!(e))?
+        .map(Arc::new);
+    // Secrets are sealed only when a key is set. Personal credentials in
+    // plain text are worth a word, not a refusal.
+    if cipher.is_none() {
+        if let Some((id, _)) = connectors
+            .iter()
+            .find(|(_, spec)| spec.effective_scope() == CredentialScope::User)
+        {
+            tracing::warn!(
+                connection = %id,
+                "a `credential = \"user\"` connection stores personal credentials in plain \
+                 text; set ${} to seal them",
+                crate::runtime::secret::KEYS_ENV
+            );
+        }
+    }
     let event_store = Arc::new(SqliteEventStore::new(db.clone())?);
     let worker_queue = Arc::new(SqliteWorkerQueue::new(db.clone())?);
     let cursor_store = Arc::new(SqliteCursorStore::new(db.clone())?);
     let wake_store = Arc::new(SqliteWakeStore::new(db.clone())?);
     let session_index_store = Arc::new(SqliteSessionIndexStore::new(db.clone())?);
-    let token_store = Arc::new(SqliteCredentialStore::new(db)?);
+    let secret_store = Arc::new(SqliteSecretStore::new(db.clone(), cipher));
+    let token_store = Arc::new(SqliteCredentialStore::new(
+        db.clone(),
+        secret_store.clone(),
+    )?);
     // The file is the whole declaration, so starting on it is also what applies
     // it: a connection taken out of the file is one whose credential is gone.
     let declared: Vec<String> = connectors.keys().cloned().collect();
@@ -275,6 +325,27 @@ pub(crate) async fn start_engine(
             connection = %forgotten,
             "forgot the credential: the file no longer declares this connection"
         );
+    }
+    // A scope that changed never adopts the old credential: the slots differ,
+    // so the old rows simply stop being read. Say so, or the silence reads as
+    // a broken login.
+    for (id, spec) in &connectors {
+        let holders = token_store.holders(DEFAULT_TENANT, id).await?;
+        let scope = spec.effective_scope();
+        let stranded = match scope {
+            CredentialScope::User => holders.contains(&crate::connectors::Subject::Shared),
+            CredentialScope::Shared => holders
+                .iter()
+                .any(|h| matches!(h, crate::connectors::Subject::Person(_))),
+        };
+        if stranded {
+            tracing::warn!(
+                connection = %id,
+                scope = scope.as_str(),
+                "the connection changed scope; credentials from the old scope are never \
+                 adopted, so each holder under the new scope must connect again"
+            );
+        }
     }
 
     let config = RuntimeConfig::default();
@@ -291,7 +362,7 @@ pub(crate) async fn start_engine(
     // env-var references, never a token. What `subs mcp login` authorized is in
     // this same database, so a login and the engine that uses it cannot drift
     // apart.
-    let connections = Some(connectors)
+    let connections = Some(connectors.clone())
         .filter(|c| !c.is_empty())
         .map(|connectors| {
             tracing::info!(
@@ -300,10 +371,26 @@ pub(crate) async fn start_engine(
             );
             Arc::new(Connections::new(
                 Arc::new(LocalRegistry::new(connectors)),
-                Arc::new(StoredCredentials::new(token_store)),
+                Arc::new(StoredCredentials::new(token_store.clone())),
                 blobs.clone(),
             ))
         });
+
+    // A public address is what turns the auth prompt's command into a link:
+    // the engine mints authorize URLs and hosts the callback.
+    let mcp_auth = match cfg.serve.as_ref().and_then(|s| s.public_url.clone()) {
+        Some(public_url) if !connectors.is_empty() => {
+            let flows = Arc::new(SqliteAuthFlows::new(db));
+            Some(Arc::new(McpAuthDeps {
+                links: Arc::new(AuthorizeLinks::new(&public_url, flows.clone(), connectors)),
+                flows,
+                secrets: secret_store,
+                credentials: token_store,
+                http: reqwest::Client::new(),
+            }))
+        }
+        _ => None,
+    };
 
     if providers.is_empty() {
         tracing::info!(
@@ -339,9 +426,7 @@ pub(crate) async fn start_engine(
             plugins,
             connector_task_queue,
             worker_queue,
-            channel_proposers: vec![Arc::new(crate::transport::slack::SlackProposer::new(
-                authorize_page(cfg),
-            ))],
+            channel_proposers: vec![Arc::new(crate::transport::slack::SlackProposer::new())],
             session_index_store,
             cursor_store,
             wake_store,
@@ -359,7 +444,7 @@ pub(crate) async fn start_engine(
     ));
     adapter.start();
 
-    Ok((rt, adapter))
+    Ok((rt, adapter, mcp_auth))
 }
 
 /// The client one engine-run block calls with. `base_url` is the file's when it

@@ -126,6 +126,10 @@ pub struct SubmitClientPayloadRequest {
 #[derive(Debug, Deserialize)]
 pub struct SubmitClientPayloadIdentity {
     pub id: String,
+    /// The worker's application knows who reads its conversation; absent
+    /// reads as shared.
+    #[serde(default)]
+    pub audience: crate::protocol::Audience,
     #[serde(default)]
     pub metadata: std::collections::HashMap<String, String>,
 }

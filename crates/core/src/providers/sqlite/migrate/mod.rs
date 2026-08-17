@@ -9,6 +9,8 @@
 mod m001_baseline;
 mod m002_slack_files;
 mod m003_blobs;
+mod m004_secret_store;
+mod m005_auth_flows;
 
 use chrono::Utc;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -41,6 +43,16 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "blobs",
         up: m003_blobs::up,
+    },
+    Migration {
+        version: 4,
+        name: "secret_store",
+        up: m004_secret_store::up,
+    },
+    Migration {
+        version: 5,
+        name: "auth_flows",
+        up: m005_auth_flows::up,
     },
 ];
 
@@ -277,6 +289,47 @@ mod tests {
                 .query_row(&format!("SELECT name FROM {ledger}"), [], |r| r.get(0))
                 .unwrap();
             assert_eq!(name, expected);
+        }
+    }
+
+    /// A credential written before the secret store becomes a referenced,
+    /// shared-slot secret — still plaintext until a key appears.
+    #[test]
+    fn stored_credentials_move_into_the_secret_store() {
+        let path = std::env::temp_dir().join(format!("migrate-conv-{}.db", Uuid::now_v7()));
+        let mut conn = Connection::open(&path).unwrap();
+        run_on_conn(&mut conn, CORE_LEDGER, &CORE_MIGRATIONS[..3]).unwrap();
+        conn.execute(
+            "INSERT INTO connector_credentials (tenant_id, connection_id, tokens)
+             VALUES ('default', 'linear', '{\"token\":\"tok\"}')",
+            [],
+        )
+        .unwrap();
+
+        run_on_conn(&mut conn, CORE_LEDGER, CORE_MIGRATIONS).unwrap();
+
+        let (subject, secret_id): (String, String) = conn
+            .query_row(
+                "SELECT subject, secret_id FROM connector_credentials
+                 WHERE connection_id = 'linear'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(subject, "", "the old row becomes the shared slot");
+        let (data, key_version): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT data, key_version FROM secrets WHERE id = ?1",
+                [&secret_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(data, "{\"token\":\"tok\"}");
+        assert_eq!(key_version, None);
+
+        drop(conn);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
     }
 

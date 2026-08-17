@@ -1,0 +1,21 @@
+name = "mcp-user-credentials"
+
+[llm.claude]
+type = "anthropic"
+
+[agent.assistant]
+llm = "claude"
+model = "claude-haiku-4-5-20251001"
+system = "You are a careful assistant. When asked about the connected account, call the whoami tool and repeat its answer exactly."
+mcp = ["mail"]
+
+[run]
+agent = "assistant"
+output = "pretty"
+
+# A connection whose credential is one person's own account. Set
+# SUBS_SECRET_KEY to seal stored credentials; without it they are stored
+# in plain text and the engine says so at startup.
+[mcp.mail]
+url = "http://127.0.0.1:4478/mcp"
+credential = "user"

@@ -209,6 +209,22 @@
       ],
       "title": "Approve"
     },
+    "Audience": {
+      "description": "Who can read what a session says. The transport sets it once, at the\nsession's start; everything absent or unknown reads as `shared`, because\n`shared` is the value that never selects a personal credential.",
+      "oneOf": [
+        {
+          "const": "shared",
+          "description": "More than one person can read the answer.",
+          "type": "string"
+        },
+        {
+          "const": "private",
+          "description": "One person only.",
+          "type": "string"
+        }
+      ],
+      "title": "Audience"
+    },
     "AudioData": {
       "additionalProperties": false,
       "properties": {
@@ -3298,6 +3314,9 @@
       "additionalProperties": false,
       "description": "The owner as delivered to the worker on `DecisionRequest.identity`, without\nthe tenant. Read `kind` with `id`: only `frontend` is an end user.",
       "properties": {
+        "audience": {
+          "$ref": "#/$defs/Audience"
+        },
         "id": {
           "type": [
             "string",

@@ -58,6 +58,9 @@ impl Caller {
             tenant_id: self.tenant_id().to_string(),
             id: self.subject().map(str::to_string),
             kind: self.owner_kind(),
+            // A caller says nothing about who reads the answers, so the safe
+            // value stands; a transport that knows sets it on its own owner.
+            audience: Default::default(),
             metadata: HashMap::new(),
         }
     }
@@ -83,6 +86,7 @@ mod tests {
             tenant_id: "tenant-a".to_string(),
             id: Some(id.to_string()),
             kind,
+            audience: Default::default(),
             metadata: HashMap::new(),
         }
     }

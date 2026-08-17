@@ -195,6 +195,73 @@ impl Manifest {
     pub fn slack_dm_agent(&self) -> Option<String> {
         self.slack.as_ref()?.dm.clone()
     }
+
+    /// Route combinations that cannot work: a `credential = "user"`
+    /// connection reached from a Slack binding whose conversations are
+    /// shared. The route is reported, not the agent — the same agent serving
+    /// direct messages is normal and correct.
+    pub fn scope_notices(&self) -> Vec<String> {
+        let connections = self.connections();
+        let personal: Vec<&String> = connections
+            .iter()
+            .filter(|(_, spec)| {
+                spec.effective_scope() == crate::connectors::registry::CredentialScope::User
+            })
+            .map(|(id, _)| id)
+            .collect();
+        let Some(slack) = self.slack.as_ref().filter(|_| !personal.is_empty()) else {
+            return Vec::new();
+        };
+
+        let mut notices = Vec::new();
+        for (agent_id, section) in &self.agent {
+            let mut reached: Vec<String> = section
+                .mcp
+                .iter()
+                .map(McpRef::id)
+                .filter(|id| personal.iter().any(|p| p == id))
+                .map(str::to_string)
+                .collect();
+            for plugin in &section.plugins {
+                let servers = self
+                    .plugin
+                    .get(plugin.id())
+                    .and_then(|s| s.bundle.as_ref())
+                    .map(|b| b.servers.keys())
+                    .into_iter()
+                    .flatten();
+                for name in servers {
+                    let derived = crate::plugins::server_id(plugin.id(), name);
+                    if personal.iter().any(|p| **p == derived) {
+                        reached.push(derived);
+                    }
+                }
+            }
+            if reached.is_empty() {
+                continue;
+            }
+            let mut bindings = Vec::new();
+            if slack.mentions.as_deref() == Some(agent_id) {
+                bindings.push("the [slack] `mentions` binding".to_string());
+            }
+            for (channel_id, channel) in &slack.channel {
+                if channel.agent() == Some(agent_id) {
+                    bindings.push(format!("the channel binding [slack.channel.{channel_id}]"));
+                }
+            }
+            for binding in bindings {
+                for connection in &reached {
+                    notices.push(format!(
+                        "▎ [agent.{agent_id}] reaches [mcp.{connection}], which is \
+                         credential = \"user\".\n\
+                         ▎ Those tools do not work on {binding}.\n\
+                         ▎ They work in direct messages."
+                    ));
+                }
+            }
+        }
+        notices
+    }
 }
 
 /// One `[llm.<id>]` block: what runs a call on it, and — where the engine runs
@@ -1480,6 +1547,56 @@ defer_tools = { strategy = "sometimes" }
         }
     }
 
+    /// The route is reported, not the agent: DMs still work, so an agent
+    /// serving both is normal — the notice names the binding that cannot.
+    #[test]
+    fn a_personal_connection_on_a_shared_binding_is_reported_as_a_route() {
+        let m = manifest(
+            r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.assistant]
+            llm = "claude"
+            model = "m"
+            mcp = ["gmail", "sentry"]
+
+            [mcp.gmail]
+            url = "https://mcp.example.test/mcp"
+            credential = "user"
+
+            [mcp.sentry]
+            url = "https://mcp.sentry.dev/mcp"
+
+            [slack]
+            dm = "assistant"
+
+            [slack.channel.C0SUPPORT]
+            agent = "assistant"
+            "#,
+        );
+        m.validate().unwrap();
+        let notices = m.scope_notices();
+        assert_eq!(notices.len(), 1, "one bad route, one notice: {notices:?}");
+        assert!(notices[0].contains("[agent.assistant]"), "{}", notices[0]);
+        assert!(notices[0].contains("[mcp.gmail]"), "{}", notices[0]);
+        assert!(
+            notices[0].contains("[slack.channel.C0SUPPORT]"),
+            "the binding, not the agent: {}",
+            notices[0]
+        );
+        assert!(
+            !notices[0].contains("sentry"),
+            "a shared connection works anywhere: {}",
+            notices[0]
+        );
+
+        // DMs alone: every route works, so nothing is reported.
+        let mut dm_only = m.clone();
+        dm_only.slack.as_mut().unwrap().channel.clear();
+        assert!(dm_only.scope_notices().is_empty());
+    }
+
     #[test]
     fn slack_routes_only_to_declared_agents() {
         let bad = manifest(
@@ -1565,6 +1682,7 @@ defer_tools = { strategy = "sometimes" }
                     protocol: ConnectorProtocol::Mcp,
                     auth: None,
                     header: None,
+                    credential: None,
                     prefix_tools: true,
                 },
             )]
@@ -1605,6 +1723,7 @@ defer_tools = { strategy = "sometimes" }
             protocol: ConnectorProtocol::Mcp,
             auth: None,
             header: None,
+            credential: None,
             prefix_tools: true,
         };
         // `pdf` + `tools-render` and `pdf-tools` + `render` both derive
@@ -1661,6 +1780,7 @@ defer_tools = { strategy = "sometimes" }
                     protocol: ConnectorProtocol::Mcp,
                     auth: None,
                     header: None,
+                    credential: None,
                     prefix_tools: true,
                 },
             )]
@@ -1690,6 +1810,7 @@ defer_tools = { strategy = "sometimes" }
                 protocol: ConnectorProtocol::Mcp,
                 auth: None,
                 header: None,
+                credential: None,
                 prefix_tools: true,
             },
         );
@@ -1702,6 +1823,7 @@ defer_tools = { strategy = "sometimes" }
                     protocol: ConnectorProtocol::Mcp,
                     auth: None,
                     header: None,
+                    credential: None,
                     prefix_tools: true,
                 },
             )]

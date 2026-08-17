@@ -1,8 +1,10 @@
+pub mod auth_flows;
 pub mod blob;
 pub mod connector_credentials;
 pub mod cursor;
 pub mod event_store;
 pub mod migrate;
+mod secret;
 pub mod session_index;
 pub mod wake;
 pub mod worker_queue;
@@ -15,10 +17,12 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::event_store::StoreError;
 
+pub use auth_flows::{Flow, Link, SqliteAuthFlows};
 pub use blob::SqliteBlobStore;
 pub use connector_credentials::SqliteCredentialStore;
 pub use cursor::SqliteCursorStore;
 pub use event_store::SqliteEventStore;
+pub use secret::SqliteSecretStore;
 pub use session_index::SqliteSessionIndexStore;
 pub use wake::SqliteWakeStore;
 pub use worker_queue::SqliteWorkerQueue;

@@ -33,6 +33,11 @@ pub fn project_log_filter(config: Option<&std::path::Path>) -> Option<String> {
 
 pub(crate) const DEFAULT_TENANT: &str = "default";
 
+/// The one person at an installation nothing authenticates. `subs run` acts
+/// as this, and `subs mcp login` fills its slot. Prefixed so it cannot
+/// collide with a subject an identity source issues.
+pub(crate) const LOCAL_SUBJECT: &str = "cli:local";
+
 impl Command {
     /// The project file this invocation will read, for callers that need it
     /// before the command runs. Only the engine commands: a cloud command
@@ -221,7 +226,7 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Mcp { command } => match command {
             mcp::McpCommand::Login { .. } => "mcp login",
             mcp::McpCommand::SetToken { .. } => "mcp set-token",
-            mcp::McpCommand::DeleteToken { .. } => "mcp delete-token",
+            mcp::McpCommand::Logout { .. } => "mcp logout",
             mcp::McpCommand::List { .. } => "mcp list",
         },
         Command::Slack { command } => match command {

@@ -12,6 +12,54 @@ pub mod mcp;
 pub mod oauth;
 pub mod registry;
 
+use crate::protocol::{Audience, OwnerKind, SessionOwner};
+
+/// Whose credential slot a call reads: the deployment's one credential, or
+/// one person's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Subject {
+    Shared,
+    Person(String),
+}
+
+impl std::fmt::Display for Subject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Subject::Shared => f.write_str("shared"),
+            Subject::Person(id) => write!(f, "subject `{id}`"),
+        }
+    }
+}
+
+/// Who a call runs for, resolved from the session owner at execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Principal {
+    /// No person: a schedule, an API key, or the system.
+    Machine,
+    /// One person, and the audience of the conversation they asked in.
+    Person { subject: String, audience: Audience },
+}
+
+impl Principal {
+    /// The deployment's owner→subject map. A single-deployment engine maps
+    /// the surface-native owner id to itself; the cloud resolves through its
+    /// identities instead.
+    pub fn of_owner(owner: Option<&SessionOwner>) -> Self {
+        match owner {
+            Some(o) if o.kind == OwnerKind::Frontend => match &o.id {
+                Some(id) => Principal::Person {
+                    subject: id.clone(),
+                    audience: o.audience,
+                },
+                None => Principal::Machine,
+            },
+            _ => Principal::Machine,
+        }
+    }
+}
+
 /// A tool as a connection offers it, before filtering or prefixing. The neutral
 /// shape every protocol lowers to.
 ///

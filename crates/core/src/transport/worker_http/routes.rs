@@ -275,6 +275,7 @@ pub async fn submit_client_payload(
         tenant_id: caller.tenant_id().to_string(),
         id: Some(req.identity.id),
         kind: OwnerKind::Frontend,
+        audience: req.identity.audience,
         metadata: req.identity.metadata,
     };
 

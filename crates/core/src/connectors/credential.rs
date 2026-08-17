@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::mcp::auth_headers;
 use super::oauth::{refresh, require_secure, same_origin, OauthError, Tokens};
 use super::registry::{AuthKind, ConnectionSpec, CredentialResolver};
-use super::{AuthNeed, ConnectorError};
+use super::{AuthNeed, ConnectorError, Subject};
 
 /// What the store holds for one connection.
 ///
@@ -43,7 +43,12 @@ impl Credential {
 /// are two accounts.
 #[async_trait::async_trait]
 pub trait CredentialStore: Send + Sync {
-    async fn get(&self, tenant_id: &str, connection_id: &str) -> Option<Credential>;
+    async fn get(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        subject: &Subject,
+    ) -> Option<Credential>;
     /// Called on every refresh too, because a rotated refresh token invalidates
     /// the one it replaced. A failure to persist is reported, not swallowed:
     /// silently dropping a rotated token locks the connection out.
@@ -51,6 +56,7 @@ pub trait CredentialStore: Send + Sync {
         &self,
         tenant_id: &str,
         connection_id: &str,
+        subject: &Subject,
         credential: Credential,
     ) -> Result<(), String>;
 }
@@ -91,9 +97,10 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         connection_id: &str,
+        subject: &Subject,
         url: &str,
     ) -> Result<Option<String>, OauthError> {
-        let tokens = match self.grant(tenant_id, connection_id, url).await? {
+        let tokens = match self.grant(tenant_id, connection_id, subject, url).await? {
             Held::Grant(tokens) => tokens,
             Held::Empty => return Ok(None),
             Held::Wrong(why) => return Err(OauthError::Unrenewable(why.into())),
@@ -106,7 +113,7 @@ impl StoredCredentials {
                 "the access token expired and the server issued no refresh token".into(),
             ));
         }
-        self.renew(tenant_id, connection_id, &tokens)
+        self.renew(tenant_id, connection_id, subject, &tokens)
             .await
             .map(Some)
     }
@@ -120,15 +127,17 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         connection_id: &str,
+        subject: &Subject,
         url: &str,
     ) -> Result<bool, OauthError> {
-        let Held::Grant(tokens) = self.grant(tenant_id, connection_id, url).await? else {
+        let Held::Grant(tokens) = self.grant(tenant_id, connection_id, subject, url).await? else {
             return Ok(false);
         };
         if !tokens.refreshable() {
             return Ok(false);
         }
-        self.renew(tenant_id, connection_id, &tokens).await?;
+        self.renew(tenant_id, connection_id, subject, &tokens)
+            .await?;
         Ok(true)
     }
 
@@ -139,9 +148,10 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         connection_id: &str,
+        subject: &Subject,
         url: &str,
     ) -> Result<Held, OauthError> {
-        let tokens = match self.store.get(tenant_id, connection_id).await {
+        let tokens = match self.store.get(tenant_id, connection_id, subject).await {
             Some(Credential::Oauth(tokens)) => *tokens,
             Some(Credential::Static { .. }) => {
                 return Ok(Held::Wrong(
@@ -164,12 +174,13 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         connection_id: &str,
+        subject: &Subject,
         held: &Tokens,
     ) -> Result<String, OauthError> {
         let gate = {
             let mut gates = self.refreshing.lock().await;
             gates
-                .entry(format!("{tenant_id}\u{0}{connection_id}"))
+                .entry(format!("{tenant_id}\u{0}{connection_id}\u{0}{subject}"))
                 .or_default()
                 .clone()
         };
@@ -177,7 +188,9 @@ impl StoredCredentials {
 
         // Adopt a token another caller landed. To refresh again would retire
         // the one they just wrote.
-        if let Some(Credential::Oauth(current)) = self.store.get(tenant_id, connection_id).await {
+        if let Some(Credential::Oauth(current)) =
+            self.store.get(tenant_id, connection_id, subject).await
+        {
             if current.access_token != held.access_token && !current.stale() {
                 return Ok(current.access_token);
             }
@@ -188,6 +201,7 @@ impl StoredCredentials {
             .put(
                 tenant_id,
                 connection_id,
+                subject,
                 Credential::Oauth(Box::new(next.clone())),
             )
             .await
@@ -201,9 +215,10 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         id: &str,
+        subject: &Subject,
         spec: &ConnectionSpec,
     ) -> Result<Option<HeaderMap>, ConnectorError> {
-        match self.access_token(tenant_id, id, &spec.url).await {
+        match self.access_token(tenant_id, id, subject, &spec.url).await {
             // Checked again here, not only at login: the project file can name
             // a different URL than the one authorized.
             Ok(Some(token)) => {
@@ -224,9 +239,10 @@ impl StoredCredentials {
         &self,
         tenant_id: &str,
         id: &str,
+        subject: &Subject,
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError> {
-        match self.store.get(tenant_id, id).await {
+        match self.store.get(tenant_id, id, subject).await {
             Some(Credential::Static { token }) => {
                 secure(&spec.url)?;
                 auth_headers(spec.header.as_deref(), &token)
@@ -250,20 +266,23 @@ impl CredentialResolver for StoredCredentials {
         &self,
         tenant_id: &str,
         id: &str,
+        subject: &Subject,
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError> {
         match spec.auth {
             Some(AuthKind::None) => Ok(HeaderMap::new()),
-            Some(AuthKind::Token) => self.static_headers(tenant_id, id, spec).await,
-            Some(AuthKind::Oauth) => match self.oauth_headers(tenant_id, id, spec).await? {
-                Some(headers) => Ok(headers),
-                None => Err(ConnectorError::unauthorized(
-                    AuthNeed::NeverAuthorized,
-                    format!("connection `{id}` is not authorized: run `subs mcp login {id}`"),
-                )),
-            },
+            Some(AuthKind::Token) => self.static_headers(tenant_id, id, subject, spec).await,
+            Some(AuthKind::Oauth) => {
+                match self.oauth_headers(tenant_id, id, subject, spec).await? {
+                    Some(headers) => Ok(headers),
+                    None => Err(ConnectorError::unauthorized(
+                        AuthNeed::NeverAuthorized,
+                        format!("connection `{id}` is not authorized: run `subs mcp login {id}`"),
+                    )),
+                }
+            }
             None => Ok(self
-                .oauth_headers(tenant_id, id, spec)
+                .oauth_headers(tenant_id, id, subject, spec)
                 .await?
                 .unwrap_or_default()),
         }
@@ -273,12 +292,13 @@ impl CredentialResolver for StoredCredentials {
         &self,
         tenant_id: &str,
         id: &str,
+        subject: &Subject,
         spec: &ConnectionSpec,
     ) -> Result<bool, ConnectorError> {
         match spec.auth {
             Some(AuthKind::None) | Some(AuthKind::Token) => Ok(false),
             _ => self
-                .refresh_now(tenant_id, id, &spec.url)
+                .refresh_now(tenant_id, id, subject, &spec.url)
                 .await
                 .map_err(|e| refresh_failed(id, &e)),
         }
@@ -332,10 +352,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CredentialStore for Slot {
-        async fn get(&self, _: &str, _: &str) -> Option<Credential> {
+        async fn get(&self, _: &str, _: &str, _: &Subject) -> Option<Credential> {
             self.0.clone()
         }
-        async fn put(&self, _: &str, _: &str, _: Credential) -> Result<(), String> {
+        async fn put(&self, _: &str, _: &str, _: &Subject, _: Credential) -> Result<(), String> {
             Ok(())
         }
     }
@@ -346,6 +366,7 @@ mod tests {
             protocol: ConnectorProtocol::Mcp,
             auth,
             header: header.map(str::to_string),
+            credential: None,
             prefix_tools: true,
         }
     }
@@ -379,7 +400,12 @@ mod tests {
     #[tokio::test]
     async fn a_static_token_defaults_to_bearer() {
         let headers = resolver(Some(stored_token()))
-            .resolve("t", "github", &spec(Some(AuthKind::Token), None))
+            .resolve(
+                "t",
+                "github",
+                &Subject::Shared,
+                &spec(Some(AuthKind::Token), None),
+            )
             .await
             .unwrap();
         assert_eq!(headers.get("authorization").unwrap(), "Bearer tok");
@@ -391,6 +417,7 @@ mod tests {
             .resolve(
                 "t",
                 "sentry",
+                &Subject::Shared,
                 &spec(Some(AuthKind::Token), Some("sentry-bearer")),
             )
             .await
@@ -402,7 +429,12 @@ mod tests {
     #[tokio::test]
     async fn a_token_connection_with_an_empty_slot_asks_for_one() {
         let err = resolver(None)
-            .resolve("t", "github", &spec(Some(AuthKind::Token), None))
+            .resolve(
+                "t",
+                "github",
+                &Subject::Shared,
+                &spec(Some(AuthKind::Token), None),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -416,7 +448,12 @@ mod tests {
     #[tokio::test]
     async fn a_slot_holding_the_other_kind_is_reported_not_sent() {
         let err = resolver(Some(stored_token()))
-            .resolve("t", "sentry", &spec(Some(AuthKind::Oauth), None))
+            .resolve(
+                "t",
+                "sentry",
+                &Subject::Shared,
+                &spec(Some(AuthKind::Oauth), None),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -465,13 +502,13 @@ mod tests {
     #[tokio::test]
     async fn an_undeclared_connection_sends_what_it_holds_or_nothing() {
         let headers = resolver(None)
-            .resolve("t", "open", &spec(None, None))
+            .resolve("t", "open", &Subject::Shared, &spec(None, None))
             .await
             .unwrap();
         assert!(headers.is_empty());
 
         let headers = resolver(Some(granted()))
-            .resolve("t", "linear", &spec(None, None))
+            .resolve("t", "linear", &Subject::Shared, &spec(None, None))
             .await
             .unwrap();
         assert_eq!(headers.get("authorization").unwrap(), "Bearer at");
@@ -480,7 +517,12 @@ mod tests {
     #[tokio::test]
     async fn auth_none_sends_nothing_and_asks_for_nothing() {
         let headers = resolver(None)
-            .resolve("t", "open", &spec(Some(AuthKind::None), None))
+            .resolve(
+                "t",
+                "open",
+                &Subject::Shared,
+                &spec(Some(AuthKind::None), None),
+            )
             .await
             .unwrap();
         assert!(headers.is_empty());
@@ -491,7 +533,7 @@ mod tests {
         let mut spec = spec(Some(AuthKind::Token), None);
         spec.url = "http://example.test/mcp".to_string();
         let err = resolver(Some(stored_token()))
-            .resolve("t", "github", &spec)
+            .resolve("t", "github", &Subject::Shared, &spec)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not https"), "got {err}");
