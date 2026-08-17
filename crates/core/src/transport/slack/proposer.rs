@@ -93,7 +93,7 @@ impl SlackProposer {
     fn authorize_prompt(&self, state: &SessionState) -> Option<DecisionResponse> {
         let (connection, need) = auth::needing(state)?;
         let authorize = auth::Authorize {
-            principal: Requester::of_owner(state.owner.as_ref()),
+            requester: Requester::of_owner(state.owner.as_ref()),
             connection: connection.clone(),
         };
 
@@ -536,7 +536,7 @@ mod tests {
                     serde_json::from_value(payload["authorize"].clone()).unwrap();
                 assert_eq!(authorize.connection, "sentry");
                 assert_eq!(
-                    authorize.principal,
+                    authorize.requester,
                     Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Default::default())
                 );
             }

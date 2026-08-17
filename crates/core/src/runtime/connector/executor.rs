@@ -74,13 +74,13 @@ async fn handle_task(
             session_id,
             tenant_id,
             connection_id,
-            principal,
+            requester,
             attempt,
             span,
             ..
         } => {
             let listed = match connections {
-                Some(c) => c.list_tools(&tenant_id, &connection_id, &principal).await,
+                Some(c) => c.list_tools(&tenant_id, &connection_id, &requester).await,
                 None => Err(unreachable()),
             };
             let command = match listed {
@@ -122,7 +122,7 @@ async fn handle_task(
             tool_call_id,
             attempt,
             connection_id,
-            principal,
+            requester,
             remote_name,
             arguments,
             span,
@@ -133,7 +133,7 @@ async fn handle_task(
                     c.call_tool(
                         &tenant_id,
                         &connection_id,
-                        &principal,
+                        &requester,
                         &remote_name,
                         &arguments,
                     )

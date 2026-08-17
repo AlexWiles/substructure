@@ -30,10 +30,11 @@ pub async fn client_auth_middleware(
     next: Next,
 ) -> Response {
     match auth.resolve(request.headers()).await {
-        Ok(principal) => {
-            let (Some(caller), Some(owner)) =
-                (principal.frontend_caller(), principal.session_owner())
-            else {
+        Ok(authenticated) => {
+            let (Some(caller), Some(owner)) = (
+                authenticated.frontend_caller(),
+                authenticated.session_owner(),
+            ) else {
                 return (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({"error": "client subject is required"})),

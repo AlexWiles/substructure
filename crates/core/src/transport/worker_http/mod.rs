@@ -55,8 +55,8 @@ async fn worker_auth_middleware(
     next: Next,
 ) -> Response {
     match state.auth.resolve(request.headers()).await {
-        Ok(principal) => {
-            let Some(caller) = principal.api_key_caller() else {
+        Ok(authenticated) => {
+            let Some(caller) = authenticated.api_key_caller() else {
                 return (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({"error": "machine subject is required"})),

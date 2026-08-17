@@ -3,6 +3,7 @@ use axum::http::HeaderMap;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use crate::protocol::Visibility;
 use crate::transport::auth::{AuthError, AuthResolver, Authenticated};
 
 #[derive(Debug, Clone)]
@@ -62,6 +63,7 @@ impl BearerHashedApiKeyAuthResolver {
                     tenant_id: binding.tenant_id.clone(),
                     source: crate::transport::auth::SOURCE_API_KEY,
                     subject: Some(binding.key_id.clone()),
+                    visibility: Visibility::Shared,
                     attrs: std::collections::HashMap::new(),
                 });
             }

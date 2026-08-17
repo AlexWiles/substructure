@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 
-use crate::protocol::{Issuer, Requester, SessionOwner, Subject};
+use crate::protocol::{Issuer, Requester, SessionOwner, Subject, Visibility};
 use crate::Caller;
 
 mod resolvers;
@@ -24,6 +24,10 @@ pub struct Authenticated {
     pub tenant_id: String,
     pub source: &'static str,
     pub subject: Option<String>,
+    /// Whether anyone but `subject` can read the session this starts. Only
+    /// the credential's minter knows, so a credential that says nothing gets
+    /// the value that reaches no personal credential.
+    pub visibility: Visibility,
     /// Additional claims surfaced by the resolver (e.g. JWT `attrs`).
     /// Empty for credential types that don't carry extra data.
     pub attrs: HashMap<String, String>,
@@ -76,8 +80,7 @@ impl Authenticated {
     pub fn session_owner(&self) -> Option<SessionOwner> {
         self.subject().map(|subject| SessionOwner {
             tenant_id: self.tenant_id.clone(),
-            // A token names one person, and this session is their own UI.
-            requester: Requester::private(subject),
+            requester: Requester::new(subject, self.visibility),
             metadata: HashMap::new(),
         })
     }
@@ -107,6 +110,7 @@ mod tests {
             tenant_id: "tenant-a".to_string(),
             source,
             subject: subject.map(str::to_string),
+            visibility: Visibility::Shared,
             attrs: HashMap::new(),
         }
     }
