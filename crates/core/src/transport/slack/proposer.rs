@@ -50,8 +50,15 @@ impl ChannelProposer for SlackProposer {
             return proposed;
         }
         // First: the proposal below would run against tools the agent has lost.
-        if let Some(prompt) = self.authorize_prompt(state) {
-            return prompt;
+        // Only the work is replaced. What the decision records stays, or the
+        // resumed turn reads a transcript missing the message that started it.
+        if let Some(actions) = self.authorize_prompt(state) {
+            return DecisionResponse {
+                actions,
+                // The prompt owns the message, so it carries no view.
+                channels: Default::default(),
+                ..proposed
+            };
         }
         match trigger {
             DecisionTrigger::ClientAction {
@@ -85,33 +92,30 @@ impl ChannelProposer for SlackProposer {
 }
 
 impl SlackProposer {
-    /// The prompt for the first connection that needs a person. It replaces
-    /// the proposal, because the session stops here.
+    /// The work for the first connection that needs a person. It replaces the
+    /// proposed work, because the session stops here.
     ///
     /// It writes why, and the facts a way in is built from. How to authorize
     /// is the delivering channel's to add, so no link is written here.
-    fn authorize_prompt(&self, state: &SessionState) -> Option<DecisionResponse> {
+    fn authorize_prompt(&self, state: &SessionState) -> Option<Vec<DecisionAction>> {
         let (connection, need) = auth::needing(state)?;
         let authorize = auth::Authorize {
             requester: Requester::of_owner(state.owner.as_ref()),
             connection: connection.clone(),
         };
 
-        Some(DecisionResponse {
-            actions: vec![DecisionAction::Interrupt {
-                interrupt_id: Some(auth::interrupt_id(&connection)),
-                reason: format!("connection `{connection}` needs authorizing"),
-                payload: serde_json::json!({
-                    "message": ask(&connection, need),
-                    "authorize": authorize,
-                    "metadata": { "options": [{
-                        "label": "Retry",
-                        "value": { "connection": connection },
-                    }] },
-                }),
-            }],
-            ..Default::default()
-        })
+        Some(vec![DecisionAction::Interrupt {
+            interrupt_id: Some(auth::interrupt_id(&connection)),
+            reason: format!("connection `{connection}` needs authorizing"),
+            payload: serde_json::json!({
+                "message": ask(&connection, need),
+                "authorize": authorize,
+                "metadata": { "options": [{
+                    "label": "Retry",
+                    "value": { "connection": connection },
+                }] },
+            }),
+        }])
     }
 }
 
@@ -307,8 +311,8 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::StoredResult;
     use crate::protocol::{AgentConfig, AuthFailure, InterruptOrigin, McpServer, RetryPolicy};
+    use crate::protocol::{Content, DraftMessage, Role, StoredResult};
     use crate::protocol::{Issuer, Subject};
     use crate::runtime::session::state::OpenInterrupt;
     use crate::session::events::{AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested};
@@ -542,6 +546,89 @@ mod tests {
             }
             other => panic!("expected one interrupt; got {other:?}"),
         }
+    }
+
+    fn message(role: Role, text: &str) -> DraftMessage {
+        DraftMessage {
+            id: Some("m1".to_string()),
+            role,
+            content: Some(Content::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+        }
+    }
+
+    fn texts(p: &DecisionResponse) -> Vec<String> {
+        p.messages
+            .iter()
+            .map(|m| {
+                m.content
+                    .as_ref()
+                    .map(Content::text_owned)
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// The turn stops, but what it recorded is still recorded. Dropping it left
+    /// the resumed turn with no question to answer, and the model invented one.
+    #[test]
+    fn the_authorization_prompt_keeps_what_the_decision_recorded() {
+        let asked = message(Role::User, "any important emails?");
+        let p = propose(
+            SESSION,
+            &DecisionTrigger::ClientTranscript {
+                messages: vec![asked.clone()],
+                client: Default::default(),
+                new_from: 0,
+            },
+            &state_needing_auth(AuthNeed::NeverAuthorized, AuthFailure::Interrupt),
+            &[],
+            DecisionResponse {
+                messages: vec![asked.clone()],
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(&p.actions[..], [DecisionAction::Interrupt { .. }]),
+            "the prompt replaces the work; got {:?}",
+            p.actions
+        );
+        assert_eq!(texts(&p), ["any important emails?"], "the question stays");
+    }
+
+    /// A tool call with no result is a transcript a model provider refuses.
+    #[test]
+    fn the_authorization_prompt_keeps_a_settled_tool_result() {
+        let result = DraftMessage {
+            tool_call_id: Some("tc1".to_string()),
+            name: Some("gmail__search_threads".to_string()),
+            ..message(Role::Tool, "error: unauthorized")
+        };
+        let p = propose(
+            SESSION,
+            &DecisionTrigger::ToolFinished {
+                id: "tc1".to_string(),
+                ok: false,
+                name: "gmail__search_threads".to_string(),
+                result: None,
+                error: None,
+            },
+            &state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt),
+            &[],
+            DecisionResponse {
+                messages: vec![result.clone()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(texts(&p), ["error: unauthorized"], "the result stays");
+        assert_eq!(
+            p.messages[0].tool_call_id.as_deref(),
+            Some("tc1"),
+            "it still answers its call"
+        );
     }
 
     #[test]

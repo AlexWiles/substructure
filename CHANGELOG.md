@@ -22,6 +22,8 @@ together at the same version.
 
 ### Fixed
 
+- A connection that needs authorizing no longer discards the message that started the turn.
+
 ## [0.6.0] - 2026-08-14
 
 ### Added
