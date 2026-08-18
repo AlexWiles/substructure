@@ -955,7 +955,10 @@ mod tests {
         assert_eq!(blocks.len(), 1, "one card carries the turn");
         assert_eq!(blocks[0]["task_id"], "turn-1");
         assert_eq!(blocks[0]["status"], "in_progress");
-        assert_eq!(blocks[0]["title"], "Working…", "no transcript, no title");
+        assert_eq!(
+            blocks[0]["title"], "Working… · search_web · 1 action",
+            "no transcript, no ask; the title still says where the turn is"
+        );
         // The proposed call is not in the log: a proposal can render its
         // call another way than the event will, and the stream appends —
         // a line that changed would freeze the log. It lands one tick on.

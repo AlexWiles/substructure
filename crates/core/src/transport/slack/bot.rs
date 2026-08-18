@@ -333,7 +333,7 @@ impl View {
                         "status": block["status"],
                     });
                     if let Some(title) = block["title"].as_str() {
-                        chunk["title"] = clip(title, 60).into();
+                        chunk["title"] = clip(title, render::MAX_TITLE).into();
                     }
                     // The stream takes strings; the block carries rich text.
                     if let Some(text) = rich_text_string(&block["details"]) {

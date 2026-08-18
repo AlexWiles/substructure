@@ -7,8 +7,9 @@ use serde_json::Value;
 use super::{clip, MAX_SECTION};
 use crate::session::events::TurnCompleted;
 
-/// Keeps a chatty tool from bloating a card; not a Slack limit.
-const MAX_TITLE: usize = 60;
+/// Keeps a chatty tool from bloating a card; not a Slack limit. The title
+/// carries the ask and where the turn is now, so it holds more than the ask.
+pub(super) const MAX_TITLE: usize = 200;
 const CANCELLED: &str = "Cancelled.";
 
 /// One Slack message: `text` is the notification, `blocks` the display.
@@ -277,8 +278,8 @@ mod tests {
 
     #[test]
     fn a_long_title_is_clipped() {
-        let card = turn_card("turn-1", &"x".repeat(100), "in_progress", None);
-        assert_eq!(card["title"].as_str().unwrap().chars().count(), 60);
+        let card = turn_card("turn-1", &"x".repeat(MAX_TITLE + 40), "in_progress", None);
+        assert_eq!(card["title"].as_str().unwrap().chars().count(), MAX_TITLE);
     }
 
     #[test]
