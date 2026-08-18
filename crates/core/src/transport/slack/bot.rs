@@ -43,6 +43,8 @@ const IMAGE_NOT_ATTACHED: &str = "_an image could not be attached_";
 
 /// Slack limits the rate of `chat.appendStream`.
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
+/// Of Slack's 256-character cap on a `task_update` chunk.
+const MAX_CHUNK: usize = 180;
 /// Shown as `<app> is typing…`.
 /// Slack removes a status after two minutes. Set it again on this cadence.
 const STATUS_REFRESH: Duration = Duration::from_secs(90);
@@ -333,6 +335,12 @@ impl View {
                     if let Some(title) = block["title"].as_str() {
                         chunk["title"] = clip(title, 60).into();
                     }
+                    // The stream takes strings; the block carries rich text.
+                    for field in ["details", "output"] {
+                        if let Some(text) = rich_text_string(&block[field]) {
+                            chunk[field] = clip(&text, MAX_CHUNK).into();
+                        }
+                    }
                     Some((id.to_string(), chunk))
                 }
                 _ => {
@@ -347,6 +355,17 @@ impl View {
             })
             .collect()
     }
+}
+
+/// The plain text of a rich_text block, for the stream's string fields.
+fn rich_text_string(block: &Value) -> Option<String> {
+    let sections = block["elements"].as_array()?;
+    let text: String = sections
+        .iter()
+        .flat_map(|s| s["elements"].as_array().into_iter().flatten())
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// The open streams, and the sessions whose activity is not yet rendered.
@@ -1590,7 +1609,8 @@ impl SlackBot {
             },
             (Some(view), Some(error)) => {
                 let line = format!("Error: {error}");
-                let mut blocks = view.blocks;
+                // The last streamed view may still hold a running card.
+                let mut blocks = render::settle_cards(&view.blocks);
                 blocks.push(section_block(&line));
                 Rendered { text: line, blocks }
             }
@@ -3232,6 +3252,38 @@ mod tests {
         );
         assert_eq!(stopped[0]["ts"], "1.1");
         assert!(bot.streams.get(&key("turn-1")).expect("the slot").dead);
+    }
+
+    /// The stream carries whatever the card carries: rich-text details fold
+    /// to a clipped string, and the same card id replaces in place.
+    #[test]
+    fn a_cards_details_ride_the_stream_as_a_string() {
+        let long = "x".repeat(400);
+        let view = View {
+            text: "".into(),
+            blocks: vec![render::turn_card(
+                "turn-1",
+                "Find x",
+                "in_progress",
+                Some(&long),
+            )],
+        };
+        let chunks = view.chunks();
+        assert_eq!(chunks.len(), 1);
+        let (id, chunk) = &chunks[0];
+        assert_eq!(id, "turn-1");
+        assert_eq!(chunk["type"], "task_update");
+        assert_eq!(chunk["title"], "Find x");
+        assert_eq!(chunk["status"], "in_progress");
+        let details = chunk["details"].as_str().unwrap();
+        assert_eq!(details.chars().count(), MAX_CHUNK, "clipped for the chunk");
+        let bare = render::turn_card("turn-1", "Find x", "complete", None);
+        let chunks = View {
+            text: "".into(),
+            blocks: vec![bare],
+        }
+        .chunks();
+        assert!(chunks[0].1.get("details").is_none());
     }
 
     /// How a writer learns the turn settled under it.

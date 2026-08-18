@@ -18,45 +18,6 @@ pub struct Rendered {
     pub blocks: Vec<Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StepStatus {
-    InProgress,
-    Complete,
-    Error,
-    /// Ended with no result.
-    Cancelled,
-}
-
-impl StepStatus {
-    pub fn wire(self) -> &'static str {
-        match self {
-            StepStatus::InProgress => "in_progress",
-            StepStatus::Complete => "complete",
-            StepStatus::Error | StepStatus::Cancelled => "error",
-        }
-    }
-}
-
-/// One unit of visible work: a tool call or a sub-agent run.
-#[derive(Debug, Clone)]
-pub struct StepView<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub status: StepStatus,
-    pub took: Option<&'a str>,
-    pub input: Option<&'a str>,
-    pub output: Option<&'a str>,
-}
-
-impl StepView<'_> {
-    pub fn title(&self) -> String {
-        match self.took {
-            Some(took) => format!("{} · {took}", self.name),
-            None => self.name.to_string(),
-        }
-    }
-}
-
 /// One answer a user can click. The bot reads `action_id` and `value` back
 /// out of the click, so render them unchanged.
 #[derive(Debug, Clone)]
@@ -111,9 +72,10 @@ pub fn render_turn(turn: &TurnCompleted, elapsed: Option<Duration>) -> Rendered 
     }
 }
 
-/// The message a cancelled run leaves: its work, and a line saying it stopped.
+/// The message a cancelled run leaves: its work settled, and a line saying
+/// it stopped.
 pub fn render_cancelled(activity: &[Value]) -> Rendered {
-    let mut blocks = activity.to_vec();
+    let mut blocks = settle_cards(activity);
     blocks.push(section_block(CANCELLED));
     Rendered {
         text: CANCELLED.to_string(),
@@ -121,38 +83,35 @@ pub fn render_cancelled(activity: &[Value]) -> Rendered {
     }
 }
 
-/// A settled unit of work, in the finished message.
-pub fn step_block(step: &StepView<'_>) -> Value {
+/// The blocks with every running card ended. A finished message must not
+/// show a spinner: it would read as work still going on.
+pub fn settle_cards(blocks: &[Value]) -> Vec<Value> {
+    blocks
+        .iter()
+        .cloned()
+        .map(|mut block| {
+            if block["type"] == "task_card" && block["status"] == "in_progress" {
+                block["status"] = "error".into();
+            }
+            block
+        })
+        .collect()
+}
+
+/// The turn's one card. The same id every render, so a stream replaces it
+/// in place.
+pub fn turn_card(id: &str, title: &str, status: &str, details: Option<&str>) -> Value {
     let mut card = serde_json::json!({
         "type": "task_card",
-        "task_id": step.id,
-        "title": clip(&step.title(), MAX_TITLE),
-        "status": step.status.wire(),
+        "task_id": id,
+        "title": clip(title, MAX_TITLE),
+        "status": status,
     });
-    let outcome = step.output.or(match step.status {
-        StepStatus::Cancelled => Some(CANCELLED),
-        _ => None,
-    });
-    for (field, heading, text) in [
-        ("details", None, step.input),
-        ("output", Some("Result:"), outcome),
-    ] {
-        // Slack rejects an empty text element.
-        if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-            card[field] = rich_text(heading, text);
-        }
+    // Slack rejects an empty text element.
+    if let Some(details) = details.filter(|d| !d.trim().is_empty()) {
+        card["details"] = rich_text(None, details);
     }
     card
-}
-
-/// What the model said between calls.
-pub fn said_block(text: &str) -> Value {
-    section_block(text)
-}
-
-/// Stands for the steps dropped to fit Slack's message limits.
-pub fn elided_block(count: usize) -> Value {
-    context_block(&format!("_… {count} earlier steps_"))
 }
 
 /// A prompt the session is waiting on.
@@ -244,17 +203,6 @@ mod tests {
         }
     }
 
-    fn step() -> StepView<'static> {
-        StepView {
-            id: "tc-1",
-            name: "search",
-            status: StepStatus::Complete,
-            took: Some("1.2s"),
-            input: Some("{\"q\":\"x\"}"),
-            output: Some("found"),
-        }
-    }
-
     #[test]
     fn a_turn_renders_its_output_with_the_elapsed_time() {
         let p = render_turn(
@@ -294,23 +242,50 @@ mod tests {
     }
 
     #[test]
-    fn a_step_card_carries_its_title_and_both_fields() {
-        let card = step_block(&step());
+    fn a_turn_card_carries_its_title_and_details() {
+        let card = turn_card(
+            "turn-1",
+            "Find x",
+            "in_progress",
+            Some("Ran 1 action — search"),
+        );
         assert_eq!(card["type"], "task_card");
-        assert_eq!(card["title"], "search · 1.2s");
-        assert_eq!(card["status"], "complete");
-        assert!(card["details"]["type"] == "rich_text");
-        assert!(card["output"]["type"] == "rich_text");
+        assert_eq!(card["task_id"], "turn-1");
+        assert_eq!(card["title"], "Find x");
+        assert_eq!(card["status"], "in_progress");
+        assert_eq!(card["details"]["type"], "rich_text");
+        assert_eq!(
+            card["details"]["elements"][0]["elements"][0]["text"],
+            "Ran 1 action — search"
+        );
     }
 
     #[test]
-    fn a_step_with_nothing_to_show_leaves_the_field_out() {
-        let mut s = step();
-        s.output = Some("   ");
-        s.input = None;
-        let card = step_block(&s);
+    fn a_card_with_nothing_to_say_leaves_details_out() {
+        let card = turn_card("turn-1", "Find x", "complete", Some("   "));
         assert!(card.get("details").is_none());
-        assert!(card.get("output").is_none(), "blank is not output");
+        assert!(turn_card("turn-1", "t", "complete", None)
+            .get("details")
+            .is_none());
+    }
+
+    #[test]
+    fn a_long_title_is_clipped() {
+        let card = turn_card("turn-1", &"x".repeat(100), "in_progress", None);
+        assert_eq!(card["title"].as_str().unwrap().chars().count(), 60);
+    }
+
+    #[test]
+    fn settling_ends_only_the_running_cards() {
+        let blocks = vec![
+            turn_card("turn-1", "t", "in_progress", None),
+            turn_card("turn-2", "t", "complete", None),
+            section_block("text"),
+        ];
+        let settled = settle_cards(&blocks);
+        assert_eq!(settled[0]["status"], "error");
+        assert_eq!(settled[1]["status"], "complete");
+        assert_eq!(settled[2]["type"], "section");
     }
 
     #[test]
@@ -344,26 +319,11 @@ mod tests {
     }
 
     #[test]
-    fn work_that_ended_with_no_result_is_a_status_not_a_sentence() {
-        let ended = StepView {
-            status: StepStatus::Cancelled,
-            output: None,
-            took: Some("2.0s"),
-            ..step()
-        };
-        let card = step_block(&ended);
-        assert_eq!(card["status"], "error");
-        assert_eq!(
-            card["output"]["elements"][0]["elements"][1]["text"],
-            "Cancelled."
-        );
-    }
-
-    #[test]
-    fn a_cancel_keeps_the_work_and_says_it_stopped() {
-        let m = render_cancelled(&[section_block("a card")]);
+    fn a_cancel_settles_the_work_and_says_it_stopped() {
+        let m = render_cancelled(&[turn_card("turn-1", "t", "in_progress", None)]);
         assert_eq!(m.text, "Cancelled.");
         assert_eq!(m.blocks.len(), 2);
+        assert_eq!(m.blocks[0]["status"], "error", "no spinner at rest");
         assert_eq!(m.blocks[1]["text"]["text"], "Cancelled.");
     }
 

@@ -6,12 +6,12 @@
 use serde_json::Value;
 
 use super::activity::TurnActivity;
-use super::render::{self, StepStatus, StepView};
-use super::{display_of, with_footer, ButtonValue};
+use super::render;
+use super::{clip, display_of, with_footer, ButtonValue};
 use crate::connectors::{AuthNeed, Requester};
 use crate::protocol::{
-    DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution, InterruptResponder,
-    Message, ResumeStatus,
+    Content, DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution,
+    InterruptResponder, Message, ResumeStatus, Role,
 };
 use crate::runtime::session::interrupts::{self, auth};
 use crate::runtime::session::state::SessionState;
@@ -43,15 +43,28 @@ impl ChannelProposer for SlackProposer {
         trigger: &DecisionTrigger,
         state: &SessionState,
         events: &[SessionEvent],
-        _transcript: &[Message],
+        transcript: &[Message],
         proposed: DecisionResponse,
     ) -> DecisionResponse {
         if !slack_owned(state) {
             return proposed;
         }
-        // First: the proposal below would run against tools the agent has lost.
-        // Only the work is replaced. What the decision records stays, or the
-        // resumed turn reads a transcript missing the message that started it.
+        // A click that answers one of our prompts comes first. It is what
+        // unparks the session, not work against tools: asking about a second
+        // connection here would answer nothing, and the engine drops that
+        // prompt anyway because the head is already parked.
+        let click = match trigger {
+            DecisionTrigger::ClientAction {
+                args: Some(args), ..
+            } => click_proposal(state, args),
+            _ => None,
+        };
+        if let Some(click) = click {
+            return click;
+        }
+        // The proposal below would run against tools the agent has lost. Only
+        // the work is replaced. What the decision records stays, or the resumed
+        // turn reads a transcript missing the message that started it.
         if let Some(actions) = self.authorize_prompt(state) {
             return DecisionResponse {
                 actions,
@@ -61,12 +74,6 @@ impl ChannelProposer for SlackProposer {
             };
         }
         match trigger {
-            DecisionTrigger::ClientAction {
-                args: Some(args), ..
-            } => match click_proposal(state, args) {
-                Some(p) => p,
-                None => proposed,
-            },
             DecisionTrigger::LlmFinished { .. }
             | DecisionTrigger::ToolFinished { .. }
             | DecisionTrigger::SubAgentFinished { .. }
@@ -79,11 +86,11 @@ impl ChannelProposer for SlackProposer {
                 if authors_interrupt {
                     return proposed;
                 }
-                let view = streaming_view(events, &proposed);
+                let view = streaming_view(events, &proposed, &title_of(transcript));
                 with_view(proposed, view)
             }
             DecisionTrigger::TurnFinished { data, .. } => {
-                let view = final_view(events, data);
+                let view = final_view(events, data, &title_of(transcript));
                 with_view(proposed, Some(view))
             }
             _ => proposed,
@@ -147,14 +154,30 @@ fn with_view(mut proposed: DecisionResponse, view: Option<Value>) -> DecisionRes
     proposed
 }
 
-/// The message so far: the turn's finished work, plus an in-progress card for
-/// each call this proposal starts.
-fn streaming_view(events: &[SessionEvent], proposed: &DecisionResponse) -> Option<Value> {
-    let mut blocks = TurnActivity::fold(events)
-        .map(|turn| turn.blocks())
-        .unwrap_or_default();
+/// The card's title: what the turn was asked to do.
+fn title_of(transcript: &[Message]) -> String {
+    transcript
+        .iter()
+        .rev()
+        .filter(|m| m.role == Role::User)
+        .find_map(|m| {
+            let text = m.content.as_ref().map(Content::text_owned)?;
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!text.is_empty()).then(|| clip(&text, 60))
+        })
+        .unwrap_or_else(|| "Working…".to_string())
+}
+
+/// The message so far: one card for the turn, counting in the calls this
+/// proposal starts. The card keeps its id, so each render replaces the last.
+fn streaming_view(
+    events: &[SessionEvent],
+    proposed: &DecisionResponse,
+    title: &str,
+) -> Option<Value> {
+    let mut turn = TurnActivity::fold(events)?;
     for action in &proposed.actions {
-        let card = match action {
+        match action {
             DecisionAction::CallTool {
                 id: Some(id),
                 name,
@@ -165,39 +188,25 @@ fn streaming_view(events: &[SessionEvent], proposed: &DecisionResponse) -> Optio
                     Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                render::step_block(&StepView {
-                    id,
-                    name,
-                    status: StepStatus::InProgress,
-                    took: None,
-                    input: Some(&input),
-                    output: None,
-                })
+                turn.step(id, name, Some(&input));
             }
             DecisionAction::SpawnSubAgent {
                 agent_id,
                 tool_call_id,
                 ..
-            } => render::step_block(&StepView {
-                id: tool_call_id,
-                name: &format!("agent {agent_id}"),
-                status: StepStatus::InProgress,
-                took: None,
-                input: None,
-                output: None,
-            }),
-            _ => continue,
-        };
-        blocks.push(card);
+            } => turn.step(tool_call_id, &format!("agent {agent_id}"), None),
+            _ => {}
+        }
     }
-    (!blocks.is_empty()).then(|| serde_json::json!({ "text": "", "blocks": blocks }))
+    Some(serde_json::json!({ "text": "", "blocks": [turn.card(title)] }))
 }
 
-/// The final message: the turn's work, the answer, and how long it took.
-fn final_view(events: &[SessionEvent], data: &Value) -> Value {
-    let mut blocks = TurnActivity::fold(events)
-        .map(|turn| turn.blocks())
-        .unwrap_or_default();
+/// The final message: the card at rest, the answer, and how long it took.
+fn final_view(events: &[SessionEvent], data: &Value, title: &str) -> Value {
+    let mut blocks = Vec::new();
+    if let Some(turn) = TurnActivity::fold(events) {
+        blocks.push(turn.settled_card(title));
+    }
     let answer = match data {
         Value::Null => "(no result)".to_string(),
         Value::String(s) => s.clone(),
@@ -365,6 +374,73 @@ mod tests {
         ApplyContext {
             occurred_at: chrono::Utc::now(),
             sequence: 1,
+        }
+    }
+
+    /// Two connections need a person, and the first has already been asked.
+    fn state_needing_auth_twice() -> SessionState {
+        let mut s = state();
+        let server = |id: &str| McpServer {
+            id: id.to_string(),
+            tools: None,
+            auth_failure: AuthFailure::Interrupt,
+            approve: Default::default(),
+        };
+        s.apply(
+            &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                config: AgentConfig {
+                    mcp: vec![server("gmail"), server("drive")],
+                    ..blank_config()
+                },
+                anchor: None,
+            }),
+            &ctx(),
+        );
+        for id in ["gmail", "drive"] {
+            s.apply(
+                &EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
+                    id: id.to_string(),
+                    attempt: 0,
+                    retry: RetryPolicy::no_retry(),
+                }),
+                &ctx(),
+            );
+            s.apply(
+                &EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
+                    id: id.to_string(),
+                    auth: AuthNeed::NeverAuthorized,
+                }),
+                &ctx(),
+            );
+        }
+        s.open_interrupts.push(OpenInterrupt {
+            interrupt_id: "mcp-auth:gmail".to_string(),
+            origin: InterruptOrigin::Frontend,
+            reason: "hold".to_string(),
+            payload: serde_json::json!({
+                "message": "*gmail* is not authorized yet, so I cannot use it.",
+                "metadata": { "options": [
+                    { "label": "Retry", "value": { "connection": "gmail" } },
+                ]},
+            }),
+            anchor: None,
+        });
+        s
+    }
+
+    fn blank_config() -> AgentConfig {
+        AgentConfig {
+            llm: None,
+            model: "m1".to_string(),
+            system: None,
+            retry: None,
+            tools: vec![],
+            sub_agents: vec![],
+            mcp: vec![],
+            defer_tools: None,
+            announce_mcp: Default::default(),
+            plugins: Vec::new(),
+            effort: None,
         }
     }
 
@@ -745,6 +821,29 @@ mod tests {
         }
     }
 
+    /// A second connection that also needs a person must not pre-empt the click
+    /// that answers the first. The engine drops the second prompt (the head is
+    /// already parked), so the click would answer nothing and the session would
+    /// hold there for every click after it.
+    #[test]
+    fn a_click_is_answered_even_when_another_connection_also_needs_authorizing() {
+        let p = propose(
+            SESSION,
+            &action(r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:gmail","option":0}"#),
+            &state_needing_auth_twice(),
+            &[],
+            DecisionResponse::default(),
+        );
+        match &p.actions[..] {
+            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { id }] =>
+            {
+                assert_eq!(interrupt_id, "mcp-auth:gmail");
+                assert_eq!(id, "gmail");
+            }
+            other => panic!("expected the click to be answered; got {other:?}"),
+        }
+    }
+
     #[test]
     fn clicking_an_ordinary_prompt_asks_for_no_fetch() {
         let p = propose(
@@ -775,9 +874,45 @@ mod tests {
         let view = &p.channels["slack"]["view"];
         assert_eq!(view["text"], "the answer\n\n_2.0s_");
         let blocks = view["blocks"].as_array().unwrap();
-        assert_eq!(blocks[0]["type"], "task_card", "the settled work leads");
+        assert_eq!(blocks[0]["type"], "task_card", "the settled card leads");
+        assert_eq!(blocks[0]["status"], "complete");
+        assert!(
+            blocks[0].get("details").is_none(),
+            "the card folds to its title"
+        );
         assert_eq!(blocks[1]["text"]["text"], "the answer");
         assert_eq!(blocks[2]["type"], "context", "the footer closes it");
+    }
+
+    #[test]
+    fn the_card_is_titled_by_what_the_user_asked() {
+        let transcript = vec![
+            crate::protocol::Message {
+                id: "m1".into(),
+                role: Role::User,
+                content: Some(Content::Text("fix the   login\nbutton".into())),
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+                reasoning: None,
+            },
+            crate::protocol::Message {
+                id: "m2".into(),
+                role: Role::Assistant,
+                content: Some(Content::Text("on it".into())),
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+                reasoning: None,
+            },
+        ];
+        assert_eq!(title_of(&transcript), "fix the login button");
+        assert_eq!(title_of(&[]), "Working…");
+        let long = crate::protocol::Message {
+            content: Some(Content::Text("x".repeat(100))),
+            ..transcript[0].clone()
+        };
+        assert_eq!(title_of(&[long]).chars().count(), 60);
     }
 
     #[test]
@@ -800,10 +935,15 @@ mod tests {
         };
         let p = propose(SESSION, &trigger, &state(), &turn_events(), proposed);
         let blocks = p.channels["slack"]["view"]["blocks"].as_array().unwrap();
-        assert_eq!(blocks[0]["task_id"], "tc1");
-        assert_eq!(blocks[0]["status"], "complete");
-        assert_eq!(blocks[1]["task_id"], "tc2", "the dispatched call's card");
-        assert_eq!(blocks[1]["status"], "in_progress");
+        assert_eq!(blocks.len(), 1, "one card carries the turn");
+        assert_eq!(blocks[0]["task_id"], "turn-1");
+        assert_eq!(blocks[0]["status"], "in_progress");
+        assert_eq!(blocks[0]["title"], "Working…", "no transcript, no title");
+        assert_eq!(
+            blocks[0]["details"]["elements"][0]["elements"][0]["text"],
+            "Ran 2 actions — send_email {\"to\":\"x\"}",
+            "the dispatched call counts in"
+        );
         assert!(!p.actions.is_empty(), "the core continuation is kept");
     }
 

@@ -8,9 +8,7 @@ mod webhook;
 
 pub use bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
 pub use proposer::SlackProposer;
-pub use render::{
-    context_block, section_block, PromptOption, PromptView, Rendered, StepStatus, StepView,
-};
+pub use render::{context_block, section_block, PromptOption, PromptView, Rendered};
 pub use socket::{MissingEnv, SlackChannel};
 pub use state::StreamStore;
 pub use webhook::webhook_router;
