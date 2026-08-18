@@ -5,20 +5,26 @@ use super::render;
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
-// The stream caps a task_update chunk at 256 characters; these budgets
-// fill it without breaking it.
 const MAX_SAID: usize = 180;
 const MAX_STEP: usize = 60;
-/// The settled card's log rides in blocks, which have no chunk cap.
+/// The stream freezes here; the settled card clips here too.
 const MAX_LOG: usize = 3_000;
 
-/// One thing the turn showed, in the order it happened. The id folds a
-/// redelivery or a retry into the item it repeats.
+/// One thing the turn showed, in the order it happened. The stream can only
+/// append, so the log only grows: an id seen again is dropped, not edited.
 enum Item {
     /// Preamble text before a call.
     Said { id: String, text: String },
     /// A tool call or a sub-agent run.
     Step { id: String, preview: String },
+}
+
+impl Item {
+    fn id(&self) -> &str {
+        match self {
+            Item::Said { id, .. } | Item::Step { id, .. } => id,
+        }
+    }
 }
 
 /// A turn's visible work, folded from the event log into one card. Every
@@ -68,88 +74,42 @@ impl TurnActivity {
     }
 
     fn say(&mut self, id: &str, text: &str) {
-        let found = self.items.iter_mut().find_map(|item| match item {
-            Item::Said { id: said, text } if said == id => Some(text),
-            _ => None,
-        });
-        match found {
-            Some(existing) => *existing = text.to_string(),
-            None => self.items.push(Item::Said {
-                id: id.to_string(),
-                text: text.to_string(),
-            }),
+        if self.items.iter().any(|item| item.id() == id) {
+            return;
         }
+        self.items.push(Item::Said {
+            id: id.to_string(),
+            text: text.to_string(),
+        });
     }
 
-    /// Count a call once; a retry or redelivery updates it in place.
+    /// Count a call once; a retry or redelivery is the same call.
     pub(super) fn step(&mut self, id: &str, name: &str, input: Option<&str>) {
+        if self.items.iter().any(|item| item.id() == id) {
+            return;
+        }
         let preview = match input.map(flatten).filter(|i| !i.is_empty()) {
             Some(input) => clip(&format!("{name} {input}"), MAX_STEP),
             None => clip(name, MAX_STEP),
         };
-        let found = self.items.iter_mut().find_map(|item| match item {
-            Item::Step { id: step, preview } if step == id => Some(preview),
-            _ => None,
+        self.items.push(Item::Step {
+            id: id.to_string(),
+            preview,
         });
-        match found {
-            Some(existing) => *existing = preview,
-            None => self.items.push(Item::Step {
-                id: id.to_string(),
-                preview,
-            }),
-        }
     }
 
-    /// The turn's one card while it runs. The same id every render, so each
-    /// update replaces the card in place.
+    /// The turn's one card while it runs: the log so far. The log only
+    /// grows, so the stream appends each render's delta.
     pub(super) fn card(&self, title: &str) -> Value {
-        render::turn_card(
-            &self.turn_id,
-            title,
-            "in_progress",
-            self.details().as_deref(),
-        )
+        render::turn_card(&self.turn_id, title, "in_progress", self.log().as_deref())
     }
 
-    /// The card at rest: done, folded to its title, with the whole turn's
-    /// log behind the fold.
+    /// The card at rest: done, with the whole log behind the fold.
     pub(super) fn settled_card(&self, title: &str) -> Value {
         render::turn_card(&self.turn_id, title, "complete", self.log().as_deref())
     }
 
-    /// What the card says now: the latest preamble, then how much ran since
-    /// it and the newest call.
-    fn details(&self) -> Option<String> {
-        let last_said = self
-            .items
-            .iter()
-            .rposition(|item| matches!(item, Item::Said { .. }));
-        let said = last_said.map(|at| match &self.items[at] {
-            Item::Said { text, .. } => clip(text, MAX_SAID),
-            Item::Step { .. } => unreachable!(),
-        });
-        let since = &self.items[last_said.map_or(0, |at| at + 1)..];
-        let steps: Vec<&str> = since
-            .iter()
-            .filter_map(|item| match item {
-                Item::Step { preview, .. } => Some(preview.as_str()),
-                _ => None,
-            })
-            .collect();
-        let ran = steps.last().map(|latest| {
-            let n = steps.len();
-            let s = if n == 1 { "" } else { "s" };
-            format!("Ran {n} action{s} — {latest}")
-        });
-        match (said, ran) {
-            (None, None) => None,
-            (Some(said), None) => Some(said),
-            (None, Some(ran)) => Some(ran),
-            (Some(said), Some(ran)) => Some(format!("{said}\n{ran}")),
-        }
-    }
-
-    /// Everything the turn showed, oldest first, for the settled card.
+    /// Everything the turn showed, oldest first.
     fn log(&self) -> Option<String> {
         let lines: Vec<String> = self
             .items
@@ -286,8 +246,8 @@ mod tests {
     }
 
     #[test]
-    fn the_card_carries_the_turn_and_replaces_in_place() {
-        let events = vec![
+    fn the_card_carries_the_turn_as_a_growing_log() {
+        let mut events = vec![
             started("turn-1", 1),
             said("llm1", "Let me look that up.", true, 2),
             tool_requested("tc1", "search_web", r#"{"q":"x"}"#, 3),
@@ -297,46 +257,38 @@ mod tests {
         assert_eq!(card["task_id"], "turn-1");
         assert_eq!(card["title"], "Find x");
         assert_eq!(card["status"], "in_progress");
+        let first = details(&events);
+        assert_eq!(first, "Let me look that up.\n• search_web {\"q\":\"x\"}");
+        // The log only grows, so the stream can append each render's delta.
+        events.push(said("llm2", "Now the details.", true, 4));
+        events.push(tool_requested("tc2", "get_page", "{}", 5));
+        let second = details(&events);
+        assert!(second.starts_with(&first), "{second}");
         assert_eq!(
-            details(&events),
-            "Let me look that up.\nRan 1 action — search_web {\"q\":\"x\"}"
+            second,
+            "Let me look that up.\n• search_web {\"q\":\"x\"}\nNow the details.\n• get_page {}"
         );
     }
 
     #[test]
-    fn a_new_preamble_starts_a_new_count() {
-        let mut events = vec![
-            started("turn-1", 1),
-            said("llm1", "First.", true, 2),
-            tool_requested("tc1", "a", "{}", 3),
-            tool_requested("tc2", "b", "{}", 4),
-        ];
-        assert_eq!(details(&events), "First.\nRan 2 actions — b {}");
-        events.push(said("llm2", "Second.", true, 5));
-        assert_eq!(details(&events), "Second.");
-        events.push(tool_requested("tc3", "c", "{}", 6));
-        assert_eq!(details(&events), "Second.\nRan 1 action — c {}");
-    }
-
-    #[test]
-    fn a_redelivered_preamble_keeps_the_count() {
+    fn a_redelivered_preamble_lands_once() {
         let events = vec![
             started("turn-1", 1),
             said("llm1", "First.", true, 2),
             tool_requested("tc1", "a", "{}", 3),
             said("llm1", "First.", true, 4),
         ];
-        assert_eq!(details(&events), "First.\nRan 1 action — a {}");
+        assert_eq!(details(&events), "First.\n• a {}");
     }
 
     #[test]
-    fn a_retry_counts_once() {
+    fn a_retry_lands_once() {
         let events = vec![
             started("turn-1", 1),
             tool_requested("tc1", "a", "{}", 2),
             tool_requested("tc1", "a", r#"{"again":1}"#, 3),
         ];
-        assert_eq!(details(&events), "Ran 1 action — a {\"again\":1}");
+        assert_eq!(details(&events), "• a {}");
     }
 
     #[test]
@@ -372,7 +324,7 @@ mod tests {
                 }),
             ),
         ];
-        assert_eq!(details(&events), "Ran 1 action — agent researcher");
+        assert_eq!(details(&events), "• agent researcher");
     }
 
     #[test]
@@ -385,12 +337,12 @@ mod tests {
         ];
         let turn = TurnActivity::fold(&events).unwrap();
         assert_eq!(turn.card("t")["task_id"], "turn-2");
-        assert_eq!(details(&events), "Ran 1 action — new {}");
+        assert_eq!(details(&events), "• new {}");
         assert!(TurnActivity::fold(&[tool_requested("tc1", "t", "{}", 1)]).is_none());
     }
 
     #[test]
-    fn a_chatty_step_fits_the_chunk() {
+    fn a_chatty_item_is_clipped_per_line() {
         let long = "x".repeat(500);
         let events = vec![
             started("turn-1", 1),
@@ -403,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn the_settled_card_carries_the_whole_log() {
+    fn the_settled_card_carries_the_same_log_done() {
         let events = vec![
             started("turn-1", 1),
             said("llm1", "First.", true, 2),
@@ -418,12 +370,6 @@ mod tests {
             card["details"]["elements"][0]["elements"][0]["text"],
             "First.\n• a {}\nSecond.\n• b {}",
             "every step, oldest first"
-        );
-        // While running, the same fold shows only the present.
-        let card = TurnActivity::fold(&events).unwrap().card("Find x");
-        assert_eq!(
-            card["details"]["elements"][0]["elements"][0]["text"],
-            "Second.\nRan 1 action — b {}"
         );
     }
 
@@ -442,14 +388,14 @@ mod tests {
     }
 
     #[test]
-    fn a_proposed_step_counts_before_its_event_lands() {
+    fn a_proposed_step_lands_before_its_event_does() {
         let events = vec![started("turn-1", 1), said("llm1", "Next.", true, 2)];
         let mut turn = TurnActivity::fold(&events).unwrap();
         turn.step("tc9", "send_email", Some(r#"{"to":"x"}"#));
         let card = turn.card("t");
         assert_eq!(
             card["details"]["elements"][0]["elements"][0]["text"],
-            "Next.\nRan 1 action — send_email {\"to\":\"x\"}"
+            "Next.\n• send_email {\"to\":\"x\"}"
         );
     }
 

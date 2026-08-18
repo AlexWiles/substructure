@@ -44,6 +44,8 @@ const IMAGE_NOT_ATTACHED: &str = "_an image could not be attached_";
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
 /// Slack's cap on a `task_update` chunk.
 const MAX_CHUNK: usize = 256;
+/// Shown from the turn's start until its card opens.
+const WORKING_STATUS: &str = "is working…";
 
 /// Only an `im` channel (`D…`) is one person's. A group DM is not: more than
 /// one person reads it, and `dm_message` never matches it anyway. Read from
@@ -315,8 +317,10 @@ impl View {
         })
     }
 
-    /// The view as stream chunks. A card is keyed by its id, text by its
-    /// content, so moving text does not send it twice.
+    /// The view as per-key stream state. A card is keyed by its id and
+    /// carries its whole details text; text blocks by their content, so
+    /// moving text does not send it twice. What actually goes on the wire
+    /// is the difference from `sent` — see [`wire_chunks`].
     fn chunks(&self) -> Vec<(String, Value)> {
         self.blocks
             .iter()
@@ -332,10 +336,8 @@ impl View {
                         chunk["title"] = clip(title, 60).into();
                     }
                     // The stream takes strings; the block carries rich text.
-                    for field in ["details", "output"] {
-                        if let Some(text) = rich_text_string(&block[field]) {
-                            chunk[field] = clip(&text, MAX_CHUNK).into();
-                        }
+                    if let Some(text) = rich_text_string(&block["details"]) {
+                        chunk["details"] = text.into();
                     }
                     Some((id.to_string(), chunk))
                 }
@@ -362,6 +364,73 @@ fn rich_text_string(block: &Value) -> Option<String> {
         .filter_map(|e| e["text"].as_str())
         .collect();
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// What to append to move the message from `sent` to `desired`, and what
+/// `sent` becomes once it lands.
+///
+/// The stream appends; it cannot replace. A card's details must grow by
+/// suffix, and each send carries only the growth, split to Slack's chunk
+/// cap. Details rewritten any other way stay unsent — the block rewrite at
+/// the turn's end is where a card may say something different.
+fn wire_chunks(
+    sent: &HashMap<String, Value>,
+    desired: &[(String, Value)],
+) -> (Vec<Value>, Vec<(String, Value)>) {
+    let mut wire = Vec::new();
+    let mut landed = Vec::new();
+    for (id, want) in desired {
+        let have = sent.get(id);
+        if have == Some(want) {
+            continue;
+        }
+        if want["type"] != "task_update" {
+            // Text is sent whole, once.
+            if have.is_none() {
+                wire.push(want.clone());
+                landed.push((id.clone(), want.clone()));
+            }
+            continue;
+        }
+        let old = have.and_then(|h| h["details"].as_str()).unwrap_or("");
+        let new = want["details"].as_str().unwrap_or("");
+        let delta = new.strip_prefix(old).unwrap_or("");
+        let moved =
+            have.is_none_or(|h| h["title"] != want["title"] || h["status"] != want["status"]);
+        if delta.is_empty() && !moved {
+            continue;
+        }
+        let mut head = serde_json::json!({
+            "type": "task_update",
+            "id": id,
+            "status": want["status"],
+        });
+        if !want["title"].is_null() {
+            head["title"] = want["title"].clone();
+        }
+        if delta.is_empty() {
+            wire.push(head);
+        } else {
+            let pieces: Vec<String> = delta
+                .chars()
+                .collect::<Vec<_>>()
+                .chunks(MAX_CHUNK)
+                .map(|c| c.iter().collect())
+                .collect();
+            for piece in pieces {
+                let mut chunk = head.clone();
+                chunk["details"] = piece.into();
+                wire.push(chunk);
+            }
+        }
+        let mut state = want.clone();
+        let grown = format!("{old}{delta}");
+        if !grown.is_empty() {
+            state["details"] = grown.into();
+        }
+        landed.push((id.clone(), state));
+    }
+    (wire, landed)
 }
 
 /// The open streams, and the sessions whose activity is not yet rendered.
@@ -1425,6 +1494,11 @@ impl EventProcessor for SlackBot {
         if let Err(e) = self.track(&ws, &thread, &event).await {
             return Err(ProcessorError::Apply(e.to_string()));
         }
+        // Immediate feedback: the status covers the gap until the card's
+        // message opens, which clears it.
+        if matches!(event.payload, EventPayload::TurnStarted(_)) {
+            self.set_status(&ws, &thread, WORKING_STATUS).await;
+        }
         let result = match &event.payload {
             EventPayload::TurnCompleted(t) => {
                 self.complete_turn(
@@ -1956,12 +2030,8 @@ impl SlackBot {
         let Some(view) = self.streams.view(key) else {
             return;
         };
-        let changed: Vec<(String, Value)> = view
-            .chunks()
-            .into_iter()
-            .filter(|(id, chunk)| open.sent.get(id) != Some(chunk))
-            .collect();
-        if changed.is_empty() {
+        let (chunks, landed) = wire_chunks(&open.sent, &view.chunks());
+        if chunks.is_empty() {
             return;
         }
 
@@ -2019,7 +2089,6 @@ impl SlackBot {
                 }
             },
         };
-        let chunks = changed.iter().map(|(_, c)| c.clone()).collect();
         if let Err(e) = self.append_stream(ws, &thread.channel, &ts, chunks).await {
             // The message takes nothing more, and the answer posts beside it.
             // Delete one this tick opened; stop one that holds cards.
@@ -2029,9 +2098,13 @@ impl SlackBot {
             }
             return self.kill_stream(key, e);
         }
+        // The card is on screen: it carries the working state from here.
+        if opened {
+            self.set_status(ws, &thread, "").await;
+        }
         // The turn ended during the append. A message this tick opened is one
         // the reply never saw.
-        if !self.streams.commit(key, ts.clone(), version, changed) && opened {
+        if !self.streams.commit(key, ts.clone(), version, landed) && opened {
             self.discard_stream(ws, &thread.channel, &ts).await;
         }
     }
@@ -2182,8 +2255,8 @@ impl SlackBot {
                 _ => {}
             }
         }
-        // The last streamed view is in the log. Cards can be sent twice, text
-        // cannot, so only its chunks seed `sent`.
+        // The last streamed view is in the log, and the stream appends: it
+        // all seeds `sent`, or a rebuilt slot would say it again.
         let view = events.iter().rev().find_map(|e| match &e.payload {
             EventPayload::ChannelsUpdated(c)
                 if e.meta.turn_id.as_deref() == Some(&row.turn_id) && !c.finishes_turn =>
@@ -2194,12 +2267,7 @@ impl SlackBot {
         });
         let sent: HashMap<String, Value> = view
             .as_ref()
-            .map(|v| {
-                v.chunks()
-                    .into_iter()
-                    .filter(|(id, _)| id.starts_with("say:"))
-                    .collect()
-            })
+            .map(|v| v.chunks().into_iter().collect())
             .unwrap_or_default();
         if let Some(view) = view {
             self.streams.set_view(key.clone(), view);
@@ -3190,36 +3258,74 @@ mod tests {
         assert!(bot.streams.get(&key("turn-1")).expect("the slot").dead);
     }
 
-    /// The stream carries whatever the card carries: rich-text details fold
-    /// to a clipped string, and the same card id replaces in place.
-    #[test]
-    fn a_cards_details_ride_the_stream_as_a_string() {
-        let long = "x".repeat(400);
-        let view = View {
+    fn desired(details: Option<&str>) -> Vec<(String, Value)> {
+        View {
             text: "".into(),
             blocks: vec![render::turn_card(
                 "turn-1",
                 "Find x",
                 "in_progress",
-                Some(&long),
+                details,
             )],
-        };
-        let chunks = view.chunks();
-        assert_eq!(chunks.len(), 1);
-        let (id, chunk) = &chunks[0];
-        assert_eq!(id, "turn-1");
-        assert_eq!(chunk["type"], "task_update");
-        assert_eq!(chunk["title"], "Find x");
-        assert_eq!(chunk["status"], "in_progress");
-        let details = chunk["details"].as_str().unwrap();
-        assert_eq!(details.chars().count(), MAX_CHUNK, "clipped for the chunk");
-        let bare = render::turn_card("turn-1", "Find x", "complete", None);
-        let chunks = View {
+        }
+        .chunks()
+    }
+
+    /// A new card streams its whole details text, split to the chunk cap.
+    #[test]
+    fn a_new_card_streams_its_details_in_pieces() {
+        let long = "x".repeat(MAX_CHUNK + 100);
+        let (wire, landed) = wire_chunks(&HashMap::new(), &desired(Some(&long)));
+        assert_eq!(wire.len(), 2, "split to the cap");
+        assert_eq!(wire[0]["type"], "task_update");
+        assert_eq!(wire[0]["id"], "turn-1");
+        assert_eq!(wire[0]["title"], "Find x");
+        assert_eq!(wire[0]["status"], "in_progress");
+        assert_eq!(
+            wire[0]["details"].as_str().unwrap().chars().count(),
+            MAX_CHUNK
+        );
+        assert_eq!(wire[1]["details"].as_str().unwrap().chars().count(), 100);
+        assert_eq!(landed[0].1["details"], long.as_str(), "sent in full");
+    }
+
+    /// The stream appends, so a grown log sends only its growth.
+    #[test]
+    fn a_grown_log_streams_only_the_delta() {
+        let (_, sent) = wire_chunks(&HashMap::new(), &desired(Some("First.\n• a {}")));
+        let sent: HashMap<String, Value> = sent.into_iter().collect();
+        let (wire, landed) = wire_chunks(&sent, &desired(Some("First.\n• a {}\nSecond.\n• b {}")));
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["details"], "\nSecond.\n• b {}");
+        assert_eq!(landed[0].1["details"], "First.\n• a {}\nSecond.\n• b {}");
+        // Caught up: nothing more to send.
+        let sent: HashMap<String, Value> = landed.into_iter().collect();
+        let (wire, _) = wire_chunks(&sent, &desired(Some("First.\n• a {}\nSecond.\n• b {}")));
+        assert!(wire.is_empty());
+    }
+
+    /// Details rewritten any other way stay unsent — appending them again
+    /// would say everything twice. The status still moves.
+    #[test]
+    fn a_rewritten_log_sends_the_status_and_no_text() {
+        let (_, sent) = wire_chunks(&HashMap::new(), &desired(Some("First.")));
+        let sent: HashMap<String, Value> = sent.into_iter().collect();
+        let (wire, _) = wire_chunks(&sent, &desired(Some("Rewritten.")));
+        assert!(wire.is_empty(), "same head, unappendable text: nothing");
+        let done = View {
             text: "".into(),
-            blocks: vec![bare],
+            blocks: vec![render::turn_card(
+                "turn-1",
+                "Find x",
+                "complete",
+                Some("Rewritten."),
+            )],
         }
         .chunks();
-        assert!(chunks[0].1.get("details").is_none());
+        let (wire, _) = wire_chunks(&sent, &done);
+        assert_eq!(wire.len(), 1, "the status change goes out alone");
+        assert_eq!(wire[0]["status"], "complete");
+        assert!(wire[0].get("details").is_none());
     }
 
     /// How a writer learns the turn settled under it.
@@ -3283,7 +3389,26 @@ mod tests {
         assert!(calls.to("assistant.threads.setStatus").is_empty());
     }
 
-    /// A running turn's events set no status either.
+    /// The card takes a model call to appear; the status covers that gap
+    /// from the turn's first event.
+    #[tokio::test]
+    async fn a_turn_starting_lights_the_status() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, _ws) = bot_for(api_base);
+
+        let started = EventPayload::TurnStarted(crate::session::events::TurnStarted {
+            turn_id: "turn-1".into(),
+        });
+        bot.apply(turn_event(started, Some("turn-1"), None))
+            .await
+            .expect("applies");
+
+        let status = calls.to("assistant.threads.setStatus");
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0]["status"], WORKING_STATUS);
+    }
+
+    /// A running turn's later events set no status: the card carries it.
     #[tokio::test]
     async fn a_running_turn_sets_no_status() {
         let (api_base, calls) = fake_slack().await;

@@ -20,7 +20,6 @@ together at the same version.
 
 - Auth refactor.
 - A Slack turn shows one task card that updates in place and settles to the answer.
-- The bot does not set a thread status while a turn runs.
 
 ### Fixed
 

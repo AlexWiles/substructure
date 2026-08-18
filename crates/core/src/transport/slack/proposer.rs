@@ -941,8 +941,8 @@ mod tests {
         assert_eq!(blocks[0]["title"], "Working…", "no transcript, no title");
         assert_eq!(
             blocks[0]["details"]["elements"][0]["elements"][0]["text"],
-            "Ran 2 actions — send_email {\"to\":\"x\"}",
-            "the dispatched call counts in"
+            "• search_web {}\n• send_email {\"to\":\"x\"}",
+            "the dispatched call lands in the log"
         );
         assert!(!p.actions.is_empty(), "the core continuation is kept");
     }
