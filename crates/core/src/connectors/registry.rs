@@ -16,7 +16,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::mcp::McpClient;
-use super::oauth::Probed;
+use super::oauth::{ClientId, Probed};
 use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, Requester, Slot, Visibility};
 use crate::protocol::ConnectorProtocol;
 use crate::protocol::StoredResult;
@@ -49,6 +49,12 @@ pub struct ConnectionSpec {
     /// section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<CredentialScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_env: Option<String>,
     /// Whether the model sees `<id>__<tool>` rather than the connection's own
     /// tool names. On by default, and the operator's call rather than the agent
     /// author's: only whoever configured the connections knows whether their
@@ -81,6 +87,20 @@ impl ConnectionSpec {
     pub fn effective_scope(&self) -> CredentialScope {
         self.credential.unwrap_or(CredentialScope::Shared)
     }
+
+    pub fn configured_client(&self) -> Option<ClientId> {
+        Some(ClientId::Registered {
+            client_id: env_value(self.client_id_env.as_deref()?)?,
+            client_secret: self.client_secret_env.as_deref().and_then(env_value),
+        })
+    }
+}
+
+fn env_value(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Whose credential a connection dials with.
@@ -692,6 +712,9 @@ mod tests {
             auth: Some(AuthKind::Oauth),
             header: None,
             credential: None,
+            scopes: Vec::new(),
+            client_id_env: None,
+            client_secret_env: None,
             prefix_tools: true,
         };
         Connections::new(
@@ -757,6 +780,51 @@ mod tests {
 
         assert_eq!(err.auth, Some(AuthNeed::Reauthorize));
         assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_configured_client_comes_from_the_environment_or_not_at_all() {
+        let mut spec = ConnectionSpec {
+            url: "https://gmailmcp.googleapis.com/mcp/v1".into(),
+            protocol: ConnectorProtocol::Mcp,
+            auth: None,
+            header: None,
+            credential: None,
+            scopes: Vec::new(),
+            client_id_env: None,
+            client_secret_env: None,
+            prefix_tools: true,
+        };
+        assert!(spec.configured_client().is_none(), "named none");
+
+        spec.client_id_env = Some("SUBS_TEST_CORE_CLIENT_ID".into());
+        spec.client_secret_env = Some("SUBS_TEST_CORE_CLIENT_SECRET".into());
+        assert!(spec.configured_client().is_none(), "named but unset");
+
+        unsafe {
+            std::env::set_var("SUBS_TEST_CORE_CLIENT_ID", "client-1");
+            std::env::set_var("SUBS_TEST_CORE_CLIENT_SECRET", "secret-1");
+        }
+        assert_eq!(
+            spec.configured_client(),
+            Some(ClientId::Registered {
+                client_id: "client-1".into(),
+                client_secret: Some("secret-1".into()),
+            })
+        );
+
+        spec.client_secret_env = None;
+        assert_eq!(
+            spec.configured_client(),
+            Some(ClientId::Registered {
+                client_id: "client-1".into(),
+                client_secret: None,
+            })
+        );
+        unsafe {
+            std::env::remove_var("SUBS_TEST_CORE_CLIENT_ID");
+            std::env::remove_var("SUBS_TEST_CORE_CLIENT_SECRET");
+        }
     }
 
     #[test]
@@ -842,6 +910,9 @@ mod tests {
             auth: None,
             header: None,
             credential: None,
+            scopes: Vec::new(),
+            client_id_env: None,
+            client_secret_env: None,
             prefix_tools: true,
         };
         let personal = ConnectionSpec {
@@ -901,6 +972,9 @@ mod tests {
                                 auth: None,
                                 header: None,
                                 credential: None,
+                                scopes: Vec::new(),
+                                client_id_env: None,
+                                client_secret_env: None,
                                 prefix_tools: true,
                             },
                         }),
@@ -1012,6 +1086,9 @@ mod tests {
             auth: None,
             header: None,
             credential: None,
+            scopes: Vec::new(),
+            client_id_env: None,
+            client_secret_env: None,
             prefix_tools: true,
         };
         let connections = Connections::new(

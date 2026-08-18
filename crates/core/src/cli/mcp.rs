@@ -157,19 +157,27 @@ fn local_slot(spec: &ConnectionSpec) -> Slot {
     }
 }
 
-/// A server whose OAuth needs an app somebody registered by hand.
-///
-/// The flow is a dead end here, so the message leads with that in the reader's
-/// terms and spends its last line on the way through rather than on the
-/// mechanism they cannot reach.
-fn unregistrable(id: &str, err: oauth::OauthError) -> anyhow::Error {
+/// A server whose OAuth needs a client somebody registered by hand.
+fn unregistrable(
+    id: &str,
+    spec: &ConnectionSpec,
+    redirect_uri: &str,
+    err: oauth::OauthError,
+) -> anyhow::Error {
     if !matches!(err, oauth::OauthError::Registration(_)) {
         return err.into();
     }
+    if let Some(var) = &spec.client_id_env {
+        return anyhow::anyhow!("{err}.\n\n[mcp.{id}] names `{var}`, and it is not set.");
+    }
     anyhow::anyhow!(
         "{err}.\n\n\
-         If the server accepts a static token, add `auth = \"token\"` to [mcp.{id}], \
-         then:\n\n  subs mcp set-token {id}"
+         Register a client with that server, then name it on [mcp.{id}]:\n\n  \
+         client_id_env = \"...\"\n  client_secret_env = \"...\"\n\n\
+         Register it as a native or desktop client. Its redirect URI is \
+         {redirect_uri}, and the port changes on every run.\n\n\
+         If the server takes a static token instead, add `auth = \"token\"`, then:\n\n  \
+         subs mcp set-token {id}"
     )
 }
 
@@ -263,11 +271,14 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -
 
     // No metadata document: this is a laptop, with no stable HTTPS address to
     // serve one from. A deployment that has one passes it here instead.
-    let client = oauth::client_id(&http, &discovered.server, None, &redirect_uri, CLIENT_NAME)
-        .await
-        .map_err(|e| unregistrable(&id, e))?;
+    let client = match spec.configured_client() {
+        Some(client) => client,
+        None => oauth::client_id(&http, &discovered.server, None, &redirect_uri, CLIENT_NAME)
+            .await
+            .map_err(|e| unregistrable(&id, &spec, &redirect_uri, e))?,
+    };
 
-    let pending = oauth::authorize(&discovered, &client, &redirect_uri, &[])?;
+    let pending = oauth::authorize(&discovered, &client, &redirect_uri, &spec.scopes)?;
 
     if let Some(scope) = &pending.scope {
         println!("Requesting: {scope}");
@@ -796,6 +807,9 @@ mod tests {
             auth,
             header: None,
             credential: None,
+            scopes: Vec::new(),
+            client_id_env: None,
+            client_secret_env: None,
             prefix_tools: true,
         }
     }

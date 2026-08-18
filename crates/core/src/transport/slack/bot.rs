@@ -2657,6 +2657,9 @@ mod tests {
                 auth: None,
                 header: None,
                 credential: Some(crate::connectors::registry::CredentialScope::User),
+                scopes: Vec::new(),
+                client_id_env: None,
+                client_secret_env: None,
                 prefix_tools: true,
             };
             Arc::new(EngineConsent(Arc::new(AuthorizeLinks::new(

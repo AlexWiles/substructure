@@ -368,7 +368,7 @@ async fn fetch_auth_server(http: &Client, issuer: &str) -> Result<AuthServer, Oa
             Ok(server) => {
                 // RFC 8414: the document must claim the issuer we asked about,
                 // or it is somebody else's metadata.
-                if server.issuer != issuer {
+                if !same_issuer(&server.issuer, issuer) {
                     return Err(OauthError::Discovery(format!(
                         "{candidate} claims issuer `{}`, expected `{issuer}`",
                         server.issuer
@@ -382,6 +382,10 @@ async fn fetch_auth_server(http: &Client, issuer: &str) -> Result<AuthServer, Oa
     Err(OauthError::Discovery(format!(
         "no authorization server metadata for `{issuer}` ({last})"
     )))
+}
+
+fn same_issuer(document: &str, asked: &str) -> bool {
+    document.trim_end_matches('/') == asked.trim_end_matches('/')
 }
 
 fn metadata_urls(issuer: &str) -> Result<Vec<String>, OauthError> {
@@ -510,21 +514,17 @@ pub fn authorize(
     discovered: &Discovered,
     client: &ClientId,
     redirect_uri: &str,
-    extra_scopes: &[String],
+    scopes: &[String],
 ) -> Result<Pending, OauthError> {
     let verifier = random_token(64);
     let challenge = B64URL.encode(Sha256::digest(verifier.as_bytes()));
     let state = random_token(32);
 
-    // The challenge's scopes are authoritative when a server sends them; none
-    // of the servers seen in practice do, so fall back to what the resource
-    // advertises. `scopes_supported` is the minimal useful set by convention.
-    let mut scopes: Vec<String> = discovered.resource.scopes_supported.clone();
-    for scope in extra_scopes {
-        if !scopes.contains(scope) {
-            scopes.push(scope.clone());
-        }
-    }
+    let scopes: &[String] = if scopes.is_empty() {
+        &discovered.resource.scopes_supported
+    } else {
+        scopes
+    };
     let scope = (!scopes.is_empty()).then(|| scopes.join(" "));
 
     let mut params = vec![
@@ -535,6 +535,8 @@ pub fn authorize(
         ("code_challenge", challenge),
         ("code_challenge_method", "S256".to_string()),
         ("resource", discovered.resource.resource.clone()),
+        ("access_type", "offline".to_string()),
+        ("prompt", "consent".to_string()),
     ];
     if let Some(scope) = &scope {
         params.push(("scope", scope.clone()));
@@ -778,13 +780,67 @@ mod tests {
         assert_eq!(params["code_challenge_method"], "S256");
         assert_eq!(params["resource"], "https://mcp.example.test/mcp");
         assert_eq!(params["client_id"], "https://app.test/client.json");
-        assert_eq!(params["scope"], "org:read project:write");
+        assert_eq!(params["scope"], "project:write");
+        assert_eq!(params["access_type"], "offline");
+        assert_eq!(params["prompt"], "consent");
         assert_eq!(
             params["code_challenge"],
             B64URL.encode(Sha256::digest(pending.verifier.as_bytes())),
             "the challenge must verify against the verifier we kept"
         );
         assert_ne!(pending.state, pending.verifier);
+    }
+
+    #[test]
+    fn given_scopes_replace_what_the_resource_advertises() {
+        let ask = |scopes: &[String]| {
+            let pending = authorize(
+                &discovered(),
+                &ClientId::Metadata {
+                    url: "https://app.test/client.json".into(),
+                },
+                "http://127.0.0.1:7777/callback",
+                scopes,
+            )
+            .unwrap();
+            pending.scope
+        };
+
+        assert_eq!(
+            ask(&[]).as_deref(),
+            Some("org:read"),
+            "none given: fall back"
+        );
+        assert_eq!(
+            ask(&["gmail.readonly".into()]).as_deref(),
+            Some("gmail.readonly"),
+            "the advertised `org:read` must not survive"
+        );
+
+        let mut narrower = discovered();
+        narrower.resource.scopes_supported = vec![];
+        let pending = authorize(
+            &narrower,
+            &ClientId::Metadata {
+                url: "https://app.test/client.json".into(),
+            },
+            "http://127.0.0.1:7777/callback",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(pending.scope, None, "nothing to ask for is no scope param");
+    }
+
+    #[test]
+    fn an_issuer_may_differ_by_a_trailing_slash_at_discovery() {
+        assert!(same_issuer(
+            "https://accounts.google.com",
+            "https://accounts.google.com/"
+        ));
+        assert!(same_issuer("https://a.test/oauth", "https://a.test/oauth/"));
+        assert!(!same_issuer("https://evil.test", "https://a.test"));
+        assert!(!same_issuer("https://a.test/oauth", "https://a.test/other"));
+        assert!(!same_issuer("https://A.test", "https://a.test"));
     }
 
     #[test]
@@ -874,13 +930,24 @@ mod tests {
     #[ignore = "network"]
     async fn discovery_resolves_the_servers_people_actually_connect() {
         let http = Client::new();
-        for (url, issuer) in [
-            ("https://mcp.sentry.dev/mcp", "https://mcp.sentry.dev"),
-            ("https://mcp.linear.app/mcp", "https://mcp.linear.app"),
-            ("https://mcp.notion.com/mcp", "https://mcp.notion.com"),
+        for (url, issuer, self_registers) in [
+            ("https://mcp.sentry.dev/mcp", "https://mcp.sentry.dev", true),
+            ("https://mcp.linear.app/mcp", "https://mcp.linear.app", true),
+            ("https://mcp.notion.com/mcp", "https://mcp.notion.com", true),
             (
                 "https://api.githubcopilot.com/mcp/",
                 "https://github.com/login/oauth",
+                false,
+            ),
+            (
+                "https://gmailmcp.googleapis.com/mcp/v1",
+                "https://accounts.google.com",
+                false,
+            ),
+            (
+                "https://drivemcp.googleapis.com/mcp/v1",
+                "https://accounts.google.com",
+                false,
             ),
         ] {
             let found = discover(&http, url)
@@ -889,11 +956,11 @@ mod tests {
             assert_eq!(found.server.issuer, issuer, "{url}");
             assert!(!found.server.authorization_endpoint.is_empty(), "{url}");
             assert!(!found.server.token_endpoint.is_empty(), "{url}");
-            assert!(
+            assert_eq!(
                 found.server.client_id_metadata_document_supported
-                    || found.server.registration_endpoint.is_some()
-                    || found.server.issuer == "https://github.com/login/oauth",
-                "{url} offers no registration mechanism we support"
+                    || found.server.registration_endpoint.is_some(),
+                self_registers,
+                "{url}"
             );
         }
     }

@@ -181,17 +181,20 @@ async fn begin(deps: &McpAuthDeps, token: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("discovery failed for `{}`: {e}", link.connection_id))?;
     let redirect_uri = deps.links.callback_url();
-    let client = oauth::client_id(
-        &deps.http,
-        &discovered.server,
-        None,
-        &redirect_uri,
-        CLIENT_NAME,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let pending =
-        oauth::authorize(&discovered, &client, &redirect_uri, &[]).map_err(|e| e.to_string())?;
+    let client = match spec.configured_client() {
+        Some(client) => client,
+        None => oauth::client_id(
+            &deps.http,
+            &discovered.server,
+            None,
+            &redirect_uri,
+            CLIENT_NAME,
+        )
+        .await
+        .map_err(|e| e.to_string())?,
+    };
+    let pending = oauth::authorize(&discovered, &client, &redirect_uri, &spec.scopes)
+        .map_err(|e| e.to_string())?;
 
     let held = PendingFlow {
         pending: pending.clone(),
@@ -347,6 +350,9 @@ mod tests {
             auth: None,
             header: None,
             credential,
+            scopes: Vec::new(),
+            client_id_env: None,
+            client_secret_env: None,
             prefix_tools: true,
         }
     }
