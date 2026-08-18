@@ -85,7 +85,7 @@ impl TurnActivity {
 
     /// Count a call once; a retry or redelivery is the same call.
     /// The name reads as a label, the arguments as code beside it.
-    pub(super) fn step(&mut self, id: &str, name: &str, input: Option<&str>) {
+    fn step(&mut self, id: &str, name: &str, input: Option<&str>) {
         if self.items.iter().any(|item| item.id() == id) {
             return;
         }
@@ -403,18 +403,6 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(log.chars().count(), MAX_LOG);
-    }
-
-    #[test]
-    fn a_proposed_step_lands_before_its_event_does() {
-        let events = vec![started("turn-1", 1), said("llm1", "Next.", true, 2)];
-        let mut turn = TurnActivity::fold(&events).unwrap();
-        turn.step("tc9", "send_email", Some(r#"{"to":"x"}"#));
-        let card = turn.card("t");
-        assert_eq!(
-            card["details"]["elements"][0]["elements"][0]["text"],
-            "Next.\n• send_email `{\"to\":\"x\"}`"
-        );
     }
 
     #[test]

@@ -86,7 +86,7 @@ impl ChannelProposer for SlackProposer {
                 if authors_interrupt {
                     return proposed;
                 }
-                let view = streaming_view(events, &proposed, &title_of(transcript));
+                let view = streaming_view(events, &title_of(transcript));
                 with_view(proposed, view)
             }
             DecisionTrigger::TurnFinished { data, .. } => {
@@ -162,42 +162,47 @@ fn title_of(transcript: &[Message]) -> String {
         .filter(|m| m.role == Role::User)
         .find_map(|m| {
             let text = m.content.as_ref().map(Content::text_owned)?;
+            let text = plain(&text);
             let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
             (!text.is_empty()).then(|| clip(&text, 60))
         })
         .unwrap_or_else(|| "Working…".to_string())
 }
 
-/// The message so far: one card for the turn, counting in the calls this
-/// proposal starts. The card keeps its id, so each render replaces the last.
-fn streaming_view(
-    events: &[SessionEvent],
-    proposed: &DecisionResponse,
-    title: &str,
-) -> Option<Value> {
-    let mut turn = TurnActivity::fold(events)?;
-    for action in &proposed.actions {
-        match action {
-            DecisionAction::CallTool {
-                id: Some(id),
-                name,
-                arguments,
-                ..
-            } => {
-                let input = match arguments {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                turn.step(id, name, Some(&input));
+/// The text without Slack markup. A finished card shows its title raw, so
+/// a `<@id>` mention would read as the id, not the name.
+fn plain(text: &str) -> String {
+    // The batch writes "<@author>: text"; the title wants the text.
+    let text = match text.strip_prefix("<@").and_then(|r| r.split_once(">: ")) {
+        Some((_, rest)) => rest,
+        None => text,
+    };
+    // Any other token reads as its label.
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        match rest[start + 1..].split_once('>') {
+            Some((token, after)) => {
+                let label = token.split_once('|').map_or(token, |(_, label)| label);
+                out.push_str(label);
+                rest = after;
             }
-            DecisionAction::SpawnSubAgent {
-                agent_id,
-                tool_call_id,
-                ..
-            } => turn.step(tool_call_id, &format!("agent {agent_id}"), None),
-            _ => {}
+            None => {
+                out.push('<');
+                rest = &rest[start + 1..];
+            }
         }
     }
+    out.push_str(rest);
+    out
+}
+
+/// The message so far: one card for the turn. Only the events write the
+/// log — the stream appends, so a line that later reads differently would
+/// freeze it. A proposed call lands when its event does.
+fn streaming_view(events: &[SessionEvent], title: &str) -> Option<Value> {
+    let turn = TurnActivity::fold(events)?;
     Some(serde_json::json!({ "text": "", "blocks": [turn.card(title)] }))
 }
 
@@ -908,6 +913,18 @@ mod tests {
         ];
         assert_eq!(title_of(&transcript), "fix the login button");
         assert_eq!(title_of(&[]), "Working…");
+        // A finished card shows its title raw: no markup survives.
+        let mention = crate::protocol::Message {
+            content: Some(Content::Text(
+                "<@U0B8ECR818W>: check <#C1|general> and <https://a.test|the doc> for <@U5>".into(),
+            )),
+            ..transcript[0].clone()
+        };
+        assert_eq!(
+            title_of(&[mention]),
+            "check general and the doc for @U5",
+            "the author prefix goes; tokens read as their labels"
+        );
         let long = crate::protocol::Message {
             content: Some(Content::Text("x".repeat(100))),
             ..transcript[0].clone()
@@ -916,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_call_proposes_a_view_with_the_next_calls_card() {
+    fn a_finished_call_proposes_a_view_of_the_evented_work() {
         let trigger = DecisionTrigger::ToolFinished {
             id: "tc1".to_string(),
             ok: true,
@@ -939,10 +956,12 @@ mod tests {
         assert_eq!(blocks[0]["task_id"], "turn-1");
         assert_eq!(blocks[0]["status"], "in_progress");
         assert_eq!(blocks[0]["title"], "Working…", "no transcript, no title");
+        // The proposed call is not in the log: a proposal can render its
+        // call another way than the event will, and the stream appends —
+        // a line that changed would freeze the log. It lands one tick on.
         assert_eq!(
-            blocks[0]["details"]["elements"][0]["elements"][0]["text"],
-            "• search_web `{}`\n• send_email `{\"to\":\"x\"}`",
-            "the dispatched call lands in the log"
+            blocks[0]["details"]["elements"][0]["elements"][0]["text"], "• search_web `{}`",
+            "the events write the log; the proposal does not"
         );
         assert!(!p.actions.is_empty(), "the core continuation is kept");
     }
