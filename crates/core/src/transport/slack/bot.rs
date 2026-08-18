@@ -1663,6 +1663,24 @@ impl SlackBot {
         }
         let meta = self.reply_meta(ws, session_id, t).await;
         let text = rendered.text.clone();
+        // The card settles inside the stream — status, and the log's tail —
+        // so the message stays a streamed card, with its fold. A rewrite
+        // would flatten it.
+        let sent = live.as_ref().map(|s| s.sent.clone()).unwrap_or_default();
+        let cards: Vec<(String, Value)> = View {
+            text: String::new(),
+            blocks: rendered.blocks.clone(),
+        }
+        .chunks()
+        .into_iter()
+        .filter(|(_, c)| c["type"] == "task_update")
+        .collect();
+        let (settle, _) = wire_chunks(&sent, &cards);
+        if !settle.is_empty() {
+            if let Err(e) = self.append_stream(ws, &thread.channel, &ts, settle).await {
+                tracing::debug!(error = %e, %session_id, "slack: card not settled");
+            }
+        }
         let chunk = serde_json::json!({
             "type": "markdown_text",
             "text": clip(&text, MAX_MARKDOWN),
@@ -1672,14 +1690,18 @@ impl SlackBot {
             .await
         {
             Ok(()) => {
-                // Rebuild from blocks, which have no 256-character chunk
-                // limit, so each card settles with its full detail.
-                if !rendered.blocks.is_empty() {
+                // Images cannot ride the stream; only they justify a rewrite.
+                let images: Vec<&Value> = rendered
+                    .blocks
+                    .iter()
+                    .filter(|b| b["type"] == "image")
+                    .collect();
+                if !images.is_empty() {
                     if let Err(e) = self
                         .update(ws, &thread.channel, &ts, &text, rendered.blocks, &meta)
                         .await
                     {
-                        tracing::warn!(error = %e, %session_id, "slack: cards not expanded");
+                        tracing::warn!(error = %e, %session_id, "slack: images not attached");
                     }
                 }
                 Ok(())
@@ -2187,21 +2209,37 @@ impl SlackBot {
                 session_id: Some(session_id.to_string()),
                 ..Default::default()
             };
+            // The card ends inside the stream, keeping its fold; the stop
+            // says why and stamps the message.
+            let cards: Vec<(String, Value)> = View {
+                text: String::new(),
+                blocks: rendered.blocks.clone(),
+            }
+            .chunks()
+            .into_iter()
+            .filter(|(_, c)| c["type"] == "task_update")
+            .collect();
+            let (settle, _) = wire_chunks(&stream.sent, &cards);
+            if !settle.is_empty() {
+                if let Err(e) = self
+                    .append_stream(ws, &stream.thread.channel, &ts, settle)
+                    .await
+                {
+                    tracing::debug!(error = %e, %session_id, "slack: cancelled card not settled");
+                }
+            }
+            let chunk = serde_json::json!({
+                "type": "markdown_text",
+                "text": rendered.text,
+            });
             if let Err(e) = self
-                .update(
-                    ws,
-                    &stream.thread.channel,
-                    &ts,
-                    &rendered.text,
-                    rendered.blocks,
-                    &meta,
-                )
+                .stop_stream(ws, &stream.thread.channel, &ts, chunk, &meta)
                 .await
             {
                 tracing::warn!(error = %e, %session_id, "slack: cancelled turn not settled");
+                // Whatever the message says, the stream still has to stop.
+                self.close_stream(ws, &stream.thread.channel, &ts).await;
             }
-            // Whatever the message says, the stream still has to stop.
-            self.close_stream(ws, &stream.thread.channel, &ts).await;
         }
         self.set_status(ws, thread, "").await;
     }
@@ -2991,6 +3029,53 @@ mod tests {
         );
     }
 
+    /// The reply settles the card inside the stream — status flip and log
+    /// tail appended, the answer on the stop — and never rewrites the
+    /// message: a rewrite flattens the card and its fold.
+    #[tokio::test]
+    async fn a_finished_turn_settles_its_card_in_the_stream() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base);
+        let mut live = stream("turn-1", Some("1.1"));
+        live.sent = wire_chunks(&HashMap::new(), &desired(Some("First.")))
+            .1
+            .into_iter()
+            .collect();
+        bot.streams.insert(live);
+        bot.streams.set_final(
+            key("turn-1"),
+            View {
+                text: "the answer".into(),
+                blocks: vec![
+                    render::turn_card("turn-1", "Find x", "complete", Some("First.\n• `a {}`")),
+                    section_block("the answer"),
+                ],
+            },
+        );
+
+        let t = TurnCompleted {
+            turn_id: "turn-1".into(),
+            data: Value::String("the answer".into()),
+            turn_cost: Default::default(),
+            turn_token_usage: Default::default(),
+            error: None,
+        };
+        bot.complete_turn(&ws, &thread(), SESSION, &t, chrono::Utc::now(), 0)
+            .await
+            .expect("finishes");
+
+        let appended = calls.to("chat.appendStream");
+        assert_eq!(appended.len(), 1, "one settle append");
+        let chunks = appended[0]["chunks"].as_array().unwrap();
+        assert!(chunks.iter().all(|c| c["type"] == "task_update"));
+        assert_eq!(chunks[0]["status"], "complete");
+        assert_eq!(chunks[0]["details"], "\n• `a {}`", "the log's tail");
+        let stopped = calls.to("chat.stopStream");
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0]["chunks"][0]["text"], "the answer");
+        assert!(calls.to("chat.update").is_empty(), "no flattening rewrite");
+    }
+
     #[tokio::test]
     async fn a_failed_turn_writes_its_error_over_the_view() {
         let (api_base, calls) = fake_slack().await;
@@ -3130,7 +3215,11 @@ mod tests {
         let stopped = calls.to("chat.stopStream");
         assert_eq!(stopped.len(), 1, "only the turn that opened a message");
         assert_eq!(stopped[0]["ts"], "1.1");
-        assert_eq!(calls.to("chat.update")[0]["text"], "Cancelled.");
+        assert_eq!(
+            stopped[0]["chunks"][0]["text"], "Cancelled.",
+            "the stop says why, keeping the streamed card intact"
+        );
+        assert!(calls.to("chat.update").is_empty(), "no flattening rewrite");
         // And the thread stops claiming it is working.
         let status = calls.to("assistant.threads.setStatus");
         assert_eq!(status.len(), 1);

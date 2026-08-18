@@ -5,8 +5,8 @@ use super::render;
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
-const MAX_SAID: usize = 180;
-const MAX_STEP: usize = 60;
+const MAX_SAID: usize = 400;
+const MAX_STEP: usize = 80;
 /// The stream freezes here; the settled card clips here too.
 const MAX_LOG: usize = 3_000;
 
@@ -98,8 +98,9 @@ impl TurnActivity {
         });
     }
 
-    /// The turn's one card while it runs: the log so far. The log only
-    /// grows, so the stream appends each render's delta.
+    /// The turn's one card while it runs: the log so far, as markdown —
+    /// that is how the stream renders its chunks. The log only grows, so
+    /// the stream appends each render's delta.
     pub(super) fn card(&self, title: &str) -> Value {
         render::turn_card(&self.turn_id, title, "in_progress", self.log().as_deref())
     }
@@ -109,17 +110,27 @@ impl TurnActivity {
         render::turn_card(&self.turn_id, title, "complete", self.log().as_deref())
     }
 
-    /// Everything the turn showed, oldest first.
+    /// Everything the turn showed, oldest first, as markdown. A blank line
+    /// holds a preamble out of the list before it; a call reads as code.
     fn log(&self) -> Option<String> {
-        let lines: Vec<String> = self
-            .items
-            .iter()
-            .map(|item| match item {
-                Item::Said { text, .. } => clip(text, MAX_SAID),
-                Item::Step { preview, .. } => format!("• {preview}"),
-            })
-            .collect();
-        (!lines.is_empty()).then(|| clip(&lines.join("\n"), MAX_LOG))
+        let mut log = String::new();
+        for item in &self.items {
+            match item {
+                Item::Said { text, .. } => {
+                    if !log.is_empty() {
+                        log.push_str("\n\n");
+                    }
+                    log.push_str(&clip(text, MAX_SAID));
+                }
+                Item::Step { preview, .. } => {
+                    if !log.is_empty() {
+                        log.push('\n');
+                    }
+                    log.push_str(&format!("• `{preview}`"));
+                }
+            }
+        }
+        (!log.is_empty()).then(|| clip(&log, MAX_LOG))
     }
 }
 
@@ -258,7 +269,7 @@ mod tests {
         assert_eq!(card["title"], "Find x");
         assert_eq!(card["status"], "in_progress");
         let first = details(&events);
-        assert_eq!(first, "Let me look that up.\n• search_web {\"q\":\"x\"}");
+        assert_eq!(first, "Let me look that up.\n• `search_web {\"q\":\"x\"}`");
         // The log only grows, so the stream can append each render's delta.
         events.push(said("llm2", "Now the details.", true, 4));
         events.push(tool_requested("tc2", "get_page", "{}", 5));
@@ -266,7 +277,8 @@ mod tests {
         assert!(second.starts_with(&first), "{second}");
         assert_eq!(
             second,
-            "Let me look that up.\n• search_web {\"q\":\"x\"}\nNow the details.\n• get_page {}"
+            "Let me look that up.\n• `search_web {\"q\":\"x\"}`\n\nNow the details.\n• `get_page {}`",
+            "a blank line holds a preamble out of the list before it"
         );
     }
 
@@ -278,7 +290,7 @@ mod tests {
             tool_requested("tc1", "a", "{}", 3),
             said("llm1", "First.", true, 4),
         ];
-        assert_eq!(details(&events), "First.\n• a {}");
+        assert_eq!(details(&events), "First.\n• `a {}`");
     }
 
     #[test]
@@ -288,7 +300,7 @@ mod tests {
             tool_requested("tc1", "a", "{}", 2),
             tool_requested("tc1", "a", r#"{"again":1}"#, 3),
         ];
-        assert_eq!(details(&events), "• a {}");
+        assert_eq!(details(&events), "• `a {}`");
     }
 
     #[test]
@@ -324,7 +336,7 @@ mod tests {
                 }),
             ),
         ];
-        assert_eq!(details(&events), "• agent researcher");
+        assert_eq!(details(&events), "• `agent researcher`");
     }
 
     #[test]
@@ -337,7 +349,7 @@ mod tests {
         ];
         let turn = TurnActivity::fold(&events).unwrap();
         assert_eq!(turn.card("t")["task_id"], "turn-2");
-        assert_eq!(details(&events), "• new {}");
+        assert_eq!(details(&events), "• `new {}`");
         assert!(TurnActivity::fold(&[tool_requested("tc1", "t", "{}", 1)]).is_none());
     }
 
@@ -368,7 +380,7 @@ mod tests {
         assert_eq!(card["status"], "complete");
         assert_eq!(
             card["details"]["elements"][0]["elements"][0]["text"],
-            "First.\n• a {}\nSecond.\n• b {}",
+            "First.\n• `a {}`\n\nSecond.\n• `b {}`",
             "every step, oldest first"
         );
     }
@@ -395,7 +407,7 @@ mod tests {
         let card = turn.card("t");
         assert_eq!(
             card["details"]["elements"][0]["elements"][0]["text"],
-            "Next.\n• send_email {\"to\":\"x\"}"
+            "Next.\n• `send_email {\"to\":\"x\"}`"
         );
     }
 
