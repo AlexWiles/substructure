@@ -876,9 +876,9 @@ mod tests {
         let blocks = view["blocks"].as_array().unwrap();
         assert_eq!(blocks[0]["type"], "task_card", "the settled card leads");
         assert_eq!(blocks[0]["status"], "complete");
-        assert!(
-            blocks[0].get("details").is_none(),
-            "the card folds to its title"
+        assert_eq!(
+            blocks[0]["details"]["elements"][0]["elements"][0]["text"], "• search_web {}",
+            "the log rides behind the fold"
         );
         assert_eq!(blocks[1]["text"]["text"], "the answer");
         assert_eq!(blocks[2]["type"], "context", "the footer closes it");

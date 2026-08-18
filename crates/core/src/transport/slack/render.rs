@@ -27,6 +27,9 @@ pub struct PromptOption {
     pub style: Option<String>,
     pub action_id: String,
     pub value: String,
+    /// Where the button sends the person. Slack opens it and still reports the
+    /// click, so a button that only opens a page carries no value.
+    pub url: Option<String>,
 }
 
 impl PromptOption {
@@ -35,8 +38,14 @@ impl PromptOption {
             "type": "button",
             "action_id": self.action_id,
             "text": { "type": "plain_text", "text": self.label },
-            "value": self.value,
         });
+        // Slack refuses an empty one.
+        if !self.value.is_empty() {
+            button["value"] = self.value.as_str().into();
+        }
+        if let Some(url) = &self.url {
+            button["url"] = url.as_str().into();
+        }
         if let Some(style @ ("primary" | "danger")) = self.style.as_deref() {
             button["style"] = style.into();
         }
@@ -146,9 +155,6 @@ pub fn settled_prompt_blocks(posted: &[Value], text: &str, resolution: &str) -> 
     settled.push(context_block(resolution));
     settled
 }
-
-/// The thread status while a turn runs.
-pub const WORKING_STATUS: &str = "is typing…";
 
 pub fn section_block(text: &str) -> Value {
     serde_json::json!({
@@ -295,6 +301,7 @@ mod tests {
             style: Some("primary".into()),
             action_id: "prompt_option_0".into(),
             value: r#"{"interrupt_id":"i-1","option":0}"#.into(),
+            url: None,
         }];
         let blocks = prompt_blocks(&PromptView {
             message: "Run it?",
@@ -305,6 +312,27 @@ mod tests {
         assert_eq!(button["action_id"], "prompt_option_0");
         assert_eq!(button["value"], r#"{"interrupt_id":"i-1","option":0}"#);
         assert_eq!(button["style"], "primary");
+    }
+
+    /// A button that opens a page answers nothing, so it carries no value.
+    #[test]
+    fn a_button_that_opens_a_page_carries_its_url_and_no_value() {
+        let options = vec![PromptOption {
+            label: "Authorize gmail".into(),
+            style: Some("primary".into()),
+            action_id: "authorize".into(),
+            value: String::new(),
+            url: Some("https://agent.test/mcp/authorize/abc".into()),
+        }];
+        let blocks = prompt_blocks(&PromptView {
+            message: "*gmail* is not authorized yet.",
+            options: &options,
+            expires_at: None,
+        });
+        let button = &blocks[1]["elements"][0];
+        assert_eq!(button["url"], "https://agent.test/mcp/authorize/abc");
+        assert_eq!(button["style"], "primary", "the way in is the green one");
+        assert!(button.get("value").is_none(), "got {button}");
     }
 
     #[test]

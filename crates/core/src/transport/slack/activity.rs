@@ -5,21 +5,27 @@ use super::render;
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
-// The stream caps a task_update chunk at 256 characters, and the title
-// rides in the same chunk; these budgets keep the card inside it.
-const MAX_SAID: usize = 120;
+// The stream caps a task_update chunk at 256 characters; these budgets
+// fill it without breaking it.
+const MAX_SAID: usize = 180;
 const MAX_STEP: usize = 60;
+/// The settled card's log rides in blocks, which have no chunk cap.
+const MAX_LOG: usize = 3_000;
 
-/// A turn's visible work, folded from the event log into one card: the
-/// latest preamble, and the calls made since it. Every render is derived,
-/// so a replay converges.
+/// One thing the turn showed, in the order it happened. The id folds a
+/// redelivery or a retry into the item it repeats.
+enum Item {
+    /// Preamble text before a call.
+    Said { id: String, text: String },
+    /// A tool call or a sub-agent run.
+    Step { id: String, preview: String },
+}
+
+/// A turn's visible work, folded from the event log into one card. Every
+/// render is derived, so a replay converges.
 pub(super) struct TurnActivity {
     turn_id: String,
-    /// The latest preamble, keyed so a redelivery does not reset the count.
-    said: Option<(String, String)>,
-    /// The calls since the preamble: id and preview. The id folds a retry
-    /// into the call it retries.
-    steps: Vec<(String, String)>,
+    items: Vec<Item>,
 }
 
 impl TurnActivity {
@@ -30,8 +36,7 @@ impl TurnActivity {
             if let EventPayload::TurnStarted(t) = &event.payload {
                 turn = Some(Self {
                     turn_id: t.turn_id.clone(),
-                    said: None,
-                    steps: Vec::new(),
+                    items: Vec::new(),
                 });
                 continue;
             }
@@ -62,16 +67,18 @@ impl TurnActivity {
         }
     }
 
-    /// A new preamble starts a new count; the same one redelivered does not.
     fn say(&mut self, id: &str, text: &str) {
-        if let Some((said, existing)) = self.said.as_mut() {
-            if said == id {
-                *existing = text.to_string();
-                return;
-            }
+        let found = self.items.iter_mut().find_map(|item| match item {
+            Item::Said { id: said, text } if said == id => Some(text),
+            _ => None,
+        });
+        match found {
+            Some(existing) => *existing = text.to_string(),
+            None => self.items.push(Item::Said {
+                id: id.to_string(),
+                text: text.to_string(),
+            }),
         }
-        self.said = Some((id.to_string(), text.to_string()));
-        self.steps.clear();
     }
 
     /// Count a call once; a retry or redelivery updates it in place.
@@ -80,9 +87,16 @@ impl TurnActivity {
             Some(input) => clip(&format!("{name} {input}"), MAX_STEP),
             None => clip(name, MAX_STEP),
         };
-        match self.steps.iter_mut().find(|(step, _)| step == id) {
-            Some((_, existing)) => *existing = preview,
-            None => self.steps.push((id.to_string(), preview)),
+        let found = self.items.iter_mut().find_map(|item| match item {
+            Item::Step { id: step, preview } if step == id => Some(preview),
+            _ => None,
+        });
+        match found {
+            Some(existing) => *existing = preview,
+            None => self.items.push(Item::Step {
+                id: id.to_string(),
+                preview,
+            }),
         }
     }
 
@@ -97,17 +111,33 @@ impl TurnActivity {
         )
     }
 
-    /// The card at rest: done, and folded to its title.
+    /// The card at rest: done, folded to its title, with the whole turn's
+    /// log behind the fold.
     pub(super) fn settled_card(&self, title: &str) -> Value {
-        render::turn_card(&self.turn_id, title, "complete", None)
+        render::turn_card(&self.turn_id, title, "complete", self.log().as_deref())
     }
 
-    /// What the card says now: the preamble, then how much ran since it and
-    /// the newest call.
+    /// What the card says now: the latest preamble, then how much ran since
+    /// it and the newest call.
     fn details(&self) -> Option<String> {
-        let said = self.said.as_ref().map(|(_, text)| clip(text, MAX_SAID));
-        let ran = self.steps.last().map(|(_, latest)| {
-            let n = self.steps.len();
+        let last_said = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, Item::Said { .. }));
+        let said = last_said.map(|at| match &self.items[at] {
+            Item::Said { text, .. } => clip(text, MAX_SAID),
+            Item::Step { .. } => unreachable!(),
+        });
+        let since = &self.items[last_said.map_or(0, |at| at + 1)..];
+        let steps: Vec<&str> = since
+            .iter()
+            .filter_map(|item| match item {
+                Item::Step { preview, .. } => Some(preview.as_str()),
+                _ => None,
+            })
+            .collect();
+        let ran = steps.last().map(|latest| {
+            let n = steps.len();
             let s = if n == 1 { "" } else { "s" };
             format!("Ran {n} action{s} — {latest}")
         });
@@ -117,6 +147,19 @@ impl TurnActivity {
             (None, Some(ran)) => Some(ran),
             (Some(said), Some(ran)) => Some(format!("{said}\n{ran}")),
         }
+    }
+
+    /// Everything the turn showed, oldest first, for the settled card.
+    fn log(&self) -> Option<String> {
+        let lines: Vec<String> = self
+            .items
+            .iter()
+            .map(|item| match item {
+                Item::Said { text, .. } => clip(text, MAX_SAID),
+                Item::Step { preview, .. } => format!("• {preview}"),
+            })
+            .collect();
+        (!lines.is_empty()).then(|| clip(&lines.join("\n"), MAX_LOG))
     }
 }
 
@@ -360,16 +403,42 @@ mod tests {
     }
 
     #[test]
-    fn the_settled_card_folds_to_its_title() {
+    fn the_settled_card_carries_the_whole_log() {
         let events = vec![
             started("turn-1", 1),
-            said("llm1", "Working on it.", true, 2),
+            said("llm1", "First.", true, 2),
             tool_requested("tc1", "a", "{}", 3),
+            said("llm2", "Second.", true, 4),
+            tool_requested("tc2", "b", "{}", 5),
         ];
         let card = TurnActivity::fold(&events).unwrap().settled_card("Find x");
         assert_eq!(card["task_id"], "turn-1");
         assert_eq!(card["status"], "complete");
-        assert!(card.get("details").is_none());
+        assert_eq!(
+            card["details"]["elements"][0]["elements"][0]["text"],
+            "First.\n• a {}\nSecond.\n• b {}",
+            "every step, oldest first"
+        );
+        // While running, the same fold shows only the present.
+        let card = TurnActivity::fold(&events).unwrap().card("Find x");
+        assert_eq!(
+            card["details"]["elements"][0]["elements"][0]["text"],
+            "Second.\nRan 1 action — b {}"
+        );
+    }
+
+    #[test]
+    fn a_long_log_is_clipped() {
+        let arg = "x".repeat(100);
+        let mut events = vec![started("turn-1", 1)];
+        for i in 0..200 {
+            events.push(tool_requested(&format!("tc{i}"), "tool", &arg, 2 + i));
+        }
+        let card = TurnActivity::fold(&events).unwrap().settled_card("t");
+        let log = card["details"]["elements"][0]["elements"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(log.chars().count(), MAX_LOG);
     }
 
     #[test]

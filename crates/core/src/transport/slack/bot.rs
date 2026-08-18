@@ -8,9 +8,9 @@ use tokio::sync::Notify;
 use super::render::{self, PromptView, Rendered};
 use super::state::StreamStore;
 use super::{
-    app_mention, block_action, build_batch, clip, display_of, dm_message, draft, prompt_options,
-    resolution_text, section_block, unstamped_ours, with_attachments, Click, Inbound, ReplyMeta,
-    SlackFile, MAX_FALLBACK, MAX_MARKDOWN, REPLY_EVENT_TYPE,
+    app_mention, authorize_option, block_action, build_batch, clip, display_of, dm_message, draft,
+    prompt_options, resolution_text, section_block, unstamped_ours, with_attachments, Click,
+    Inbound, ReplyMeta, SlackFile, AUTHORIZE_ACTION, MAX_FALLBACK, MAX_MARKDOWN, REPLY_EVENT_TYPE,
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
@@ -23,7 +23,6 @@ use crate::runtime::blob::{
 use crate::runtime::session::interrupts::auth::Authorize;
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
-use crate::session::state::SessionStatus;
 use crate::session::SessionEvent;
 use crate::transport::channel::ChannelContext;
 use crate::transport::consent::{CliConsent, Consent, WayIn};
@@ -43,11 +42,8 @@ const IMAGE_NOT_ATTACHED: &str = "_an image could not be attached_";
 
 /// Slack limits the rate of `chat.appendStream`.
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
-/// Of Slack's 256-character cap on a `task_update` chunk.
-const MAX_CHUNK: usize = 180;
-/// Shown as `<app> is typing…`.
-/// Slack removes a status after two minutes. Set it again on this cadence.
-const STATUS_REFRESH: Duration = Duration::from_secs(90);
+/// Slack's cap on a `task_update` chunk.
+const MAX_CHUNK: usize = 256;
 
 /// Only an `im` channel (`D…`) is one person's. A group DM is not: more than
 /// one person reads it, and `dm_message` never matches it anyway. Read from
@@ -469,15 +465,6 @@ impl Streams {
             .map(|s| s.turn_id.clone())
     }
 
-    /// Every turn still running, whether or not it has opened a message.
-    fn live(&self) -> Vec<Stream> {
-        lock(&self.open)
-            .values()
-            .filter(|s| !s.dead)
-            .cloned()
-            .collect()
-    }
-
     fn set_view(&self, key: StreamKey, view: View) {
         lock(&self.views).insert(key, view);
     }
@@ -596,17 +583,15 @@ impl SlackBot {
         self
     }
 
-    /// The line telling a person how to authorize, appended when a prompt
-    /// carries the facts. A link is minted at delivery, so the event log
-    /// holds none, and Slack's markup is applied here rather than by whoever
-    /// decided where to send them.
-    async fn way_in(&self, tenant_id: &str, payload: &serde_json::Value) -> Option<String> {
+    /// How a person authorizes, for a prompt that carries the facts. A link is
+    /// minted at delivery, so the event log holds none.
+    ///
+    /// A link becomes a button, because one click is the whole point. A command
+    /// is words: there is nothing to click.
+    async fn way_in(&self, tenant_id: &str, payload: &serde_json::Value) -> Option<WayIn> {
         let authorize: Authorize =
             serde_json::from_value(payload.get("authorize")?.clone()).ok()?;
-        Some(match self.consent.way_in(tenant_id, &authorize).await? {
-            WayIn::Link { url, label } => format!("<{url}|{label}>"),
-            WayIn::Command(words) => words,
-        })
+        self.consent.way_in(tenant_id, &authorize).await
     }
 
     /// Start the outbound processor and the activity worker.
@@ -668,6 +653,10 @@ impl SlackBot {
         let Some(click) = block_action(payload) else {
             return;
         };
+        // Slack reports a click on a link button too. It answers nothing.
+        if click.action_id == AUTHORIZE_ACTION {
+            return;
+        }
         let team = payload["team"]["id"]
             .as_str()
             .or_else(|| payload["user"]["team_id"].as_str());
@@ -1279,37 +1268,8 @@ impl SlackBot {
         }
     }
 
-    /// Whether the event is a running turn's work. A session names its last
-    /// turn after that turn ends, so the event's turn id does not say. The
-    /// slot does: it is opened at the turn's start and taken by its reply.
-    fn working(&self, event: &SessionEvent) -> bool {
-        // The prompt took the slot with it; the resume speaks for itself.
-        if matches!(event.payload, EventPayload::InterruptResumed(_)) {
-            return true;
-        }
-        // The events that end a turn, and a prompt waiting on a person.
-        let stops = matches!(
-            event.payload,
-            EventPayload::TurnCompleted(_)
-                | EventPayload::SessionInterrupted(_)
-                | EventPayload::SessionCancelled
-                | EventPayload::SessionDone(_)
-        ) || matches!(event.meta.status, SessionStatus::Interrupted { .. });
-        let Some(turn_id) = event.meta.turn_id.as_deref() else {
-            return false;
-        };
-        let key = StreamKey::new(&event.tenant_id, &event.session_id, turn_id);
-        !stops && self.streams.get(&key).is_some()
-    }
-
-    /// The working indicator. An empty status clears it.
-    async fn set_working(&self, ws: &Workspace, thread: &Thread) {
-        self.set_status(ws, thread, render::WORKING_STATUS).await;
-    }
-
-    /// The indicator belongs to the thread, not to one turn: a turn ending
-    /// hands it to the turn queued behind it rather than clearing it, so a
-    /// thread that is still working never looks idle.
+    /// Put out a status a worker set, once nothing is running to carry it.
+    /// The card holds the working state; the bot sets no status of its own.
     async fn settle_status(
         &self,
         ws: &Workspace,
@@ -1322,9 +1282,8 @@ impl SlackBot {
             .live_elsewhere(&event.tenant_id, &event.session_id, ended)
             .is_none()
         {
-            return self.set_status(ws, thread, "").await;
+            self.set_status(ws, thread, "").await;
         }
-        self.set_working(ws, thread).await
     }
 
     async fn set_status(&self, ws: &Workspace, thread: &Thread, status: &str) {
@@ -1465,11 +1424,6 @@ impl EventProcessor for SlackBot {
         // The row lands before the checkpoint commits: a lost write replays.
         if let Err(e) = self.track(&ws, &thread, &event).await {
             return Err(ProcessorError::Apply(e.to_string()));
-        }
-        // Slack clears the indicator on every write to the thread, so each
-        // event of a running turn sets it again.
-        if self.working(&event) {
-            self.set_working(&ws, &thread).await;
         }
         let result = match &event.payload {
             EventPayload::TurnCompleted(t) => {
@@ -1778,11 +1732,17 @@ impl SlackBot {
             Some(view) => (view.text, view.blocks),
             None => match display_of(&p.payload) {
                 Some(display) => {
-                    let options = prompt_options(&display, &p.interrupt_id);
-                    let message = match self.way_in(&ws.tenant_id, &p.payload).await {
-                        Some(how) => format!("{}\n\n{how}", display.message),
-                        None => display.message.clone(),
-                    };
+                    let mut message = display.message.clone();
+                    // The way in leads, so the first button is the one to press.
+                    let mut options = Vec::new();
+                    match self.way_in(&ws.tenant_id, &p.payload).await {
+                        Some(WayIn::Link { url, label }) => {
+                            options.push(authorize_option(url, label))
+                        }
+                        Some(WayIn::Command(words)) => message = format!("{message}\n\n{words}"),
+                        None => {}
+                    }
+                    options.extend(prompt_options(&display, &p.interrupt_id));
                     let blocks = render::prompt_blocks(&PromptView {
                         message: &message,
                         options: &options,
@@ -1958,24 +1918,11 @@ impl SlackBot {
 
     /// One worker; the tick is the global append budget.
     async fn stream_activity(&self, ctx: &ChannelContext) {
-        let mut refreshed = std::time::Instant::now();
         loop {
-            // Slack drops a status after two minutes, so every live turn has
-            // it set again on this cadence. Off the clock rather than off the
-            // queue: a turn that streams a card every second never lets the
-            // idle branch run, and it is the turns that work the longest that
-            // most need to look like they are working.
-            if refreshed.elapsed() >= STATUS_REFRESH {
-                self.refresh_statuses().await;
-                refreshed = std::time::Instant::now();
-            }
             let Some(key) = self.streams.take_dirty() else {
-                // Nothing to render: wait for work, or for the status to be
-                // due again.
                 tokio::select! {
                     _ = ctx.shutdown.cancelled() => return,
                     _ = self.streams.notified() => {}
-                    _ = tokio::time::sleep(STATUS_REFRESH) => {}
                 }
                 continue;
             };
@@ -1987,17 +1934,6 @@ impl SlackBot {
                 _ = ctx.shutdown.cancelled() => return,
                 _ = tokio::time::sleep(ACTIVITY_INTERVAL) => {}
             }
-        }
-    }
-
-    /// Set the status again for every running turn. Slack drops one after two
-    /// minutes, and the longest turns need it most.
-    async fn refresh_statuses(&self) {
-        for stream in self.streams.live() {
-            let Some(ws) = self.resolver.by_tenant(&stream.tenant_id).await else {
-                continue;
-            };
-            self.set_working(&ws, &stream.thread).await;
         }
     }
 
@@ -2016,11 +1952,8 @@ impl SlackBot {
             },
         };
         let thread = open.thread.clone();
-        // No view yet: nothing to send but the status.
+        // No view yet: nothing to send.
         let Some(view) = self.streams.view(key) else {
-            if open.ts.is_none() {
-                self.set_working(ws, &thread).await;
-            }
             return;
         };
         let changed: Vec<(String, Value)> = view
@@ -2029,9 +1962,6 @@ impl SlackBot {
             .filter(|(id, chunk)| open.sent.get(id) != Some(chunk))
             .collect();
         if changed.is_empty() {
-            if open.ts.is_none() {
-                self.set_working(ws, &thread).await;
-            }
             return;
         }
 
@@ -2099,13 +2029,9 @@ impl SlackBot {
             }
             return self.kill_stream(key, e);
         }
-        // The card cleared the indicator; the turn goes on, so set it again.
-        if self.streams.commit(key, ts.clone(), version, changed) {
-            return self.set_working(ws, &thread).await;
-        }
         // The turn ended during the append. A message this tick opened is one
         // the reply never saw.
-        if opened {
+        if !self.streams.commit(key, ts.clone(), version, changed) && opened {
             self.discard_stream(ws, &thread.channel, &ts).await;
         }
     }
@@ -2639,6 +2565,7 @@ mod tests {
         use crate::protocol::{Issuer, Subject};
         use crate::providers::sqlite::{SqliteAuthFlows, SqliteDb};
         use crate::runtime::session::interrupts::auth;
+        use crate::transport::consent::WayIn;
         use crate::transport::consent::{CliConsent, Consent, DashboardConsent, EngineConsent};
         use crate::transport::mcp_auth::AuthorizeLinks;
         use std::sync::Arc;
@@ -2652,6 +2579,14 @@ mod tests {
 
         fn person(audience: Visibility) -> Requester {
             Requester::new(Subject::new(Issuer::slack(), "T1:U1"), audience)
+        }
+
+        /// The way in as one string, so these read as what a person sees.
+        fn shown(way: Option<WayIn>) -> Option<String> {
+            way.map(|way| match way {
+                WayIn::Link { url, label } => format!("<{url}|{label}>"),
+                WayIn::Command(words) => words,
+            })
         }
 
         fn bot(consent: Arc<dyn Consent>) -> SlackBot {
@@ -2703,9 +2638,7 @@ mod tests {
         async fn an_engine_that_hosts_the_flow_mints_a_link() {
             let path = temp();
             let bot = bot(engine(&path));
-            let how = bot
-                .way_in("t", &payload(person(Visibility::Private)))
-                .await
+            let how = shown(bot.way_in("t", &payload(person(Visibility::Private))).await)
                 .expect("a private person gets a link");
             assert!(
                 how.starts_with("<https://agent.test/mcp/authorize/"),
@@ -2721,7 +2654,7 @@ mod tests {
             let path = temp();
             let bot = bot(engine(&path));
             for refused in [Requester::machine(), person(Visibility::Shared)] {
-                let how = bot.way_in("t", &payload(refused)).await.unwrap();
+                let how = shown(bot.way_in("t", &payload(refused)).await).unwrap();
                 assert_eq!(how, "Run `subs mcp login gmail` to authorize it.");
             }
             cleanup(&path);
@@ -2733,17 +2666,21 @@ mod tests {
                 "https://app.test/overview".into(),
             )));
             assert_eq!(
-                dashboard
-                    .way_in("t", &payload(person(Visibility::Private)))
-                    .await
-                    .unwrap(),
+                shown(
+                    dashboard
+                        .way_in("t", &payload(person(Visibility::Private)))
+                        .await
+                )
+                .unwrap(),
                 "<https://app.test/overview|Authorize it in the dashboard>"
             );
             assert_eq!(
-                bot(Arc::new(CliConsent))
-                    .way_in("t", &payload(person(Visibility::Private)))
-                    .await
-                    .unwrap(),
+                shown(
+                    bot(Arc::new(CliConsent))
+                        .way_in("t", &payload(person(Visibility::Private)))
+                        .await
+                )
+                .unwrap(),
                 "Run `subs mcp login gmail` to authorize it."
             );
         }
@@ -2754,7 +2691,7 @@ mod tests {
         async fn a_prompt_without_the_facts_is_left_alone() {
             let bot = bot(Arc::new(CliConsent));
             let bare = serde_json::json!({ "message": "*gmail* rejected its token." });
-            assert_eq!(bot.way_in("t", &bare).await, None);
+            assert_eq!(shown(bot.way_in("t", &bare).await), None);
         }
 
         /// Two people on one connection get two links.
@@ -2763,20 +2700,19 @@ mod tests {
             let path = temp();
             let bot = bot(engine(&path));
 
-            let first = bot
-                .way_in("t", &payload(person(Visibility::Private)))
-                .await
-                .unwrap();
-            let second = bot
-                .way_in(
+            let first =
+                shown(bot.way_in("t", &payload(person(Visibility::Private))).await).unwrap();
+            let second = shown(
+                bot.way_in(
                     "t",
                     &payload(Requester::new(
                         Subject::new(Issuer::slack(), "T1:U2"),
                         Visibility::Private,
                     )),
                 )
-                .await
-                .unwrap();
+                .await,
+            )
+            .unwrap();
             assert_ne!(first, second);
             cleanup(&path);
         }
@@ -3325,10 +3261,11 @@ mod tests {
         );
     }
 
-    /// A card is a write, and a write clears the indicator. The turn goes on,
-    /// so the card lands with the indicator behind it.
+    /// The card is the working state; the bot sets no status beside it.
+    /// Slack renders a set status as its own placeholder message, which
+    /// reads as a second reply under the card.
     #[tokio::test]
-    async fn a_card_lands_with_the_indicator_behind_it() {
+    async fn a_card_lands_with_no_status_beside_it() {
         let (api_base, calls) = fake_slack().await;
         let (bot, ws) = bot_for(api_base);
         bot.streams.insert(stream("turn-1", Some("1.1")));
@@ -3343,19 +3280,15 @@ mod tests {
         bot.stream_turn(&ws, &key("turn-1")).await;
 
         assert_eq!(calls.to("chat.appendStream").len(), 1);
-        let status = calls.to("assistant.threads.setStatus");
-        assert_eq!(status.len(), 1, "the card cleared it; the turn lights it");
-        assert_eq!(status[0]["status"], render::WORKING_STATUS);
+        assert!(calls.to("assistant.threads.setStatus").is_empty());
     }
 
-    /// Only the end of a turn puts the indicator out. A prompt's resume, and
-    /// the work after it, set it again.
+    /// A running turn's events set no status either.
     #[tokio::test]
-    async fn a_running_turn_shows_the_indicator_on_every_event() {
+    async fn a_running_turn_sets_no_status() {
         let (api_base, calls) = fake_slack().await;
         let (bot, _ws) = bot_for(api_base);
 
-        // The prompt took the turn's slot with it; the resume speaks for itself.
         let resumed = EventPayload::InterruptResumed(crate::session::events::InterruptResumed {
             interrupt_id: "i1".into(),
             payload: Value::Null,
@@ -3364,7 +3297,6 @@ mod tests {
             .await
             .expect("applies");
 
-        // The work that follows is the running turn's, and it holds a slot.
         bot.streams.insert(stream("turn-1", Some("1.1")));
         let work = EventPayload::DecisionCompleted(crate::session::events::DecisionCompleted {
             id: "d1".into(),
@@ -3373,9 +3305,7 @@ mod tests {
             .await
             .expect("applies");
 
-        let status = calls.to("assistant.threads.setStatus");
-        assert_eq!(status.len(), 2, "the resume, and the work after it");
-        assert!(status.iter().all(|s| s["status"] == render::WORKING_STATUS));
+        assert!(calls.to("assistant.threads.setStatus").is_empty());
     }
 
     /// `session.done` carries the turn id of the turn that just ended, and it
@@ -3477,23 +3407,6 @@ mod tests {
             start_time: chrono::Utc::now(),
             end_time: chrono::Utc::now(),
         }
-    }
-
-    /// Every live turn is refreshed, not only the ones with nothing on screen
-    /// yet: Slack drops a status after two minutes, and the turns that take
-    /// longest are the ones that need it most.
-    #[test]
-    fn the_status_is_refreshed_for_every_turn_still_running() {
-        let streams = Streams::default();
-        streams.insert(stream("turn-1", Some("1.1")));
-        streams.insert(stream("turn-2", None));
-        assert_eq!(streams.live().len(), 2);
-
-        // Nor one Slack refused: it will never render again.
-        streams.kill(&key("turn-1"));
-        let live = streams.live();
-        assert_eq!(live.len(), 1);
-        assert_eq!(live[0].key(), key("turn-2"));
     }
 
     /// A channel with nothing of its own is the default's, so declaring one
