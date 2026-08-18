@@ -84,13 +84,19 @@ impl TurnActivity {
     }
 
     /// Count a call once; a retry or redelivery is the same call.
+    /// The name reads as a label, the arguments as code beside it.
     pub(super) fn step(&mut self, id: &str, name: &str, input: Option<&str>) {
         if self.items.iter().any(|item| item.id() == id) {
             return;
         }
-        let preview = match input.map(flatten).filter(|i| !i.is_empty()) {
-            Some(input) => clip(&format!("{name} {input}"), MAX_STEP),
-            None => clip(name, MAX_STEP),
+        let input = input
+            .map(flatten)
+            // A backtick would end the span the arguments sit in.
+            .map(|i| i.replace('`', "'"))
+            .filter(|i| !i.is_empty());
+        let preview = match input {
+            Some(input) => format!("{name} `{}`", clip(&input, MAX_STEP)),
+            None => name.to_string(),
         };
         self.items.push(Item::Step {
             id: id.to_string(),
@@ -126,7 +132,7 @@ impl TurnActivity {
                     if !log.is_empty() {
                         log.push('\n');
                     }
-                    log.push_str(&format!("• `{preview}`"));
+                    log.push_str(&format!("• {preview}"));
                 }
             }
         }
@@ -269,7 +275,7 @@ mod tests {
         assert_eq!(card["title"], "Find x");
         assert_eq!(card["status"], "in_progress");
         let first = details(&events);
-        assert_eq!(first, "Let me look that up.\n• `search_web {\"q\":\"x\"}`");
+        assert_eq!(first, "Let me look that up.\n• search_web `{\"q\":\"x\"}`");
         // The log only grows, so the stream can append each render's delta.
         events.push(said("llm2", "Now the details.", true, 4));
         events.push(tool_requested("tc2", "get_page", "{}", 5));
@@ -277,7 +283,7 @@ mod tests {
         assert!(second.starts_with(&first), "{second}");
         assert_eq!(
             second,
-            "Let me look that up.\n• `search_web {\"q\":\"x\"}`\n\nNow the details.\n• `get_page {}`",
+            "Let me look that up.\n• search_web `{\"q\":\"x\"}`\n\nNow the details.\n• get_page `{}`",
             "a blank line holds a preamble out of the list before it"
         );
     }
@@ -290,7 +296,7 @@ mod tests {
             tool_requested("tc1", "a", "{}", 3),
             said("llm1", "First.", true, 4),
         ];
-        assert_eq!(details(&events), "First.\n• `a {}`");
+        assert_eq!(details(&events), "First.\n• a `{}`");
     }
 
     #[test]
@@ -300,7 +306,7 @@ mod tests {
             tool_requested("tc1", "a", "{}", 2),
             tool_requested("tc1", "a", r#"{"again":1}"#, 3),
         ];
-        assert_eq!(details(&events), "• `a {}`");
+        assert_eq!(details(&events), "• a `{}`");
     }
 
     #[test]
@@ -336,7 +342,7 @@ mod tests {
                 }),
             ),
         ];
-        assert_eq!(details(&events), "• `agent researcher`");
+        assert_eq!(details(&events), "• agent researcher");
     }
 
     #[test]
@@ -349,7 +355,7 @@ mod tests {
         ];
         let turn = TurnActivity::fold(&events).unwrap();
         assert_eq!(turn.card("t")["task_id"], "turn-2");
-        assert_eq!(details(&events), "• `new {}`");
+        assert_eq!(details(&events), "• new `{}`");
         assert!(TurnActivity::fold(&[tool_requested("tc1", "t", "{}", 1)]).is_none());
     }
 
@@ -380,7 +386,7 @@ mod tests {
         assert_eq!(card["status"], "complete");
         assert_eq!(
             card["details"]["elements"][0]["elements"][0]["text"],
-            "First.\n• `a {}`\n\nSecond.\n• `b {}`",
+            "First.\n• a `{}`\n\nSecond.\n• b `{}`",
             "every step, oldest first"
         );
     }
@@ -407,7 +413,7 @@ mod tests {
         let card = turn.card("t");
         assert_eq!(
             card["details"]["elements"][0]["elements"][0]["text"],
-            "Next.\n• `send_email {\"to\":\"x\"}`"
+            "Next.\n• send_email `{\"to\":\"x\"}`"
         );
     }
 
