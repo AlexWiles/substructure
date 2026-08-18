@@ -6,12 +6,12 @@
 use serde_json::Value;
 
 use super::activity::TurnActivity;
-use super::render::{self, StepStatus, StepView};
-use super::{display_of, with_footer, ButtonValue};
+use super::render;
+use super::{clip, display_of, with_footer, ButtonValue};
 use crate::connectors::{AuthNeed, Requester};
 use crate::protocol::{
-    DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution, InterruptResponder,
-    Message, ResumeStatus,
+    Content, DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution,
+    InterruptResponder, Message, ResumeStatus, Role,
 };
 use crate::runtime::session::interrupts::{self, auth};
 use crate::runtime::session::state::SessionState;
@@ -43,23 +43,37 @@ impl ChannelProposer for SlackProposer {
         trigger: &DecisionTrigger,
         state: &SessionState,
         events: &[SessionEvent],
-        _transcript: &[Message],
+        transcript: &[Message],
         proposed: DecisionResponse,
     ) -> DecisionResponse {
         if !slack_owned(state) {
             return proposed;
         }
-        // First: the proposal below would run against tools the agent has lost.
-        if let Some(prompt) = self.authorize_prompt(state) {
-            return prompt;
-        }
-        match trigger {
+        // A click that answers one of our prompts comes first. It is what
+        // unparks the session, not work against tools: asking about a second
+        // connection here would answer nothing, and the engine drops that
+        // prompt anyway because the head is already parked.
+        let click = match trigger {
             DecisionTrigger::ClientAction {
                 args: Some(args), ..
-            } => match click_proposal(state, args) {
-                Some(p) => p,
-                None => proposed,
-            },
+            } => click_proposal(state, args),
+            _ => None,
+        };
+        if let Some(click) = click {
+            return click;
+        }
+        // The proposal below would run against tools the agent has lost. Only
+        // the work is replaced. What the decision records stays, or the resumed
+        // turn reads a transcript missing the message that started it.
+        if let Some(actions) = self.authorize_prompt(state) {
+            return DecisionResponse {
+                actions,
+                // The prompt owns the message, so it carries no view.
+                channels: Default::default(),
+                ..proposed
+            };
+        }
+        match trigger {
             DecisionTrigger::LlmFinished { .. }
             | DecisionTrigger::ToolFinished { .. }
             | DecisionTrigger::SubAgentFinished { .. }
@@ -72,11 +86,11 @@ impl ChannelProposer for SlackProposer {
                 if authors_interrupt {
                     return proposed;
                 }
-                let view = streaming_view(events, &proposed);
+                let view = streaming_view(events, &title_of(transcript));
                 with_view(proposed, view)
             }
             DecisionTrigger::TurnFinished { data, .. } => {
-                let view = final_view(events, data);
+                let view = final_view(events, data, &title_of(transcript));
                 with_view(proposed, Some(view))
             }
             _ => proposed,
@@ -85,33 +99,30 @@ impl ChannelProposer for SlackProposer {
 }
 
 impl SlackProposer {
-    /// The prompt for the first connection that needs a person. It replaces
-    /// the proposal, because the session stops here.
+    /// The work for the first connection that needs a person. It replaces the
+    /// proposed work, because the session stops here.
     ///
     /// It writes why, and the facts a way in is built from. How to authorize
     /// is the delivering channel's to add, so no link is written here.
-    fn authorize_prompt(&self, state: &SessionState) -> Option<DecisionResponse> {
+    fn authorize_prompt(&self, state: &SessionState) -> Option<Vec<DecisionAction>> {
         let (connection, need) = auth::needing(state)?;
         let authorize = auth::Authorize {
             requester: Requester::of_owner(state.owner.as_ref()),
             connection: connection.clone(),
         };
 
-        Some(DecisionResponse {
-            actions: vec![DecisionAction::Interrupt {
-                interrupt_id: Some(auth::interrupt_id(&connection)),
-                reason: format!("connection `{connection}` needs authorizing"),
-                payload: serde_json::json!({
-                    "message": ask(&connection, need),
-                    "authorize": authorize,
-                    "metadata": { "options": [{
-                        "label": "Retry",
-                        "value": { "connection": connection },
-                    }] },
-                }),
-            }],
-            ..Default::default()
-        })
+        Some(vec![DecisionAction::Interrupt {
+            interrupt_id: Some(auth::interrupt_id(&connection)),
+            reason: format!("connection `{connection}` needs authorizing"),
+            payload: serde_json::json!({
+                "message": ask(&connection, need),
+                "authorize": authorize,
+                "metadata": { "options": [{
+                    "label": "Retry",
+                    "value": { "connection": connection },
+                }] },
+            }),
+        }])
     }
 }
 
@@ -143,57 +154,64 @@ fn with_view(mut proposed: DecisionResponse, view: Option<Value>) -> DecisionRes
     proposed
 }
 
-/// The message so far: the turn's finished work, plus an in-progress card for
-/// each call this proposal starts.
-fn streaming_view(events: &[SessionEvent], proposed: &DecisionResponse) -> Option<Value> {
-    let mut blocks = TurnActivity::fold(events)
-        .map(|turn| turn.blocks())
-        .unwrap_or_default();
-    for action in &proposed.actions {
-        let card = match action {
-            DecisionAction::CallTool {
-                id: Some(id),
-                name,
-                arguments,
-                ..
-            } => {
-                let input = match arguments {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                render::step_block(&StepView {
-                    id,
-                    name,
-                    status: StepStatus::InProgress,
-                    took: None,
-                    input: Some(&input),
-                    output: None,
-                })
-            }
-            DecisionAction::SpawnSubAgent {
-                agent_id,
-                tool_call_id,
-                ..
-            } => render::step_block(&StepView {
-                id: tool_call_id,
-                name: &format!("agent {agent_id}"),
-                status: StepStatus::InProgress,
-                took: None,
-                input: None,
-                output: None,
-            }),
-            _ => continue,
-        };
-        blocks.push(card);
-    }
-    (!blocks.is_empty()).then(|| serde_json::json!({ "text": "", "blocks": blocks }))
+/// The card's title: what the turn was asked to do.
+fn title_of(transcript: &[Message]) -> String {
+    transcript
+        .iter()
+        .rev()
+        .filter(|m| m.role == Role::User)
+        .find_map(|m| {
+            let text = m.content.as_ref().map(Content::text_owned)?;
+            let text = plain(&text);
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!text.is_empty()).then(|| clip(&text, 60))
+        })
+        .unwrap_or_else(|| "Working…".to_string())
 }
 
-/// The final message: the turn's work, the answer, and how long it took.
-fn final_view(events: &[SessionEvent], data: &Value) -> Value {
-    let mut blocks = TurnActivity::fold(events)
-        .map(|turn| turn.blocks())
-        .unwrap_or_default();
+/// The text without Slack markup. A finished card shows its title raw, so
+/// a `<@id>` mention would read as the id, not the name.
+fn plain(text: &str) -> String {
+    // The batch writes "<@author>: text"; the title wants the text.
+    let text = match text.strip_prefix("<@").and_then(|r| r.split_once(">: ")) {
+        Some((_, rest)) => rest,
+        None => text,
+    };
+    // Any other token reads as its label.
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        match rest[start + 1..].split_once('>') {
+            Some((token, after)) => {
+                let label = token.split_once('|').map_or(token, |(_, label)| label);
+                out.push_str(label);
+                rest = after;
+            }
+            None => {
+                out.push('<');
+                rest = &rest[start + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The message so far: one card for the turn. Only the events write the
+/// log — the stream appends, so a line that later reads differently would
+/// freeze it. A proposed call lands when its event does.
+fn streaming_view(events: &[SessionEvent], title: &str) -> Option<Value> {
+    let turn = TurnActivity::fold(events)?;
+    Some(serde_json::json!({ "text": "", "blocks": [turn.card(title)] }))
+}
+
+/// The final message: the card at rest, the answer, and how long it took.
+fn final_view(events: &[SessionEvent], data: &Value, title: &str) -> Value {
+    let mut blocks = Vec::new();
+    if let Some(turn) = TurnActivity::fold(events) {
+        blocks.push(turn.settled_card(title));
+    }
     let answer = match data {
         Value::Null => "(no result)".to_string(),
         Value::String(s) => s.clone(),
@@ -307,8 +325,8 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::StoredResult;
     use crate::protocol::{AgentConfig, AuthFailure, InterruptOrigin, McpServer, RetryPolicy};
+    use crate::protocol::{Content, DraftMessage, Role, StoredResult};
     use crate::protocol::{Issuer, Subject};
     use crate::runtime::session::state::OpenInterrupt;
     use crate::session::events::{AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested};
@@ -361,6 +379,73 @@ mod tests {
         ApplyContext {
             occurred_at: chrono::Utc::now(),
             sequence: 1,
+        }
+    }
+
+    /// Two connections need a person, and the first has already been asked.
+    fn state_needing_auth_twice() -> SessionState {
+        let mut s = state();
+        let server = |id: &str| McpServer {
+            id: id.to_string(),
+            tools: None,
+            auth_failure: AuthFailure::Interrupt,
+            approve: Default::default(),
+        };
+        s.apply(
+            &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                config: AgentConfig {
+                    mcp: vec![server("gmail"), server("drive")],
+                    ..blank_config()
+                },
+                anchor: None,
+            }),
+            &ctx(),
+        );
+        for id in ["gmail", "drive"] {
+            s.apply(
+                &EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
+                    id: id.to_string(),
+                    attempt: 0,
+                    retry: RetryPolicy::no_retry(),
+                }),
+                &ctx(),
+            );
+            s.apply(
+                &EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
+                    id: id.to_string(),
+                    auth: AuthNeed::NeverAuthorized,
+                }),
+                &ctx(),
+            );
+        }
+        s.open_interrupts.push(OpenInterrupt {
+            interrupt_id: "mcp-auth:gmail".to_string(),
+            origin: InterruptOrigin::Frontend,
+            reason: "hold".to_string(),
+            payload: serde_json::json!({
+                "message": "*gmail* is not authorized yet, so I cannot use it.",
+                "metadata": { "options": [
+                    { "label": "Retry", "value": { "connection": "gmail" } },
+                ]},
+            }),
+            anchor: None,
+        });
+        s
+    }
+
+    fn blank_config() -> AgentConfig {
+        AgentConfig {
+            llm: None,
+            model: "m1".to_string(),
+            system: None,
+            retry: None,
+            tools: vec![],
+            sub_agents: vec![],
+            mcp: vec![],
+            defer_tools: None,
+            announce_mcp: Default::default(),
+            plugins: Vec::new(),
+            effort: None,
         }
     }
 
@@ -544,6 +629,89 @@ mod tests {
         }
     }
 
+    fn message(role: Role, text: &str) -> DraftMessage {
+        DraftMessage {
+            id: Some("m1".to_string()),
+            role,
+            content: Some(Content::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+        }
+    }
+
+    fn texts(p: &DecisionResponse) -> Vec<String> {
+        p.messages
+            .iter()
+            .map(|m| {
+                m.content
+                    .as_ref()
+                    .map(Content::text_owned)
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// The turn stops, but what it recorded is still recorded. Dropping it left
+    /// the resumed turn with no question to answer, and the model invented one.
+    #[test]
+    fn the_authorization_prompt_keeps_what_the_decision_recorded() {
+        let asked = message(Role::User, "any important emails?");
+        let p = propose(
+            SESSION,
+            &DecisionTrigger::ClientTranscript {
+                messages: vec![asked.clone()],
+                client: Default::default(),
+                new_from: 0,
+            },
+            &state_needing_auth(AuthNeed::NeverAuthorized, AuthFailure::Interrupt),
+            &[],
+            DecisionResponse {
+                messages: vec![asked.clone()],
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(&p.actions[..], [DecisionAction::Interrupt { .. }]),
+            "the prompt replaces the work; got {:?}",
+            p.actions
+        );
+        assert_eq!(texts(&p), ["any important emails?"], "the question stays");
+    }
+
+    /// A tool call with no result is a transcript a model provider refuses.
+    #[test]
+    fn the_authorization_prompt_keeps_a_settled_tool_result() {
+        let result = DraftMessage {
+            tool_call_id: Some("tc1".to_string()),
+            name: Some("gmail__search_threads".to_string()),
+            ..message(Role::Tool, "error: unauthorized")
+        };
+        let p = propose(
+            SESSION,
+            &DecisionTrigger::ToolFinished {
+                id: "tc1".to_string(),
+                ok: false,
+                name: "gmail__search_threads".to_string(),
+                result: None,
+                error: None,
+            },
+            &state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt),
+            &[],
+            DecisionResponse {
+                messages: vec![result.clone()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(texts(&p), ["error: unauthorized"], "the result stays");
+        assert_eq!(
+            p.messages[0].tool_call_id.as_deref(),
+            Some("tc1"),
+            "it still answers its call"
+        );
+    }
+
     #[test]
     fn a_connection_already_asked_about_is_not_asked_about_again() {
         let mut state = state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt);
@@ -658,6 +826,29 @@ mod tests {
         }
     }
 
+    /// A second connection that also needs a person must not pre-empt the click
+    /// that answers the first. The engine drops the second prompt (the head is
+    /// already parked), so the click would answer nothing and the session would
+    /// hold there for every click after it.
+    #[test]
+    fn a_click_is_answered_even_when_another_connection_also_needs_authorizing() {
+        let p = propose(
+            SESSION,
+            &action(r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:gmail","option":0}"#),
+            &state_needing_auth_twice(),
+            &[],
+            DecisionResponse::default(),
+        );
+        match &p.actions[..] {
+            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { id }] =>
+            {
+                assert_eq!(interrupt_id, "mcp-auth:gmail");
+                assert_eq!(id, "gmail");
+            }
+            other => panic!("expected the click to be answered; got {other:?}"),
+        }
+    }
+
     #[test]
     fn clicking_an_ordinary_prompt_asks_for_no_fetch() {
         let p = propose(
@@ -688,13 +879,61 @@ mod tests {
         let view = &p.channels["slack"]["view"];
         assert_eq!(view["text"], "the answer\n\n_2.0s_");
         let blocks = view["blocks"].as_array().unwrap();
-        assert_eq!(blocks[0]["type"], "task_card", "the settled work leads");
+        assert_eq!(blocks[0]["type"], "task_card", "the settled card leads");
+        assert_eq!(blocks[0]["status"], "complete");
+        assert_eq!(
+            blocks[0]["details"]["elements"][0]["elements"][0]["text"], "• search_web `{}`",
+            "the log rides behind the fold"
+        );
         assert_eq!(blocks[1]["text"]["text"], "the answer");
         assert_eq!(blocks[2]["type"], "context", "the footer closes it");
     }
 
     #[test]
-    fn a_finished_call_proposes_a_view_with_the_next_calls_card() {
+    fn the_card_is_titled_by_what_the_user_asked() {
+        let transcript = vec![
+            crate::protocol::Message {
+                id: "m1".into(),
+                role: Role::User,
+                content: Some(Content::Text("fix the   login\nbutton".into())),
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+                reasoning: None,
+            },
+            crate::protocol::Message {
+                id: "m2".into(),
+                role: Role::Assistant,
+                content: Some(Content::Text("on it".into())),
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+                reasoning: None,
+            },
+        ];
+        assert_eq!(title_of(&transcript), "fix the login button");
+        assert_eq!(title_of(&[]), "Working…");
+        // A finished card shows its title raw: no markup survives.
+        let mention = crate::protocol::Message {
+            content: Some(Content::Text(
+                "<@U0B8ECR818W>: check <#C1|general> and <https://a.test|the doc> for <@U5>".into(),
+            )),
+            ..transcript[0].clone()
+        };
+        assert_eq!(
+            title_of(&[mention]),
+            "check general and the doc for @U5",
+            "the author prefix goes; tokens read as their labels"
+        );
+        let long = crate::protocol::Message {
+            content: Some(Content::Text("x".repeat(100))),
+            ..transcript[0].clone()
+        };
+        assert_eq!(title_of(&[long]).chars().count(), 60);
+    }
+
+    #[test]
+    fn a_finished_call_proposes_a_view_of_the_evented_work() {
         let trigger = DecisionTrigger::ToolFinished {
             id: "tc1".to_string(),
             ok: true,
@@ -713,10 +952,17 @@ mod tests {
         };
         let p = propose(SESSION, &trigger, &state(), &turn_events(), proposed);
         let blocks = p.channels["slack"]["view"]["blocks"].as_array().unwrap();
-        assert_eq!(blocks[0]["task_id"], "tc1");
-        assert_eq!(blocks[0]["status"], "complete");
-        assert_eq!(blocks[1]["task_id"], "tc2", "the dispatched call's card");
-        assert_eq!(blocks[1]["status"], "in_progress");
+        assert_eq!(blocks.len(), 1, "one card carries the turn");
+        assert_eq!(blocks[0]["task_id"], "turn-1");
+        assert_eq!(blocks[0]["status"], "in_progress");
+        assert_eq!(blocks[0]["title"], "Working…", "no transcript, no title");
+        // The proposed call is not in the log: a proposal can render its
+        // call another way than the event will, and the stream appends —
+        // a line that changed would freeze the log. It lands one tick on.
+        assert_eq!(
+            blocks[0]["details"]["elements"][0]["elements"][0]["text"], "• search_web `{}`",
+            "the events write the log; the proposal does not"
+        );
         assert!(!p.actions.is_empty(), "the core continuation is kept");
     }
 

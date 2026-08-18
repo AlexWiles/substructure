@@ -8,9 +8,7 @@ mod webhook;
 
 pub use bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
 pub use proposer::SlackProposer;
-pub use render::{
-    context_block, section_block, PromptOption, PromptView, Rendered, StepStatus, StepView,
-};
+pub use render::{context_block, section_block, PromptOption, PromptView, Rendered};
 pub use socket::{MissingEnv, SlackChannel};
 pub use state::StreamStore;
 pub use webhook::webhook_router;
@@ -355,8 +353,23 @@ fn prompt_options(display: &Display, interrupt_id: &str) -> Vec<PromptOption> {
                 option: idx,
             })
             .unwrap_or_default(),
+            url: None,
         })
         .collect()
+}
+
+/// The button that opens a way in. It answers nothing, so it holds no value
+/// and the session never sees its click.
+pub(super) const AUTHORIZE_ACTION: &str = "authorize";
+
+fn authorize_option(url: String, label: String) -> PromptOption {
+    PromptOption {
+        label,
+        style: Some("primary".to_string()),
+        action_id: AUTHORIZE_ACTION.to_string(),
+        value: String::new(),
+        url: Some(url),
+    }
 }
 
 /// A button click, read out of a `block_actions` payload.

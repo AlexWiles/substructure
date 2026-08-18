@@ -19,8 +19,12 @@ together at the same version.
 ### Changed
 
 - Auth refactor.
+- A Slack turn shows one task card that updates in place and settles to the answer.
 
 ### Fixed
+
+- A connection that needs authorizing no longer discards the message that started the turn.
+- The Retry button now answers its prompt when a second connection also needs authorizing.
 
 ## [0.6.0] - 2026-08-14
 

@@ -8,9 +8,9 @@ use tokio::sync::Notify;
 use super::render::{self, PromptView, Rendered};
 use super::state::StreamStore;
 use super::{
-    app_mention, block_action, build_batch, clip, display_of, dm_message, draft, prompt_options,
-    resolution_text, section_block, unstamped_ours, with_attachments, Click, Inbound, ReplyMeta,
-    SlackFile, MAX_FALLBACK, MAX_MARKDOWN, REPLY_EVENT_TYPE,
+    app_mention, authorize_option, block_action, build_batch, clip, display_of, dm_message, draft,
+    prompt_options, resolution_text, section_block, unstamped_ours, with_attachments, Click,
+    Inbound, ReplyMeta, SlackFile, AUTHORIZE_ACTION, MAX_FALLBACK, MAX_MARKDOWN, REPLY_EVENT_TYPE,
 };
 use crate::event_store::Seq;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
@@ -23,7 +23,6 @@ use crate::runtime::blob::{
 use crate::runtime::session::interrupts::auth::Authorize;
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
-use crate::session::state::SessionStatus;
 use crate::session::SessionEvent;
 use crate::transport::channel::ChannelContext;
 use crate::transport::consent::{CliConsent, Consent, WayIn};
@@ -43,9 +42,10 @@ const IMAGE_NOT_ATTACHED: &str = "_an image could not be attached_";
 
 /// Slack limits the rate of `chat.appendStream`.
 const ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
-/// Shown as `<app> is typing…`.
-/// Slack removes a status after two minutes. Set it again on this cadence.
-const STATUS_REFRESH: Duration = Duration::from_secs(90);
+/// Slack's cap on a `task_update` chunk.
+const MAX_CHUNK: usize = 256;
+/// Shown from the turn's start until its card opens.
+const WORKING_STATUS: &str = "is working…";
 
 /// Only an `im` channel (`D…`) is one person's. A group DM is not: more than
 /// one person reads it, and `dm_message` never matches it anyway. Read from
@@ -317,8 +317,10 @@ impl View {
         })
     }
 
-    /// The view as stream chunks. A card is keyed by its id, text by its
-    /// content, so moving text does not send it twice.
+    /// The view as per-key stream state. A card is keyed by its id and
+    /// carries its whole details text; text blocks by their content, so
+    /// moving text does not send it twice. What actually goes on the wire
+    /// is the difference from `sent` — see [`wire_chunks`].
     fn chunks(&self) -> Vec<(String, Value)> {
         self.blocks
             .iter()
@@ -332,6 +334,10 @@ impl View {
                     });
                     if let Some(title) = block["title"].as_str() {
                         chunk["title"] = clip(title, 60).into();
+                    }
+                    // The stream takes strings; the block carries rich text.
+                    if let Some(text) = rich_text_string(&block["details"]) {
+                        chunk["details"] = text.into();
                     }
                     Some((id.to_string(), chunk))
                 }
@@ -347,6 +353,84 @@ impl View {
             })
             .collect()
     }
+}
+
+/// The plain text of a rich_text block, for the stream's string fields.
+fn rich_text_string(block: &Value) -> Option<String> {
+    let sections = block["elements"].as_array()?;
+    let text: String = sections
+        .iter()
+        .flat_map(|s| s["elements"].as_array().into_iter().flatten())
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// What to append to move the message from `sent` to `desired`, and what
+/// `sent` becomes once it lands.
+///
+/// The stream appends; it cannot replace. A card's details must grow by
+/// suffix, and each send carries only the growth, split to Slack's chunk
+/// cap. Details rewritten any other way stay unsent — the block rewrite at
+/// the turn's end is where a card may say something different.
+fn wire_chunks(
+    sent: &HashMap<String, Value>,
+    desired: &[(String, Value)],
+) -> (Vec<Value>, Vec<(String, Value)>) {
+    let mut wire = Vec::new();
+    let mut landed = Vec::new();
+    for (id, want) in desired {
+        let have = sent.get(id);
+        if have == Some(want) {
+            continue;
+        }
+        if want["type"] != "task_update" {
+            // Text is sent whole, once.
+            if have.is_none() {
+                wire.push(want.clone());
+                landed.push((id.clone(), want.clone()));
+            }
+            continue;
+        }
+        let old = have.and_then(|h| h["details"].as_str()).unwrap_or("");
+        let new = want["details"].as_str().unwrap_or("");
+        let delta = new.strip_prefix(old).unwrap_or("");
+        let moved =
+            have.is_none_or(|h| h["title"] != want["title"] || h["status"] != want["status"]);
+        if delta.is_empty() && !moved {
+            continue;
+        }
+        let mut head = serde_json::json!({
+            "type": "task_update",
+            "id": id,
+            "status": want["status"],
+        });
+        if !want["title"].is_null() {
+            head["title"] = want["title"].clone();
+        }
+        if delta.is_empty() {
+            wire.push(head);
+        } else {
+            let pieces: Vec<String> = delta
+                .chars()
+                .collect::<Vec<_>>()
+                .chunks(MAX_CHUNK)
+                .map(|c| c.iter().collect())
+                .collect();
+            for piece in pieces {
+                let mut chunk = head.clone();
+                chunk["details"] = piece.into();
+                wire.push(chunk);
+            }
+        }
+        let mut state = want.clone();
+        let grown = format!("{old}{delta}");
+        if !grown.is_empty() {
+            state["details"] = grown.into();
+        }
+        landed.push((id.clone(), state));
+    }
+    (wire, landed)
 }
 
 /// The open streams, and the sessions whose activity is not yet rendered.
@@ -448,15 +532,6 @@ impl Streams {
                     && !s.dead
             })
             .map(|s| s.turn_id.clone())
-    }
-
-    /// Every turn still running, whether or not it has opened a message.
-    fn live(&self) -> Vec<Stream> {
-        lock(&self.open)
-            .values()
-            .filter(|s| !s.dead)
-            .cloned()
-            .collect()
     }
 
     fn set_view(&self, key: StreamKey, view: View) {
@@ -577,17 +652,15 @@ impl SlackBot {
         self
     }
 
-    /// The line telling a person how to authorize, appended when a prompt
-    /// carries the facts. A link is minted at delivery, so the event log
-    /// holds none, and Slack's markup is applied here rather than by whoever
-    /// decided where to send them.
-    async fn way_in(&self, tenant_id: &str, payload: &serde_json::Value) -> Option<String> {
+    /// How a person authorizes, for a prompt that carries the facts. A link is
+    /// minted at delivery, so the event log holds none.
+    ///
+    /// A link becomes a button, because one click is the whole point. A command
+    /// is words: there is nothing to click.
+    async fn way_in(&self, tenant_id: &str, payload: &serde_json::Value) -> Option<WayIn> {
         let authorize: Authorize =
             serde_json::from_value(payload.get("authorize")?.clone()).ok()?;
-        Some(match self.consent.way_in(tenant_id, &authorize).await? {
-            WayIn::Link { url, label } => format!("<{url}|{label}>"),
-            WayIn::Command(words) => words,
-        })
+        self.consent.way_in(tenant_id, &authorize).await
     }
 
     /// Start the outbound processor and the activity worker.
@@ -649,6 +722,10 @@ impl SlackBot {
         let Some(click) = block_action(payload) else {
             return;
         };
+        // Slack reports a click on a link button too. It answers nothing.
+        if click.action_id == AUTHORIZE_ACTION {
+            return;
+        }
         let team = payload["team"]["id"]
             .as_str()
             .or_else(|| payload["user"]["team_id"].as_str());
@@ -1260,37 +1337,8 @@ impl SlackBot {
         }
     }
 
-    /// Whether the event is a running turn's work. A session names its last
-    /// turn after that turn ends, so the event's turn id does not say. The
-    /// slot does: it is opened at the turn's start and taken by its reply.
-    fn working(&self, event: &SessionEvent) -> bool {
-        // The prompt took the slot with it; the resume speaks for itself.
-        if matches!(event.payload, EventPayload::InterruptResumed(_)) {
-            return true;
-        }
-        // The events that end a turn, and a prompt waiting on a person.
-        let stops = matches!(
-            event.payload,
-            EventPayload::TurnCompleted(_)
-                | EventPayload::SessionInterrupted(_)
-                | EventPayload::SessionCancelled
-                | EventPayload::SessionDone(_)
-        ) || matches!(event.meta.status, SessionStatus::Interrupted { .. });
-        let Some(turn_id) = event.meta.turn_id.as_deref() else {
-            return false;
-        };
-        let key = StreamKey::new(&event.tenant_id, &event.session_id, turn_id);
-        !stops && self.streams.get(&key).is_some()
-    }
-
-    /// The working indicator. An empty status clears it.
-    async fn set_working(&self, ws: &Workspace, thread: &Thread) {
-        self.set_status(ws, thread, render::WORKING_STATUS).await;
-    }
-
-    /// The indicator belongs to the thread, not to one turn: a turn ending
-    /// hands it to the turn queued behind it rather than clearing it, so a
-    /// thread that is still working never looks idle.
+    /// Put out a status a worker set, once nothing is running to carry it.
+    /// The card holds the working state; the bot sets no status of its own.
     async fn settle_status(
         &self,
         ws: &Workspace,
@@ -1303,9 +1351,8 @@ impl SlackBot {
             .live_elsewhere(&event.tenant_id, &event.session_id, ended)
             .is_none()
         {
-            return self.set_status(ws, thread, "").await;
+            self.set_status(ws, thread, "").await;
         }
-        self.set_working(ws, thread).await
     }
 
     async fn set_status(&self, ws: &Workspace, thread: &Thread, status: &str) {
@@ -1447,10 +1494,10 @@ impl EventProcessor for SlackBot {
         if let Err(e) = self.track(&ws, &thread, &event).await {
             return Err(ProcessorError::Apply(e.to_string()));
         }
-        // Slack clears the indicator on every write to the thread, so each
-        // event of a running turn sets it again.
-        if self.working(&event) {
-            self.set_working(&ws, &thread).await;
+        // Immediate feedback: the status covers the gap until the card's
+        // message opens, which clears it.
+        if matches!(event.payload, EventPayload::TurnStarted(_)) {
+            self.set_status(&ws, &thread, WORKING_STATUS).await;
         }
         let result = match &event.payload {
             EventPayload::TurnCompleted(t) => {
@@ -1590,7 +1637,8 @@ impl SlackBot {
             },
             (Some(view), Some(error)) => {
                 let line = format!("Error: {error}");
-                let mut blocks = view.blocks;
+                // The last streamed view may still hold a running card.
+                let mut blocks = render::settle_cards(&view.blocks);
                 blocks.push(section_block(&line));
                 Rendered { text: line, blocks }
             }
@@ -1615,6 +1663,24 @@ impl SlackBot {
         }
         let meta = self.reply_meta(ws, session_id, t).await;
         let text = rendered.text.clone();
+        // The card settles inside the stream — status, and the log's tail —
+        // so the message stays a streamed card, with its fold. A rewrite
+        // would flatten it.
+        let sent = live.as_ref().map(|s| s.sent.clone()).unwrap_or_default();
+        let cards: Vec<(String, Value)> = View {
+            text: String::new(),
+            blocks: rendered.blocks.clone(),
+        }
+        .chunks()
+        .into_iter()
+        .filter(|(_, c)| c["type"] == "task_update")
+        .collect();
+        let (settle, _) = wire_chunks(&sent, &cards);
+        if !settle.is_empty() {
+            if let Err(e) = self.append_stream(ws, &thread.channel, &ts, settle).await {
+                tracing::debug!(error = %e, %session_id, "slack: card not settled");
+            }
+        }
         let chunk = serde_json::json!({
             "type": "markdown_text",
             "text": clip(&text, MAX_MARKDOWN),
@@ -1624,14 +1690,18 @@ impl SlackBot {
             .await
         {
             Ok(()) => {
-                // Rebuild from blocks, which have no 256-character chunk
-                // limit, so each card settles with its full detail.
-                if !rendered.blocks.is_empty() {
+                // Images cannot ride the stream; only they justify a rewrite.
+                let images: Vec<&Value> = rendered
+                    .blocks
+                    .iter()
+                    .filter(|b| b["type"] == "image")
+                    .collect();
+                if !images.is_empty() {
                     if let Err(e) = self
                         .update(ws, &thread.channel, &ts, &text, rendered.blocks, &meta)
                         .await
                     {
-                        tracing::warn!(error = %e, %session_id, "slack: cards not expanded");
+                        tracing::warn!(error = %e, %session_id, "slack: images not attached");
                     }
                 }
                 Ok(())
@@ -1758,11 +1828,17 @@ impl SlackBot {
             Some(view) => (view.text, view.blocks),
             None => match display_of(&p.payload) {
                 Some(display) => {
-                    let options = prompt_options(&display, &p.interrupt_id);
-                    let message = match self.way_in(&ws.tenant_id, &p.payload).await {
-                        Some(how) => format!("{}\n\n{how}", display.message),
-                        None => display.message.clone(),
-                    };
+                    let mut message = display.message.clone();
+                    // The way in leads, so the first button is the one to press.
+                    let mut options = Vec::new();
+                    match self.way_in(&ws.tenant_id, &p.payload).await {
+                        Some(WayIn::Link { url, label }) => {
+                            options.push(authorize_option(url, label))
+                        }
+                        Some(WayIn::Command(words)) => message = format!("{message}\n\n{words}"),
+                        None => {}
+                    }
+                    options.extend(prompt_options(&display, &p.interrupt_id));
                     let blocks = render::prompt_blocks(&PromptView {
                         message: &message,
                         options: &options,
@@ -1938,24 +2014,11 @@ impl SlackBot {
 
     /// One worker; the tick is the global append budget.
     async fn stream_activity(&self, ctx: &ChannelContext) {
-        let mut refreshed = std::time::Instant::now();
         loop {
-            // Slack drops a status after two minutes, so every live turn has
-            // it set again on this cadence. Off the clock rather than off the
-            // queue: a turn that streams a card every second never lets the
-            // idle branch run, and it is the turns that work the longest that
-            // most need to look like they are working.
-            if refreshed.elapsed() >= STATUS_REFRESH {
-                self.refresh_statuses().await;
-                refreshed = std::time::Instant::now();
-            }
             let Some(key) = self.streams.take_dirty() else {
-                // Nothing to render: wait for work, or for the status to be
-                // due again.
                 tokio::select! {
                     _ = ctx.shutdown.cancelled() => return,
                     _ = self.streams.notified() => {}
-                    _ = tokio::time::sleep(STATUS_REFRESH) => {}
                 }
                 continue;
             };
@@ -1967,17 +2030,6 @@ impl SlackBot {
                 _ = ctx.shutdown.cancelled() => return,
                 _ = tokio::time::sleep(ACTIVITY_INTERVAL) => {}
             }
-        }
-    }
-
-    /// Set the status again for every running turn. Slack drops one after two
-    /// minutes, and the longest turns need it most.
-    async fn refresh_statuses(&self) {
-        for stream in self.streams.live() {
-            let Some(ws) = self.resolver.by_tenant(&stream.tenant_id).await else {
-                continue;
-            };
-            self.set_working(&ws, &stream.thread).await;
         }
     }
 
@@ -1996,22 +2048,12 @@ impl SlackBot {
             },
         };
         let thread = open.thread.clone();
-        // No view yet: nothing to send but the status.
+        // No view yet: nothing to send.
         let Some(view) = self.streams.view(key) else {
-            if open.ts.is_none() {
-                self.set_working(ws, &thread).await;
-            }
             return;
         };
-        let changed: Vec<(String, Value)> = view
-            .chunks()
-            .into_iter()
-            .filter(|(id, chunk)| open.sent.get(id) != Some(chunk))
-            .collect();
-        if changed.is_empty() {
-            if open.ts.is_none() {
-                self.set_working(ws, &thread).await;
-            }
+        let (chunks, landed) = wire_chunks(&open.sent, &view.chunks());
+        if chunks.is_empty() {
             return;
         }
 
@@ -2069,7 +2111,6 @@ impl SlackBot {
                 }
             },
         };
-        let chunks = changed.iter().map(|(_, c)| c.clone()).collect();
         if let Err(e) = self.append_stream(ws, &thread.channel, &ts, chunks).await {
             // The message takes nothing more, and the answer posts beside it.
             // Delete one this tick opened; stop one that holds cards.
@@ -2079,13 +2120,13 @@ impl SlackBot {
             }
             return self.kill_stream(key, e);
         }
-        // The card cleared the indicator; the turn goes on, so set it again.
-        if self.streams.commit(key, ts.clone(), version, changed) {
-            return self.set_working(ws, &thread).await;
+        // The card is on screen: it carries the working state from here.
+        if opened {
+            self.set_status(ws, &thread, "").await;
         }
         // The turn ended during the append. A message this tick opened is one
         // the reply never saw.
-        if opened {
+        if !self.streams.commit(key, ts.clone(), version, landed) && opened {
             self.discard_stream(ws, &thread.channel, &ts).await;
         }
     }
@@ -2168,21 +2209,37 @@ impl SlackBot {
                 session_id: Some(session_id.to_string()),
                 ..Default::default()
             };
+            // The card ends inside the stream, keeping its fold; the stop
+            // says why and stamps the message.
+            let cards: Vec<(String, Value)> = View {
+                text: String::new(),
+                blocks: rendered.blocks.clone(),
+            }
+            .chunks()
+            .into_iter()
+            .filter(|(_, c)| c["type"] == "task_update")
+            .collect();
+            let (settle, _) = wire_chunks(&stream.sent, &cards);
+            if !settle.is_empty() {
+                if let Err(e) = self
+                    .append_stream(ws, &stream.thread.channel, &ts, settle)
+                    .await
+                {
+                    tracing::debug!(error = %e, %session_id, "slack: cancelled card not settled");
+                }
+            }
+            let chunk = serde_json::json!({
+                "type": "markdown_text",
+                "text": rendered.text,
+            });
             if let Err(e) = self
-                .update(
-                    ws,
-                    &stream.thread.channel,
-                    &ts,
-                    &rendered.text,
-                    rendered.blocks,
-                    &meta,
-                )
+                .stop_stream(ws, &stream.thread.channel, &ts, chunk, &meta)
                 .await
             {
                 tracing::warn!(error = %e, %session_id, "slack: cancelled turn not settled");
+                // Whatever the message says, the stream still has to stop.
+                self.close_stream(ws, &stream.thread.channel, &ts).await;
             }
-            // Whatever the message says, the stream still has to stop.
-            self.close_stream(ws, &stream.thread.channel, &ts).await;
         }
         self.set_status(ws, thread, "").await;
     }
@@ -2236,8 +2293,8 @@ impl SlackBot {
                 _ => {}
             }
         }
-        // The last streamed view is in the log. Cards can be sent twice, text
-        // cannot, so only its chunks seed `sent`.
+        // The last streamed view is in the log, and the stream appends: it
+        // all seeds `sent`, or a rebuilt slot would say it again.
         let view = events.iter().rev().find_map(|e| match &e.payload {
             EventPayload::ChannelsUpdated(c)
                 if e.meta.turn_id.as_deref() == Some(&row.turn_id) && !c.finishes_turn =>
@@ -2248,12 +2305,7 @@ impl SlackBot {
         });
         let sent: HashMap<String, Value> = view
             .as_ref()
-            .map(|v| {
-                v.chunks()
-                    .into_iter()
-                    .filter(|(id, _)| id.starts_with("say:"))
-                    .collect()
-            })
+            .map(|v| v.chunks().into_iter().collect())
             .unwrap_or_default();
         if let Some(view) = view {
             self.streams.set_view(key.clone(), view);
@@ -2619,6 +2671,7 @@ mod tests {
         use crate::protocol::{Issuer, Subject};
         use crate::providers::sqlite::{SqliteAuthFlows, SqliteDb};
         use crate::runtime::session::interrupts::auth;
+        use crate::transport::consent::WayIn;
         use crate::transport::consent::{CliConsent, Consent, DashboardConsent, EngineConsent};
         use crate::transport::mcp_auth::AuthorizeLinks;
         use std::sync::Arc;
@@ -2632,6 +2685,14 @@ mod tests {
 
         fn person(audience: Visibility) -> Requester {
             Requester::new(Subject::new(Issuer::slack(), "T1:U1"), audience)
+        }
+
+        /// The way in as one string, so these read as what a person sees.
+        fn shown(way: Option<WayIn>) -> Option<String> {
+            way.map(|way| match way {
+                WayIn::Link { url, label } => format!("<{url}|{label}>"),
+                WayIn::Command(words) => words,
+            })
         }
 
         fn bot(consent: Arc<dyn Consent>) -> SlackBot {
@@ -2683,9 +2744,7 @@ mod tests {
         async fn an_engine_that_hosts_the_flow_mints_a_link() {
             let path = temp();
             let bot = bot(engine(&path));
-            let how = bot
-                .way_in("t", &payload(person(Visibility::Private)))
-                .await
+            let how = shown(bot.way_in("t", &payload(person(Visibility::Private))).await)
                 .expect("a private person gets a link");
             assert!(
                 how.starts_with("<https://agent.test/mcp/authorize/"),
@@ -2701,7 +2760,7 @@ mod tests {
             let path = temp();
             let bot = bot(engine(&path));
             for refused in [Requester::machine(), person(Visibility::Shared)] {
-                let how = bot.way_in("t", &payload(refused)).await.unwrap();
+                let how = shown(bot.way_in("t", &payload(refused)).await).unwrap();
                 assert_eq!(how, "Run `subs mcp login gmail` to authorize it.");
             }
             cleanup(&path);
@@ -2713,17 +2772,21 @@ mod tests {
                 "https://app.test/overview".into(),
             )));
             assert_eq!(
-                dashboard
-                    .way_in("t", &payload(person(Visibility::Private)))
-                    .await
-                    .unwrap(),
+                shown(
+                    dashboard
+                        .way_in("t", &payload(person(Visibility::Private)))
+                        .await
+                )
+                .unwrap(),
                 "<https://app.test/overview|Authorize it in the dashboard>"
             );
             assert_eq!(
-                bot(Arc::new(CliConsent))
-                    .way_in("t", &payload(person(Visibility::Private)))
-                    .await
-                    .unwrap(),
+                shown(
+                    bot(Arc::new(CliConsent))
+                        .way_in("t", &payload(person(Visibility::Private)))
+                        .await
+                )
+                .unwrap(),
                 "Run `subs mcp login gmail` to authorize it."
             );
         }
@@ -2734,7 +2797,7 @@ mod tests {
         async fn a_prompt_without_the_facts_is_left_alone() {
             let bot = bot(Arc::new(CliConsent));
             let bare = serde_json::json!({ "message": "*gmail* rejected its token." });
-            assert_eq!(bot.way_in("t", &bare).await, None);
+            assert_eq!(shown(bot.way_in("t", &bare).await), None);
         }
 
         /// Two people on one connection get two links.
@@ -2743,20 +2806,19 @@ mod tests {
             let path = temp();
             let bot = bot(engine(&path));
 
-            let first = bot
-                .way_in("t", &payload(person(Visibility::Private)))
-                .await
-                .unwrap();
-            let second = bot
-                .way_in(
+            let first =
+                shown(bot.way_in("t", &payload(person(Visibility::Private))).await).unwrap();
+            let second = shown(
+                bot.way_in(
                     "t",
                     &payload(Requester::new(
                         Subject::new(Issuer::slack(), "T1:U2"),
                         Visibility::Private,
                     )),
                 )
-                .await
-                .unwrap();
+                .await,
+            )
+            .unwrap();
             assert_ne!(first, second);
             cleanup(&path);
         }
@@ -2967,6 +3029,53 @@ mod tests {
         );
     }
 
+    /// The reply settles the card inside the stream — status flip and log
+    /// tail appended, the answer on the stop — and never rewrites the
+    /// message: a rewrite flattens the card and its fold.
+    #[tokio::test]
+    async fn a_finished_turn_settles_its_card_in_the_stream() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base);
+        let mut live = stream("turn-1", Some("1.1"));
+        live.sent = wire_chunks(&HashMap::new(), &desired(Some("First.")))
+            .1
+            .into_iter()
+            .collect();
+        bot.streams.insert(live);
+        bot.streams.set_final(
+            key("turn-1"),
+            View {
+                text: "the answer".into(),
+                blocks: vec![
+                    render::turn_card("turn-1", "Find x", "complete", Some("First.\n• `a {}`")),
+                    section_block("the answer"),
+                ],
+            },
+        );
+
+        let t = TurnCompleted {
+            turn_id: "turn-1".into(),
+            data: Value::String("the answer".into()),
+            turn_cost: Default::default(),
+            turn_token_usage: Default::default(),
+            error: None,
+        };
+        bot.complete_turn(&ws, &thread(), SESSION, &t, chrono::Utc::now(), 0)
+            .await
+            .expect("finishes");
+
+        let appended = calls.to("chat.appendStream");
+        assert_eq!(appended.len(), 1, "one settle append");
+        let chunks = appended[0]["chunks"].as_array().unwrap();
+        assert!(chunks.iter().all(|c| c["type"] == "task_update"));
+        assert_eq!(chunks[0]["status"], "complete");
+        assert_eq!(chunks[0]["details"], "\n• `a {}`", "the log's tail");
+        let stopped = calls.to("chat.stopStream");
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0]["chunks"][0]["text"], "the answer");
+        assert!(calls.to("chat.update").is_empty(), "no flattening rewrite");
+    }
+
     #[tokio::test]
     async fn a_failed_turn_writes_its_error_over_the_view() {
         let (api_base, calls) = fake_slack().await;
@@ -3106,7 +3215,11 @@ mod tests {
         let stopped = calls.to("chat.stopStream");
         assert_eq!(stopped.len(), 1, "only the turn that opened a message");
         assert_eq!(stopped[0]["ts"], "1.1");
-        assert_eq!(calls.to("chat.update")[0]["text"], "Cancelled.");
+        assert_eq!(
+            stopped[0]["chunks"][0]["text"], "Cancelled.",
+            "the stop says why, keeping the streamed card intact"
+        );
+        assert!(calls.to("chat.update").is_empty(), "no flattening rewrite");
         // And the thread stops claiming it is working.
         let status = calls.to("assistant.threads.setStatus");
         assert_eq!(status.len(), 1);
@@ -3234,6 +3347,76 @@ mod tests {
         assert!(bot.streams.get(&key("turn-1")).expect("the slot").dead);
     }
 
+    fn desired(details: Option<&str>) -> Vec<(String, Value)> {
+        View {
+            text: "".into(),
+            blocks: vec![render::turn_card(
+                "turn-1",
+                "Find x",
+                "in_progress",
+                details,
+            )],
+        }
+        .chunks()
+    }
+
+    /// A new card streams its whole details text, split to the chunk cap.
+    #[test]
+    fn a_new_card_streams_its_details_in_pieces() {
+        let long = "x".repeat(MAX_CHUNK + 100);
+        let (wire, landed) = wire_chunks(&HashMap::new(), &desired(Some(&long)));
+        assert_eq!(wire.len(), 2, "split to the cap");
+        assert_eq!(wire[0]["type"], "task_update");
+        assert_eq!(wire[0]["id"], "turn-1");
+        assert_eq!(wire[0]["title"], "Find x");
+        assert_eq!(wire[0]["status"], "in_progress");
+        assert_eq!(
+            wire[0]["details"].as_str().unwrap().chars().count(),
+            MAX_CHUNK
+        );
+        assert_eq!(wire[1]["details"].as_str().unwrap().chars().count(), 100);
+        assert_eq!(landed[0].1["details"], long.as_str(), "sent in full");
+    }
+
+    /// The stream appends, so a grown log sends only its growth.
+    #[test]
+    fn a_grown_log_streams_only_the_delta() {
+        let (_, sent) = wire_chunks(&HashMap::new(), &desired(Some("First.\n• a {}")));
+        let sent: HashMap<String, Value> = sent.into_iter().collect();
+        let (wire, landed) = wire_chunks(&sent, &desired(Some("First.\n• a {}\nSecond.\n• b {}")));
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["details"], "\nSecond.\n• b {}");
+        assert_eq!(landed[0].1["details"], "First.\n• a {}\nSecond.\n• b {}");
+        // Caught up: nothing more to send.
+        let sent: HashMap<String, Value> = landed.into_iter().collect();
+        let (wire, _) = wire_chunks(&sent, &desired(Some("First.\n• a {}\nSecond.\n• b {}")));
+        assert!(wire.is_empty());
+    }
+
+    /// Details rewritten any other way stay unsent — appending them again
+    /// would say everything twice. The status still moves.
+    #[test]
+    fn a_rewritten_log_sends_the_status_and_no_text() {
+        let (_, sent) = wire_chunks(&HashMap::new(), &desired(Some("First.")));
+        let sent: HashMap<String, Value> = sent.into_iter().collect();
+        let (wire, _) = wire_chunks(&sent, &desired(Some("Rewritten.")));
+        assert!(wire.is_empty(), "same head, unappendable text: nothing");
+        let done = View {
+            text: "".into(),
+            blocks: vec![render::turn_card(
+                "turn-1",
+                "Find x",
+                "complete",
+                Some("Rewritten."),
+            )],
+        }
+        .chunks();
+        let (wire, _) = wire_chunks(&sent, &done);
+        assert_eq!(wire.len(), 1, "the status change goes out alone");
+        assert_eq!(wire[0]["status"], "complete");
+        assert!(wire[0].get("details").is_none());
+    }
+
     /// How a writer learns the turn settled under it.
     #[test]
     fn a_commit_after_the_reply_took_the_slot_says_so() {
@@ -3273,10 +3456,11 @@ mod tests {
         );
     }
 
-    /// A card is a write, and a write clears the indicator. The turn goes on,
-    /// so the card lands with the indicator behind it.
+    /// The card is the working state; the bot sets no status beside it.
+    /// Slack renders a set status as its own placeholder message, which
+    /// reads as a second reply under the card.
     #[tokio::test]
-    async fn a_card_lands_with_the_indicator_behind_it() {
+    async fn a_card_lands_with_no_status_beside_it() {
         let (api_base, calls) = fake_slack().await;
         let (bot, ws) = bot_for(api_base);
         bot.streams.insert(stream("turn-1", Some("1.1")));
@@ -3291,19 +3475,34 @@ mod tests {
         bot.stream_turn(&ws, &key("turn-1")).await;
 
         assert_eq!(calls.to("chat.appendStream").len(), 1);
-        let status = calls.to("assistant.threads.setStatus");
-        assert_eq!(status.len(), 1, "the card cleared it; the turn lights it");
-        assert_eq!(status[0]["status"], render::WORKING_STATUS);
+        assert!(calls.to("assistant.threads.setStatus").is_empty());
     }
 
-    /// Only the end of a turn puts the indicator out. A prompt's resume, and
-    /// the work after it, set it again.
+    /// The card takes a model call to appear; the status covers that gap
+    /// from the turn's first event.
     #[tokio::test]
-    async fn a_running_turn_shows_the_indicator_on_every_event() {
+    async fn a_turn_starting_lights_the_status() {
         let (api_base, calls) = fake_slack().await;
         let (bot, _ws) = bot_for(api_base);
 
-        // The prompt took the turn's slot with it; the resume speaks for itself.
+        let started = EventPayload::TurnStarted(crate::session::events::TurnStarted {
+            turn_id: "turn-1".into(),
+        });
+        bot.apply(turn_event(started, Some("turn-1"), None))
+            .await
+            .expect("applies");
+
+        let status = calls.to("assistant.threads.setStatus");
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0]["status"], WORKING_STATUS);
+    }
+
+    /// A running turn's later events set no status: the card carries it.
+    #[tokio::test]
+    async fn a_running_turn_sets_no_status() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, _ws) = bot_for(api_base);
+
         let resumed = EventPayload::InterruptResumed(crate::session::events::InterruptResumed {
             interrupt_id: "i1".into(),
             payload: Value::Null,
@@ -3312,7 +3511,6 @@ mod tests {
             .await
             .expect("applies");
 
-        // The work that follows is the running turn's, and it holds a slot.
         bot.streams.insert(stream("turn-1", Some("1.1")));
         let work = EventPayload::DecisionCompleted(crate::session::events::DecisionCompleted {
             id: "d1".into(),
@@ -3321,9 +3519,7 @@ mod tests {
             .await
             .expect("applies");
 
-        let status = calls.to("assistant.threads.setStatus");
-        assert_eq!(status.len(), 2, "the resume, and the work after it");
-        assert!(status.iter().all(|s| s["status"] == render::WORKING_STATUS));
+        assert!(calls.to("assistant.threads.setStatus").is_empty());
     }
 
     /// `session.done` carries the turn id of the turn that just ended, and it
@@ -3425,23 +3621,6 @@ mod tests {
             start_time: chrono::Utc::now(),
             end_time: chrono::Utc::now(),
         }
-    }
-
-    /// Every live turn is refreshed, not only the ones with nothing on screen
-    /// yet: Slack drops a status after two minutes, and the turns that take
-    /// longest are the ones that need it most.
-    #[test]
-    fn the_status_is_refreshed_for_every_turn_still_running() {
-        let streams = Streams::default();
-        streams.insert(stream("turn-1", Some("1.1")));
-        streams.insert(stream("turn-2", None));
-        assert_eq!(streams.live().len(), 2);
-
-        // Nor one Slack refused: it will never render again.
-        streams.kill(&key("turn-1"));
-        let live = streams.live();
-        assert_eq!(live.len(), 1);
-        assert_eq!(live[0].key(), key("turn-2"));
     }
 
     /// A channel with nothing of its own is the default's, so declaring one
