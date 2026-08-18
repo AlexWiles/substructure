@@ -74,6 +74,45 @@ url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry2
 
 An agent with both sees `sentry__` and `sentry2__` tools.
 
+## What it asks for
+
+`scopes` is the access consent is asked for. Declared nothing, a connection asks
+for what the server advertises — which is that server's maximum, not its
+recommendation. Sentry advertises writing to projects, teams and events where
+reading issues needs none of it.
+
+```toml title="substructure.toml"
+[mcp.sentry]
+url = "https://mcp.sentry.dev/mcp"
+scopes = ["org:read"]
+```
+
+## Servers that issue no client
+
+Most servers hand out a client identity when asked, either from a metadata
+document or by dynamic registration. A few do neither — Google and GitHub among
+them — and want one registered by hand.
+
+Register it with that server, then name where the halves are kept. The file
+names variables and never holds a secret, and `subs apply` strips these before
+the document reaches a deployment: a client belongs to whoever registered it
+against their own redirect URI.
+
+```toml title="substructure.toml"
+[mcp.gmail]
+url = "https://gmailmcp.googleapis.com/mcp/v1"
+credential = "user"
+scopes = ["https://www.googleapis.com/auth/gmail.modify"]
+client_id_env = "GMAIL_CLIENT_ID"
+client_secret_env = "GMAIL_CLIENT_SECRET"
+```
+
+The redirect URI to register differs by what runs the flow. An engine's is
+`<base_url>/mcp/callback`, one address that every connection shares. The CLI
+binds a fresh loopback port on every run, so register it as a native or desktop
+client, where the port is not matched. Where a server issues no client and the
+file names none, `subs mcp login` prints the URI it bound.
+
 ## Where the credential lives
 
 The file decides.

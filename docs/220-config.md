@@ -165,6 +165,10 @@ prefix_tools = false
 | `url` | url | required | The server. |
 | `auth` | string | ask the server | Override how it authenticates: `"token"`, `"oauth"`, or `"none"`. |
 | `header` | string | `Authorization` | Header a static token rides in. Only under `auth = "token"`. |
+| `credential` | string | `"shared"` | Whose credential the connection dials with: `"shared"` for one, `"user"` for one per person. |
+| `scopes` | list | ask the server | The access to ask consent for. The server's own list is its maximum, not its recommendation. |
+| `client_id_env` | string | — | Variable holding the OAuth client, for a server that issues none. Named, never written. |
+| `client_secret_env` | string | — | The secret half. Only alongside `client_id_env`. |
 | `prefix_tools` | bool | `true` | Show the model `<id>__<tool>` instead of the connection's own names. |
 
 A `token` written in the file is a parse error. Fill a connection with `subs mcp

@@ -477,6 +477,9 @@ fn load_servers(
                         auth: None,
                         header: None,
                         credential: None,
+                        scopes: Vec::new(),
+                        client_id_env: None,
+                        client_secret_env: None,
                         prefix_tools: true,
                     },
                 );

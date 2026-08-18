@@ -89,7 +89,17 @@ impl Manifest {
             .iter()
             .filter(|(_, s)| s.signing_secret_env.is_some())
             .map(|(id, _)| format!("[agent.{id}].signing_secret_env"));
-        llm.chain(agent).collect()
+        let mcp = self.mcp.iter().flat_map(|(id, s)| {
+            s.client_id_env
+                .iter()
+                .map(move |_| format!("[mcp.{id}].client_id_env"))
+                .chain(
+                    s.client_secret_env
+                        .iter()
+                        .map(move |_| format!("[mcp.{id}].client_secret_env")),
+                )
+        });
+        llm.chain(agent).chain(mcp).collect()
     }
 
     /// This document with the env-bound fields dropped — the copy that crosses
@@ -101,6 +111,10 @@ impl Manifest {
         }
         for section in wire.agent.values_mut() {
             section.signing_secret_env = None;
+        }
+        for spec in wire.mcp.values_mut() {
+            spec.client_id_env = None;
+            spec.client_secret_env = None;
         }
         // The content is sent separately; `hash` names it.
         for spec in wire.plugin.values_mut() {
@@ -1084,6 +1098,12 @@ fn check_connection(spec: &ConnectionSpec) -> Result<()> {
     if spec.header.is_some() && spec.auth != Some(AuthKind::Token) {
         bail!("`header` carries a static token, so it needs `auth = \"token\"`");
     }
+    if spec.client_secret_env.is_some() && spec.client_id_env.is_none() {
+        bail!("`client_secret_env` needs `client_id_env`");
+    }
+    if spec.auth == Some(AuthKind::Token) && !spec.scopes.is_empty() {
+        bail!("`scopes` is asked for at consent, which `auth = \"token\"` does not do");
+    }
     Ok(())
 }
 
@@ -1119,13 +1139,21 @@ mod tests {
             model = "claude-sonnet-4-5"
             worker = "https://bot.example.com/agent"
             signing_secret_env = "MY_SECRET"
+
+            [mcp.gmail]
+            url = "https://gmailmcp.googleapis.com/mcp/v1"
+            scopes = ["https://www.googleapis.com/auth/gmail.modify"]
+            client_id_env = "MY_CLIENT"
+            client_secret_env = "MY_CLIENT_SECRET"
             "#,
         );
         assert_eq!(
             m.local_bindings(),
             [
                 "[llm.claude].api_key_env",
-                "[agent.support].signing_secret_env"
+                "[agent.support].signing_secret_env",
+                "[mcp.gmail].client_id_env",
+                "[mcp.gmail].client_secret_env",
             ]
         );
 
@@ -1134,6 +1162,31 @@ mod tests {
         // Everything else survives: only the bindings are local.
         assert_eq!(wire.agent["support"].worker, m.agent["support"].worker);
         assert_eq!(wire.llm["claude"].kind, ProviderKind::Anthropic);
+        assert_eq!(wire.mcp["gmail"].scopes, m.mcp["gmail"].scopes);
+    }
+
+    #[test]
+    fn a_client_needs_both_halves_and_a_token_asks_for_no_scopes() {
+        let named = manifest(
+            r#"
+            [mcp.gmail]
+            url = "https://gmailmcp.googleapis.com/mcp/v1"
+            client_secret_env = "MY_CLIENT_SECRET"
+            "#,
+        );
+        let err = named.validate().unwrap_err().to_string();
+        assert!(err.contains("needs `client_id_env`"), "{err}");
+
+        let static_token = manifest(
+            r#"
+            [mcp.thing]
+            url = "https://thing.example.test/mcp"
+            auth = "token"
+            scopes = ["read"]
+            "#,
+        );
+        let err = static_token.validate().unwrap_err().to_string();
+        assert!(err.contains("does not do"), "{err}");
     }
 
     #[test]
@@ -1683,6 +1736,9 @@ defer_tools = { strategy = "sometimes" }
                     auth: None,
                     header: None,
                     credential: None,
+                    scopes: Vec::new(),
+                    client_id_env: None,
+                    client_secret_env: None,
                     prefix_tools: true,
                 },
             )]
@@ -1724,6 +1780,9 @@ defer_tools = { strategy = "sometimes" }
             auth: None,
             header: None,
             credential: None,
+            scopes: Vec::new(),
+            client_id_env: None,
+            client_secret_env: None,
             prefix_tools: true,
         };
         // `pdf` + `tools-render` and `pdf-tools` + `render` both derive
@@ -1781,6 +1840,9 @@ defer_tools = { strategy = "sometimes" }
                     auth: None,
                     header: None,
                     credential: None,
+                    scopes: Vec::new(),
+                    client_id_env: None,
+                    client_secret_env: None,
                     prefix_tools: true,
                 },
             )]
@@ -1811,6 +1873,9 @@ defer_tools = { strategy = "sometimes" }
                 auth: None,
                 header: None,
                 credential: None,
+                scopes: Vec::new(),
+                client_id_env: None,
+                client_secret_env: None,
                 prefix_tools: true,
             },
         );
@@ -1824,6 +1889,9 @@ defer_tools = { strategy = "sometimes" }
                     auth: None,
                     header: None,
                     credential: None,
+                    scopes: Vec::new(),
+                    client_id_env: None,
+                    client_secret_env: None,
                     prefix_tools: true,
                 },
             )]
