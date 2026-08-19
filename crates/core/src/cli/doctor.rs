@@ -31,7 +31,7 @@ pub async fn run(scope: ProjectScope) -> Result<()> {
         .context("no substructure.toml found. Write one, or pass -c.")?;
 
     let notices = match target(&scope.globals)?.here().is_some() {
-        true => here(&found).await?,
+        true => here(&found, env_value).await?,
         false => deployed(&scope).await?,
     };
     report(&notices, &scope)
@@ -62,8 +62,9 @@ async fn deployed(scope: &ProjectScope) -> Result<Vec<Notice>> {
 }
 
 /// What an engine you run here still needs: the credentials it reads from this
-/// machine's environment, and the consents in its own database.
-async fn here(found: &Found) -> Result<Vec<Notice>> {
+/// machine's environment, and the consents in its own database. The lookup is
+/// a parameter so a test states what is set instead of reading the machine.
+async fn here(found: &Found, env: impl Fn(&str) -> Option<String>) -> Result<Vec<Notice>> {
     let config = &found.config;
     let mut out = Vec::new();
 
@@ -71,7 +72,7 @@ async fn here(found: &Found) -> Result<Vec<Notice>> {
     // nothing. Where the key is issued is part of the sentence: a reader who
     // has to go and get one should not have to go and find that too.
     for block in config.provider_bindings() {
-        if env_value(&block.api_key_env).is_some() {
+        if env(&block.api_key_env).is_some() {
             continue;
         }
         let issued = block
@@ -106,7 +107,7 @@ async fn here(found: &Found) -> Result<Vec<Notice>> {
     // machine's to hold. Nothing routes anywhere without them.
     if config.slack.as_ref().is_some_and(|s| s.is_configured()) {
         for (var, example) in SLACK_TOKENS {
-            if env_value(var).is_some() {
+            if env(var).is_some() {
                 continue;
             }
             out.push(
@@ -123,7 +124,7 @@ async fn here(found: &Found) -> Result<Vec<Notice>> {
         let Some(var) = &section.signing_secret_env else {
             continue;
         };
-        if env_value(var).is_none() {
+        if env(var).is_none() {
             out.push(
                 Notice::action(format!(
                     "Set ${var}, which signs the decisions [agent.{id}] sends its worker"
@@ -164,6 +165,11 @@ mod tests {
         notices.iter().map(|n| n.message.as_str()).collect()
     }
 
+    /// An environment holding nothing, whatever this machine holds.
+    fn empty(_: &str) -> Option<String> {
+        None
+    }
+
     /// Every credential an engine here reads, named with the variable it is
     /// missing from — the whole point of running this before `subs serve`.
     #[tokio::test]
@@ -177,7 +183,7 @@ mod tests {
              [slack]\ndm = \"support\"\n",
         );
 
-        let notices = here(&file).await.unwrap();
+        let notices = here(&file, empty).await.unwrap();
         let said = messages(&notices).join("\n");
         assert!(said.contains("$NOT_SET_ANTHROPIC"), "{said}");
         assert!(
@@ -220,7 +226,7 @@ mod tests {
             "[llm.byo]\ntype = \"worker\"\n\
              [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n",
         );
-        assert!(here(&file).await.unwrap().is_empty());
+        assert!(here(&file, empty).await.unwrap().is_empty());
     }
 
     /// Slack tokens are only this machine's business when something routes to
@@ -231,6 +237,6 @@ mod tests {
             "[llm.byo]\ntype = \"worker\"\n\
              [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n[slack]\n",
         );
-        assert!(here(&file).await.unwrap().is_empty());
+        assert!(here(&file, empty).await.unwrap().is_empty());
     }
 }
