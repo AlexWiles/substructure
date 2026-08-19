@@ -9,6 +9,8 @@ together at the same version.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-19
+
 ### Added
 
 - Support approval interrupts on destructive MCP tools.
@@ -104,7 +106,8 @@ together at the same version.
 - The changelog starts again at this release. For the changes before it, refer
   to the git history.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/substructureai/substructure/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/substructureai/substructure/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/substructureai/substructure/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/substructureai/substructure/compare/v0.4.0...v0.4.1
