@@ -768,6 +768,7 @@ impl SlackBot {
                     metadata: HashMap::from_iter([
                         ("slack_channel".to_string(), click.channel.clone()),
                         ("slack_thread_ts".to_string(), click.thread_ts.clone()),
+                        ("slack_user".to_string(), click.user.clone()),
                     ]),
                 },
                 input: ClientInput::Action {
@@ -1222,6 +1223,7 @@ impl SlackBot {
                         [
                             Some(("slack_channel".into(), inbound.channel.clone())),
                             Some(("slack_thread_ts".into(), inbound.thread_ts.clone())),
+                            Some(("slack_user".into(), inbound.user.clone())),
                             inbound.team.clone().map(|team| ("slack_team".into(), team)),
                         ]
                         .into_iter()
@@ -1938,10 +1940,7 @@ impl SlackBot {
         match &event.payload {
             EventPayload::TurnStarted(t) => {
                 let owner = event.meta.owner.as_ref();
-                let recipient = owner
-                    .and_then(|o| o.requester.subject.as_ref().map(|s| s.id.as_str()))
-                    .and_then(|id| id.strip_prefix("slack:"))
-                    .map(str::to_string);
+                let recipient = owner.and_then(|o| o.metadata.get("slack_user")).cloned();
                 let recipient_team = owner.and_then(|o| o.metadata.get("slack_team")).cloned();
                 let mut stream = Stream {
                     tenant_id: event.tenant_id.clone(),
@@ -2315,10 +2314,7 @@ impl SlackBot {
             owner.and_then(|o| o.metadata.get("slack_channel"))?,
             owner.and_then(|o| o.metadata.get("slack_thread_ts"))?,
         );
-        let recipient = owner
-            .and_then(|o| o.requester.subject.as_ref().map(|s| s.id.as_str()))
-            .and_then(|id| id.strip_prefix("slack:"))
-            .map(str::to_string);
+        let recipient = owner.and_then(|o| o.metadata.get("slack_user")).cloned();
         let recipient_team = owner.and_then(|o| o.metadata.get("slack_team")).cloned();
         let mut stream = Stream {
             tenant_id: key.tenant_id.clone(),
@@ -3076,6 +3072,49 @@ mod tests {
         assert!(calls.to("chat.update").is_empty(), "no flattening rewrite");
     }
 
+    /// `chat.startStream` outside a DM is refused without a recipient, so the
+    /// owner's own record of who asked is what opens the message.
+    #[tokio::test]
+    async fn a_tracked_turn_takes_its_recipient_from_the_owner() {
+        let (api_base, _) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base);
+
+        bot.track(
+            &ws,
+            &thread(),
+            &turn_event(
+                EventPayload::TurnStarted(crate::runtime::session::events::TurnStarted {
+                    turn_id: "turn-1".into(),
+                }),
+                Some("turn-1"),
+                None,
+            ),
+        )
+        .await
+        .expect("tracks");
+
+        let stream = bot.streams.get(&key("turn-1")).expect("the slot");
+        assert_eq!(stream.recipient.as_deref(), Some("U1"));
+    }
+
+    #[tokio::test]
+    async fn an_opened_stream_names_its_recipient() {
+        let (api_base, calls) = fake_slack().await;
+        let (bot, ws) = bot_for(api_base);
+
+        bot.start_stream(&ws, &thread(), Some("U1"), Some("T1"))
+            .await
+            .expect("opens");
+
+        let body = calls
+            .to("chat.startStream")
+            .first()
+            .cloned()
+            .expect("one stream opened");
+        assert_eq!(body["recipient_user_id"], "U1");
+        assert_eq!(body["recipient_team_id"], "T1");
+    }
+
     #[tokio::test]
     async fn a_failed_turn_writes_its_error_over_the_view() {
         let (api_base, calls) = fake_slack().await;
@@ -3597,6 +3636,7 @@ mod tests {
                 metadata: [
                     ("slack_channel".to_string(), "C1".to_string()),
                     ("slack_thread_ts".to_string(), "1.0".to_string()),
+                    ("slack_user".to_string(), "U1".to_string()),
                 ]
                 .into(),
             }),

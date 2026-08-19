@@ -177,14 +177,20 @@ fn plain(text: &str) -> String {
         Some((_, rest)) => rest,
         None => text,
     };
-    // Any other token reads as its label.
+    // Any other token reads as its label. Without one it is a bare id — a
+    // mention, a channel, a group — which names nobody once the markup is
+    // gone, so it leaves the title rather than reading as the id.
     let mut out = String::new();
     let mut rest = text;
     while let Some(start) = rest.find('<') {
         out.push_str(&rest[..start]);
         match rest[start + 1..].split_once('>') {
             Some((token, after)) => {
-                let label = token.split_once('|').map_or(token, |(_, label)| label);
+                let label = match token.split_once('|') {
+                    Some((_, label)) => label,
+                    None if token.starts_with(['@', '#', '!']) => "",
+                    None => token,
+                };
                 out.push_str(label);
                 rest = after;
             }
@@ -922,9 +928,16 @@ mod tests {
         };
         assert_eq!(
             title_of(&[mention]),
-            "check general and the doc for @U5",
-            "the author prefix goes; tokens read as their labels"
+            "check general and the doc for",
+            "the author prefix goes; tokens read as their labels, ids as nothing"
         );
+        // Addressing the bot is how a channel reaches it, and the mention
+        // leads: an id there would be the first thing the card says.
+        let addressed = crate::protocol::Message {
+            content: Some(Content::Text("<@U0BNB0VAF8E> what is the push rate".into())),
+            ..transcript[0].clone()
+        };
+        assert_eq!(title_of(&[addressed]), "what is the push rate");
         let long = crate::protocol::Message {
             content: Some(Content::Text("x".repeat(100))),
             ..transcript[0].clone()
