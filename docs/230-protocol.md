@@ -15,7 +15,7 @@ The machine-readable source is
 
 ## Field naming
 
-Fields the engine defines are `snake_case`. A payload borrowed whole from
+Fields that the engine defines are `snake_case`. A payload borrowed whole from
 another spec keeps that spec's spelling — MCP's content blocks stay
 `mimeType`, and AG-UI's interrupt payload stays `expiresAt` — so a worker can
 forward one without renaming its fields.
@@ -115,7 +115,7 @@ type DecisionRequest = {
 | `pending_calls` | How many tool and sub-agent calls are in flight. |
 | `messages` | The active conversation, root to head. This is what the model sees. |
 | `message_tree` | Every branch. See [Conversations](./120-conversations.md). |
-| `ancestry` | Parent session ids, for a sub-agent. Empty for a root session. |
+| `ancestry` | Parent session IDs, for a sub-agent. Empty for a root session. |
 | `attempts` | How many times the engine has delivered this decision. |
 | `deadline` | When this attempt expires. |
 | `turn_id` | The turn this decision belongs to. |
@@ -162,7 +162,7 @@ type DecisionResponse = {
 | `actions` | What the engine does next. See [Actions](#actions). |
 | `state` | Replaces your state. Omit or send `null` to keep it. Send `{}` to clear it. |
 | `agent` | Replaces the config. Omit to keep it. |
-| `channels` | How a frontend shows this decision, keyed by kind. The engine passes it through. See [Slack](./130-slack.md#customizing-what-the-bot-shows). |
+| `channels` | How a frontend shows this decision, keyed by kind. The engine passes it through. See [Slack](./130-slack.md#customize-what-the-bot-shows). |
 
 An empty response `{}` writes nothing. Use it to leave a tool call open. See
 [Async tools](./110-async-tools.md).
@@ -356,10 +356,11 @@ over the current conversation.
 `llm.call` takes an `llm` to send one call to another block. The config stays as
 it is. See [LLMs](./70-llms.md).
 
-`connector.sync` names a connection the config in force already names. Use it
-after a person corrects a credential: the fetch runs again with a full retry
-budget, and the tools it returns replace the ones the session held. A decision
-that waits on the connection is delivered after the fetch settles. See
+`connector.sync` names a connection that the config in force already names. Use
+it after a person corrects a credential: the fetch runs again with a full retry
+budget, and the tools that it returns replace the ones that the session held.
+The engine delivers a decision that waits on the connection after the fetch
+settles. See
 [Connectors](./40-connectors.md#when-a-credential-stops-working).
 
 ## Errors
@@ -616,9 +617,9 @@ type ClientInput =
 | `client.messages` | Replaces the conversation with your view, and branches where the two differ. |
 
 `client.append` never branches. The engine composes it against the active path
-when it delivers it, and drops any message whose id it already recorded.
+when it delivers it, and drops any message whose ID it already recorded.
 
-### Queuing
+### Queued turns
 
 A session runs one turn at a time. A submit that arrives during a turn is
 refused with `turn_already_active`.

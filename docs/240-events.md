@@ -29,11 +29,11 @@ data: {"session_id":"0193a1","seq":7,"occurred_at":"2026-07-14T10:00:03Z","paylo
 ```
 
 To resume after a drop, pass `?after_seq=<n>`. `EventSource` does this for you.
-On reconnect the browser sends the last frame id in a `Last-Event-ID` header,
+On reconnect the browser sends the last frame ID in a `Last-Event-ID` header,
 which wins over the query parameter.
 
 Each stream covers one session. A sub-agent is its own session with its own
-stream. Open a second stream with the child's id to watch it.
+stream. Open a second stream with the child's ID to watch it.
 
 ## Event shape
 
@@ -61,7 +61,7 @@ Render a chat from these.
 | `turn.started` | A turn began: `{ turn_id }`. |
 | `turn.completed` | A turn ended, with its cost and output. |
 | `session.done` | The session finished its work. |
-| `session.cancelled` | The session was cancelled. |
+| `session.cancelled` | The session was canceled. |
 
 ## Model calls
 
@@ -79,8 +79,8 @@ event: llm.token.delta
 data: {"type":"llm.token.delta","session_id":"0193a1","call_id":"llm-1","seq":3,"text":"Hi"}
 ```
 
-These carry a [`StreamDelta`](./230-protocol.md#streaming). They are not
-recorded in the log.
+These carry a [`StreamDelta`](./230-protocol.md#streaming). The engine does not
+record them in the log.
 
 ## Tool calls
 
@@ -138,7 +138,7 @@ Engine bookkeeping. Useful for monitoring.
 | `decision.completed` | The worker answered. |
 | `decision.errored` | The decision failed. |
 | `decision.dropped` | The decision was abandoned. |
-| `call.voided` | A call was cancelled before it settled. |
+| `call.voided` | A call was canceled before it settled. |
 | `session.message_requested` | A `message.send` targeted another session. |
 
 ## AG-UI

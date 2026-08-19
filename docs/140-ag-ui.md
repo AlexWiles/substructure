@@ -26,7 +26,7 @@ client that needs to catch up.
 | Field | Meaning |
 | --- | --- |
 | `threadId` | The session. |
-| `runId` | The turn id. |
+| `runId` | The turn ID. |
 | `messages` | The client's view of the conversation. |
 | `resume` | Answers to interrupts. |
 | `tools`, `context`, `state`, `forwardedProps` | Supplied by the frontend. |

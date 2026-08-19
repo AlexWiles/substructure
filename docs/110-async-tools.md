@@ -50,16 +50,16 @@ When the render finishes, end the call by its `id`.
 Send it to the engine's client API. See
 [REST API](./250-api.md#post-apimachinesessionssession_idcallssettle).
 
-## Going async
+## Go async
 
 Answer a `tool.execute` with no `tool.result` and no `tool.error` and the call
 stays open.
 
-This is the same state a client-side tool is in while the browser works. An
-async tool is the worker's version of that. Declare it as an ordinary tool and
+A client-side tool is in the same state while the browser works. An async tool
+is the worker's version of that. Declare it as an ordinary tool and
 run it on your own schedule.
 
-## Waiting
+## The wait
 
 The turn stays open while a call is in flight. Other tool calls that finish
 first record their results.
@@ -70,7 +70,7 @@ model never sees a half-finished turn.
 The wait is saved state. It uses no compute, and it survives a restart of the
 engine or your worker.
 
-## Ending the call
+## End the call
 
 Report the result and name the call by `id`.
 
@@ -88,7 +88,7 @@ again.
 ## Timeouts
 
 A client-handled call waits forever by default. It is the one effect with no
-limit, because a person may be answering it.
+limit, because a person might be answering it.
 
 To limit the wait, give the `tool.call` a `retry` policy with an
 `attempt_timeout_secs` or a `total_timeout_secs`. When either expires, the call

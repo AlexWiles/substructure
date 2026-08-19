@@ -39,7 +39,8 @@ worker decides for it.
 
 ## Storage
 
-The engine writes to a store you can replace. The CLI uses SQLite at the path
+The engine writes to a store that you can replace. The CLI uses SQLite at the
+path
 `db` names.
 
 ```toml title="substructure.toml"
@@ -145,7 +146,7 @@ mentions = "my-agent"
 
 See [Slack](./130-slack.md) for the routing rules.
 
-## Administering a self-hosted deployment
+## Administer a self-hosted deployment
 
 `[remote]` names any server that speaks `/api/v1`. Point it at your own.
 
@@ -162,7 +163,7 @@ subs apply -c subs.prod.toml
 The CLI stores credentials per server, so you can be logged in to your
 deployment and the hosted cloud at once.
 
-## Embedding the engine
+## Embed the engine
 
 A Rust crate can embed the engine and drive it directly. A worker then becomes a
 callback instead of an HTTP endpoint.
@@ -172,7 +173,7 @@ Socket Mode is a thin transport over it. To run the same bot over the Events API
 instead, do three things.
 
 1. Implement `WorkspaceResolver`. It maps a team to a bot token, a tenant, and
-   an agent. Use one tenant per install, because `slack:{channel}:{ts}` ids are
+   an agent. Use one tenant per install, because `slack:{channel}:{ts}` IDs are
    unique only within a workspace.
 2. Mount `webhook_router`. It verifies signatures on `/events` and
    `/interactions`, and answers `url_verification`.

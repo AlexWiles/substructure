@@ -16,7 +16,7 @@ model = "anthropic/claude-sonnet-4-5"
 system = "You are the on-call assistant."
 ```
 
-The id is how everything else names the agent. Slack routes to it. A client
+The ID is how everything else names the agent. Slack routes to it. A client
 submits to it. A parent agent calls it.
 
 ## What you can declare
@@ -110,7 +110,8 @@ Tools come from three places.
 | Your code | Your worker | The config the worker returns |
 | The browser | The client | `tools` on the agent, with `handler = "client"` |
 
-Only browser tools go in the file. The tools your worker runs are worker code.
+Only browser tools go in the file. The tools that your worker runs are worker
+code.
 
 ## Next
 

@@ -54,7 +54,7 @@ it, the run stops with the call open. The client ends the call by `id`.
 Input and output schemas work the same as for worker tools. See
 [Tool calls](./60-tools.md).
 
-## Ending a call
+## End a call
 
 The client answers an open call with one of these inputs.
 
@@ -84,8 +84,9 @@ type ClientContext = {
 
 Each of these tools gets `handler: "client"`.
 
-The engine only adds tools. It ignores a name a worker tool or a sub-agent
-already uses. Use this for browser features the worker does not know about. See
+The engine only adds tools. It ignores a name that a worker tool or a sub-agent
+already uses. Use this for browser features that the worker does not know about.
+See
 [AG-UI](./140-ag-ui.md).
 
 ## Next

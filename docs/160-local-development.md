@@ -103,7 +103,7 @@ This serves the [REST API](./250-api.md) and the [AG-UI](./140-ag-ui.md)
 endpoints on `127.0.0.1:8080`. Point a frontend at it.
 
 `--no-auth` turns off client and worker authentication. Use it only for a server
-nothing off this machine can reach.
+that nothing off this machine can reach.
 
 ## Develop a worker
 
@@ -188,7 +188,7 @@ run` shows errors and `subs serve` shows info.
 
 ## Next
 
-- [Workers](./50-workers.md): the code the engine calls.
+- [Workers](./50-workers.md): the code that the engine calls.
 - [CLI](./260-cli.md): every command and flag.
 - [Self-hosting](./180-self-hosting.md): run the engine for other people.
 - [Cloud](./170-cloud.md): deploy the same file.

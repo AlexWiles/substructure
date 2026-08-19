@@ -12,12 +12,12 @@ again. The engine merges that view into the tree.
 ## The tree
 
 Each message is a node with a parent. The head is the active leaf. The path from
-the head to the root is the conversation the model sees.
+the head to the root is the conversation that the model sees.
 
 A decision request holds that path as `messages` and the whole tree as
 `message_tree`.
 
-## Submitting
+## Submit input
 
 A client sends input in two ways.
 
@@ -26,14 +26,14 @@ A client sends input in two ways.
 | `client.message` | Adds one message to the active path. |
 | `client.messages` | Sends the full conversation view. The engine merges edits and branches into the tree. |
 
-The engine matches the view against the tree by message `id`. Known ids at the
-start match existing nodes. The first message that is new or has no id starts a
+The engine matches the view against the tree by message `id`. Known IDs at the
+start match existing nodes. The first message that is new or has no ID starts a
 branch. `new_from` on the trigger gives its index.
 
-## Editing and branching
+## Edit and branch
 
 To edit, send the view again with an earlier message changed. Give that message
-a new id, or no id.
+a new ID, or no ID.
 
 The engine starts a branch at the last matching node, records the changed
 message and everything after it, and moves the head to the end. The original
@@ -42,12 +42,13 @@ branch stays in the tree.
 To regenerate, send the view without the last assistant reply. The engine
 records a new reply beside the old one.
 
-Sending a message again under its existing id changes nothing. The engine
-matches on id, not on content.
+Sending a message again under its existing ID changes nothing. The engine
+matches on ID, not on content.
 
 A view that stops at an earlier node writes nothing. It moves the head to that
-node and emits `head.moved`. The next reply branches there, and work in flight
-on the branch you left is cancelled. This is how a client changes branches.
+node and emits `head.moved`. The next reply branches there, and the engine
+cancels work in flight on the branch that you left. This is how a client changes
+branches.
 
 ## Example
 
@@ -64,7 +65,7 @@ An active path of `u1 → a1 → u2`. The client edits back to the first questio
 }
 ```
 
-`u1` matches. The message with no id starts a branch under it. The worker sees
+`u1` matches. The message with no ID starts a branch under it. The worker sees
 `messages: [u1, e1]` with `new_from: 1`. The `a1 → u2` branch stays.
 
 ## One turn at a time

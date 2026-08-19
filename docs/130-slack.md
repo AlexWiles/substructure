@@ -10,7 +10,7 @@ The thread is the session. Later mentions continue the conversation.
 
 ## Set it up
 
-Two steps. Say who answers, then connect the workspace.
+Setting up takes two steps: say who answers, then connect the workspace.
 
 ```toml title="substructure.toml"
 [slack]
@@ -41,7 +41,7 @@ An engine you run needs a Slack app you own. See
 ```toml title="substructure.toml"
 [slack]
 dm = "support"               # direct messages
-mentions = "support"         # @mentions, in any channel not named below
+mentions = "support"         # @mentions, in any channel the table omits
 
 [slack.channel.C0ENGOPS]     # eng-oncall
 agent = "oncall"
@@ -67,7 +67,7 @@ A channel names an agent, not a prompt or a tool list.
 [`[agent.<id>]`](./30-agents.md) already holds those. Point a channel at another
 agent and you change its prompt, its model, and its tools together.
 
-Name a channel by **id**, never by name. Get the id from the channel's About
+Name a channel by **ID**, never by name. Get the ID from the channel's About
 tab, from the channel link (`…/C0ENGOPS`), or from `conversations.list`. A
 `#name` is a parse error. The engine checks every `agent` against the file's
 sections at startup.
@@ -89,7 +89,7 @@ ahead of it.
 
 Each tool call and sub-agent run shows as a
 [task card](https://docs.slack.dev/reference/block-kit/blocks/task-card-block/).
-Cards are collapsed by default. Once the turn finishes, each card shows its
+Cards are collapsed by default. After the turn finishes, each card shows its
 arguments and its result.
 
 ## Interrupt prompts
@@ -127,39 +127,40 @@ Put the routing hint in the interrupt's `reason`: `tool_call`,
 ### What a click does
 
 A click answers the question. The prompt then loses its buttons and says who
-answered and which way: a `danger` button shows ❌, any other ✅. Work after
-that goes into a new message.
+answered and how: a `danger` button shows ❌, and any other button shows ✅.
+Work after that goes into a new message.
 
-A click cannot send anything the prompt did not offer, and clicking twice
-answers once.
+A click cannot send anything that the prompt did not offer, and a second click
+changes nothing.
 
 The worker side — what a click resumes with, and how to answer one yourself —
-is in [Interrupts](./100-interrupts.md#answering-a-prompt), with a worker in the
+is in [Interrupts](./100-interrupts.md#answer-a-prompt), with a worker in the
 [`node-hono-tool-approval`](../examples/node-hono-tool-approval) example.
 
 ### A message while a prompt is open
 
-The engine refuses a message while the session is parked, because the prompt
-owes an answer first. The bot posts the open question again rather than saying
-nothing, so a link in it comes back with it.
+The engine refuses a message while the session is paused, because the prompt
+needs an answer first. The bot posts the open question again instead of staying
+silent, so any link in the question comes back with it.
 
-## Authorizing a connection
+## Authorize a connection
 
 The bot raises a prompt of its own when a connection has no usable credential.
-It names the connection, says what happened to its credential, and links the
-page a person authorizes it on. See
+It names the connection, says what happened to its credential, and links to the
+page where a person authorizes it. See
 [Connectors](./40-connectors.md#when-a-credential-stops-working).
 
 The link is there when the file has a `[remote]` pinned to a project on the
 hosted cloud, which is the only deployment whose dashboard address follows from
-its API's. Anywhere else the prompt names `subs mcp login <id>`, which is what
-an operator runs where the engine is.
+its API address. Anywhere else the prompt names `subs mcp login <id>`, which is
+what an operator runs on the machine where the engine runs.
 
-`Retry` fetches the connection's tools again. The turn continues with them, or
-the same question comes back if the credential is still not good. The prompt is
-one per connection however many times a decision runs, so nobody is asked twice.
+`Retry` fetches the connection's tools again, and the turn continues with them.
+If the credential is still not good, the same question comes back. The engine
+raises one prompt per connection however many times a decision runs, so nobody
+is asked twice.
 
-## Customizing what the bot shows
+## Customize what the bot shows
 
 Every Slack message goes through the decision loop. A decision response can
 carry a `channels.slack` value. Without it, the bot shows its default. With it,
@@ -187,7 +188,7 @@ your value wins.
 | `update` | Rewrites one message, by channel and ts. |
 
 On every decision the engine proposes the default `view`. A worker that
-customizes changes the proposed view instead of building a new one.
+customizes the view changes the proposed view instead of building a new one.
 
 A view streams while the turn runs. The `turn.finished` view is the finished
 message: the reply that ends the turn posts it.
@@ -208,7 +209,7 @@ The bot reads what it missed. Messages sent between mentions reach the agent at
 the next mention. Users appear as `<@U…>: text`.
 
 The bot needs `channels:history` and `im:history` to do this. Without them it
-appends the new message alone, with a note that context may be missing.
+appends the new message alone, with a note that context might be missing.
 
 ## Attachments
 
@@ -223,18 +224,19 @@ becomes a note naming the file, so the agent can say what it cannot read.
 
 An image the agent produces goes back the other way. The bot uploads it to
 Slack once per workspace and the reply embeds it. This needs `files:write`.
-An image Slack refuses becomes a note in the reply; the text always arrives.
+An image that Slack refuses becomes a note in the reply; the text always
+arrives.
 
-## Pointing a session at a thread
+## Point a session at a thread
 
 A session belongs to Slack because of the `slack_channel` and `slack_thread_ts`
-owner metadata. The shape of the session id does not matter.
+owner metadata. The shape of the session ID does not matter.
 
 An API client can set the same metadata on its first submit. That session's
 turns then go into the thread like any other.
 
 A click on a reply goes back to the session that posted it. Each reply carries
-its session id.
+its session ID.
 
 ## Next
 

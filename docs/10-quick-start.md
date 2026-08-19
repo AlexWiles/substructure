@@ -9,7 +9,7 @@ of your own.
 To run the engine on your machine instead, with no account and no deployment,
 start with the [local quick start](./15-quick-start-local.md).
 
-## 1. Install the CLI
+## Install the CLI
 
 ```sh
 npm install -g @substructure.ai/cli
@@ -19,7 +19,7 @@ subs login
 `subs login` authenticates in your browser. It stores a token under
 `~/.config/substructure`.
 
-## 2. Describe the agent
+## Describe the agent
 
 Write `substructure.toml` in your project root.
 
@@ -44,18 +44,19 @@ url = "https://api.substructure.ai"
 
 `[llm.openrouter]` says which provider to call. `[agent.oncall]` says who calls
 it. `[slack]` says where the agent answers. `[remote]` says the file describes a
-deployment, so every command below acts on the cloud. The file holds no keys.
+deployment, so every command on this page acts on the cloud. The file holds no
+keys.
 
-## 3. Create the project
+## Create the project
 
 ```sh
 subs apply
 ```
 
-Apply creates the project and writes its id back into the file. Run it again
+Apply creates the project and writes its ID back into the file. Run it again
 after every change to the file.
 
-## 4. Add your LLM key
+## Add your LLM key
 
 ```sh
 subs llm set-key openrouter
@@ -63,7 +64,7 @@ subs llm set-key openrouter
 
 The command reads the key from stdin. Calls run on your key.
 
-## 5. Connect Slack
+## Connect Slack
 
 ```sh
 subs slack connect
@@ -71,7 +72,7 @@ subs slack connect
 
 This opens Slack's consent page. The token goes to the deployment.
 
-## 6. Talk to it
+## Talk to it
 
 Mention the bot in a channel and it answers in the thread. Send it a DM and it
 answers every message.

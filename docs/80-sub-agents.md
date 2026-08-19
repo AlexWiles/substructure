@@ -50,24 +50,25 @@ const poet = ({ proposed }) => proposed;
 const decide = (req) => (req.agent_id === "poet" ? poet(req) : assistant(req));
 ```
 
-## Declaring
+## Declare a sub-agent
 
-`sub_agents` lists by id the agents this agent can call. The model sees each one
-as a tool with that id as its name. The tool takes one `message` argument.
+`sub_agents` lists by ID the agents this agent can call. The model sees each
+one as a tool with that ID as its name. The tool takes one `message` argument.
 
-Ids and tool names share one namespace. An id must not match a tool name.
+IDs and tool names share one namespace. An ID must not match a tool name.
 
-The tool's description comes from the `description` on the section it names. Two
+The tool's description comes from the `description` on the section that it
+names. Two
 parents that call the same child describe it the same way.
 
-An agent that exists only to be called can carry just a `description` and a
+An agent that exists only to be called can carry only a `description` and a
 `worker`.
 
 A worker can also write the description. The expanded `sub_agents` arrive in the
 `session.start` proposal. So `description` is required only for an agent with no
 worker.
 
-## Calling
+## Call a sub-agent
 
 When the model calls a sub-agent, `proposed` starts a child session. It carries
 the child's first message, taken from the `message` argument.
@@ -75,12 +76,12 @@ the child's first message, taken from the `message` argument.
 The child runs as a normal session with its own `agent_id`, transcript, and
 cost. Its decision requests carry an `ancestry` list of the sessions above it.
 
-## Completing
+## Complete a call
 
 When the child's turn ends, the parent receives a `sub_agent.finished` trigger.
 
 `proposed` records the result as the tool's result and prompts the parent again.
-The child's cost and token use are added to the parent's turn.
+The engine adds the child's cost and token use to the parent's turn.
 
 ## Spec
 

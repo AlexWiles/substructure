@@ -18,7 +18,7 @@ Rust types.
 | `protocol.schema.json` | Every wire type, in one JSON Schema. The top-level type is `Protocol`. |
 | `worker.openapi.json` | The worker endpoint: `POST /`, from `DecisionRequest` to `DecisionResponse`. |
 
-## Generating
+## Generate the types
 
 Point a generator at `protocol.schema.json`. The examples keep the output as
 `protocol.ts`, `protocol.go`, or `protocol.py`.

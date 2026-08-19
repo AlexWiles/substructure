@@ -63,7 +63,7 @@ function decide({ trigger, proposed }) {
 }
 ```
 
-## Declaring a tool
+## Declare a tool
 
 Tools go in the agent config. The model sees `name`, `description`, and `input`.
 
@@ -97,7 +97,7 @@ The engine checks a tool's schemas in both directions. It only validates. A
 value that passes is exactly the value that came in. The engine converts no
 types and adds no defaults.
 
-A tool with no schema is not checked.
+The engine does not check a tool with no schema.
 
 ### input
 
@@ -191,7 +191,7 @@ End a call with a result.
 }
 ```
 
-A result is blocks of content, in the shape MCP defines. Text is the common
+A result is blocks of content, in the shape that MCP defines. Text is the common
 case:
 
 ```json

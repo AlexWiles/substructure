@@ -3,15 +3,16 @@ title: Deferred tools
 group: Building agents
 ---
 
-A deferred tool is one the request does not carry. The engine still holds it,
-still finds it in a search, and still runs a call to it.
+A deferred tool is one that the request does not carry. The engine still holds
+it, still finds it in a search, and still runs a call to it.
 
 Tool definitions sit at the front of the request, before the conversation. A
 provider caches an exact prefix, so a definition that moves costs the cache of
 everything behind it. Deferral keeps a large tool set out of that prefix.
 
 Use it when the list is long enough that the model starts choosing badly, or
-when the definitions cost more than they earn. It reads every one on every turn.
+when the definitions cost more than they earn. The model reads every definition
+on every turn.
 
 ## Example
 
@@ -39,12 +40,12 @@ function decide({ trigger, proposed }) {
 }
 ```
 
-The request carries `get_weather` and two tools the engine adds. It carries
-neither deferred tool.
+The request carries `get_weather` and two tools that the engine adds. It
+carries neither deferred tool.
 
 ## The two tools
 
-An agent with one or more deferred tools gets two more. It gets one set,
+An agent with one or more deferred tools gets two more. It gets one set of two,
 whatever the number of deferred tools.
 
 ```jsonc
@@ -55,17 +56,16 @@ whatever the number of deferred tools.
 ```
 
 Each tool does one thing. A search answers with the name, the description, and
-the input schema of each match, so one search is the whole distance to a call.
-An empty query matches every tool, so a model that does not know what is
-available starts there.
+the input schema of each match, so one search gives the model everything it
+needs to make a call. An empty query matches every tool, so a model that does
+not know what is available starts there.
 
 A search gives each tool one name. `call_tool` takes that name back, exactly as
-it was given. It is the same name the model calls directly when the tool is not
-deferred.
+the search gave it. It is the same name that the model calls directly when the
+tool is not deferred.
 
 A search covers every tool of the agent: from your worker or from a connection,
-deferred or not. Therefore an answer of nothing means that the agent has
-nothing.
+deferred or not. So an empty answer means that the agent has no tools.
 
 ## Any source
 
@@ -79,10 +79,10 @@ Deferral is a property of a tool. Each source sets the flag its own way.
 
 `defer_tools` is the agent's default, and a tool or a connection that states
 its own `defer` overrides it. See
-[Connectors](./40-connectors.md#deferring-a-connection).
+[Connectors](./40-connectors.md#defer-a-connection).
 
-An agent can mix. A tool that does not defer stays in the request, beside the
-two.
+An agent can mix the two. A tool that does not defer stays in the request,
+beside `tool_search` and `call_tool`.
 
 `defer_tools` takes `true` for the defaults, or a table for the settings. The
 presence of the key is the switch, so an agent cannot carry a setting that does
@@ -100,35 +100,36 @@ strategy = "search"
 | Key | Default | What it sets |
 | --- | --- | --- |
 | `strategy` | `search` | Which tools the engine gives the model. `search` is the only value today. |
-| `max_matches` | `5` | The most matches one search answers with. A match carries a whole schema, so an answer of many is the tool list the search replaced. An answer says how many it left out. |
+| `max_matches` | `5` | The most matches one search answers with. A match carries a whole schema, so an answer with many matches is the tool list that the search replaced. An answer says how many matches it left out. |
 
-`max_matches` is never zero: a search that can answer with nothing is a search
-the model cannot use.
+`max_matches` is never zero: a search that can never return a match is a search
+that the model cannot use.
 
 ## What does not change
 
-The wrapper stops at the engine. A `call_tool` becomes the call it names, with
-that tool's own name, that tool's own arguments, and that tool's own route.
+The wrapper stops at the engine. A `call_tool` becomes the call that it names,
+with that tool's own name, that tool's own arguments, and that tool's own
+route.
 
 | | |
 | --- | --- |
 | Where it runs | Its own handler decides: your worker, the client, or the engine. |
-| `tool.execute` | Arrives with the tool's own name. Your worker cannot tell. |
+| `tool.execute` | Arrives with the tool's own name. Your worker cannot tell the difference. |
 | `tool.finished` | Reports the tool's own name. |
 | Schemas | The engine checks the arguments against the tool's own `input`, because the provider never received it. |
 | Retries | The call's own policy. |
 
-A `call_tool` that names a tool the agent cannot reach is refused. The error
-names the tools it can reach.
+The engine refuses a `call_tool` that names a tool the agent cannot reach. The
+error names the tools that the agent can reach.
 
-A deferred name has no length limit. It never reaches a provider, so there is
-nothing to fit.
+A deferred name has no length limit. It never reaches a provider, so there is no
+provider limit to fit.
 
 ## The cache
 
 The two definitions are constant. Their names and their text say nothing about
-which tools exist, so the request does not change when the set behind them
-changes.
+which tools exist, so the request does not change when the set of tools behind
+them changes.
 
 | What changes mid-session | What the request does |
 | --- | --- |
@@ -138,13 +139,13 @@ changes.
 | A tool that does not defer is added | It enters the request, and the cache behind it is lost. |
 
 The engine decides from the config alone, and not from what a fetch has
-answered. An agent that sets `defer_tools` thus carries the two tools from
-its first turn, before it names one connection. A connection added in
-turn 50 moves no definition.
+answered. An agent that sets `defer_tools` therefore carries the two tools from
+its first turn, even before it names a connection. A connection added in turn 50
+moves no definition.
 
-The answers are where everything variable lives: which tools exist, and what
-each one takes. An answer is a tool result, at the end of the request, behind
-the cache.
+The answers carry everything that varies: which tools exist, and what each one
+takes. An answer is a tool result, at the end of the request, behind the
+cache.
 
 ## Next
 

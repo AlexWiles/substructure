@@ -73,7 +73,7 @@ const tools = [
 ];
 
 function decide({ trigger, proposed }) {
-    // Add our tools to the config from the file.
+    // Add the tools to the config from the file.
     if (trigger.type === "session.start") {
         return {
             agent: {

@@ -62,7 +62,7 @@ A file has two roles. It can have one or both.
 | An engine you run | `db`, `log`, `[run]`, `[serve]` | `subs run`, `subs serve` |
 | A deployment you administer | `[remote]` | `subs apply`, `subs keys`, `subs sessions` |
 
-What the project is stays the same for both roles: `name`, `[llm.<id>]`,
+The project itself stays the same for both roles: `name`, `[llm.<id>]`,
 `[agent.<id>]`, `[mcp.<id>]`, and `[slack]`.
 
 A second environment is a second file. `subs apply -c substructure.staging.toml`
@@ -81,7 +81,7 @@ deploys a separate project.
 
 ## `[llm.<id>]`
 
-Where a model call runs. An agent names a block by its id.
+Where a model call runs. An agent names a block by its ID.
 
 ```toml
 [llm.claude]
@@ -109,7 +109,7 @@ deployment refuses a document that carries one.
 
 ## `[agent.<id>]`
 
-An agent. The id is what clients, channels, and parent agents route on.
+An agent. The ID is what clients, channels, and parent agents route on.
 
 ```toml
 [agent.support]
@@ -118,7 +118,7 @@ model = "claude-sonnet-4-5"
 system = "You are a support agent."
 mcp = ["sentry"]
 sub_agents = ["researcher"]
-tools = [{ name = "confirm", description = "Ask the human", handler = "client" }]
+tools = [{ name = "confirm", description = "Ask a person", handler = "client" }]
 worker = "https://bot.example.com/agent"
 signing_secret_env = "SUPPORT_SIGNING_SECRET"
 
@@ -132,10 +132,10 @@ tool = { max_attempts = 3 }
 | `model` | string | The model. Required when the section sets anything. |
 | `system` | string | The system prompt. |
 | `description` | string | What this agent does, shown to a parent that calls it. |
-| `mcp` | list | Connections. An id, or a table to take fewer tools, to put them behind a search, to stop before a call, or to go on without one that needs authorizing: `{ id, tools, approve, auth_failure }`. `tools` sets the filter and `defer`; see [Deferring a connection](./40-connectors.md#deferring-a-connection). `approve` is `never` (the default), `destructive`, or `always`; see [Approving a call](./40-connectors.md#approving-a-call). `auth_failure` is `interrupt` (the default) or `degrade`; see [Connectors](./40-connectors.md#when-a-credential-stops-working). |
+| `mcp` | list | Connections. An ID, or a table to take fewer tools, to put them behind a search, to stop before a call, or to go on without one that needs authorizing: `{ id, tools, approve, auth_failure }`. `tools` sets the filter and `defer`; see [Defer a connection](./40-connectors.md#defer-a-connection). `approve` is `never` (the default), `destructive`, or `always`; see [Approve a call](./40-connectors.md#approve-a-call). `auth_failure` is `interrupt` (the default) or `degrade`; see [Connectors](./40-connectors.md#when-a-credential-stops-working). |
 | `defer_tools` | bool or table | Absent by default. Keeps every tool of this agent out of the request, whatever its source. `true` takes the defaults; a table sets them, with `strategy` for which tools find the deferred ones (`search`, the only value today) and `max_matches` for how many a search answers with (`5`). A tool or a connection overrides it with its own `defer`. See [Deferred tools](./65-deferred-tools.md). |
-| `announce_mcp` | string | `auto` by default. Where the engine tells the model that a connection is available: `auto` or `never`. See [Announcing a connection](./40-connectors.md#announcing-a-connection). |
-| `sub_agents` | list of ids | Agents this one can call. |
+| `announce_mcp` | string | `auto` by default. Where the engine tells the model that a connection is available: `auto` or `never`. See [Announce a connection](./40-connectors.md#announce-a-connection). |
+| `sub_agents` | list of IDs | Agents this one can call. |
 | `tools` | list | Browser tools. Each needs `handler = "client"`. |
 | `worker` | url | Where decisions go. Leave it off and the engine decides. |
 | `signing_secret_env` | string | The variable holding the signing secret. For an engine you run. |
@@ -192,12 +192,12 @@ off = true
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `dm` | agent id | Answers direct messages. |
-| `mentions` | agent id | Answers mentions in any channel `channel` does not name. |
-| `channel.<id>.agent` | agent id | Answers in that channel. |
+| `dm` | agent ID | Answers direct messages. |
+| `mentions` | agent ID | Answers mentions in any channel `channel` does not name. |
+| `channel.<id>.agent` | agent ID | Answers in that channel. |
 | `channel.<id>.off` | bool | The bot stays out of that channel. |
 
-Name a channel by id, never by name. A `#name` is a parse error. See
+Name a channel by ID, never by name. A `#name` is a parse error. See
 [Slack](./130-slack.md).
 
 ## `[run]`
@@ -206,7 +206,7 @@ Defaults for `subs run`.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `agent` | agent id | none | Which agent a bare `subs run` uses. |
+| `agent` | agent ID | none | Which agent a bare `subs run` uses. |
 | `output` | `ag-ui`, `jsonl`, `pretty` | `ag-ui` | How to print the turn. |
 
 ## `[serve]`
@@ -227,8 +227,8 @@ host, or another person's `subs serve`.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `url` | url | `https://api.substructure.ai` | The API to talk to. |
-| `org` | id | none | Written by `subs link` or `subs apply`. |
-| `project` | id | none | Written by `subs apply` when it creates the project. |
+| `org` | ID | none | Written by `subs link` or `subs apply`. |
+| `project` | ID | none | Written by `subs apply` when it creates the project. |
 
 `subs apply` writes the pin back into the file and keeps your comments. A second
 apply changes nothing.

@@ -121,7 +121,7 @@ The call ends with a final error in three cases.
 - A policy with no attempts left.
 - An expired `total_timeout_secs`.
 
-An attempt timeout is retryable. The next attempt may work. A total timeout is
+An attempt timeout is retryable. The next attempt might work. A total timeout is
 not.
 
 `code` describes a failure. `retryable` decides whether the engine tries again.

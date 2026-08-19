@@ -25,7 +25,7 @@ function decide({ trigger, proposed, state }) {
 }
 ```
 
-## Reading and writing
+## Read and write state
 
 The engine sends the current state on every request. To change it, return a new
 `state` on the decision.
@@ -39,9 +39,10 @@ The engine sends the current state on every request. To change it, return a new
 Writing the same value again records no new version. A session with no state
 reads as `null`, so check for it.
 
-## Branching
+## Branches
 
-State is attached to the message tree. If you edit an earlier message or branch
+The engine attaches state to the message tree. If you edit an earlier message or
+branch
 the conversation, the engine reads the state as it was at that point.
 
 `DecisionRequest.state` is always correct for the active path. See
@@ -49,10 +50,11 @@ the conversation, the engine reads the state as it was at that point.
 
 ## State and config
 
-Both travel with the decision and are versioned the same way. The engine reads
-them differently.
+Both travel with the decision, and the engine versions them the same way. It
+reads them differently.
 
-The agent config is a typed document the engine reads to propose model calls.
+The agent config is a typed document that the engine reads to propose model
+calls.
 State is memory the engine stores and returns unchanged.
 
 ## Spec

@@ -14,7 +14,8 @@ The block's `type` says who makes the call.
 | `openrouter` | The engine, against OpenRouter. | yes |
 | `worker` | Your worker. | no |
 
-The file is the only place this is declared. Nothing on the wire can change it.
+The file is the only place that declares this. Nothing on the wire can change
+it.
 
 ## Bring your own key
 
@@ -30,7 +31,7 @@ model = "claude-sonnet-4-5"
 ```
 
 There is no default block and no fallback. An agent names a block, or its calls
-fail with an error that lists the blocks the file declares.
+fail with an error that lists the blocks that the file declares.
 
 ## Call the model yourself
 
@@ -98,7 +99,7 @@ only to `type = "worker"`.
 Set it and the request is the provider's own body, ready to send. You return the
 provider's own response.
 
-A call the engine makes always uses the engine's own shapes.
+A call that the engine makes always uses the engine's own shapes.
 
 ## Streaming
 
@@ -130,7 +131,7 @@ tool calls or ends the turn. Return `proposed`.
 
 The block's `type` decides who holds the key.
 
-**On an engine you run**, a block the engine calls reads its key from the
+**On an engine you run**, a block that the engine calls reads its key from the
 environment. `api_key_env` names the variable. Without it, the engine uses the
 vendor's default: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
 `OPENROUTER_API_KEY`.
@@ -173,14 +174,14 @@ cache_ttl = "in_memory" | "24h"    # `openai`
 
 Every engine-run call asks the vendor to cache the prompt: the tools, the system
 prompt, and the transcript as it grows. A turn that hits the cache pays a
-fraction of the input price, and the engine holds the front of the prompt still
-so the cache keeps hitting.
+fraction of the input price, and the engine keeps the front of the prompt
+unchanged so the cache keeps hitting.
 
 A cached prefix lives about five minutes by default, and each hit resets the
 clock. A session that turns faster than that never needs `cache_ttl`. Set it
-where a session waits on a person or a slow job between turns, and the prompt
-would otherwise be read again in full: the longer life costs more to write, and
-pays for itself from about the third turn that reads it.
+when a session waits on a person or a slow job between turns, and the vendor
+would otherwise read the prompt again in full: the longer life costs more to
+write, and pays for itself from about the third turn that reads it.
 
 ```typescript
 type LlmExecute = {

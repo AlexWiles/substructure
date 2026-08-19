@@ -1,18 +1,18 @@
 # substructure.ai
-[https://substructure.ai](https://substructure.ai)
+[substructure.ai](https://substructure.ai)
 
 Build production-ready AI agents in any language with no SDK.
 
 [![cli](https://img.shields.io/npm/v/@substructure.ai/cli?label=cli)](https://www.npmjs.com/package/@substructure.ai/cli)
 
-> Pre-1.0: APIs and the wire protocol may change between releases.
+> Pre-1.0: APIs and the wire protocol might change between releases.
 
 Substructure runs the agent loop for you. It calls the model, runs the tools,
 saves every step, and streams events to your frontend.
 
 You declare an agent in one file. When you need your own code in the loop, point
-the agent at an HTTP endpoint you own. Everything is HTTP, so you can write that
-endpoint in any language. There is no SDK to install.
+the agent at an HTTP endpoint that you own. Everything is HTTP, so you can write
+that endpoint in any language. There is no SDK to install.
 
 Run it on the hosted cloud, on your machine, or on your own servers. The same
 file describes all three.
@@ -78,7 +78,7 @@ you care about.
 import { createServer } from "node:http";
 
 function decide({ trigger, proposed }) {
-    // Run our tool when the model calls it.
+    // Run the tool when the model calls it.
     if (trigger.type === "tool.execute" && trigger.name === "get_time") {
         return { actions: [{ type: "tool.result", result: new Date().toISOString() }] };
     }
@@ -183,7 +183,7 @@ same message submitted twice runs once.
 
 Docs: [Durability](./docs/200-durability.md)
 
-### Waiting for humans
+### Human approval
 
 An agent can stop and wait for a person to approve, then continue. A waiting
 agent uses no compute. In Slack this is a button.
@@ -237,8 +237,8 @@ Examples: [Node](./examples/node-hono-plan-mode), [Python](./examples/python-fas
 
 ### Sub-agents
 
-An agent can give work to other agents. Each child runs in its own session. Cost
-and token use roll up to the parent.
+An agent can give work to other agents. Each child runs in its own session. The
+parent's totals include each child's cost and token use.
 
 Docs: [Sub-agents](./docs/80-sub-agents.md)
 

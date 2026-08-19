@@ -6,8 +6,8 @@ group: Running it
 Substructure cloud hosts the engine. A project receives client traffic, decides
 each turn, and makes the model calls you gave it a key for.
 
-You manage a project with `subs`. There is no dashboard step you cannot do from
-the terminal.
+You manage a project with `subs`. There is no dashboard step that you cannot do
+from the terminal.
 
 ## One file is one project
 
@@ -33,8 +33,8 @@ worker = "https://my-worker.example.com/agent"
 url = "https://api.substructure.ai"
 ```
 
-`[remote]` is what makes this file a deployment's. Without it, every command
-reads the engine on your machine instead.
+`[remote]` is what makes this file describe a deployment. Without it, every
+command reads the engine on your machine instead.
 
 ```sh
 subs apply

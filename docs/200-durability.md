@@ -45,11 +45,11 @@ A client that lost its connection resumes the event stream from a cursor. It
 reads the events it missed, then goes live.
 
 If it sends its conversation view again, the engine matches the messages against
-the tree by id. A reconnect records nothing new.
+the tree by ID. A reconnect records nothing new.
 
 ## Storage
 
-The engine saves to a store you can replace. The CLI uses SQLite in
+The engine saves to a store that you can replace. The CLI uses SQLite in
 `substructure.db`.
 
 Stop the engine, come back later, and the session continues.

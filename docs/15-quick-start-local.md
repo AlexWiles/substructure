@@ -5,15 +5,15 @@ group: Getting started
 
 Run an agent on your machine. One file, two commands, no account.
 
-## 1. Install the CLI
+## Install the CLI
 
 ```sh
 npm install -g @substructure.ai/cli
 ```
 
-The CLI is the engine too. Nothing below signs in or leaves this machine.
+The CLI is the engine too. Nothing on this page signs in or leaves this machine.
 
-## 2. Describe the agent
+## Describe the agent
 
 Write `substructure.toml` in your project root.
 
@@ -37,7 +37,7 @@ output = "pretty"
 it. The file names no `[remote]`, so every command acts here. `[run]` gives
 `subs run` its defaults so you stop repeating flags.
 
-## 3. Give it a key
+## Give it a key
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
@@ -46,7 +46,7 @@ export OPENROUTER_API_KEY=sk-or-...
 The engine takes the key from your environment. The file holds no keys — it
 names variables at most, with `api_key_env`.
 
-## 4. Talk to it
+## Talk to it
 
 ```sh
 subs run "what is broken?"
@@ -55,7 +55,7 @@ subs run "what is broken?"
 The reply streams to your terminal. `output = "pretty"` shows the turn as text;
 the default, `ag-ui`, streams protocol events.
 
-## 5. Continue the session
+## Continue the session
 
 After every run the CLI prints the command to continue it.
 
@@ -78,9 +78,9 @@ subs sessions events <session-id> -o pretty
 
 ## What you have
 
-An agent that runs on this machine, on your key, against a SQLite file you can
-delete. The engine calls the model, saves every step, and replays it on demand.
-You wrote one file and no code.
+An agent that runs on this machine, on your key, against a SQLite file that you
+can delete. The engine calls the model, saves every step, and replays it on
+demand. You wrote one file and no code.
 
 `subs serve --no-auth` runs the same engine as an HTTP server, with the REST and
 AG-UI endpoints a frontend needs.

@@ -21,16 +21,17 @@ it sends your worker.
 System has the most privilege, then ApiKey and Admin, then Frontend.
 
 ApiKey and Admin differ in who holds the credential: a program holds a key, a
-person logs in. Only a worker answers a decision the engine hands out, so only
-ApiKey may. An admin administers a session and does not run the model for it.
+person logs in. Only a worker answers a decision that the engine hands out, so
+only an ApiKey caller may. An admin administers a session and does not run the
+model for it.
 
 ## Client tokens
 
 A client calls the client API with `Authorization: Bearer <jwt>`.
 
 The engine verifies the token as HS256 against the configured issuer and
-audience, using `CLIENT_TOKEN_HS256_SECRET`. The `sub` claim names the person;
-the issuer is stamped here, never read from the token.
+audience, using `CLIENT_TOKEN_HS256_SECRET`. The `sub` claim names the person,
+and the engine stamps the issuer here rather than reading it from the token.
 
 Your backend creates these tokens through the machine API, using its own API
 key.
@@ -43,8 +44,8 @@ Authorization: Bearer <SUBSTRUCTURE_API_KEY>
 ```
 
 `identity.id` is required. It names the person the session runs for, under the
-`app` issuer — the one your application vouches for. You choose the id and we
-sign it, so a browser holding the token cannot rename itself.
+`app` issuer — the one your application vouches for. You choose the ID and the
+engine signs it, so a browser holding the token cannot rename itself.
 
 `identity.visibility` says whether anyone but that person can read the session,
 and it decides whether their own credentials may answer there. Only you know
@@ -92,21 +93,21 @@ type WorkerIdentity = {
 The engine sets this once and vouches for it. Read it without verifying it. It
 is who the session is for, not the caller of this request.
 
-The issuer is half the name. An id is only unique within the source that minted
+The issuer is half the name. An ID is only unique within the source that minted
 it, so your application's `bob` and a workspace's `bob` are two people, and
-comparing ids alone would conflate them.
+comparing IDs alone would conflate them.
 
 ## Patterns
 
 ### One session per user
 
-Authenticate the user in your own app. Create a token that carries their id and
+Authenticate the user in your own app. Create a token that carries their ID and
 give it to the browser. That user owns every session the browser opens.
 
 ### Limit by identity
 
 Read `identity` on each decision to give an owner only their own data. Check the
-issuer as well as the id: an operator is not the end user with that name.
+issuer as well as the ID: an operator is not the end user with that name.
 
 ```javascript
 function decide({ trigger, proposed, identity }) {
@@ -139,7 +140,8 @@ See [Workers](./50-workers.md#verify-the-signature).
 
 An agent that names no variable on a local engine gets unsigned requests.
 
-Worker responses are not signed. The engine trusts the connection it opened.
+The engine does not sign worker responses. It trusts the connection that it
+opened.
 
 ## Rules
 
@@ -147,11 +149,12 @@ Worker responses are not signed. The engine trusts the connection it opened.
 - A Frontend caller ends only client-handled tool calls.
 - A worker decision needs an ApiKey or System caller. An Admin caller cannot
   submit one, and cannot answer an `llm.execute`.
-- Cancelling a session needs any caller but Frontend.
+- Canceling a session needs any caller but Frontend.
 - A session records the kind of owner as well as the name. An end user opens
-  only a session an end user owns, so an admin and a user with the same name
-  are different owners.
-- A session an operator starts is owned by that credential, and named by it.
+  only a session that an end user owns, so an admin and a user with the same
+  name are different owners.
+- A session that an operator starts belongs to that credential, and takes its
+  name from it.
 - To resume an interrupt, a caller needs at least the privilege of the caller
   that raised it.
 
