@@ -97,3 +97,11 @@ auth = { renderer = "none" }
 
 `none` is the one that matters: it says the server wants no credential, so
 nothing keeps asking you to authorize it.
+
+## Next
+
+- [Connectors](./40-connectors.md): the rules a plugin's servers follow.
+- [Agents](./30-agents.md): the section that names a plugin.
+- [Config](./220-config.md): every key of a `[plugin.<id>]` section.
+- [Tool calls](./60-tools.md): what the model does with the tools a plugin
+  brings.

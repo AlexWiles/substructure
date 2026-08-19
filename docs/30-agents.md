@@ -28,6 +28,7 @@ submits to it. A parent agent calls it.
 | `system` | The system prompt. |
 | `description` | What this agent does, for a parent that calls it. |
 | `mcp` | Connections whose tools the model can call. See [Connectors](./40-connectors.md). |
+| `plugins` | Plugins whose skills and servers this agent gets. See [Plugins](./45-plugins.md). |
 | `sub_agents` | Other agents this one can call. See [Sub-agents](./80-sub-agents.md). |
 | `tools` | Tools the browser runs. See [Client-side tools](./150-client-tools.md). |
 | `worker` | Where decisions go. See [Workers](./50-workers.md). |
@@ -107,6 +108,7 @@ Tools come from three places.
 | Source | Runs on | Declared in |
 | --- | --- | --- |
 | A connector | The engine | `mcp` on the agent |
+| A plugin | The engine | `plugins` on the agent |
 | Your code | Your worker | The config the worker returns |
 | The browser | The client | `tools` on the agent, with `handler = "client"` |
 
@@ -116,6 +118,7 @@ code.
 ## Next
 
 - [Connectors](./40-connectors.md): tools from Sentry, GitHub, and any MCP server.
+- [Plugins](./45-plugins.md): skills and servers from a plugin directory.
 - [Workers](./50-workers.md): decide with your own code.
 - [Sub-agents](./80-sub-agents.md): agents that call agents.
 - [Config](./220-config.md): every key in the file.

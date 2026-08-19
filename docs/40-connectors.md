@@ -482,5 +482,6 @@ what the `Retry` button proposes. See [Protocol](./230-protocol.md#actions).
 - [Interrupts](./100-interrupts.md): the pause that an approval creates.
 - [Tool calls](./60-tools.md): tools your worker runs.
 - [Deferred tools](./65-deferred-tools.md): what `defer` turns on.
+- [Plugins](./45-plugins.md): a directory that brings its own MCP servers.
 - [Agents](./30-agents.md): the section that names a connection.
 - [Sub-agents](./80-sub-agents.md): put a large connector behind a child agent.

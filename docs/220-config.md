@@ -63,7 +63,7 @@ A file has two roles. It can have one or both.
 | A deployment you administer | `[remote]` | `subs apply`, `subs keys`, `subs sessions` |
 
 The project itself stays the same for both roles: `name`, `[llm.<id>]`,
-`[agent.<id>]`, `[mcp.<id>]`, and `[slack]`.
+`[agent.<id>]`, `[mcp.<id>]`, `[plugin.<id>]`, and `[slack]`.
 
 A second environment is a second file. `subs apply -c substructure.staging.toml`
 deploys a separate project.
@@ -131,10 +131,12 @@ tool = { max_attempts = 3 }
 | `llm` | string | The `[llm.<id>]` block. Required when the section sets anything. |
 | `model` | string | The model. Required when the section sets anything. |
 | `system` | string | The system prompt. |
+| `effort` | string | How hard the model thinks: `xhigh`, `high`, `medium`, `low`, `minimal`, or `none`. It sits on the agent because it pairs with the model. |
 | `description` | string | What this agent does, shown to a parent that calls it. |
 | `mcp` | list | Connections. An ID, or a table to take fewer tools, to put them behind a search, to stop before a call, or to go on without one that needs authorizing: `{ id, tools, approve, auth_failure }`. `tools` sets the filter and `defer`; see [Defer a connection](./40-connectors.md#defer-a-connection). `approve` is `never` (the default), `destructive`, or `always`; see [Approve a call](./40-connectors.md#approve-a-call). `auth_failure` is `interrupt` (the default) or `degrade`; see [Connectors](./40-connectors.md#when-a-credential-stops-working). |
 | `defer_tools` | bool or table | Absent by default. Keeps every tool of this agent out of the request, whatever its source. `true` takes the defaults; a table sets them, with `strategy` for which tools find the deferred ones (`search`, the only value today) and `max_matches` for how many a search answers with (`5`). A tool or a connection overrides it with its own `defer`. See [Deferred tools](./65-deferred-tools.md). |
 | `announce_mcp` | string | `auto` by default. Where the engine tells the model that a connection is available: `auto` or `never`. See [Announce a connection](./40-connectors.md#announce-a-connection). |
+| `plugins` | list | Plugins this agent uses. An ID, or a table with the same knobs as an `mcp` entry, applied to the plugin's servers: `{ id, tools, approve, auth_failure }`. See [Plugins](./45-plugins.md). |
 | `sub_agents` | list of IDs | Agents this one can call. |
 | `tools` | list | Browser tools. Each needs `handler = "client"`. |
 | `worker` | url | Where decisions go. Leave it off and the engine decides. |
@@ -173,6 +175,27 @@ prefix_tools = false
 
 A `token` written in the file is a parse error. Fill a connection with `subs mcp
 login <id>` or `subs mcp set-token <id>`. See [Connectors](./40-connectors.md).
+
+## `[plugin.<id>]`
+
+A plugin directory the CLI resolves and sends to the deployment. An agent names
+a plugin by its ID.
+
+```toml
+[plugin.pdf]
+path = "./plugins/pdf-tools"
+auth = { renderer = "none" }
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `path` | path | required | The plugin directory. A relative path resolves against the file. |
+| `auth` | table | ask the server | How each of the plugin's servers authenticates, as `<server> = "oauth" \| "token" \| "none"`. `mcp.json` has no field for this. |
+
+The CLI resolves the directory to data — at startup for a local engine, at
+`subs apply` for a deployment — so a session never reads plugin files. A
+plugin's servers join the connection registry as `<plugin>-<server>` and
+authorize like any connection. See [Plugins](./45-plugins.md).
 
 ## `[slack]`
 
@@ -258,6 +281,7 @@ The file names secrets. It never holds them.
 ## Next
 
 - [Agents](./30-agents.md): what an agent section declares.
+- [Plugins](./45-plugins.md): what a `[plugin.<id>]` directory holds.
 - [CLI](./260-cli.md): the commands that read this file.
 - [Cloud](./170-cloud.md): applying it to a deployment.
 - [Protocol](./230-protocol.md): the same types on the wire.

@@ -127,7 +127,8 @@ Put the routing hint in the interrupt's `reason`: `tool_call`,
 ### What a click does
 
 A click answers the question. The prompt then loses its buttons and says who
-answered and how: a `danger` button shows ❌, and any other button shows ✅.
+answered and how: a `danger` button reads as declined and shows ❌, and any
+other button reads as approved and shows ✅.
 Work after that goes into a new message.
 
 A click cannot send anything that the prompt did not offer, and a second click

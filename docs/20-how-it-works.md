@@ -89,6 +89,7 @@ The trigger says why the engine is asking.
 | `llm.finished` | A model call ended. |
 | `sub_agent.finished` | A child session completed. |
 | `interrupt.resumed` | Someone resumed a paused branch. |
+| `turn.finished` | A turn completed. It carries the turn's cost and output. |
 
 ## Actions
 
@@ -103,6 +104,8 @@ The actions in a decision tell the engine what to do.
 | `sub_agent.spawn` | Start a child session. |
 | `message.send` | Write a message into a session. |
 | `interrupt` | Pause the branch until someone resumes it. |
+| `interrupt.resolve` | Clear an open interrupt and resume. |
+| `connector.sync` | Fetch a connection's tools again. |
 | `done` | End the turn. |
 
 ## Where things run

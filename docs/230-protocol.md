@@ -29,7 +29,7 @@ The model called your `get_weather` tool.
   "session_id": "0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
   "decision_id": "0193a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61",
   "agent_id": "oncall",
-  "identity": { "id": "user_42" },
+  "identity": { "subject": { "issuer": "app", "id": "user_42" }, "visibility": "shared" },
   "trigger": {
     "type": "tool.execute",
     "id": "call_abc",
@@ -106,7 +106,7 @@ type DecisionRequest = {
 | `session_id` | The conversation this decision belongs to. |
 | `decision_id` | This decision. Only one is live at a time. |
 | `agent_id` | Which agent to act as. Route on this when one worker serves several agents. |
-| `identity` | The session's owner. The engine sets it once and vouches for it. |
+| `identity` | The session's owner. The engine sets it once and vouches for it. See [Session identity](./190-auth.md#session-identity). |
 | `trigger` | Why the engine is asking. See [Triggers](#triggers). |
 | `proposed` | What the engine plans to do. Return it unchanged to accept it. Empty when only your worker knows what to do. |
 | `state` | Your agent state, stored exactly as you wrote it. `null` when the session has none. |
@@ -121,8 +121,14 @@ type DecisionRequest = {
 | `turn_id` | The turn this decision belongs to. |
 
 ```typescript
+type Subject = {
+    issuer: string              // where the name comes from: "slack", "app", "cli", …
+    id: string                  // that source's own name for the person
+}
+
 type WorkerIdentity = {
-    id?: string
+    subject?: Subject           // absent: nobody is behind this session
+    visibility: "shared" | "private"
     metadata?: Record<string, string>
 }
 
@@ -391,12 +397,12 @@ type AgentConfig = {
     model: string               // the only required field
     llm?: string                // the [llm.<id>] block calls run on
     system?: string
-    handler?: "server" | "worker"    // where model calls run. default server
-    format?: "openai" | "anthropic"  // wire format when handler is worker
+    effort?: "xhigh" | "high" | "medium" | "low" | "minimal" | "none"
     retry?: RetryConfig
     tools?: AgentTool[]
     sub_agents?: SubAgent[]
     mcp?: McpServer[]
+    plugins?: AgentPlugin[]
     defer_tools?: boolean | {   // the default for every tool of this agent.
         strategy?: "search"     //   presence is the switch. omitted: no opinion
         max_matches?: number    //   matches per search, >= 1. omitted: 5
@@ -434,7 +440,25 @@ type McpTools = {
     idempotent?: boolean
     defer?: boolean             // omitted: the agent's defer_tools
 }
+
+type AgentPlugin = {
+    id: string                  // a plugin the engine holds. never a path
+    description?: string
+    servers?: string[]          // connection ids of this plugin's servers
+    skills?: unknown[]          // the skills the entry lists to the model
+    tools?: McpTools            // applied to each of the plugin's servers
+    approve?: "never" | "destructive" | "always"
+    auth_failure?: "interrupt" | "degrade"
+}
 ```
+
+`effort` sits on the agent because it pairs with the model. Unset, it sends no
+reasoning config and leaves the provider its own default. See
+[Plugins](./45-plugins.md) for what an `AgentPlugin` names.
+
+Who runs a model call is not on the config. The `[llm.<id>]` block's `type`
+decides it, and that block's `format` sets the wire shape a worker answers in.
+See [LLMs](./70-llms.md).
 
 An `[agent.<id>]` section in `substructure.toml` uses these same names. See
 [Config](./220-config.md).

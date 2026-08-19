@@ -167,6 +167,13 @@ Docs: [Connectors](./docs/40-connectors.md)
 
 Examples: [Node](./examples/node-hono-connectors)
 
+### Plugins
+
+Point an agent at an [agent-plugins](https://agent-plugins.org) directory and it
+gets that plugin's skills and MCP servers.
+
+Docs: [Plugins](./docs/45-plugins.md)
+
 ### Any LLM
 
 The engine calls Anthropic, OpenAI, or OpenRouter with your key. Or your worker

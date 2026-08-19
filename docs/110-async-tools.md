@@ -47,7 +47,8 @@ When the render finishes, end the call by its `id`.
 { "type": "tool.result", "id": "<toolCallId>", "result": { "content": [{ "type": "text", "text": "https://reports/42.pdf" }] } }
 ```
 
-Send it to the engine's client API. See
+Send it to the engine's machine API, which takes an API key rather than a
+client token. See
 [REST API](./250-api.md#post-apimachinesessionssession_idcallssettle).
 
 ## Go async
