@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Fixed
+
+- `subs mcp` commands now find a plugin's servers when the file names a `[remote]`.
+
 ## [0.7.0] - 2026-08-19
 
 ### Added

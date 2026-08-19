@@ -124,7 +124,12 @@ fn open_store(db: SqliteDb) -> Result<SqliteCredentialStore> {
 
 /// Checked before a command that only makes sense under one method. A file that
 /// declares nothing is the usual case and passes: the server is asked instead.
-fn require_auth(id: &str, spec: &ConnectionSpec, want: AuthKind) -> Result<()> {
+fn require_auth(
+    cfg: &ProjectConfig,
+    id: &str,
+    spec: &ConnectionSpec,
+    want: AuthKind,
+) -> Result<()> {
     let declared = match spec.auth {
         // Nothing declared: discovery decides, and either command may be the
         // one that fits. `login` finds out; `set-token` is what a file has to
@@ -132,7 +137,8 @@ fn require_auth(id: &str, spec: &ConnectionSpec, want: AuthKind) -> Result<()> {
         None if want == AuthKind::Oauth => return Ok(()),
         None => bail!(
             "`{id}` declares no `auth`, so its token would never be sent. \
-             Write `auth = \"token\"` on [mcp.{id}] first."
+             Write {} first.",
+            token_declaration(cfg, id)
         ),
         Some(declared) if declared == want => return Ok(()),
         Some(declared) => declared,
@@ -143,6 +149,23 @@ fn require_auth(id: &str, spec: &ConnectionSpec, want: AuthKind) -> Result<()> {
         AuthKind::None => "it declares that it needs no credential".to_string(),
     };
     bail!("`{id}` declares `auth = \"{}\"`: {fix}", declared.as_str())
+}
+
+/// Where `auth = "token"` is written for this id. A plugin's server has no
+/// `[mcp.<id>]` to put it on — the id is derived, and declaring one is an
+/// error — so the plugin's own `auth` table is what a reader has to edit.
+fn token_declaration(cfg: &ProjectConfig, id: &str) -> String {
+    let from_plugin = match cfg.mcp.contains_key(id) {
+        true => None,
+        false => cfg
+            .plugin
+            .keys()
+            .find_map(|pid| Some((pid, id.strip_prefix(&format!("{pid}-"))?))),
+    };
+    match from_plugin {
+        Some((pid, server)) => format!("`auth = {{ {server} = \"token\" }}` on [plugin.{pid}]"),
+        None => format!("`auth = \"token\"` on [mcp.{id}]"),
+    }
 }
 
 /// Whose slot a local command reads or writes. Consent given here is
@@ -236,7 +259,7 @@ fn open_existing_db(cfg: &ProjectConfig) -> Result<Option<SqliteDb>> {
 
 async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -> Result<()> {
     let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
-    require_auth(&id, &spec, AuthKind::Oauth)?;
+    require_auth(&cfg, &id, &spec, AuthKind::Oauth)?;
     let subject = local_slot(&spec);
 
     let http = reqwest::Client::new();
@@ -338,7 +361,7 @@ async fn set_token_local(
     cfg: ProjectConfig,
 ) -> Result<()> {
     let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
-    require_auth(&id, &spec, AuthKind::Token)?;
+    require_auth(&cfg, &id, &spec, AuthKind::Token)?;
     let subject = local_slot(&spec);
 
     let token = match &env {
@@ -539,8 +562,8 @@ async fn login_remote(
     scope: ProjectScope,
     cfg: ProjectConfig,
 ) -> Result<()> {
-    let (id, spec) = pick(&cfg.mcp, id)?;
-    require_auth(&id, &spec, AuthKind::Oauth)?;
+    let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
+    require_auth(&cfg, &id, &spec, AuthKind::Oauth)?;
     let (ctx, org, project) = remote_target(&scope).await?;
 
     // Declaring first is idempotent and inert: `subs apply` may already have
@@ -605,8 +628,8 @@ async fn set_token_remote(
     scope: ProjectScope,
     cfg: ProjectConfig,
 ) -> Result<()> {
-    let (id, spec) = pick(&cfg.mcp, id)?;
-    require_auth(&id, &spec, AuthKind::Token)?;
+    let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
+    require_auth(&cfg, &id, &spec, AuthKind::Token)?;
 
     let token = match &env {
         Some(var) => super::env_value(var)
@@ -644,7 +667,7 @@ async fn delete_token_remote(
     scope: ProjectScope,
     cfg: ProjectConfig,
 ) -> Result<()> {
-    let (id, _) = pick(&cfg.mcp, id)?;
+    let (id, _) = pick(&cfg.resolved_connections()?, id)?;
     let (ctx, org, project) = remote_target(&scope).await?;
     let found = connections_for(&ctx, &org, Some(&project))
         .await?
@@ -723,7 +746,8 @@ async fn connections_for(
 }
 
 async fn list_remote(scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
-    if cfg.mcp.is_empty() {
+    let declared = cfg.resolved_connections()?;
+    if declared.is_empty() {
         bail!("substructure.toml declares no connections under `[mcp.<id>]`");
     }
     let ctx = CloudContext::load(&scope.globals)?;
@@ -731,7 +755,7 @@ async fn list_remote(scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
     let project = ctx.pinned_project(scope.project.as_deref()).await?;
     let connections = connections_for(&ctx, &org, project.as_deref()).await?;
 
-    for (id, spec) in &cfg.mcp {
+    for (id, spec) in &declared {
         let status = match connections.iter().find(|c| &c.connection_id == id) {
             Some(found) => found.status.clone(),
             None => "not authorized".to_string(),
@@ -892,6 +916,53 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("declares no `auth`"), "{err}");
+    }
+
+    /// A plugin's server is a connection like any other, and a file naming a
+    /// `[remote]` reaches it by the same derived id the deployment asks for.
+    /// There is no `[mcp.<id>]` to write `auth` on, so the plugin is where the
+    /// reader is sent.
+    #[tokio::test]
+    async fn a_plugins_server_is_reachable_from_a_file_naming_a_remote() {
+        let dir = tmpdir();
+        std::fs::create_dir_all(dir.join("plugin")).unwrap();
+        std::fs::write(
+            dir.join("plugin/plugin.json"),
+            r#"{ "name": "reggu.admin", "version": "1.0.0", "description": "Admin." }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("plugin/mcp.json"),
+            r#"{ "mcpServers": { "admin": {
+                "type": "streamable-http", "url": "https://reggu.test/mcp" } } }"#,
+        )
+        .unwrap();
+        let path = dir.join(project_config::FILENAME);
+        std::fs::write(
+            &path,
+            "[plugin.reggu]\npath = \"./plugin\"\n[remote]\nurl = \"https://api.test\"\n",
+        )
+        .unwrap();
+        let cfg = project_config::load_explicit(&path).unwrap().config;
+
+        let connections = cfg.resolved_connections().unwrap();
+        assert!(connections.contains_key("reggu-admin"), "{connections:?}");
+
+        // Declaring nothing stops before anything is asked of the deployment,
+        // and names the table that would carry it.
+        let scope = ProjectScope {
+            org: None,
+            project: None,
+            globals: globals(),
+        };
+        let err = set_token_remote(Some("reggu-admin".into()), Some("PATH".into()), scope, cfg)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`auth = { admin = \"token\" }` on [plugin.reggu]"),
+            "{err}"
+        );
     }
 
     /// The token reaches the store the engine reads, and never argv.
