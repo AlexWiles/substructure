@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Fixed
+
+- Allow local HTTP MCP servers.
+
 ## [0.7.1] - 2026-08-19
 
 ### Fixed

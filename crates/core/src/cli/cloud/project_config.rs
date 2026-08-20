@@ -701,14 +701,16 @@ mod tests {
             .to_string();
         assert!(err.contains("cannot prefix a tool name"), "got {err}");
 
-        // A credential would cross the network in the clear.
-        let err = parse("[mcp.sentry]\nurl = \"http://mcp.sentry.dev/mcp\"\n")
+        // A typo is caught here rather than at the first fetch.
+        let err = parse("[mcp.sentry]\nurl = \"mcp.sentry.dev\"\n")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("not https"), "got {err}");
+        assert!(err.contains("is not a URL"), "got {err}");
 
-        // Loopback is exempt: nothing off-host sees it.
+        // Plaintext is the file's call: a server on this machine or this
+        // network is reached in the clear, and only a deployment knows better.
         ok("[mcp.issues]\nurl = \"http://localhost:4445/mcp\"\n");
+        ok("[mcp.issues]\nurl = \"http://mcp.internal:8080/mcp\"\n");
     }
 
     #[test]

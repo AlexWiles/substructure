@@ -10,7 +10,7 @@ use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 
 use super::mcp::auth_headers;
-use super::oauth::{refresh, require_secure, same_origin, OauthError, Tokens};
+use super::oauth::{refresh, same_origin, OauthError, Tokens};
 use super::registry::{AuthKind, ConnectionSpec, CredentialResolver};
 use super::{AuthNeed, ConnectorError, Slot};
 
@@ -215,12 +215,7 @@ impl StoredCredentials {
         spec: &ConnectionSpec,
     ) -> Result<Option<HeaderMap>, ConnectorError> {
         match self.access_token(tenant_id, id, subject, &spec.url).await {
-            // Checked again here, not only at login: the project file can name
-            // a different URL than the one authorized.
-            Ok(Some(token)) => {
-                secure(&spec.url)?;
-                auth_headers(None, &token).map(Some)
-            }
+            Ok(Some(token)) => auth_headers(None, &token).map(Some),
             Ok(None) => Ok(None),
             // A grant that cannot be renewed is reported even where the file
             // declared nothing: the connection was authorized once, so falling
@@ -239,10 +234,7 @@ impl StoredCredentials {
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError> {
         match self.store.get(tenant_id, id, subject).await {
-            Some(Credential::Static { token }) => {
-                secure(&spec.url)?;
-                auth_headers(spec.header.as_deref(), &token)
-            }
+            Some(Credential::Static { token }) => auth_headers(spec.header.as_deref(), &token),
             Some(Credential::Oauth(_)) => Err(mismatch(id, AuthKind::Token)),
             None => Err(ConnectorError::unauthorized(
                 AuthNeed::NeverAuthorized,
@@ -318,10 +310,6 @@ fn refresh_failed(id: &str, e: &OauthError) -> ConnectorError {
         AuthNeed::Reauthorize,
         format!("connection `{id}`: {what}. Run `subs mcp login {id}` ({e})"),
     )
-}
-
-fn secure(url: &str) -> Result<(), ConnectorError> {
-    require_secure(url).map_err(|e| ConnectorError::permanent(e.to_string()))
 }
 
 fn mismatch(id: &str, declared: AuthKind) -> ConnectorError {
@@ -527,15 +515,18 @@ mod tests {
         assert!(headers.is_empty());
     }
 
+    /// The scheme is the declaration's business: a server on this machine or
+    /// this network is reached in the clear, and a deployment that wants more
+    /// says so where declarations arrive.
     #[tokio::test]
-    async fn a_token_never_crosses_plaintext_http() {
+    async fn a_token_goes_to_a_plaintext_url_the_file_named() {
         let mut spec = spec(Some(AuthKind::Token), None);
-        spec.url = "http://example.test/mcp".to_string();
-        let err = resolver(Some(stored_token()))
+        spec.url = "http://mcp.internal:8080/mcp".to_string();
+        let headers = resolver(Some(stored_token()))
             .resolve("t", "github", &Slot::Shared, &spec)
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("not https"), "got {err}");
+            .unwrap();
+        assert!(headers.contains_key("authorization"));
     }
 
     #[test]

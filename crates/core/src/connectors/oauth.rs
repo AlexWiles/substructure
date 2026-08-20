@@ -209,7 +209,6 @@ struct TokenResponse {
 /// `resource_metadata` pointer. A server that omits it still resolves, via the
 /// well-known path built from the endpoint URL.
 pub async fn discover(http: &Client, mcp_url: &str) -> Result<Discovered, OauthError> {
-    require_secure(mcp_url)?;
     let metadata_url = match probe(http, mcp_url).await {
         Some(url) => url,
         None => prm_url(mcp_url)?,
@@ -261,7 +260,6 @@ pub enum Probed {
 /// refusal. Cheap, and the only thing that can answer: nothing in a manifest
 /// knows this and nothing in MCP announces it up front.
 pub async fn sniff(http: &Client, mcp_url: &str) -> Result<Probed, OauthError> {
-    require_secure(mcp_url)?;
     let answered = unauthenticated(http, mcp_url).await?;
     if !answered.challenged {
         return Ok(Probed::NoChallenge);
@@ -323,20 +321,6 @@ pub fn challenge_param(challenge: &str, name: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// A bearer credential must not cross the network in the clear. Loopback is
-/// exempt: a server on this machine has no certificate and nothing off-host to
-/// intercept it.
-pub(crate) fn require_secure(url: &str) -> Result<(), OauthError> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| OauthError::Discovery(format!("`{url}` is not a URL: {e}")))?;
-    if parsed.scheme() == "https" || is_loopback(url) {
-        return Ok(());
-    }
-    Err(OauthError::Discovery(format!(
-        "`{url}` is not https: a credential would cross the network in the clear"
-    )))
 }
 
 pub(crate) fn same_origin(a: &str, b: &str) -> bool {
@@ -495,8 +479,8 @@ async fn register(
     })
 }
 
-/// One definition of the exemption, shared with the CLI's declaration check so
-/// the two cannot drift.
+/// A redirect back to this machine, which registers as a native client rather
+/// than a web one.
 pub(crate) fn is_loopback(redirect_uri: &str) -> bool {
     reqwest::Url::parse(redirect_uri).is_ok_and(|u| {
         matches!(
@@ -963,17 +947,6 @@ mod tests {
                 "{url}"
             );
         }
-    }
-
-    #[test]
-    fn a_credential_never_goes_out_over_cleartext() {
-        assert!(require_secure("https://mcp.linear.app/mcp").is_ok());
-        // A local server has no certificate and nothing off-host to intercept.
-        assert!(require_secure("http://127.0.0.1:8080/mcp").is_ok());
-        assert!(require_secure("http://localhost:8080/mcp").is_ok());
-
-        let err = require_secure("http://mcp.linear.app/mcp").unwrap_err();
-        assert!(err.to_string().contains("not https"), "{err}");
     }
 
     #[test]

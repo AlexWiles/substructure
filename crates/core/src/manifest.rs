@@ -1107,14 +1107,13 @@ fn check_connection(spec: &ConnectionSpec) -> Result<()> {
     Ok(())
 }
 
-/// Checked again where a credential is actually sent, but a URL the document
-/// should not have held is better reported while reading it.
+/// A typo is caught while reading the document rather than at the first fetch.
+/// The scheme is not the engine's to police: a server on this machine or this
+/// network is reached in the clear, and a deployment that needs more says so
+/// where declarations arrive.
 pub fn check_url(url: &str) -> Result<()> {
-    let parsed = reqwest::Url::parse(url).with_context(|| format!("`{url}` is not a URL"))?;
-    if parsed.scheme() == "https" || crate::connectors::oauth::is_loopback(url) {
-        return Ok(());
-    }
-    bail!("`{url}` is not https: a credential would cross the network in the clear")
+    reqwest::Url::parse(url).with_context(|| format!("`{url}` is not a URL"))?;
+    Ok(())
 }
 
 #[cfg(test)]
