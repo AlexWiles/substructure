@@ -1627,7 +1627,7 @@ mod tests {
                     "the id carries the call, so an answer is bound to what was asked"
                 );
                 assert!(reason.contains("sentry__delete"), "got {reason:?}");
-                assert_eq!(payload["tool_call_id"], serde_json::json!("tc-1"));
+                assert_eq!(payload["toolCallId"], serde_json::json!("tc-1"));
                 assert_eq!(
                     payload["metadata"]["options"][0]["value"]["approved"],
                     serde_json::json!(true),

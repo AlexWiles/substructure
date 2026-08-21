@@ -5,6 +5,8 @@
 
 use serde_json::Value;
 
+use crate::transport::channel::ChannelKind;
+
 use super::activity::TurnActivity;
 use super::render;
 use super::{clip, display_of, with_footer, ButtonValue};
@@ -148,7 +150,7 @@ fn with_view(mut proposed: DecisionResponse, view: Option<Value>) -> DecisionRes
     if let Some(view) = view {
         let slack = proposed
             .channels
-            .entry("slack".to_string())
+            .entry(ChannelKind::SLACK.to_string())
             .or_insert_with(|| serde_json::json!({}));
         slack["view"] = view;
     }
@@ -289,7 +291,7 @@ fn click_proposal(state: &SessionState, args: &Value) -> Option<DecisionResponse
         status: ResumeStatus::Resolved,
         payload: option.value,
         responder: Some(InterruptResponder {
-            channel: "slack".to_string(),
+            channel: ChannelKind::SLACK.to_string(),
             user: Some(click.user.to_string()),
             label: Some(option.label),
             style: option.style,
@@ -314,7 +316,7 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
     let blocks = render::settled_prompt_blocks(&click.message_blocks, click.message_text, note);
     DecisionResponse {
         channels: [(
-            "slack".to_string(),
+            ChannelKind::SLACK.to_string(),
             serde_json::json!({
                 "update": {
                     "channel": click.channel,

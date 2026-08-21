@@ -25,6 +25,14 @@ impl Renderer {
         matches!(self, Renderer::Jsonl)
     }
 
+    /// Drop the `--input` hints. A chat has no `--input`.
+    pub(crate) fn at_a_prompt(mut self) -> Self {
+        if let Renderer::Pretty(printer) = &mut self {
+            printer.reader = Reader::Prompt;
+        }
+        self
+    }
+
     pub(crate) fn emit(
         &mut self,
         stdout: &mut std::io::Stdout,
@@ -63,6 +71,22 @@ pub(crate) fn color() -> bool {
     std::io::stdout().is_terminal()
 }
 
+/// Secondary text on stderr. Faint on a terminal, plain when piped.
+pub(crate) fn note(text: &str) {
+    if std::io::stderr().is_terminal() {
+        eprintln!("{DIM}{text}{RESET}");
+    } else {
+        eprintln!("{text}");
+    }
+}
+
+/// Who reads the output: a shell running `subs run`, or a chat prompt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    Shell,
+    Prompt,
+}
+
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
@@ -82,6 +106,7 @@ pub struct PrettyPrinter {
     color: bool,
     at_line_start: bool,
     tools: HashMap<String, PendingTool>,
+    reader: Reader,
 }
 
 impl PrettyPrinter {
@@ -90,6 +115,7 @@ impl PrettyPrinter {
             color,
             at_line_start: true,
             tools: HashMap::new(),
+            reader: Reader::Shell,
         }
     }
 
@@ -166,15 +192,20 @@ impl PrettyPrinter {
             AgUiEvent::RunFinished { outcome, .. } => {
                 if let Some(RunOutcome::Interrupt { interrupts }) = outcome {
                     for it in interrupts {
-                        self.break_line(w)?;
-                        let msg = it.message.as_deref().unwrap_or("(no message)");
-                        // The id is what an `interrupt.resume` input needs.
-                        self.write_styled(
-                            w,
-                            YELLOW,
-                            &format!("⚠ interrupt {} [{}]: {msg}", it.id, it.reason),
-                        )?;
-                        self.newline(w)?;
+                        if let Some(id) = &it.tool_call_id {
+                            self.tools.remove(id);
+                        }
+                        if self.reader == Reader::Shell {
+                            self.break_line(w)?;
+                            let msg = it.message.as_deref().unwrap_or("(no message)");
+                            // The id is what an `interrupt.resume` input needs.
+                            self.write_styled(
+                                w,
+                                YELLOW,
+                                &format!("⚠ interrupt {} [{}]: {msg}", it.id, it.reason),
+                            )?;
+                            self.newline(w)?;
+                        }
                     }
                 }
                 self.render_pending_settlements(w)?;
@@ -204,6 +235,17 @@ impl PrettyPrinter {
         pending.sort();
         for (id, name) in pending {
             self.break_line(w)?;
+            // Nothing in a chat settles a client tool, so say that the turn
+            // stopped rather than offer a way to finish it.
+            if self.reader == Reader::Prompt {
+                self.write_styled(
+                    w,
+                    YELLOW,
+                    &format!("⧗ {name} is waiting on a client-side result, which this chat cannot settle."),
+                )?;
+                self.newline(w)?;
+                continue;
+            }
             self.write_styled(
                 w,
                 YELLOW,
@@ -299,12 +341,23 @@ mod tests {
     use super::*;
 
     fn render_all(events: Vec<AgUiEvent>) -> String {
-        let mut printer = PrettyPrinter::new(false);
+        render_with(PrettyPrinter::new(false), events)
+    }
+
+    fn render_with(mut printer: PrettyPrinter, events: Vec<AgUiEvent>) -> String {
         let mut buf: Vec<u8> = Vec::new();
         for ev in &events {
             printer.render(&mut buf, ev).unwrap();
         }
         String::from_utf8(buf).unwrap()
+    }
+
+    /// What a chat renders with: it answers the interrupt itself, so the
+    /// `--input` vocabulary belongs to `run` alone.
+    fn at_a_prompt() -> PrettyPrinter {
+        let mut printer = PrettyPrinter::new(false);
+        printer.reader = Reader::Prompt;
+        printer
     }
 
     fn text(id: &str, delta: &str) -> AgUiEvent {
@@ -512,6 +565,78 @@ mod tests {
             }),
         }]);
         assert_eq!(out, "⚠ interrupt int-1 [confirmation]: Send the email?\n");
+    }
+
+    fn parked_on(tool_call_id: Option<&str>) -> AgUiEvent {
+        AgUiEvent::RunFinished {
+            thread_id: "t".into(),
+            run_id: "r".into(),
+            result: None,
+            outcome: Some(RunOutcome::Interrupt {
+                interrupts: vec![crate::transport::ag_ui::events::AgUiInterrupt {
+                    id: "int-1".into(),
+                    reason: "confirmation".into(),
+                    message: Some("Send the email?".into()),
+                    tool_call_id: tool_call_id.map(str::to_string),
+                    response_schema: None,
+                    expires_at: None,
+                    metadata: None,
+                }],
+            }),
+        }
+    }
+
+    fn interrupted() -> AgUiEvent {
+        parked_on(None)
+    }
+
+    #[test]
+    fn at_a_prompt_the_interrupt_line_is_left_to_the_prompt_that_answers_it() {
+        assert_eq!(render_with(at_a_prompt(), vec![interrupted()]), "");
+    }
+
+    /// A gated call is pending because the interrupt parked it, and the resume
+    /// is what settles it — `tool.result` would be the wrong input to offer.
+    #[test]
+    fn a_call_the_interrupt_parked_is_not_reported_as_awaiting_a_settlement() {
+        let mut evs = call("toolu_1", "issues__delete_issue");
+        evs.push(parked_on(Some("toolu_1")));
+        let out = render_all(evs);
+        assert_eq!(
+            out,
+            "→ issues__delete_issue {}\n⚠ interrupt int-1 [confirmation]: Send the email?\n"
+        );
+        assert!(!out.contains("awaiting result"), "got {out}");
+
+        let chatting = render_with(at_a_prompt(), {
+            let mut evs = call("toolu_1", "issues__delete_issue");
+            evs.push(parked_on(Some("toolu_1")));
+            evs
+        });
+        assert_eq!(chatting, "→ issues__delete_issue {}\n");
+    }
+
+    #[test]
+    fn a_pending_call_the_interrupt_did_not_park_is_still_reported() {
+        let mut evs = call("call_a", "get_weather");
+        evs.push(parked_on(Some("toolu_other")));
+        let out = render_all(evs);
+        assert!(out.contains("get_weather awaiting result"), "got {out}");
+    }
+
+    /// Nothing in a chat settles a client tool, so the turn's stopping is
+    /// still reported — just not as an `--input` to send.
+    #[test]
+    fn at_a_prompt_a_pending_client_tool_says_it_cannot_be_settled() {
+        let mut evs = call("call_a", "get_weather");
+        evs.push(run_finished());
+        let out = render_with(at_a_prompt(), evs);
+        assert_eq!(
+            out,
+            "→ get_weather {}\n⧗ get_weather is waiting on a client-side result, \
+             which this chat cannot settle.\n"
+        );
+        assert!(!out.contains("--input"), "got {out}");
     }
 
     #[test]

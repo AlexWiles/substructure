@@ -30,11 +30,16 @@ use substructure_core::session::events::{DecisionErrored, EventPayload};
 use substructure_core::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use substructure_core::span::SpanContext;
 use substructure_core::sub_agent::SubAgentTask;
+use substructure_core::transport::ag_ui::events::AgUiEvent;
+use substructure_core::transport::ag_ui::run as ag_ui_run;
+use substructure_core::transport::ag_ui::translator::run_ag_ui_translation;
+use substructure_core::transport::channel::ChannelContext;
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::worker::push::TransportRegistry;
 use substructure_core::worker::{AgentEntry, StaticAgentDirectory, WorkerEndpoint};
 use substructure_core::{Caller, HandleClientInput, Runtime, RuntimeConfig, RuntimeDeps};
+use tokio_util::sync::CancellationToken;
 
 const TENANT: &str = "default";
 
@@ -822,5 +827,123 @@ async fn a_delegation_opens_its_child_with_the_message() {
                 .as_deref()
                 == Some("do it"))),
         "the child is prompted with the delegating message"
+    );
+}
+
+// ── Starting a turn ──────────────────────────────────────────────────────
+
+fn client_message(agent_id: &str, text: &str) -> ClientInput {
+    ClientInput::Message {
+        agent_id: agent_id.to_string(),
+        turn_id: None,
+        message: DraftMessage {
+            id: None,
+            role: Role::User,
+            content: Some(Content::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+        },
+        stream: true,
+        queue: false,
+    }
+}
+
+async fn started(h: &Harness, translated: bool) -> (ChannelContext, String, ag_ui_run::Turn) {
+    let ctx = ChannelContext::new(h.runtime.clone(), CancellationToken::new());
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let turn = ag_ui_run::start(
+        &ctx,
+        &Caller::System {
+            tenant_id: TENANT.to_string(),
+        },
+        &SessionOwner {
+            tenant_id: TENANT.to_string(),
+            requester: Requester::private(Subject::new(Issuer::cli(), "local".to_string())),
+            metadata: Default::default(),
+        },
+        &session_id,
+        client_message("assistant", "hi"),
+        "test_start",
+        translated,
+    )
+    .await
+    .expect("the turn starts");
+    (ctx, session_id, turn)
+}
+
+/// `subs run`, `subs chat`, and the `/api/v1/projects/{p}/run` route all open a
+/// turn through this one function, so what it admits is what all three read.
+///
+/// The stream is scoped to the turn, which is what closes it: nothing here
+/// asks it to stop.
+#[tokio::test]
+async fn a_started_turn_ends_its_own_stream() {
+    let h = start(BTreeMap::from([(
+        "assistant".to_string(),
+        engine_hosted("claude"),
+    )]))
+    .await;
+    let (_ctx, _session_id, turn) = started(&h, false).await;
+    assert!(
+        turn.deltas.is_none(),
+        "a reader of engine events subscribes to no token deltas"
+    );
+
+    let mut events = turn.events;
+    let mut seen = Vec::new();
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = events.recv().await {
+            seen.push(event.payload);
+        }
+    })
+    .await;
+
+    assert!(drained.is_ok(), "the stream did not close: {seen:#?}");
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completed on the stream: {seen:#?}"
+    );
+}
+
+/// The same start, read the translated way. A run that reaches its end emits
+/// `RunFinished`, so a CLI that never sees one reports an unfinished run.
+#[tokio::test]
+async fn a_started_turn_translates_to_a_finished_run() {
+    let h = start(BTreeMap::from([(
+        "assistant".to_string(),
+        engine_hosted("claude"),
+    )]))
+    .await;
+    let (ctx, session_id, turn) = started(&h, true).await;
+    let deltas = turn
+        .deltas
+        .expect("a translated reader subscribes to deltas");
+
+    let mut out = run_ag_ui_translation(
+        turn.events,
+        deltas,
+        session_id,
+        turn.turn_id,
+        ctx.shutdown.clone(),
+    );
+    let mut seen: Vec<AgUiEvent> = Vec::new();
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = out.recv().await {
+            seen.push(event);
+        }
+    })
+    .await;
+
+    assert!(drained.is_ok(), "the stream did not close: {seen:#?}");
+    assert!(
+        matches!(seen.first(), Some(AgUiEvent::RunStarted { .. })),
+        "a run opens with RunStarted: {seen:#?}"
+    );
+    assert!(
+        matches!(seen.last(), Some(AgUiEvent::RunFinished { .. })),
+        "and ends with RunFinished: {seen:#?}"
     );
 }

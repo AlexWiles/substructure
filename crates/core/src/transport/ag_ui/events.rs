@@ -135,7 +135,7 @@ impl AgUiInterrupt {
             id: interrupt_id.to_string(),
             reason: reason.to_string(),
             message: take_str("message"),
-            tool_call_id: take_str("toolCallId"),
+            tool_call_id: take_str("toolCallId").or_else(|| take_str("tool_call_id")),
             response_schema: take("responseSchema"),
             expires_at: take_str("expiresAt"),
             metadata: take("metadata"),

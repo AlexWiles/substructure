@@ -9,9 +9,21 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Add `subs chat`, a CLI channel that holds one session open and answers interrupt prompts with a picker.
+- Add the session AG-UI connect route to the v1 API.
+
 ### Changed
 
 - Manifest format updates
+- `subs run` now names the session it starts, on a deployment as well as here.
+- The run route now streams only the turn it starts, and ends when that turn ends.
+- The approval interrupt now carries the parked call's id in the AG-UI field `toolCallId`.
+
+### Fixed
+
+- A call that an interrupt parked is no longer reported as awaiting a client-side result.
 
 ## [0.7.2] - 2026-08-21
 

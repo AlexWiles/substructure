@@ -36,6 +36,14 @@ fn to_snapshot(message: Message) -> SnapshotMessage {
     }
 }
 
+pub fn open_interrupts(session: &SessionState) -> Vec<AgUiInterrupt> {
+    session
+        .interrupts_for(session.head_id.as_deref())
+        .into_iter()
+        .map(AgUiInterrupt::from_open)
+        .collect()
+}
+
 /// Rehydration frames: the active branch plus every open interrupt on the
 /// head path. `None` = session not created yet.
 pub fn snapshot_events(
@@ -45,13 +53,8 @@ pub fn snapshot_events(
 ) -> Vec<AgUiEvent> {
     let tree = session.map(SessionState::message_tree).unwrap_or_default();
     let outcome = session.and_then(|s| {
-        let interrupts = s.interrupts_for(s.head_id.as_deref());
-        (!interrupts.is_empty()).then(|| RunOutcome::Interrupt {
-            interrupts: interrupts
-                .into_iter()
-                .map(AgUiInterrupt::from_open)
-                .collect(),
-        })
+        let interrupts = open_interrupts(s);
+        (!interrupts.is_empty()).then_some(RunOutcome::Interrupt { interrupts })
     });
     vec![
         AgUiEvent::RunStarted {

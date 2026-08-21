@@ -108,7 +108,7 @@ pub fn ask(held: &ToolCall, connector_tools: &[ConnectorTool], remaining: usize)
         reason: format!("`{name}` needs approval before it runs"),
         payload: serde_json::json!({
             "message": format!("Run `{name}`?{shown}{after}"),
-            "tool_call_id": held.id,
+            "toolCallId": held.id,
             "metadata": {
                 "type": "tool.approval",
                 "tool": name,

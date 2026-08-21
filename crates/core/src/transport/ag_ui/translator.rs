@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use axum::response::sse::Event as SseEvent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -413,18 +412,20 @@ fn tool_result(tool_call_id: String, content: String) -> AgUiEvent {
     }
 }
 
+/// The one translation loop. Every reader of a turn's AG-UI events gets it
+/// from here, so the ordering rules below are written once.
 pub fn run_ag_ui_translation(
     mut event_rx: mpsc::Receiver<SessionEvent>,
     mut delta_rx: mpsc::Receiver<TokenDelta>,
     thread_id: String,
     run_id: String,
     shutdown: CancellationToken,
-) -> mpsc::Receiver<SseEvent> {
+) -> mpsc::Receiver<AgUiEvent> {
     let (out_tx, out_rx) = mpsc::channel(64);
     tokio::spawn(async move {
         let mut t = AgUiTranslator::new(thread_id, run_id);
         for v in t.start() {
-            if out_tx.send(v.to_sse()).await.is_err() {
+            if out_tx.send(v).await.is_err() {
                 return;
             }
         }
@@ -432,7 +433,7 @@ pub fn run_ag_ui_translation(
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     for v in t.finalize_error("server shutting down".to_string()) {
-                        let _ = out_tx.send(v.to_sse()).await;
+                        let _ = out_tx.send(v).await;
                     }
                     return;
                 }
@@ -447,14 +448,14 @@ pub fn run_ag_ui_translation(
                         if matches!(payload, EventPayload::LlmCallCompleted(_)) {
                             while let Ok(d) = delta_rx.try_recv() {
                                 for v in t.on_delta(d) {
-                                    if out_tx.send(v.to_sse()).await.is_err() {
+                                    if out_tx.send(v).await.is_err() {
                                         return;
                                     }
                                 }
                             }
                         }
                         for v in t.on_event(payload, ends_run) {
-                            if out_tx.send(v.to_sse()).await.is_err() {
+                            if out_tx.send(v).await.is_err() {
                                 return;
                             }
                         }
@@ -466,7 +467,7 @@ pub fn run_ag_ui_translation(
                         if !t.terminated() {
                             let msg = "run stream closed before completion".to_string();
                             for v in t.finalize_error(msg) {
-                                let _ = out_tx.send(v.to_sse()).await;
+                                let _ = out_tx.send(v).await;
                             }
                         }
                         return;
@@ -475,7 +476,7 @@ pub fn run_ag_ui_translation(
                 delta = delta_rx.recv() => match delta {
                     Some(d) => {
                         for v in t.on_delta(d) {
-                            if out_tx.send(v.to_sse()).await.is_err() {
+                            if out_tx.send(v).await.is_err() {
                                 return;
                             }
                         }

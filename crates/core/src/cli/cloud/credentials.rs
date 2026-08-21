@@ -59,12 +59,17 @@ pub fn resolve_api_url(flag: Option<&str>) -> String {
     DEFAULT_API_URL.to_string()
 }
 
-pub fn default_path() -> Result<PathBuf> {
+/// Where this CLI keeps what it remembers between runs.
+pub fn config_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
         .context("could not determine config dir (HOME/XDG_CONFIG_HOME unset)")?;
-    Ok(base.join("substructure").join("credentials.toml"))
+    Ok(base.join("substructure"))
+}
+
+pub fn default_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("credentials.toml"))
 }
 
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {

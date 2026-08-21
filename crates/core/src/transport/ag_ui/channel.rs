@@ -19,7 +19,7 @@ use crate::transport::ag_ui::snapshot::snapshot_events;
 use crate::transport::ag_ui::translator::{run_ag_ui_translation, AgUiTranslator};
 use crate::transport::ag_ui::types::{ConnectInput, RunAgentInput};
 use crate::transport::auth::AuthResolver;
-use crate::transport::channel::{Channel, ChannelContext};
+use crate::transport::channel::{Channel, ChannelContext, ChannelKind};
 use crate::transport::http::{client_auth_middleware, client_cors, runtime_error_response};
 use crate::{Caller, HandleClientInput, SubmitClientPayload};
 
@@ -34,8 +34,8 @@ impl AgUiChannel {
 }
 
 impl Channel for AgUiChannel {
-    fn kind(&self) -> &'static str {
-        "ag-ui"
+    fn kind(&self) -> ChannelKind {
+        ChannelKind::AG_UI
     }
 
     fn router(&self, ctx: ChannelContext) -> Option<Router> {
@@ -148,7 +148,7 @@ async fn run(
             status: entry.status,
             payload: entry.payload.unwrap_or(serde_json::Value::Null),
             responder: Some(crate::protocol::InterruptResponder {
-                channel: "ag-ui".to_string(),
+                channel: ChannelKind::AG_UI.to_string(),
                 user: None,
                 // Nobody picked an option. The client sends its own payload.
                 label: None,
@@ -209,7 +209,7 @@ async fn run(
         input.run_id,
         ctx.shutdown.clone(),
     );
-    let stream = ReceiverStream::new(out_rx).map(Ok::<_, std::convert::Infallible>);
+    let stream = ReceiverStream::new(out_rx).map(|e| Ok::<_, std::convert::Infallible>(e.to_sse()));
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()

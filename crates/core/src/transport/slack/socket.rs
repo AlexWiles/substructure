@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
 use crate::runtime::blob::BlobStore;
-use crate::transport::channel::{Channel, ChannelContext};
+use crate::transport::channel::{Channel, ChannelContext, ChannelKind};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
@@ -180,8 +180,8 @@ impl SlackChannel {
 
 #[async_trait::async_trait]
 impl Channel for SlackChannel {
-    fn kind(&self) -> &'static str {
-        "slack"
+    fn kind(&self) -> ChannelKind {
+        ChannelKind::SLACK
     }
 
     async fn run(&self, ctx: ChannelContext) {

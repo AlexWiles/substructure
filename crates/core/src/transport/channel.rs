@@ -92,6 +92,28 @@ impl ChannelContext {
     }
 }
 
+/// A channel's name. Used for its mount path, its key in a proposal's
+/// `channels` map, and the `responder.channel` it stamps on a settled
+/// interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChannelKind(&'static str);
+
+impl ChannelKind {
+    pub const SLACK: Self = Self("slack");
+    pub const AG_UI: Self = Self("ag-ui");
+    pub const CLI: Self = Self("cli");
+
+    pub const fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ChannelKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 /// A frontend for agent sessions. A channel maps its native inputs onto
 /// [`ChannelContext::handle_client_input`] and renders the outbound event
 /// stream into its own protocol. Request-driven channels contribute a router;
@@ -100,7 +122,7 @@ impl ChannelContext {
 pub trait Channel: Send + Sync {
     /// URL-safe name; the channel's routes are served under
     /// `/api/channels/{kind}`.
-    fn kind(&self) -> &'static str;
+    fn kind(&self) -> ChannelKind;
 
     /// Routes relative to the channel's mount point.
     fn router(&self, ctx: ChannelContext) -> Option<Router> {
