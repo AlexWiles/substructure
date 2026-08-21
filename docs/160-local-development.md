@@ -56,11 +56,12 @@ subs run "hi"
 
 ## Continue a session
 
-After every run the CLI prints the command to continue it.
+After every run the CLI prints the command to continue it: the one you typed,
+with the session pinned and the message replaced by a placeholder at the end.
 
 ```
 continue this session with:
-  subs run --agent oncall --session <session-id> '...'
+  subs run --session <session-id> '...'
 ```
 
 ```sh

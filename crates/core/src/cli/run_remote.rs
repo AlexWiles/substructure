@@ -20,7 +20,8 @@ pub struct Run {
     pub session_id: Option<String>,
     pub input: ClientInput,
     pub output: OutputFormat,
-    pub agent: String,
+    /// The message or `--input` this run sent, elided from the resume hint.
+    pub payload: Option<String>,
 }
 
 fn format_for(output: OutputFormat) -> RunFormat {
@@ -98,7 +99,7 @@ pub async fn run(cmd: Run) -> Result<()> {
     }
 
     if let Some(session_id) = session_id {
-        super::run::print_resume_hint(&session_id, &cmd.agent, cmd.output, None);
+        super::run::print_resume_hint(&session_id, cmd.payload.as_deref());
     }
     Ok(())
 }

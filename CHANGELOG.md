@@ -12,6 +12,7 @@ together at the same version.
 ### Fixed
 
 - Allow local HTTP MCP servers.
+- The resume hint now repeats the flags you gave and ends with the message placeholder.
 
 ## [0.7.1] - 2026-08-19
 

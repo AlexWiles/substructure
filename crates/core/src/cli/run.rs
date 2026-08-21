@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use uuid::Uuid;
 
 use super::cloud::project_config;
@@ -136,7 +136,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     let agent_id = select_agent(args.agent, run.agent, &cfg.agent_ids())?;
 
     // Captured for the resume hint printed at the end, before the args are consumed.
-    let agent = agent_id.clone();
+    let payload = args.message.clone().or_else(|| args.input.clone());
 
     let input = match (args.message, args.input) {
         (Some(message), _) => message_input(message, agent_id),
@@ -158,7 +158,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
             session_id: args.session,
             input,
             output: output_mode,
-            agent,
+            payload,
         })
         .await;
     }
@@ -280,30 +280,19 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     if translator.terminated() {
         await_indexed(&rt, &session_id).await;
-        print_resume_hint(&session_id, &agent, output_mode, Some(&db_path));
+        print_resume_hint(&session_id, payload.as_deref());
         Ok(())
     } else {
         anyhow::bail!("event stream ended before the run finished")
     }
 }
 
-/// `db` is the database a run here wrote. A remote run gives none.
-pub(crate) fn print_resume_hint(
-    session_id: &str,
-    agent: &str,
-    output: OutputFormat,
-    db: Option<&str>,
-) {
-    let output = output.to_possible_value().map(|v| v.get_name().to_string());
+/// `payload` is the message or `--input` this run sent.
+pub(crate) fn print_resume_hint(session_id: &str, payload: Option<&str>) {
+    let argv: Vec<String> = std::env::args().collect();
     let hint = format!(
         "continue this session with:\n  {}",
-        resume_command(
-            &program_name(),
-            session_id,
-            agent,
-            output.as_deref(),
-            db.unwrap_or(project_config::DEFAULT_DB),
-        )
+        resume_command(&argv, session_id, payload)
     );
     // Faint so the hint reads as secondary; plain when piped.
     if std::io::stderr().is_terminal() {
@@ -342,33 +331,83 @@ async fn await_indexed(rt: &Runtime, session_id: &str) {
     tracing::debug!(session_id, "session index did not catch up before exit");
 }
 
-/// The running binary's name, read from the executable itself so a future rename of
-/// the `[[bin]]` flows through without touching this code.
-fn program_name() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "subs".into())
+/// This run's argv, with `--session` pinned and the message replaced by a
+/// placeholder at the end.
+fn resume_command(argv: &[String], session: &str, payload: Option<&str>) -> String {
+    let mut out = vec![argv
+        .first()
+        .map(|p| file_name(p))
+        .unwrap_or_else(|| "subs".into())];
+
+    let mut moved_input = false;
+    let mut elided = false;
+    // The flag the previous argument was, when it takes a value.
+    let mut pending: Option<&str> = None;
+    for arg in argv.iter().skip(1) {
+        let flag = pending.take();
+        if flag == Some("--session") {
+            continue;
+        }
+        if arg == "--session" {
+            pending = Some("--session");
+            continue;
+        }
+        if arg.starts_with("--session=") {
+            continue;
+        }
+        let is_payload = match flag {
+            Some(f) => f == "--input",
+            None => !arg.starts_with('-') && payload == Some(arg.as_str()),
+        };
+        if is_payload && !elided {
+            elided = true;
+            // `--input` follows its value to the end.
+            if flag == Some("--input") {
+                out.pop();
+                moved_input = true;
+            }
+            continue;
+        }
+        if takes_value(arg) {
+            pending = Some(arg);
+        }
+        out.push(quote(arg));
+    }
+    out.push("--session".into());
+    out.push(quote(session));
+    if moved_input {
+        out.push("--input".into());
+    }
+    out.push("'...'".into());
+    out.join(" ")
 }
 
-/// The invocation that resumes this session with the next turn. `--output` and
-/// `--db` are echoed only when non-default so the common case stays short.
-fn resume_command(
-    program: &str,
-    session: &str,
-    agent: &str,
-    output: Option<&str>,
-    db: &str,
-) -> String {
-    let mut cmd = format!("{program} run --agent {agent} --session {session}");
-    if let Some(output) = output.filter(|o| *o != "ag-ui") {
-        cmd.push_str(&format!(" --output {output}"));
+/// `run`'s flags whose value is the next argument.
+fn takes_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--agent" | "--input" | "--config" | "-c" | "--url" | "--db" | "--output" | "-o"
+    )
+}
+
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Single-quotes anything a shell would read as more than one word.
+fn quote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
+    if plain {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
     }
-    if db != project_config::DEFAULT_DB {
-        cmd.push_str(&format!(" --db {db}"));
-    }
-    cmd.push_str(" '...'");
-    cmd
 }
 
 #[cfg(test)]
@@ -379,37 +418,81 @@ mod tests {
         vec!["assistant".to_string(), "researcher".to_string()]
     }
 
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
     #[test]
-    fn resume_command_leads_with_program_and_omits_default_db() {
+    fn resume_command_echoes_the_flags_the_caller_gave() {
         let cmd = resume_command(
-            "subs",
+            &argv(&[
+                "../subs/target/debug/subs",
+                "run",
+                "-c",
+                "subs.toml",
+                "--output",
+                "pretty",
+                "--agent",
+                "coder",
+                "update the readme",
+            ]),
             "sess-1",
-            "my-agent",
-            Some("ag-ui"),
-            "substructure.db",
+            Some("update the readme"),
         );
-        assert_eq!(cmd, "subs run --agent my-agent --session sess-1 '...'");
+        assert_eq!(
+            cmd,
+            "subs run -c subs.toml --output pretty --agent coder --session sess-1 '...'"
+        );
     }
 
     #[test]
-    fn resume_command_uses_the_given_program_name() {
-        let cmd = resume_command("renamed-cli", "s", "a", None, "substructure.db");
-        assert!(cmd.starts_with("renamed-cli run "), "{cmd}");
+    fn resume_command_replaces_an_earlier_session() {
+        let cmd = resume_command(
+            &argv(&["subs", "run", "--session", "old", "hi"]),
+            "new",
+            Some("hi"),
+        );
+        assert_eq!(cmd, "subs run --session new '...'");
+
+        let joined = resume_command(&argv(&["subs", "run", "--session=old", "hi"]), "new", None);
+        assert_eq!(joined, "subs run hi --session new '...'");
     }
 
     #[test]
-    fn resume_command_echoes_a_non_default_db() {
-        let cmd = resume_command("subs", "sess-2", "a", Some("ag-ui"), "other.db");
-        assert!(cmd.contains(" --db other.db"), "{cmd}");
+    fn resume_command_quotes_what_a_shell_would_split() {
+        let cmd = resume_command(
+            &argv(&["subs", "run", "--db", "my db.db", "hi there"]),
+            "s",
+            Some("hi there"),
+        );
+        assert_eq!(cmd, "subs run --db 'my db.db' --session s '...'");
     }
 
     #[test]
-    fn resume_command_echoes_non_default_output_and_omits_the_default() {
-        let pretty = resume_command("subs", "s", "a", Some("pretty"), "substructure.db");
-        assert!(pretty.contains(" --output pretty"), "{pretty}");
+    fn resume_command_does_not_read_a_flags_value_as_the_message() {
+        let cmd = resume_command(
+            &argv(&["subs", "run", "--agent", "coder", "coder"]),
+            "s",
+            Some("coder"),
+        );
+        assert_eq!(cmd, "subs run --agent coder --session s '...'");
+    }
 
-        let default = resume_command("subs", "s", "a", Some("ag-ui"), "substructure.db");
-        assert!(!default.contains("--output"), "{default}");
+    #[test]
+    fn resume_command_moves_input_to_the_end_with_its_flag() {
+        let cmd = resume_command(
+            &argv(&[
+                "subs",
+                "run",
+                "--input",
+                r#"{"type":"client.message"}"#,
+                "-o",
+                "pretty",
+            ]),
+            "s",
+            Some(r#"{"type":"client.message"}"#),
+        );
+        assert_eq!(cmd, "subs run -o pretty --session s --input '...'");
     }
 
     #[test]
