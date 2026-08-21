@@ -20,7 +20,7 @@ file describes all three.
 ## Put an agent in Slack
 
 ```sh
-npm install -g @substructure.ai/cli
+curl -fsSL https://subs.dev/cli.sh | bash
 subs login
 ```
 
@@ -286,6 +286,13 @@ Docs: [Self-hosting](./docs/180-self-hosting.md)
   engine locally.
 
 ## Install
+
+```sh
+curl -fsSL https://subs.dev/cli.sh | bash
+```
+
+Verifies the release checksum and installs to `~/.local/bin`
+(`SUBS_INSTALL_DIR` to move it, `SUBS_VERSION` to pin a tag). Or from npm:
 
 ```sh
 npm i -g @substructure.ai/cli

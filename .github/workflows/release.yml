@@ -30,12 +30,14 @@ jobs:
             host: macos-15
             platform: darwin-x64
             bin: subs
+          # 22.04 (glibc 2.35) is the oldest runner image; the binary it links
+          # runs on anything newer, which the 24.04 image (2.39) would not.
           - target: x86_64-unknown-linux-gnu
-            host: ubuntu-24.04
+            host: ubuntu-22.04
             platform: linux-x64
             bin: subs
           - target: aarch64-unknown-linux-gnu
-            host: ubuntu-24.04
+            host: ubuntu-22.04
             platform: linux-arm64
             bin: subs
             cross: true
@@ -104,6 +106,29 @@ jobs:
           path: packages/cli/npm/${{ matrix.platform }}
           if-no-files-found: error
 
+      # ── Release tarball (https://subs.dev/cli.sh) ───────────────────────
+      # Asset names carry no version, so `releases/latest/download/<name>`
+      # resolves without an API call. Pinning goes through the tag instead.
+      - name: Package release tarball
+        shell: bash
+        run: |
+          NAME="subs-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          tar -C target/${{ matrix.target }}/release -czf "dist/$NAME" ${{ matrix.bin }}
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$NAME" > "$NAME.sha256"
+          else
+            shasum -a 256 "$NAME" > "$NAME.sha256"
+          fi
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: tarball-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
   publish:
     name: Publish to npm
     needs: build
@@ -147,6 +172,13 @@ jobs:
       - name: Restore executable bit on CLI binaries
         run: chmod +x packages/cli/npm/*/bin/subs
 
+      - name: Download release tarballs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tarball-*
+          path: dist
+          merge-multiple: true
+
       # ── Publish CLI platform packages and main wrapper ───────────────────
       - name: Publish CLI platform packages
         env:
@@ -175,8 +207,8 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           if NOTES=$(node scripts/changelog-section.mjs "$VERSION"); then
-            gh release create "v$VERSION" --title "v$VERSION" --verify-tag --notes "$NOTES"
+            gh release create "v$VERSION" dist/* --title "v$VERSION" --verify-tag --notes "$NOTES"
           else
             echo "No CHANGELOG section for $VERSION; using auto-generated notes."
-            gh release create "v$VERSION" --title "v$VERSION" --verify-tag --generate-notes
+            gh release create "v$VERSION" dist/* --title "v$VERSION" --verify-tag --generate-notes
           fi

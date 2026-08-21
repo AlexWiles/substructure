@@ -12,9 +12,13 @@ start with the [local quick start](./15-quick-start-local.md).
 ## Install the CLI
 
 ```sh
-npm install -g @substructure.ai/cli
+curl -fsSL https://subs.dev/cli.sh | bash
 subs login
 ```
+
+The script verifies the release's checksum and installs to `~/.local/bin`. Set
+`SUBS_INSTALL_DIR` to put it elsewhere, `SUBS_VERSION` to pin a release. With
+npm instead: `npm install -g @substructure.ai/cli`.
 
 `subs login` authenticates in your browser. It stores a token under
 `~/.config/substructure`.

@@ -8,7 +8,7 @@ Run an agent on your machine. One file, two commands, no account.
 ## Install the CLI
 
 ```sh
-npm install -g @substructure.ai/cli
+curl -fsSL https://subs.dev/cli.sh | bash
 ```
 
 The CLI is the engine too. Nothing on this page signs in or leaves this machine.

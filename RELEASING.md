@@ -39,6 +39,13 @@ Pushing the tag triggers `.github/workflows/release.yml`, which:
    - `aarch64-unknown-linux-gnu` (cross-compiled), `x86_64-unknown-linux-gnu`
 2. For each target, builds an `@substructure.ai/cli-<platform>` package directory containing the binary.
 3. Publishes the CLI platform packages, then `@substructure.ai/cli`.
+4. Attaches `subs-<target>.tar.gz` and a `.sha256` for each to the GitHub Release.
+
+Those tarballs are what `curl -fsSL https://subs.dev/cli.sh | bash` installs.
+The asset names carry no version so `releases/latest/download/<name>` resolves
+without an API call; `SUBS_VERSION` pins a tag instead. Linux builds run on the
+`ubuntu-22.04` image on purpose — glibc 2.35 is the floor the binary imposes on
+whoever installs it.
 
 ## Dry runs
 
