@@ -9,7 +9,6 @@
 //! and this machine holds it.
 
 use anyhow::{bail, Context as _, Result};
-use clap::Subcommand;
 use serde::Serialize;
 
 use crate::api::v1::{LlmBlockView, LlmKeyRequest};
@@ -23,32 +22,7 @@ use super::pickers;
 use super::print;
 use super::project_config::ProjectConfig;
 use super::ProjectScope;
-
-#[derive(Subcommand)]
-pub enum LlmCommand {
-    /// List the blocks this project declares and whether each has a key.
-    #[command(name = "list", visible_alias = "ls")]
-    List {
-        #[command(flatten)]
-        scope: ProjectScope,
-    },
-    /// Upload the key for one block. Typed at a prompt, piped in on stdin, or
-    /// read from the environment variable `--env` names.
-    SetKey {
-        block: String,
-        /// Read the key from this environment variable instead of stdin.
-        #[arg(long, value_name = "VAR")]
-        env: Option<String>,
-        #[command(flatten)]
-        scope: ProjectScope,
-    },
-    /// Remove the key for one block. Calls on it fail until another is set.
-    DeleteKey {
-        block: String,
-        #[command(flatten)]
-        scope: ProjectScope,
-    },
-}
+use crate::cli::connections::Row;
 
 #[derive(Debug, Serialize)]
 struct KeyResult<'a> {
@@ -56,29 +30,69 @@ struct KeyResult<'a> {
     key_bound: bool,
 }
 
-pub async fn run(command: LlmCommand) -> Result<()> {
-    match command {
-        LlmCommand::List { scope } => match target(&scope.globals)?.here() {
-            Some(config) => list_here(&config, &scope),
-            None => list(scope).await,
-        },
-        LlmCommand::SetKey { block, env, scope } => match target(&scope.globals)?.here() {
-            Some(config) => key_is_a_variable(&block, &config, "set"),
-            None => set_key(block, env, scope).await,
-        },
-        LlmCommand::DeleteKey { block, scope } => match target(&scope.globals)?.here() {
-            Some(config) => key_is_a_variable(&block, &config, "delete"),
-            None => delete_key(block, scope).await,
-        },
+pub(crate) async fn set_key_at(
+    block: String,
+    env: Option<String>,
+    scope: ProjectScope,
+) -> Result<()> {
+    match target(&scope.globals)?.here() {
+        Some(config) => key_is_a_variable(&block, &config, "set"),
+        None => set_key(block, env, scope).await,
     }
 }
 
-/// The name, the type, and whether the variable holds a key.
-fn declared(name: &str, config: &ProjectConfig) -> Option<[String; 3]> {
+pub(crate) async fn delete_key_at(block: String, scope: ProjectScope) -> Result<()> {
+    match target(&scope.globals)?.here() {
+        Some(config) => key_is_a_variable(&block, &config, "delete"),
+        None => delete_key(block, scope).await,
+    }
+}
+
+pub(crate) async fn rows(
+    cfg: &ProjectConfig,
+    scope: &ProjectScope,
+    here: bool,
+) -> Result<Vec<Row>> {
+    if cfg.llm.is_empty() {
+        return Ok(Vec::new());
+    }
+    if here {
+        return Ok(cfg
+            .llm
+            .keys()
+            .filter_map(|name| declared(name, cfg))
+            .collect());
+    }
+
+    let (ctx, project) = Context::from_project(scope).await?;
+    let blocks: Vec<LlmBlockView> = ctx
+        .client
+        .get(&format!("/api/v1/projects/{project}/llm"))
+        .await?;
+    Ok(blocks
+        .iter()
+        .map(|b| Row {
+            path: format!("llm.{}", b.name),
+            what: b.kind.clone(),
+            credential: key_cell(&b.kind, b.key_bound).to_string(),
+        })
+        .collect())
+}
+
+const WORKER_RUNS_IT: &str = "n/a (your worker runs it)";
+
+fn key_cell(kind: &str, bound: bool) -> &'static str {
+    match (kind, bound) {
+        ("worker", _) => WORKER_RUNS_IT,
+        (_, true) => "set",
+        (_, false) => "not set",
+    }
+}
+
+fn declared(name: &str, config: &ProjectConfig) -> Option<Row> {
     let spec = config.llm.get(name)?;
-    // A worker block makes the call, so no key binds here.
-    let key = match spec.kind {
-        ProviderKind::Worker => "n/a (your worker runs it)".to_string(),
+    let credential = match spec.kind {
+        ProviderKind::Worker => WORKER_RUNS_IT.to_string(),
         _ => match spec.api_key_env() {
             None => "no variable named".to_string(),
             Some(var) => match env_value(&var).is_some() {
@@ -87,32 +101,11 @@ fn declared(name: &str, config: &ProjectConfig) -> Option<[String; 3]> {
             },
         },
     };
-    Some([name.to_string(), spec.kind.name().to_string(), key])
-}
-
-fn list_here(config: &ProjectConfig, scope: &ProjectScope) -> Result<()> {
-    let rows: Vec<[String; 3]> = config
-        .llm
-        .keys()
-        .filter_map(|name| declared(name, config))
-        .collect();
-
-    if scope.globals.json {
-        let blocks: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|[name, kind, key]| serde_json::json!({"name": name, "type": kind, "key": key}))
-            .collect();
-        return print::json(&blocks);
-    }
-
-    let columns = [
-        print::Column::left("NAME"),
-        print::Column::left("TYPE"),
-        print::Column::left("KEY"),
-    ];
-    let rows: Vec<Vec<String>> = rows.iter().map(|r| r.to_vec()).collect();
-    print::table(&columns, &rows);
-    Ok(())
+    Some(Row {
+        path: format!("llm.{name}"),
+        what: spec.kind.name().to_string(),
+        credential,
+    })
 }
 
 /// There is no key to upload or remove here. Says which variable holds it.
@@ -139,39 +132,6 @@ fn key_is_a_variable(block: &str, config: &ProjectConfig, verb: &str) -> Result<
              set.\n  export {var}=..."
         ),
     }
-}
-
-async fn list(scope: ProjectScope) -> Result<()> {
-    let (ctx, project) = Context::from_project(&scope).await?;
-    let blocks: Vec<LlmBlockView> = ctx
-        .client
-        .get(&format!("/api/v1/projects/{project}/llm"))
-        .await?;
-
-    if scope.globals.json {
-        return print::json(&blocks);
-    }
-
-    let columns = [
-        print::Column::left("NAME"),
-        print::Column::left("TYPE"),
-        print::Column::left("KEY"),
-    ];
-    let rows: Vec<Vec<String>> = blocks
-        .iter()
-        .map(|b| {
-            // A worker block runs the call itself, so there is no key to bind
-            // here and an empty cell would read as one that is missing.
-            let key = match (b.kind.as_str(), b.key_bound) {
-                ("worker", _) => "n/a (your worker runs it)",
-                (_, true) => "set",
-                (_, false) => "not set",
-            };
-            vec![b.name.clone(), b.kind.clone(), key.into()]
-        })
-        .collect();
-    print::table(&columns, &rows);
-    Ok(())
 }
 
 async fn set_key(block: String, env: Option<String>, scope: ProjectScope) -> Result<()> {
@@ -237,8 +197,9 @@ mod tests {
     #[test]
     fn a_block_here_reports_the_variable_it_reads() {
         let config = config(BLOCKS);
-        let [name, kind, key] = declared("claude", &config).unwrap();
-        assert_eq!(name, "claude");
+        let row = declared("claude", &config).unwrap();
+        let (kind, key) = (row.what, row.credential);
+        assert_eq!(row.path, "llm.claude");
         assert_eq!(kind, "anthropic");
         assert_eq!(key, "$NOT_SET_ANTHROPIC (not set)");
     }
@@ -246,7 +207,8 @@ mod tests {
     #[test]
     fn a_worker_block_needs_no_key_here() {
         let config = config(BLOCKS);
-        let [_, kind, key] = declared("byo", &config).unwrap();
+        let row = declared("byo", &config).unwrap();
+        let (kind, key) = (row.what, row.credential);
         assert_eq!(kind, "worker");
         assert!(key.contains("your worker runs it"), "{key}");
     }

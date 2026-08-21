@@ -11,6 +11,7 @@
 //! it compares the whole persisted snapshot, not the fields a test thought to
 //! look at.
 
+use crate::connectors::registry::ConnectionPath;
 use crate::protocol::StoredResult;
 use std::collections::HashMap;
 
@@ -400,7 +401,7 @@ impl World {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: vec![McpServer {
-                id: "conn-1".to_string(),
+                path: ConnectionPath::Mcp("conn-1".into()),
                 tools: None,
                 auth_failure: Default::default(),
                 approve: Default::default(),

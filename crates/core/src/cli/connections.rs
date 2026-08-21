@@ -18,7 +18,6 @@ use axum::extract::Query;
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
-use clap::Subcommand;
 use serde::Deserialize;
 use tokio::sync::{mpsc, Mutex, Notify};
 
@@ -29,7 +28,7 @@ use super::{DEFAULT_TENANT, LOCAL_SUBJECT};
 use crate::api::v1::{McpAuthorizeResponse, McpConnection, McpDeclareRequest, McpTokenRequest};
 use crate::connectors::credential::{Credential, CredentialStore};
 use crate::connectors::oauth;
-use crate::connectors::registry::{AuthKind, ConnectionSpec, CredentialScope};
+use crate::connectors::registry::{AuthKind, ConnectionPath, ConnectionSpec, CredentialScope};
 use crate::connectors::Slot;
 use crate::providers::sqlite::{SqliteCredentialStore, SqliteDb, SqliteSecretStore};
 use crate::runtime::secret::SecretCipher;
@@ -42,70 +41,6 @@ const REMOTE_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 const CLIENT_NAME: &str = "Substructure";
-
-#[derive(Subcommand)]
-pub enum McpCommand {
-    /// Authorize an `auth = "oauth"` connection, opening a browser for consent.
-    Login {
-        /// Connection id from `substructure.toml`. Optional when the file
-        /// declares exactly one.
-        id: Option<String>,
-        /// Print the authorization URL instead of opening a browser.
-        #[arg(long)]
-        no_browser: bool,
-        #[command(flatten)]
-        scope: ProjectScope,
-    },
-    /// Set the token for an `auth = "token"` connection. Typed at a prompt,
-    /// piped in on stdin, or read from the environment variable `--env` names.
-    SetToken {
-        id: Option<String>,
-        /// Read the token from this environment variable instead of stdin.
-        #[arg(long, value_name = "VAR")]
-        env: Option<String>,
-        #[command(flatten)]
-        scope: ProjectScope,
-    },
-    /// Forget a connection's credentials — every holder's, whichever way they
-    /// were obtained. Calls on it fail until somebody connects again.
-    #[command(name = "logout")]
-    Logout {
-        id: Option<String>,
-        #[command(flatten)]
-        scope: ProjectScope,
-    },
-    /// Show declared connections and whether each one is authorized.
-    #[command(name = "list", visible_alias = "ls")]
-    List {
-        #[command(flatten)]
-        scope: ProjectScope,
-    },
-}
-
-pub async fn run(command: McpCommand) -> Result<()> {
-    match command {
-        McpCommand::Login {
-            id,
-            no_browser,
-            scope,
-        } => match environment(&scope.globals)? {
-            cfg if cfg.remote.is_none() => login_local(id, no_browser, cfg).await,
-            cfg => login_remote(id, no_browser, scope, cfg).await,
-        },
-        McpCommand::SetToken { id, env, scope } => match environment(&scope.globals)? {
-            cfg if cfg.remote.is_none() => set_token_local(id, env, &scope.globals, cfg).await,
-            cfg => set_token_remote(id, env, scope, cfg).await,
-        },
-        McpCommand::Logout { id, scope } => match environment(&scope.globals)? {
-            cfg if cfg.remote.is_none() => delete_token_local(id, cfg).await,
-            cfg => delete_token_remote(id, scope, cfg).await,
-        },
-        McpCommand::List { scope } => match environment(&scope.globals)? {
-            cfg if cfg.remote.is_none() => list_local(cfg).await,
-            cfg => list_remote(scope, cfg).await,
-        },
-    }
-}
 
 /// The cipher the environment configures, with a set-and-wrong variable
 /// reported rather than read as "no cipher".
@@ -122,52 +57,6 @@ fn open_store(db: SqliteDb) -> Result<SqliteCredentialStore> {
     Ok(SqliteCredentialStore::new(db, secrets)?)
 }
 
-/// Checked before a command that only makes sense under one method. A file that
-/// declares nothing is the usual case and passes: the server is asked instead.
-fn require_auth(
-    cfg: &ProjectConfig,
-    id: &str,
-    spec: &ConnectionSpec,
-    want: AuthKind,
-) -> Result<()> {
-    let declared = match spec.auth {
-        // Nothing declared: discovery decides, and either command may be the
-        // one that fits. `login` finds out; `set-token` is what a file has to
-        // ask for, since nothing on the wire announces a static token.
-        None if want == AuthKind::Oauth => return Ok(()),
-        None => bail!(
-            "`{id}` declares no `auth`, so its token would never be sent. \
-             Write {} first.",
-            token_declaration(cfg, id)
-        ),
-        Some(declared) if declared == want => return Ok(()),
-        Some(declared) => declared,
-    };
-    let fix = match declared {
-        AuthKind::Oauth => format!("authorize it with `subs mcp login {id}`"),
-        AuthKind::Token => format!("set its token with `subs mcp set-token {id}`"),
-        AuthKind::None => "it declares that it needs no credential".to_string(),
-    };
-    bail!("`{id}` declares `auth = \"{}\"`: {fix}", declared.as_str())
-}
-
-/// Where `auth = "token"` is written for this id. A plugin's server has no
-/// `[mcp.<id>]` to put it on — the id is derived, and declaring one is an
-/// error — so the plugin's own `auth` table is what a reader has to edit.
-fn token_declaration(cfg: &ProjectConfig, id: &str) -> String {
-    let from_plugin = match cfg.mcp.contains_key(id) {
-        true => None,
-        false => cfg
-            .plugin
-            .keys()
-            .find_map(|pid| Some((pid, id.strip_prefix(&format!("{pid}-"))?))),
-    };
-    match from_plugin {
-        Some((pid, server)) => format!("`auth = {{ {server} = \"token\" }}` on [plugin.{pid}]"),
-        None => format!("`auth = \"token\"` on [mcp.{id}]"),
-    }
-}
-
 /// Whose slot a local command reads or writes. Consent given here is
 /// whoever ran the command, so no other person's slot is reachable.
 fn local_slot(spec: &ConnectionSpec) -> Slot {
@@ -182,7 +71,6 @@ fn local_slot(spec: &ConnectionSpec) -> Slot {
 
 /// A server whose OAuth needs a client somebody registered by hand.
 fn unregistrable(
-    id: &str,
     spec: &ConnectionSpec,
     redirect_uri: &str,
     err: oauth::OauthError,
@@ -190,47 +78,66 @@ fn unregistrable(
     if !matches!(err, oauth::OauthError::Registration(_)) {
         return err.into();
     }
-    if let Some(var) = &spec.client_id_env {
-        return anyhow::anyhow!("{err}.\n\n[mcp.{id}] names `{var}`, and it is not set.");
+    if let Some(var) = &spec.decl.client_id_env {
+        return anyhow::anyhow!(
+            "{err}.\n\n[{}] names `{var}`, and it is not set.",
+            spec.path
+        );
     }
+    let path = &spec.path;
     anyhow::anyhow!(
         "{err}.\n\n\
-         Register a client with that server, then name it on [mcp.{id}]:\n\n  \
+         Register a client with that server, then name it on [{path}]:\n\n  \
          client_id_env = \"...\"\n  client_secret_env = \"...\"\n\n\
          Register it as a native or desktop client. Its redirect URI is \
          {redirect_uri}, and the port changes on every run.\n\n\
          If the server takes a static token instead, add `auth = \"token\"`, then:\n\n  \
-         subs mcp set-token {id}"
+         subs auth {path}"
     )
 }
 
 /// The environment these commands act on. An absent file is a configuration
 /// problem, not an empty list: nothing here can succeed without one.
-fn environment(globals: &CloudGlobals) -> Result<ProjectConfig> {
+pub(super) fn environment(globals: &CloudGlobals) -> Result<ProjectConfig> {
     let found = project_config::resolve(globals.config.as_deref())?
         .context("no substructure.toml found; connections are declared under `[mcp.<id>]`")?;
     Ok(found.config)
 }
 
-/// Resolve the id to act on, allowing it to be omitted where there is no
-/// ambiguity.
-fn pick<T: Clone>(connections: &BTreeMap<String, T>, id: Option<String>) -> Result<(String, T)> {
+pub(super) fn pick(
+    connections: &BTreeMap<ConnectionPath, ConnectionSpec>,
+    path: Option<ConnectionPath>,
+) -> Result<ConnectionSpec> {
     if connections.is_empty() {
-        bail!("substructure.toml declares no connections under `[mcp.<id>]`");
+        bail!("substructure.toml declares no connections");
     }
-    let id = match id {
-        Some(id) => id,
+    let path = match path {
+        Some(path) => path,
         None if connections.len() == 1 => connections.keys().next().expect("one").clone(),
-        None => bail!(
-            "name a connection: {}",
-            connections.keys().cloned().collect::<Vec<_>>().join(", ")
-        ),
+        None => bail!("name a connection: {}", list(connections)),
     };
-    let spec = connections
-        .get(&id)
-        .cloned()
-        .with_context(|| format!("`{id}` is not declared in substructure.toml"))?;
-    Ok((id, spec))
+    connections.get(&path).cloned().with_context(|| {
+        format!(
+            "`{path}` is not declared in substructure.toml. Declared: {}",
+            list(connections)
+        )
+    })
+}
+
+pub(super) fn list(connections: &BTreeMap<ConnectionPath, ConnectionSpec>) -> String {
+    let mut paths: Vec<String> = connections.keys().map(ConnectionPath::to_string).collect();
+    paths.sort();
+    match paths.is_empty() {
+        true => "none".to_string(),
+        false => paths.join(", "),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Row {
+    pub path: String,
+    pub what: String,
+    pub credential: String,
 }
 
 // ── Local: loopback consent, credential in the environment's database ────────
@@ -257,32 +164,37 @@ fn open_existing_db(cfg: &ProjectConfig) -> Result<Option<SqliteDb>> {
     Ok(Some(SqliteDb::open(&path, Duration::from_secs(5))?))
 }
 
-async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -> Result<()> {
-    let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
-    require_auth(&cfg, &id, &spec, AuthKind::Oauth)?;
-    let subject = local_slot(&spec);
+pub(super) async fn login_local(
+    spec: &ConnectionSpec,
+    no_browser: bool,
+    cfg: &ProjectConfig,
+) -> Result<()> {
+    let id = &spec.path.to_string();
+    let subject = local_slot(spec);
 
     let http = reqwest::Client::new();
 
-    println!("Discovering {}...", spec.url);
+    println!("Discovering {}...", spec.decl.url);
     // What the server says it wants, where the file did not. A file that
     // declared OAuth is taken at its word: it is there to override exactly this.
-    if spec.auth.is_none() {
-        match oauth::sniff(&http, &spec.url).await? {
+    if spec.decl.auth.is_none() {
+        match oauth::sniff(&http, &spec.decl.url).await? {
             oauth::Probed::NoChallenge => {
-                println!("{} did not ask for a credential. Nothing to do.", spec.url);
+                println!(
+                    "{} did not ask for a credential. Nothing to do.",
+                    spec.decl.url
+                );
                 return Ok(());
             }
             oauth::Probed::Protected => bail!(
                 "{} wants a credential but publishes no way to get one. If it takes a \
-                 static token, write `auth = \"token\"` on [mcp.{id}] and run \
-                 `subs mcp set-token {id}`.",
-                spec.url
+                 static token, write `auth = \"token\"` on [{id}] and run `subs auth {id}`.",
+                spec.decl.url
             ),
             oauth::Probed::Oauth => {}
         }
     }
-    let discovered = oauth::discover(&http, &spec.url).await?;
+    let discovered = oauth::discover(&http, &spec.decl.url).await?;
 
     // Bound before registering: the redirect URI must name the port we will
     // actually be listening on, and dynamic registration records it.
@@ -298,10 +210,10 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -
         Some(client) => client,
         None => oauth::client_id(&http, &discovered.server, None, &redirect_uri, CLIENT_NAME)
             .await
-            .map_err(|e| unregistrable(&id, &spec, &redirect_uri, e))?,
+            .map_err(|e| unregistrable(spec, &redirect_uri, e))?,
     };
 
-    let pending = oauth::authorize(&discovered, &client, &redirect_uri, &spec.scopes)?;
+    let pending = oauth::authorize(&discovered, &client, &redirect_uri, &spec.decl.scopes)?;
 
     if let Some(scope) = &pending.scope {
         println!("Requesting: {scope}");
@@ -340,29 +252,27 @@ async fn login_local(id: Option<String>, no_browser: bool, cfg: ProjectConfig) -
 
     let refreshable = tokens.refreshable();
     // Keyed by id, not by URL: two ids naming one server are two accounts.
-    store_credential(&cfg, &id, &subject, Credential::Oauth(Box::new(tokens))).await?;
+    store_credential(cfg, id, &subject, Credential::Oauth(Box::new(tokens))).await?;
 
     println!("Authorized `{id}` in {}.", cfg.db_path());
     if !refreshable {
         println!(
-            "Note: the server issued no refresh token, so this expires and needs `subs mcp login {id}` again."
+            "Note: the server issued no refresh token, so this expires and needs `subs auth {id}` again."
         );
     }
     Ok(())
 }
 
-/// The token, typed or piped, the way `subs llm set-key` takes one: a static
-/// credential is configuration, and it never appears in argv where a shell
-/// history would keep it.
-async fn set_token_local(
-    id: Option<String>,
+/// The token is typed or piped: a static credential never appears in argv
+/// where a shell history would keep it.
+pub(super) async fn set_token_local(
+    spec: &ConnectionSpec,
     env: Option<String>,
     globals: &CloudGlobals,
-    cfg: ProjectConfig,
+    cfg: &ProjectConfig,
 ) -> Result<()> {
-    let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
-    require_auth(&cfg, &id, &spec, AuthKind::Token)?;
-    let subject = local_slot(&spec);
+    let id = &spec.path.to_string();
+    let subject = local_slot(spec);
 
     let token = match &env {
         Some(var) => super::env_value(var)
@@ -375,19 +285,19 @@ async fn set_token_local(
         bail!("no token given. Pipe it in, or pass --env <VAR>.");
     }
 
-    store_credential(&cfg, &id, &subject, Credential::Static { token }).await?;
+    store_credential(cfg, id, &subject, Credential::Static { token }).await?;
     println!("Token set for `{id}` in {}.", cfg.db_path());
     Ok(())
 }
 
-async fn delete_token_local(id: Option<String>, cfg: ProjectConfig) -> Result<()> {
-    let (id, _) = pick(&cfg.resolved_connections()?, id)?;
-    let Some(db) = open_existing_db(&cfg)? else {
+pub(super) async fn delete_token_local(path: &ConnectionPath, cfg: &ProjectConfig) -> Result<()> {
+    let id = &path.to_string();
+    let Some(db) = open_existing_db(cfg)? else {
         println!("`{id}` holds no credential.");
         return Ok(());
     };
     let store = open_store(db)?;
-    match store.delete(DEFAULT_TENANT, &id).await? {
+    match store.delete(DEFAULT_TENANT, id).await? {
         true => println!("Forgot the credential for `{id}`."),
         false => println!("`{id}` holds no credential."),
     }
@@ -406,33 +316,44 @@ async fn store_credential(
         .map_err(|e| anyhow::anyhow!("storing the credential: {e}"))
 }
 
-async fn list_local(cfg: ProjectConfig) -> Result<()> {
+pub(super) async fn list_local(cfg: &ProjectConfig) -> Result<Vec<Row>> {
     let connections = cfg.resolved_connections()?;
-    if connections.is_empty() {
-        bail!("substructure.toml declares no connections under `[mcp.<id>]`");
-    }
-    let store = match open_existing_db(&cfg)? {
+    let store = match open_existing_db(cfg)? {
         Some(db) => Some(open_store(db)?),
         None => None,
     };
 
+    let mut rows = Vec::new();
     for (id, spec) in &connections {
-        if spec.effective_scope() == CredentialScope::Shared || spec.auth == Some(AuthKind::None) {
+        if spec.effective_scope() == CredentialScope::Shared
+            || spec.decl.auth == Some(AuthKind::None)
+        {
             let held = match &store {
-                Some(store) => CredentialStore::get(store, DEFAULT_TENANT, id, &Slot::Shared).await,
+                Some(store) => {
+                    CredentialStore::get(store, DEFAULT_TENANT, &id.to_string(), &Slot::Shared)
+                        .await
+                }
                 None => None,
             };
-            println!("{id}\t{}\t{}", spec.url, describe(spec, held.as_ref()));
+            rows.push(Row {
+                path: spec.path.to_string(),
+                what: spec.decl.url.clone(),
+                credential: describe(spec, held.as_ref()),
+            });
             continue;
         }
 
         let holders = match &store {
-            Some(store) => store.holders(DEFAULT_TENANT, id).await?,
+            Some(store) => store.holders(DEFAULT_TENANT, &id.to_string()).await?,
             None => Vec::new(),
         };
-        println!("{id}\t{}\t{}", spec.url, connected(holders.len()));
+        rows.push(Row {
+            path: spec.path.to_string(),
+            what: spec.decl.url.clone(),
+            credential: connected(holders.len()),
+        });
     }
-    Ok(())
+    Ok(rows)
 }
 
 fn connected(holders: usize) -> String {
@@ -444,19 +365,23 @@ fn connected(holders: usize) -> String {
 
 /// What one connection's slot holds, read against what the file declares.
 fn describe(spec: &ConnectionSpec, held: Option<&Credential>) -> String {
-    if spec.auth == Some(AuthKind::None) {
+    if spec.decl.auth == Some(AuthKind::None) {
         return "no credential needed".to_string();
     }
     let Some(held) = held else {
         // Nothing declared and nothing held is not a problem yet: the server
         // has not been asked, and may want nothing.
-        return match spec.auth {
+        return match spec.decl.auth {
             Some(AuthKind::Token) => "no token set".to_string(),
             Some(_) => "not authorized".to_string(),
             None => "not connected".to_string(),
         };
     };
-    if spec.auth.is_some_and(|declared| declared != held.kind()) {
+    if spec
+        .decl
+        .auth
+        .is_some_and(|declared| declared != held.kind())
+    {
         return format!("holds {}; not authorized", held.kind().as_str());
     }
     match held {
@@ -465,7 +390,7 @@ fn describe(spec: &ConnectionSpec, held: Option<&Credential>) -> String {
             // The credential is keyed by id, so an edited `url` leaves one that
             // the resolver will refuse to send. Saying so beats reading as
             // authorized.
-            if !oauth::same_origin(&tokens.resource, &spec.url) {
+            if !oauth::same_origin(&tokens.resource, &spec.decl.url) {
                 return format!("authorized for {}; log in again", tokens.resource);
             }
             match tokens.expires_at {
@@ -503,11 +428,13 @@ pub(crate) enum Needs {
 /// server that wants no credential from one nobody has authorized — and
 /// reporting the first as unauthorized would be a permanent false alarm about a
 /// connection that works.
-pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<(String, Needs)>> {
-    let declared: Vec<(String, ConnectionSpec)> = cfg
+pub(crate) async fn unauthorized_local(
+    cfg: &ProjectConfig,
+) -> Result<Vec<(ConnectionPath, Needs)>> {
+    let declared: Vec<(ConnectionPath, ConnectionSpec)> = cfg
         .resolved_connections()?
         .into_iter()
-        .filter(|(_, spec)| spec.auth != Some(AuthKind::None))
+        .filter(|(_, spec)| spec.decl.auth != Some(AuthKind::None))
         .collect();
     let store = match open_existing_db(cfg)? {
         Some(db) => Some(open_store(db)?),
@@ -521,14 +448,16 @@ pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<(Strin
     for (id, spec) in declared {
         let slot = local_slot(&spec);
         let held = match &store {
-            Some(store) => CredentialStore::get(store, DEFAULT_TENANT, &id, &slot).await,
+            Some(store) => {
+                CredentialStore::get(store, DEFAULT_TENANT, &id.to_string(), &slot).await
+            }
             None => None,
         };
         let usable = match &held {
-            Some(Credential::Static { .. }) => spec.auth == Some(AuthKind::Token),
+            Some(Credential::Static { .. }) => spec.decl.auth == Some(AuthKind::Token),
             Some(Credential::Oauth(tokens)) => {
-                spec.auth != Some(AuthKind::Token)
-                    && oauth::same_origin(&tokens.resource, &spec.url)
+                spec.decl.auth != Some(AuthKind::Token)
+                    && oauth::same_origin(&tokens.resource, &spec.decl.url)
                     && !expired(tokens)
             }
             None => false,
@@ -536,18 +465,18 @@ pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<(Strin
         if usable {
             continue;
         }
-        let needs = match spec.auth {
+        let needs = match spec.decl.auth {
             Some(AuthKind::Token) => Needs::Token,
             Some(_) => Needs::Login,
             // Unreachable is not unauthorized: saying what a server wants means
             // having asked it.
-            None => match oauth::sniff(&http, &spec.url).await {
+            None => match oauth::sniff(&http, &spec.decl.url).await {
                 Ok(oauth::Probed::Oauth) => Needs::Login,
                 Ok(oauth::Probed::Protected) => Needs::Declaration,
                 Ok(oauth::Probed::NoChallenge) | Err(_) => continue,
             },
         };
-        out.push((id, needs));
+        out.push((spec.path.clone(), needs));
     }
     Ok(out)
 }
@@ -556,14 +485,12 @@ pub(crate) async fn unauthorized_local(cfg: &ProjectConfig) -> Result<Vec<(Strin
 
 /// Consent may land in the dashboard instead of here, so this polls for the
 /// outcome rather than owning it.
-async fn login_remote(
-    id: Option<String>,
+pub(super) async fn login_remote(
+    spec: &ConnectionSpec,
     no_browser: bool,
     scope: ProjectScope,
-    cfg: ProjectConfig,
 ) -> Result<()> {
-    let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
-    require_auth(&cfg, &id, &spec, AuthKind::Oauth)?;
+    let id = &spec.path.to_string();
     let (ctx, org, project) = remote_target(&scope).await?;
 
     // Declaring first is idempotent and inert: `subs apply` may already have
@@ -572,7 +499,7 @@ async fn login_remote(
         .client
         .post_json(
             &format!("/api/v1/orgs/{org}/mcp/connections"),
-            &declare(&id, &spec, &project),
+            &declare(id, spec, &project),
         )
         .await?;
     let started: McpAuthorizeResponse = ctx
@@ -597,7 +524,7 @@ async fn login_remote(
     {
         println!(
             "Still waiting on consent. Finish in the browser; the connection appears \
-             in `subs mcp list` once it lands."
+             in `subs list` once it lands."
         );
         return Ok(());
     }
@@ -611,26 +538,23 @@ async fn login_remote(
 /// from the file.
 fn declare(id: &str, spec: &ConnectionSpec, project: &str) -> McpDeclareRequest {
     McpDeclareRequest {
-        url: spec.url.clone(),
+        url: spec.decl.url.clone(),
         connection_id: Some(id.to_string()),
         project_id: project.to_string(),
-        auth: spec.auth.map(|a| a.as_str().to_string()),
-        header: spec.header.clone(),
+        auth: spec.decl.auth.map(|a| a.as_str().to_string()),
+        header: spec.decl.header.clone(),
     }
 }
 
 /// The deployment holds the token and the engine there sends it; nothing is
 /// written on this machine. Declaring first is idempotent, so a token may be
 /// set before the first `subs apply`.
-async fn set_token_remote(
-    id: Option<String>,
+pub(super) async fn set_token_remote(
+    spec: &ConnectionSpec,
     env: Option<String>,
     scope: ProjectScope,
-    cfg: ProjectConfig,
 ) -> Result<()> {
-    let (id, spec) = pick(&cfg.resolved_connections()?, id)?;
-    require_auth(&cfg, &id, &spec, AuthKind::Token)?;
-
+    let id = &spec.path.to_string();
     let token = match &env {
         Some(var) => super::env_value(var)
             .with_context(|| format!("${var} is not set"))?
@@ -647,7 +571,7 @@ async fn set_token_remote(
         .client
         .post_json(
             &format!("/api/v1/orgs/{org}/mcp/connections"),
-            &declare(&id, &spec, &project),
+            &declare(id, spec, &project),
         )
         .await?;
     ctx.client
@@ -662,17 +586,13 @@ async fn set_token_remote(
     Ok(())
 }
 
-async fn delete_token_remote(
-    id: Option<String>,
-    scope: ProjectScope,
-    cfg: ProjectConfig,
-) -> Result<()> {
-    let (id, _) = pick(&cfg.resolved_connections()?, id)?;
+pub(super) async fn delete_token_remote(path: &ConnectionPath, scope: ProjectScope) -> Result<()> {
+    let id = &path.to_string();
     let (ctx, org, project) = remote_target(&scope).await?;
     let found = connections_for(&ctx, &org, Some(&project))
         .await?
         .into_iter()
-        .find(|c| c.connection_id == id);
+        .find(|c| &c.connection_id == id);
     let Some(found) = found else {
         println!("`{id}` holds no credential.");
         return Ok(());
@@ -745,24 +665,32 @@ async fn connections_for(
     ctx.client.get(&path).await
 }
 
-async fn list_remote(scope: ProjectScope, cfg: ProjectConfig) -> Result<()> {
+pub(super) async fn list_remote(scope: &ProjectScope, cfg: &ProjectConfig) -> Result<Vec<Row>> {
     let declared = cfg.resolved_connections()?;
     if declared.is_empty() {
-        bail!("substructure.toml declares no connections under `[mcp.<id>]`");
+        return Ok(Vec::new());
     }
     let ctx = CloudContext::load(&scope.globals)?;
     let org = ctx.require_org(scope.org.as_deref()).await?;
     let project = ctx.pinned_project(scope.project.as_deref()).await?;
     let connections = connections_for(&ctx, &org, project.as_deref()).await?;
 
+    let mut rows = Vec::new();
     for (id, spec) in &declared {
-        let status = match connections.iter().find(|c| &c.connection_id == id) {
+        let status = match connections
+            .iter()
+            .find(|c| c.connection_id == id.to_string())
+        {
             Some(found) => found.status.clone(),
             None => "not authorized".to_string(),
         };
-        println!("{id}\t{}\t{status}", spec.url);
+        rows.push(Row {
+            path: spec.path.to_string(),
+            what: spec.decl.url.clone(),
+            credential: status,
+        });
     }
-    Ok(())
+    Ok(rows)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -821,13 +749,17 @@ const PAGE: &str = "<!doctype html><meta charset=utf-8><title>Substructure</titl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::registry::ConnectionDecl;
     use crate::protocol::ConnectorProtocol;
     use std::path::PathBuf;
 
     fn spec(auth: Option<AuthKind>) -> ConnectionSpec {
-        ConnectionSpec {
+        spec_at(ConnectionPath::Mcp("linear".into()), auth)
+    }
+
+    fn spec_at(path: ConnectionPath, auth: Option<AuthKind>) -> ConnectionSpec {
+        ConnectionDecl {
             url: "https://mcp.linear.app/mcp".into(),
-            protocol: ConnectorProtocol::Mcp,
             auth,
             header: None,
             credential: None,
@@ -836,6 +768,7 @@ mod tests {
             client_secret_env: None,
             prefix_tools: true,
         }
+        .at(path, ConnectorProtocol::Mcp)
     }
 
     fn globals() -> CloudGlobals {
@@ -859,110 +792,62 @@ mod tests {
 
     #[test]
     fn an_id_may_be_omitted_only_when_there_is_no_ambiguity() {
-        let one = BTreeMap::from([("linear".to_string(), spec(Some(AuthKind::Oauth)))]);
-        assert_eq!(pick(&one, None).unwrap().0, "linear");
+        let linear = ConnectionPath::Mcp("linear".into());
+        let one = BTreeMap::from([(linear.clone(), spec(Some(AuthKind::Oauth)))]);
+        assert_eq!(pick(&one, None).unwrap().path, linear);
 
         let two = BTreeMap::from([
-            ("linear".to_string(), spec(Some(AuthKind::Oauth))),
-            ("sentry".to_string(), spec(Some(AuthKind::Oauth))),
+            (linear, spec(Some(AuthKind::Oauth))),
+            (
+                ConnectionPath::Mcp("sentry".into()),
+                spec_at(ConnectionPath::Mcp("sentry".into()), Some(AuthKind::Oauth)),
+            ),
         ]);
         let err = pick(&two, None).unwrap_err().to_string();
-        assert!(err.contains("linear") && err.contains("sentry"), "{err}");
+        assert!(
+            err.contains("mcp.linear") && err.contains("mcp.sentry"),
+            "named by path: {err}"
+        );
 
-        let err = pick(&one, Some("nope".into())).unwrap_err().to_string();
+        let err = pick(&one, ConnectionPath::parse("mcp.nope"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not declared"), "{err}");
 
-        let none: BTreeMap<String, ConnectionSpec> = BTreeMap::new();
+        let none: BTreeMap<ConnectionPath, ConnectionSpec> = BTreeMap::new();
         let err = pick(&none, None).unwrap_err().to_string();
         assert!(err.contains("declares no connections"), "{err}");
+    }
+
+    #[test]
+    fn a_plugins_server_is_picked_by_where_it_is_declared() {
+        let connections = BTreeMap::from([(
+            ConnectionPath::PluginServer {
+                plugin: "reggu".into(),
+                server: "code".into(),
+            },
+            spec_at(
+                ConnectionPath::PluginServer {
+                    plugin: "reggu".into(),
+                    server: "code".into(),
+                },
+                Some(AuthKind::Token),
+            ),
+        )]);
+        assert_eq!(
+            pick(&connections, ConnectionPath::parse("plugin.reggu.mcp.code"))
+                .unwrap()
+                .path
+                .tool_prefix(),
+            "reggu_code"
+        );
+        assert!(ConnectionPath::parse("reggu_code").is_none());
     }
 
     fn written(body: &str) -> ProjectConfig {
         let path = tmpdir().join(project_config::FILENAME);
         std::fs::write(&path, body).unwrap();
         project_config::load_explicit(&path).unwrap().config
-    }
-
-    /// Each command belongs to one declared method, and says which the other is
-    /// rather than running a flow the connection does not use.
-    #[tokio::test]
-    async fn a_command_refuses_a_connection_declaring_the_other_method() {
-        let token =
-            written("[mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\nauth = \"token\"\n");
-        let err = login_local(Some("sentry".into()), true, token)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("subs mcp set-token sentry"), "{err}");
-
-        let oauth =
-            written("[mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\nauth = \"oauth\"\n");
-        let err = set_token_local(
-            Some("sentry".into()),
-            Some("PATH".into()),
-            &globals(),
-            oauth,
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("subs mcp login sentry"), "{err}");
-
-        // And a connection that declares nothing: a token it never sends is
-        // worse than a refusal, since nothing would say why.
-        let bare = written("[mcp.sentry]\nurl = \"https://mcp.sentry.dev/mcp\"\n");
-        let err = set_token_local(Some("sentry".into()), Some("PATH".into()), &globals(), bare)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("declares no `auth`"), "{err}");
-    }
-
-    /// A plugin's server is a connection like any other, and a file naming a
-    /// `[remote]` reaches it by the same derived id the deployment asks for.
-    /// There is no `[mcp.<id>]` to write `auth` on, so the plugin is where the
-    /// reader is sent.
-    #[tokio::test]
-    async fn a_plugins_server_is_reachable_from_a_file_naming_a_remote() {
-        let dir = tmpdir();
-        std::fs::create_dir_all(dir.join("plugin")).unwrap();
-        std::fs::write(
-            dir.join("plugin/plugin.json"),
-            r#"{ "name": "reggu.admin", "version": "1.0.0", "description": "Admin." }"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("plugin/mcp.json"),
-            r#"{ "mcpServers": { "admin": {
-                "type": "streamable-http", "url": "https://reggu.test/mcp" } } }"#,
-        )
-        .unwrap();
-        let path = dir.join(project_config::FILENAME);
-        std::fs::write(
-            &path,
-            "[plugin.reggu]\npath = \"./plugin\"\n[remote]\nurl = \"https://api.test\"\n",
-        )
-        .unwrap();
-        let cfg = project_config::load_explicit(&path).unwrap().config;
-
-        let connections = cfg.resolved_connections().unwrap();
-        assert!(connections.contains_key("reggu-admin"), "{connections:?}");
-
-        // Declaring nothing stops before anything is asked of the deployment,
-        // and names the table that would carry it.
-        let scope = ProjectScope {
-            org: None,
-            project: None,
-            globals: globals(),
-        };
-        let err = set_token_remote(Some("reggu-admin".into()), Some("PATH".into()), scope, cfg)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("`auth = { admin = \"token\" }` on [plugin.reggu]"),
-            "{err}"
-        );
     }
 
     /// The token reaches the store the engine reads, and never argv.
@@ -977,29 +862,27 @@ mod tests {
         .unwrap();
 
         std::env::set_var("SUBS_TEST_MCP_TOKEN", "ghp_written");
-        set_token_local(
-            Some("github".into()),
-            Some("SUBS_TEST_MCP_TOKEN".into()),
-            &globals(),
-            cfg.clone(),
+        let spec = pick(
+            &cfg.resolved_connections().unwrap(),
+            ConnectionPath::parse("mcp.github"),
         )
-        .await
         .unwrap();
+        set_token_local(&spec, Some("SUBS_TEST_MCP_TOKEN".into()), &globals(), &cfg)
+            .await
+            .unwrap();
 
         let store = open_store(open_db(&cfg).unwrap()).unwrap();
         assert_eq!(
-            CredentialStore::get(&store, DEFAULT_TENANT, "github", &Slot::Shared).await,
+            CredentialStore::get(&store, DEFAULT_TENANT, "mcp.github", &Slot::Shared).await,
             Some(Credential::Static {
                 token: "ghp_written".into()
             })
         );
 
         // And forgetting it empties the slot rather than the file.
-        delete_token_local(Some("github".into()), cfg)
-            .await
-            .unwrap();
+        delete_token_local(&spec.path, &cfg).await.unwrap();
         assert!(
-            CredentialStore::get(&store, DEFAULT_TENANT, "github", &Slot::Shared)
+            CredentialStore::get(&store, DEFAULT_TENANT, "mcp.github", &Slot::Shared)
                 .await
                 .is_none()
         );
@@ -1021,8 +904,8 @@ mod tests {
         assert_eq!(
             unauthorized_local(&cfg).await.unwrap(),
             [
-                ("github".to_string(), Needs::Token),
-                ("linear".to_string(), Needs::Login)
+                (ConnectionPath::Mcp("github".into()), Needs::Token),
+                (ConnectionPath::Mcp("linear".into()), Needs::Login)
             ]
         );
     }
@@ -1074,7 +957,7 @@ mod tests {
     #[test]
     fn a_credential_for_another_server_does_not_read_as_authorized() {
         let mut spec = spec(Some(AuthKind::Oauth));
-        spec.url = "https://mcp.sentry.dev/mcp".into();
+        spec.decl.url = "https://mcp.sentry.dev/mcp".into();
         let status = describe(&spec, Some(&granted()));
         assert!(status.contains("mcp.linear.app"), "{status}");
         assert!(status.contains("log in again"), "{status}");

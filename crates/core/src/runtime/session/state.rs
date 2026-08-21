@@ -31,6 +31,7 @@ use super::decision::{LlmHandler, ToolHandler, Trigger};
 use super::events::*;
 use super::prompt_context;
 use super::tool_contract::classify_arguments;
+use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{
     AgentTool, ConnectorTool, DeferToolsStrategy, Handler, McpServer, StoredResult,
@@ -51,7 +52,7 @@ pub struct Source {
 /// server's own words ahead of the name that says whose they are.
 #[derive(serde::Serialize)]
 struct Summary<'a> {
-    mcp_server: &'a str,
+    mcp_server: &'a ConnectionPath,
     tools: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     about: Option<&'a str>,
@@ -1028,8 +1029,8 @@ impl SessionState {
             .and_then(|e| e.sub_agent())
     }
 
-    pub fn connector_sync(&self, id: &str) -> Option<&ConnectorSyncState> {
-        self.effect(EffectKind::ConnectorSync, id)
+    pub fn connector_sync(&self, path: &ConnectionPath) -> Option<&ConnectorSyncState> {
+        self.effect(EffectKind::ConnectorSync, &path.to_string())
             .and_then(|e| e.connector())
     }
 
@@ -1413,9 +1414,9 @@ impl SessionState {
             }
             EventPayload::CallVoided(p) => self.apply_call_voided(p),
             EventPayload::ConnectorSyncRequested(p) => {
-                if !self.has_effect(EffectKind::ConnectorSync, &p.id) {
+                if !self.has_effect(EffectKind::ConnectorSync, &p.path.to_string()) {
                     self.insert_effect(
-                        &p.id,
+                        &p.path.to_string(),
                         EffectTracking::new(p.retry.clone(), now),
                         EffectPayload::ConnectorSync(ConnectorSyncState {
                             tools: Vec::new(),
@@ -1429,7 +1430,7 @@ impl SessionState {
                 // A retry re-arms the same entry rather than starting a new one:
                 // one connection, one fetch, however many attempts. A settled
                 // effect starts over, because its attempts are spent.
-                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
+                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.path.to_string()) {
                     match e.tracking.status() {
                         EffectStatus::Failed | EffectStatus::Completed => e.tracking.restart(now),
                         _ => e.tracking.dispatch(now),
@@ -1437,7 +1438,7 @@ impl SessionState {
                 }
             }
             EventPayload::ConnectorSyncCompleted(p) => {
-                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
+                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.path.to_string()) {
                     e.tracking.complete();
                     if let Some(sync) = e.connector_mut() {
                         sync.tools = p.tools.clone();
@@ -1449,7 +1450,7 @@ impl SessionState {
                 }
             }
             EventPayload::ConnectorSyncErrored(p) => {
-                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.id) {
+                if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.path.to_string()) {
                     e.tracking.record_error(p.retryable, now);
                     if let Some(sync) = e.connector_mut() {
                         sync.error = Some(p.error.message.clone());
@@ -1460,7 +1461,7 @@ impl SessionState {
             // The fetch does not change. Only the credential is not valid.
             EventPayload::ConnectorAuthFailed(p) => {
                 if let Some(sync) = self
-                    .effect_mut(EffectKind::ConnectorSync, &p.id)
+                    .effect_mut(EffectKind::ConnectorSync, &p.path.to_string())
                     .and_then(EffectState::connector_mut)
                 {
                     sync.auth = Some(p.auth);
@@ -1826,7 +1827,7 @@ impl SessionState {
         let mut resolutions: Vec<filter::Resolution> = servers
             .iter()
             .filter_map(|connector| {
-                let effect = self.effect(EffectKind::ConnectorSync, &connector.id)?;
+                let effect = self.effect(EffectKind::ConnectorSync, &connector.path.to_string())?;
                 let sync = effect.connector()?;
                 effect.tracking.is_ready().then(|| {
                     filter::resolve(
@@ -1869,12 +1870,16 @@ impl SessionState {
 
     /// The connection as the config at `leaf` names it, with the offer this
     /// session recorded.
-    fn connector_source(&self, connector_id: &str, leaf: Option<&str>) -> Option<Source> {
+    fn connector_source(
+        &self,
+        connector_id: &ConnectionPath,
+        leaf: Option<&str>,
+    ) -> Option<Source> {
         let config = self.resolve_agent_for(leaf)?;
         let server = self
             .servers_for(&config)
             .into_iter()
-            .find(|c| c.id == connector_id)?;
+            .find(|c| c.path == *connector_id)?;
         let sync = self.connector_sync(connector_id)?;
         Some(Source {
             server,
@@ -1899,10 +1904,10 @@ impl SessionState {
         self.servers_for(&config)
             .iter()
             .filter(|c| {
-                self.effect(EffectKind::ConnectorSync, &c.id)
+                self.effect(EffectKind::ConnectorSync, &c.path.to_string())
                     .is_some_and(|e| e.tracking.is_ready())
             })
-            .filter_map(|c| self.connector_source(&c.id, leaf))
+            .filter_map(|c| self.connector_source(&c.path, leaf))
             .collect()
     }
 
@@ -1913,7 +1918,7 @@ impl SessionState {
         let leaf = effect.anchor.clone();
         let tc = effect.tool()?;
         let target = tc.target.as_ref()?;
-        super::engine_tools::answer(self, target.kind, leaf.as_deref(), &tc.arguments)
+        super::engine_tools::answer(self, target.kind(), leaf.as_deref(), &tc.arguments)
     }
 
     /// A skill call's branch, plugin, and arguments. `None` for every other
@@ -1921,10 +1926,12 @@ impl SessionState {
     pub fn skill_call(&self, tool_call_id: &str) -> Option<SkillCall> {
         let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
         let tc = effect.tool()?;
-        let target = tc.target.as_ref()?;
-        (target.kind == crate::protocol::ConnectorToolKind::Skill).then(|| SkillCall {
+        let ConnectorTarget::Skill { plugin, .. } = tc.target.as_ref()? else {
+            return None;
+        };
+        Some(SkillCall {
             leaf: effect.anchor.clone(),
-            plugin_id: target.connector.clone(),
+            plugin_id: plugin.clone(),
             arguments: tc.arguments.clone(),
         })
     }
@@ -1958,13 +1965,13 @@ impl SessionState {
     /// What one connection is, for an announcement: its size, and its own
     /// words. `None` while the connection has not settled, so a notice never
     /// claims a server the engine cannot yet reach.
-    pub fn connection_summary(&self, id: &str, leaf: Option<&str>) -> Option<String> {
+    pub fn connection_summary(&self, path: &ConnectionPath, leaf: Option<&str>) -> Option<String> {
         let source = self
             .searchable_connectors(leaf)
             .into_iter()
-            .find(|source| source.server.id == id)?;
+            .find(|source| source.server.path == *path)?;
         serde_json::to_string(&Summary {
-            mcp_server: &source.server.id,
+            mcp_server: &source.server.path,
             tools: filter::callable(&source.server, &source.offered).len(),
             about: source.instructions.as_deref(),
         })
@@ -2090,14 +2097,14 @@ impl SessionState {
 
     /// Connections the config in force on `leaf` names but has never fetched.
     /// Each needs a `connector.sync.requested` before the model can be prompted.
-    pub fn unsynced_connectors(&self, leaf: Option<&str>) -> Vec<String> {
+    pub fn unsynced_connectors(&self, leaf: Option<&str>) -> Vec<ConnectionPath> {
         let Some(config) = self.resolve_agent_for(leaf) else {
             return Vec::new();
         };
         self.servers_for(&config)
             .iter()
-            .filter(|c| !self.has_effect(EffectKind::ConnectorSync, &c.id))
-            .map(|c| c.id.clone())
+            .filter(|c| !self.has_effect(EffectKind::ConnectorSync, &c.path.to_string()))
+            .map(|c| c.path.clone())
             .collect()
     }
 
@@ -2114,7 +2121,7 @@ impl SessionState {
             return false;
         };
         self.servers_for(&config).iter().any(|c| {
-            self.tracking(EffectKind::ConnectorSync, &c.id)
+            self.tracking(EffectKind::ConnectorSync, &c.path.to_string())
                 .is_some_and(EffectTracking::is_in_flight)
         })
     }
@@ -2669,7 +2676,7 @@ mod agent_version_tests {
             entry: AgentVersion {
                 value: AgentConfig {
                     mcp: vec![McpServer {
-                        id: "sentry".to_string(),
+                        path: ConnectionPath::Mcp("sentry".into()),
                         tools: None,
                         auth_failure: Default::default(),
                         approve: Default::default(),
@@ -2685,7 +2692,7 @@ mod agent_version_tests {
         s.agent_versions.push(with_sentry("m1", Some("u1")));
         s.agent_versions.push(version("m2", Some("u2")));
         s.insert_effect(
-            "sentry",
+            "mcp.sentry",
             EffectTracking::new_queued(RetryPolicy::no_retry()),
             EffectPayload::ConnectorSync(ConnectorSyncState {
                 prefix: Some("sentry".to_string()),
@@ -2701,17 +2708,19 @@ mod agent_version_tests {
                 auth: None,
             }),
         );
-        if let Some(e) = s.effect_mut(EffectKind::ConnectorSync, "sentry") {
+        if let Some(e) = s.effect_mut(EffectKind::ConnectorSync, "mcp.sentry") {
             e.tracking.dispatch(Utc::now());
             e.tracking.complete();
         }
 
         assert!(
-            s.connection_summary("sentry", Some("x1")).is_some(),
+            s.connection_summary(&ConnectionPath::Mcp("sentry".into()), Some("x1"))
+                .is_some(),
             "the fork still holds the connection, so a call there can describe it"
         );
         assert!(
-            s.connection_summary("sentry", Some("u2")).is_none(),
+            s.connection_summary(&ConnectionPath::Mcp("sentry".into()), Some("u2"))
+                .is_none(),
             "u2 dropped it, so a call there has nothing to describe"
         );
     }

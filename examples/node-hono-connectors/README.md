@@ -62,7 +62,7 @@ url = "http://localhost:4445/mcp"
 ```
 
 A real service wants something. Nothing announces a static token, so a file that
-uses one says so, and `subs mcp set-token sentry` uploads it:
+uses one says so, and `subs auth mcp.sentry` uploads it:
 
 ```toml
 [mcp.sentry]
@@ -71,7 +71,7 @@ auth = "token"
 header = "Sentry-Bearer"
 ```
 
-Where it takes OAuth, `subs mcp login sentry` opens a browser. Either way the
+Where it takes OAuth, `subs auth mcp.sentry` opens a browser. Either way the
 credential lands in the `db` this file names — which is why `.gitignore` covers
 `*.db*`.
 
@@ -92,5 +92,5 @@ gives you no tools under `read_only`, instead of every tool.
 ## Use a real service
 
 Declare a connection in `substructure.toml`, authorize it (set the variable it
-names, or `subs mcp login <id>`), and add the id to `mcp` in `server.mjs`.
+names, or `subs auth <path>`), and add the id to `mcp` in `server.mjs`.
 Nothing else changes.

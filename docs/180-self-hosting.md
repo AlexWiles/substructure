@@ -33,7 +33,7 @@ worker decides for it.
 | --- | --- |
 | Provider keys | The environment. `api_key_env` on each `[llm.<id>]` block names the variable. |
 | Signing secrets | The environment. `signing_secret_env` on each `[agent.<id>]` names the variable. |
-| Connector credentials | The `db` file, written by `subs mcp login`. |
+| Connector credentials | The `db` file, written by `subs auth`. |
 | Slack tokens | The environment. `$SLACK_APP_TOKEN` and `$SLACK_BOT_TOKEN`. |
 | Client token secret | `$CLIENT_TOKEN_HS256_SECRET`. |
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::cli::env::{OutputFormat, ProviderBinding, ProviderKind};
-use crate::connectors::registry::ConnectionSpec;
+use crate::connectors::registry::{ConnectionDecl, ConnectionPath, ConnectionSpec};
 use crate::manifest::{
     AgentSection, Manifest, PluginSpec, ProviderSpec, ResolvedPlugins, SlackConfig,
 };
@@ -59,7 +59,7 @@ pub struct ProjectConfig {
     /// of truth.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Engine state: events, sessions, and the credentials `subs mcp login`
+    /// Engine state: events, sessions, and the credentials `subs auth`
     /// authorized. Defaults to this file's own name — `substructure.toml` keeps
     /// `substructure.db`, and `subs.staging.toml` gets `subs.staging.db`, so two
     /// files in one directory are two engines rather than one they share.
@@ -88,7 +88,7 @@ pub struct ProjectConfig {
     /// engine here dials them itself; a remote is told the id and URL and
     /// holds the credential, so `auth` is the engine's half alone.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub mcp: BTreeMap<String, ConnectionSpec>,
+    pub mcp: BTreeMap<String, ConnectionDecl>,
     /// Agent plugins this project declares, each a directory the CLI reads.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin: BTreeMap<String, PluginSpec>,
@@ -138,8 +138,7 @@ pub struct ServeConfig {
     pub auth: Option<bool>,
     /// The HTTPS address this engine is reachable at from a browser. Setting
     /// it is what lets an agent hand a person an authorize *link* for an MCP
-    /// connection; without one, consent needs `subs mcp login` on this
-    /// machine.
+    /// connection; without one, consent needs `subs auth` on this machine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
 }
@@ -174,7 +173,7 @@ impl ProjectConfig {
 
     /// Every connection the file reaches, a plugin's servers included. Reads
     /// the plugin directories.
-    pub fn resolved_connections(&self) -> anyhow::Result<BTreeMap<String, ConnectionSpec>> {
+    pub fn resolved_connections(&self) -> anyhow::Result<BTreeMap<ConnectionPath, ConnectionSpec>> {
         Ok(self.resolved_manifest()?.0.connections())
     }
 
@@ -797,11 +796,11 @@ mod tests {
 
         let err = parse(
             "[llm.claude]\ntype = \"anthropic\"\n\n\
-             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nmcp = [\"sentry\"]\n",
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nmcp = [\"mcp.sentry\"]\n",
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("no connection `sentry`"), "got {err}");
+        assert!(err.contains("no connection `mcp.sentry`"), "got {err}");
     }
 
     /// A `worker` block's calls are made by a worker, so an agent on one that
@@ -981,7 +980,7 @@ mod tests {
             system = "Be brief."
             worker = "http://localhost:4444"
             signing_secret_env = "S"
-            mcp = ["sentry"]
+            mcp = ["mcp.sentry"]
             sub_agents = ["researcher"]
             tools = [{ name = "confirm", description = "Ask", handler = "client" }]
 

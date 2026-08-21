@@ -9,7 +9,7 @@ use crate::cli::cloud::{credentials, print};
 use crate::cli::env::{EnvVars, ProviderEnv, ProviderKind};
 use crate::cli::DEFAULT_TENANT;
 use crate::connectors::credential::StoredCredentials;
-use crate::connectors::registry::{Connections, CredentialScope, LocalRegistry};
+use crate::connectors::registry::{ConnectionPath, Connections, CredentialScope, LocalRegistry};
 use crate::llm::{LlmProviderRegistry, LlmProviderTrait, LlmTask};
 use crate::manifest;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
@@ -319,7 +319,7 @@ pub(crate) async fn start_engine(
     )?);
     // The file is the whole declaration, so starting on it is also what applies
     // it: a connection taken out of the file is one whose credential is gone.
-    let declared: Vec<String> = connectors.keys().cloned().collect();
+    let declared: Vec<String> = connectors.keys().map(ConnectionPath::to_string).collect();
     for forgotten in token_store.retain(DEFAULT_TENANT, &declared).await? {
         tracing::info!(
             connection = %forgotten,
@@ -330,7 +330,7 @@ pub(crate) async fn start_engine(
     // so the old rows simply stop being read. Say so, or the silence reads as
     // a broken login.
     for (id, spec) in &connectors {
-        let holders = token_store.holders(DEFAULT_TENANT, id).await?;
+        let holders = token_store.holders(DEFAULT_TENANT, &id.to_string()).await?;
         let scope = spec.effective_scope();
         let stranded = match scope {
             CredentialScope::User => holders.contains(&crate::connectors::Slot::Shared),
@@ -359,9 +359,8 @@ pub(crate) async fn start_engine(
         ShardedInMemoryQueue::new(config.connector_executor_workers as u32),
     );
     // Connections come from `substructure.toml`; the file holds only names and
-    // env-var references, never a token. What `subs mcp login` authorized is in
-    // this same database, so a login and the engine that uses it cannot drift
-    // apart.
+    // env-var references, never a token. What `subs auth` authorized is in this
+    // same database, so a login and the engine that uses it cannot drift apart.
     let connections = Some(connectors.clone())
         .filter(|c| !c.is_empty())
         .map(|connectors| {

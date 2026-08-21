@@ -1,6 +1,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::connectors::registry::ConnectionPath;
 use crate::connectors::Requester;
 use crate::runtime::span::SpanContext;
 
@@ -14,7 +15,7 @@ pub enum ConnectorTask {
         source_event_id: Uuid,
         session_id: String,
         tenant_id: String,
-        connection_id: String,
+        connection_id: ConnectionPath,
         /// Resolved from the session owner at dispatch, never persisted.
         requester: Requester,
         attempt: u32,
@@ -27,7 +28,7 @@ pub enum ConnectorTask {
         tenant_id: String,
         tool_call_id: String,
         attempt: u32,
-        connection_id: String,
+        connection_id: ConnectionPath,
         requester: Requester,
         /// The name the connection knows the tool by, not the model's alias.
         remote_name: String,

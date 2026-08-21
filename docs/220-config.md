@@ -24,7 +24,7 @@ type = "anthropic"
 llm = "claude"
 model = "claude-sonnet-4-5"
 system = "You are a support agent."
-mcp = ["sentry"]
+mcp = ["mcp.sentry"]
 sub_agents = ["researcher"]
 
 [agent.researcher]
@@ -116,7 +116,7 @@ An agent. The ID is what clients, channels, and parent agents route on.
 llm = "claude"
 model = "claude-sonnet-4-5"
 system = "You are a support agent."
-mcp = ["sentry"]
+mcp = ["mcp.sentry"]
 sub_agents = ["researcher"]
 tools = [{ name = "confirm", description = "Ask a person", handler = "client" }]
 worker = "https://bot.example.com/agent"
@@ -173,8 +173,8 @@ prefix_tools = false
 | `client_secret_env` | string | — | The secret half. Only alongside `client_id_env`. |
 | `prefix_tools` | bool | `true` | Show the model `<id>__<tool>` instead of the connection's own names. |
 
-A `token` written in the file is a parse error. Fill a connection with `subs mcp
-login <id>` or `subs mcp set-token <id>`. See [Connectors](./40-connectors.md).
+A `token` written in the file is a parse error. Fill a connection with
+`subs auth <path>`. See [Connectors](./40-connectors.md).
 
 ## `[plugin.<id>]`
 
@@ -184,18 +184,47 @@ a plugin by its ID.
 ```toml
 [plugin.pdf]
 path = "./plugins/pdf-tools"
-auth = { renderer = "none" }
+
+[plugin.pdf.mcp.renderer]
+auth = "none"
 ```
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `path` | path | required | The plugin directory. A relative path resolves against the file. |
-| `auth` | table | ask the server | How each of the plugin's servers authenticates, as `<server> = "oauth" \| "token" \| "none"`. `mcp.json` has no field for this. |
+| `mcp.<server>` | table | the plugin's own | What this deployment says about one of the plugin's servers. See [`[plugin.<id>.mcp.<server>]`](#pluginidmcpserver). |
 
 The CLI resolves the directory to data — at startup for a local engine, at
 `subs apply` for a deployment — so a session never reads plugin files. A
-plugin's servers join the connection registry as `<plugin>-<server>` and
-authorize like any connection. See [Plugins](./45-plugins.md).
+plugin's servers join the connection registry as `plugin.<id>.mcp.<server>`
+and authorize like any connection. The model sees their tools under
+`<plugin>_<server>__<tool>`. See [Plugins](./45-plugins.md).
+
+
+### `[plugin.<id>.mcp.<server>]`
+
+What this deployment says about one server the plugin declares, keyed by its
+name in the plugin's `mcp.json`. Every key overrides the plugin's; one left out
+keeps what the plugin shipped.
+
+```toml
+[plugin.reggu.mcp.code]
+auth = "token"
+url = "https://reggu-code.staging.example.com/mcp"
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `url` | url | the plugin's | Where this deployment reaches the server. |
+| `auth` | string | ask the server | `"oauth"`, `"token"`, or `"none"`. `mcp.json` has no field for it. |
+| `header` | string | `Authorization` | Header carrying a static token. Only under `auth = "token"`. |
+| `credential` | string | `shared` | `shared` or `user`. |
+| `scopes` | list | — | The access to ask consent for. |
+| `client_id_env` | string | — | Variable holding the OAuth client. Named, never written. |
+| `client_secret_env` | string | — | The secret half. |
+| `prefix_tools` | bool | `true` | Show the model `<id>__<tool>`. |
+
+Authorize it by its path: `subs auth plugin.reggu.mcp.code`.
 
 ## `[slack]`
 
@@ -271,9 +300,9 @@ The file names secrets. It never holds them.
 
 | Secret | How the file refers to it |
 | --- | --- |
-| Provider key | `api_key_env` on the LLM block, for an engine you run. `subs llm set-key` for a deployment. |
+| Provider key | `api_key_env` on the LLM block, for an engine you run. `subs auth` for a deployment. |
 | Signing secret | `signing_secret_env` on the agent, for an engine you run. The deployment creates its own. |
-| Connector token | `subs mcp login`, or `subs mcp set-token`. |
+| Connector token | `subs auth <path>`. |
 | Slack tokens | `$SLACK_APP_TOKEN` and `$SLACK_BOT_TOKEN`, or `subs slack connect`. |
 
 `subs apply` strips `api_key_env` and `signing_secret_env` before it sends.

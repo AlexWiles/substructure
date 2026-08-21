@@ -65,7 +65,7 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
     state
         .servers_for(&config)
         .into_iter()
-        .map(|server| (format!("mcp:{}", server.id), server))
+        .map(|server| (format!("mcp:{}", server.path), server))
         .filter(|(id, _)| !said.contains(id))
         .filter_map(|(id, server)| {
             Some(PromptContext {
@@ -73,7 +73,7 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
                 placement: Placement::System,
                 // The `mcp_server` key is the label, so there is no prose here
                 // to go stale or to need configuring.
-                content: state.connection_summary(&server.id, leaf)?,
+                content: state.connection_summary(&server.path, leaf)?,
             })
         })
         .collect()
@@ -213,6 +213,7 @@ fn message(call_id: &str, context: &str, role: Role, content: &str) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::registry::ConnectionPath;
     use crate::connectors::RemoteTool;
     use crate::protocol::{AgentConfig, AgentPlugin, RetryPolicy, SkillMeta, StoredContent};
     use crate::runtime::session::events::{
@@ -258,7 +259,10 @@ mod tests {
                                 description: "also long ".repeat(500),
                             },
                         ],
-                        servers: vec!["pdf-renderer".to_string()],
+                        servers: vec![ConnectionPath::PluginServer {
+                            plugin: "pdf".into(),
+                            server: "renderer".into(),
+                        }],
                         tools: None,
                         auth_failure: Default::default(),
                         approve: Default::default(),
@@ -274,7 +278,10 @@ mod tests {
                 &mut s,
                 3,
                 EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
-                    id: "pdf-renderer".to_string(),
+                    path: ConnectionPath::PluginServer {
+                        plugin: "pdf".into(),
+                        server: "renderer".into(),
+                    },
                     attempt: 0,
                     retry: RetryPolicy::no_retry(),
                 }),
@@ -283,8 +290,11 @@ mod tests {
                 &mut s,
                 4,
                 EventPayload::ConnectorSyncCompleted(Box::new(ConnectorSyncCompleted {
-                    id: "pdf-renderer".to_string(),
-                    prefix: Some("pdf-renderer".to_string()),
+                    path: ConnectionPath::PluginServer {
+                        plugin: "pdf".into(),
+                        server: "renderer".into(),
+                    },
+                    prefix: Some("pdf_renderer".to_string()),
                     tools: vec![RemoteTool {
                         name: "fill_form".to_string(),
                         description: String::new(),
@@ -309,12 +319,15 @@ mod tests {
     #[test]
     fn a_plugins_settled_server_is_announced_like_any_connection() {
         let state = plugin_state(true);
-        assert_eq!(owed_ids(&state), ["plugin:pdf", "mcp:pdf-renderer"]);
+        assert_eq!(
+            owed_ids(&state),
+            ["plugin:pdf", "mcp:plugin.pdf.mcp.renderer"]
+        );
         let owed = owed(&state, None, "call-1");
         assert!(
             owed[1]
                 .content
-                .starts_with("{\"mcp_server\":\"pdf-renderer\""),
+                .starts_with("{\"mcp_server\":\"plugin.pdf.mcp.renderer\""),
             "{}",
             owed[1].content
         );

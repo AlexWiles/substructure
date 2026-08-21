@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::connectors::registry::ConnectionPath;
 use crate::connectors::Requester;
 use crate::runtime::session::interrupts::auth::Authorize;
 
@@ -49,7 +50,7 @@ impl Consent for EngineConsent {
             .0
             .mint_for(
                 tenant_id,
-                &authorize.connection,
+                &authorize.connection.to_string(),
                 &authorize.requester,
                 chrono::Utc::now(),
             )
@@ -80,10 +81,8 @@ impl Consent for CliConsent {
     }
 }
 
-fn cli(connection: &str) -> WayIn {
-    WayIn::Command(format!(
-        "Run `subs mcp login {connection}` to authorize it."
-    ))
+fn cli(connection: &ConnectionPath) -> WayIn {
+    WayIn::Command(format!("Run `subs auth {connection}` to authorize it."))
 }
 
 /// Kept out of `Requester`'s own file: this is what a way in is asked about,

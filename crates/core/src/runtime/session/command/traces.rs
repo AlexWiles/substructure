@@ -10,6 +10,7 @@
 //! matched exhaustively, so a new command fails to compile until a trace
 //! exercises it.
 
+use crate::connectors::registry::ConnectionPath;
 use crate::protocol::StoredResult;
 use std::collections::{BTreeSet, HashMap};
 
@@ -171,7 +172,7 @@ fn config_with_client_tool(tool: &str) -> AgentConfig {
 fn config_with_mcp(connection: &str) -> AgentConfig {
     AgentConfig {
         mcp: vec![McpServer {
-            id: connection.to_string(),
+            path: ConnectionPath::Mcp(connection.to_string()),
             tools: None,
             auth_failure: Default::default(),
             approve: Default::default(),
@@ -549,7 +550,7 @@ fn flow_connector_gating() -> Trace {
     assert!(
         t.agg
             .state
-            .tracking(EffectKind::ConnectorSync, "conn-1")
+            .tracking(EffectKind::ConnectorSync, "mcp.conn-1")
             .unwrap()
             .is_in_flight(),
         "the fetch is in flight"
@@ -564,7 +565,7 @@ fn flow_connector_gating() -> Trace {
     );
     assert_eq!(
         super::schedule::waiting_on(&t.agg.state).values().next(),
-        Some(&vec!["connector_sync:conn-1".to_string()]),
+        Some(&vec!["connector_sync:mcp.conn-1".to_string()]),
         "and says so"
     );
 
@@ -572,7 +573,7 @@ fn flow_connector_gating() -> Trace {
     t.run(
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            "conn-1".to_string(),
+            "mcp.conn-1".to_string(),
             Some(0),
             Outcome::Connector {
                 prefix: None,
@@ -640,7 +641,7 @@ fn flow_connector_failure_releases_the_gate() -> Trace {
     t.run(
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            "conn-1".to_string(),
+            "mcp.conn-1".to_string(),
             Some(0),
             SettleError::new(ErrorInfo::internal("unreachable"), false)
                 .auth(Some(AuthNeed::Reauthorize)),

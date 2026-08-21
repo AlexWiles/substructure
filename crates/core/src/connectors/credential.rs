@@ -1,7 +1,7 @@
 //! The credential a connection dials with, whichever way it was obtained.
 //!
-//! One slot per connection: `subs mcp login` fills it with an OAuth grant and
-//! `subs mcp set-token` fills it with a static token, and the resolver below
+//! One slot per connection: `subs auth` fills it — with an OAuth grant or a
+//! static token, whichever the connection declares — and the resolver below
 //! turns whichever landed there into headers. Keeping them in one slot is what
 //! lets a deployment hold either — the store is the seam, and neither kind ever
 //! reaches the event log or the file.
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::mcp::auth_headers;
 use super::oauth::{refresh, same_origin, OauthError, Tokens};
-use super::registry::{AuthKind, ConnectionSpec, CredentialResolver};
+use super::registry::{AuthKind, ConnectionPath, ConnectionSpec, CredentialResolver};
 use super::{AuthNeed, ConnectorError, Slot};
 
 /// What the store holds for one connection.
@@ -214,13 +214,16 @@ impl StoredCredentials {
         subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<Option<HeaderMap>, ConnectorError> {
-        match self.access_token(tenant_id, id, subject, &spec.url).await {
+        match self
+            .access_token(tenant_id, id, subject, &spec.decl.url)
+            .await
+        {
             Ok(Some(token)) => auth_headers(None, &token).map(Some),
             Ok(None) => Ok(None),
             // A grant that cannot be renewed is reported even where the file
             // declared nothing: the connection was authorized once, so falling
             // back to sending nothing would lose that.
-            Err(e) => Err(refresh_failed(id, &e)),
+            Err(e) => Err(refresh_failed(&spec.path, &e)),
         }
     }
 
@@ -234,11 +237,14 @@ impl StoredCredentials {
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError> {
         match self.store.get(tenant_id, id, subject).await {
-            Some(Credential::Static { token }) => auth_headers(spec.header.as_deref(), &token),
-            Some(Credential::Oauth(_)) => Err(mismatch(id, AuthKind::Token)),
+            Some(Credential::Static { token }) => auth_headers(spec.decl.header.as_deref(), &token),
+            Some(Credential::Oauth(_)) => Err(mismatch(spec, AuthKind::Token)),
             None => Err(ConnectorError::unauthorized(
                 AuthNeed::NeverAuthorized,
-                format!("connection `{id}` has no token: run `subs mcp set-token {id}`"),
+                format!(
+                    "connection `{}` has no token: run `subs auth {}`",
+                    spec.path, spec.path
+                ),
             )),
         }
     }
@@ -257,7 +263,7 @@ impl CredentialResolver for StoredCredentials {
         subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError> {
-        match spec.auth {
+        match spec.decl.auth {
             Some(AuthKind::None) => Ok(HeaderMap::new()),
             Some(AuthKind::Token) => self.static_headers(tenant_id, id, subject, spec).await,
             Some(AuthKind::Oauth) => {
@@ -265,7 +271,10 @@ impl CredentialResolver for StoredCredentials {
                     Some(headers) => Ok(headers),
                     None => Err(ConnectorError::unauthorized(
                         AuthNeed::NeverAuthorized,
-                        format!("connection `{id}` is not authorized: run `subs mcp login {id}`"),
+                        format!(
+                            "connection `{}` is not authorized: run `subs auth {}`",
+                            spec.path, spec.path
+                        ),
                     )),
                 }
             }
@@ -283,21 +292,23 @@ impl CredentialResolver for StoredCredentials {
         subject: &Slot,
         spec: &ConnectionSpec,
     ) -> Result<bool, ConnectorError> {
-        match spec.auth {
+        match spec.decl.auth {
             Some(AuthKind::None) | Some(AuthKind::Token) => Ok(false),
             _ => self
-                .refresh_now(tenant_id, id, subject, &spec.url)
+                .refresh_now(tenant_id, id, subject, &spec.decl.url)
                 .await
-                .map_err(|e| refresh_failed(id, &e)),
+                .map_err(|e| refresh_failed(&spec.path, &e)),
         }
     }
 }
 
 /// A refresh that failed, as either a spent grant or a passing fault. Logging
 /// in corrects every spent case.
-fn refresh_failed(id: &str, e: &OauthError) -> ConnectorError {
+fn refresh_failed(path: &ConnectionPath, e: &OauthError) -> ConnectorError {
     if !e.is_spent() {
-        return ConnectorError::retryable(format!("connection `{id}`: token refresh failed ({e})"));
+        return ConnectorError::retryable(format!(
+            "connection `{path}`: token refresh failed ({e})"
+        ));
     }
     let what = match e {
         OauthError::Refused { code, .. } if code == "invalid_grant" => {
@@ -308,19 +319,20 @@ fn refresh_failed(id: &str, e: &OauthError) -> ConnectorError {
     };
     ConnectorError::unauthorized(
         AuthNeed::Reauthorize,
-        format!("connection `{id}`: {what}. Run `subs mcp login {id}` ({e})"),
+        format!("connection `{path}`: {what}. Run `subs auth {path}` ({e})"),
     )
 }
 
-fn mismatch(id: &str, declared: AuthKind) -> ConnectorError {
-    let (holds, fix) = match declared {
-        AuthKind::Token => ("an OAuth grant", format!("subs mcp set-token {id}")),
-        _ => ("a static token", format!("subs mcp login {id}")),
+fn mismatch(spec: &ConnectionSpec, declared: AuthKind) -> ConnectorError {
+    let holds = match declared {
+        AuthKind::Token => "an OAuth grant",
+        _ => "a static token",
     };
+    let path = &spec.path;
     ConnectorError::unauthorized(
         AuthNeed::NeverAuthorized,
         format!(
-            "connection `{id}` declares `auth = \"{}\"` but holds {holds}: run `{fix}`",
+            "connection `{path}` declares `auth = \"{}\"` but holds {holds}: run `subs auth {path}`",
             declared.as_str()
         ),
     )
@@ -328,6 +340,7 @@ fn mismatch(id: &str, declared: AuthKind) -> ConnectorError {
 
 #[cfg(test)]
 mod tests {
+    use super::super::registry::ConnectionDecl;
     use super::*;
     use crate::protocol::ConnectorProtocol;
     use std::sync::Arc;
@@ -345,9 +358,16 @@ mod tests {
     }
 
     fn spec(auth: Option<AuthKind>, header: Option<&str>) -> ConnectionSpec {
-        ConnectionSpec {
+        spec_at(ConnectionPath::Mcp("sentry".into()), auth, header)
+    }
+
+    fn spec_at(
+        path: ConnectionPath,
+        auth: Option<AuthKind>,
+        header: Option<&str>,
+    ) -> ConnectionSpec {
+        ConnectionDecl {
             url: "https://example.test/mcp".to_string(),
-            protocol: ConnectorProtocol::Mcp,
             auth,
             header: header.map(str::to_string),
             credential: None,
@@ -356,6 +376,7 @@ mod tests {
             client_secret_env: None,
             prefix_tools: true,
         }
+        .at(path, ConnectorProtocol::Mcp)
     }
 
     fn resolver(held: Option<Credential>) -> StoredCredentials {
@@ -391,7 +412,11 @@ mod tests {
                 "t",
                 "github",
                 &Slot::Shared,
-                &spec(Some(AuthKind::Token), None),
+                &spec_at(
+                    ConnectionPath::Mcp("github".into()),
+                    Some(AuthKind::Token),
+                    None,
+                ),
             )
             .await
             .unwrap();
@@ -420,7 +445,11 @@ mod tests {
                 "t",
                 "github",
                 &Slot::Shared,
-                &spec(Some(AuthKind::Token), None),
+                &spec_at(
+                    ConnectionPath::Mcp("github".into()),
+                    Some(AuthKind::Token),
+                    None,
+                ),
             )
             .await
             .unwrap_err();
@@ -429,7 +458,7 @@ mod tests {
             Some(AuthNeed::NeverAuthorized),
             "an empty slot was never authorized; nothing is spent and nothing needs replacing"
         );
-        assert!(err.to_string().contains("subs mcp set-token github"));
+        assert!(err.to_string().contains("subs auth mcp.github"));
     }
 
     #[tokio::test]
@@ -444,19 +473,22 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("subs mcp login sentry"),
+            err.to_string().contains("subs auth mcp.sentry"),
             "got {err}"
         );
     }
 
     #[test]
     fn a_passing_fault_at_the_token_endpoint_is_not_a_dead_grant() {
-        let transient = refresh_failed("sentry", &OauthError::Token("connection reset".into()));
+        let transient = refresh_failed(
+            &ConnectionPath::Mcp("sentry".into()),
+            &OauthError::Token("connection reset".into()),
+        );
         assert_eq!(transient.auth, None);
         assert!(transient.retryable);
 
         let dead = refresh_failed(
-            "sentry",
+            &ConnectionPath::Mcp("sentry".into()),
             &OauthError::Refused {
                 code: "invalid_grant".into(),
                 description: None,
@@ -470,7 +502,7 @@ mod tests {
     #[test]
     fn a_forgotten_client_registration_asks_for_the_same_correction() {
         let err = refresh_failed(
-            "sentry",
+            &ConnectionPath::Mcp("sentry".into()),
             &OauthError::Refused {
                 code: "invalid_client".into(),
                 description: None,
@@ -478,7 +510,7 @@ mod tests {
         );
         assert_eq!(err.auth, Some(AuthNeed::Reauthorize));
         assert!(
-            err.to_string().contains("subs mcp login sentry"),
+            err.to_string().contains("subs auth mcp.sentry"),
             "got {err}"
         );
     }
@@ -521,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn a_token_goes_to_a_plaintext_url_the_file_named() {
         let mut spec = spec(Some(AuthKind::Token), None);
-        spec.url = "http://mcp.internal:8080/mcp".to_string();
+        spec.decl.url = "http://mcp.internal:8080/mcp".to_string();
         let headers = resolver(Some(stored_token()))
             .resolve("t", "github", &Slot::Shared, &spec)
             .await

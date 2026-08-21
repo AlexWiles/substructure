@@ -327,7 +327,7 @@ mod tests {
         Link {
             link_hash: hash.to_string(),
             tenant_id: "default".to_string(),
-            connection_id: "gmail".to_string(),
+            connection_id: "mcp.gmail".to_string(),
             subject: Slot::Of(Subject::new(Issuer::slack(), "T1:U1")),
         }
     }

@@ -18,6 +18,7 @@
 //! costs nothing.
 
 use super::{fail, mismatched, void_events, KindSpec, Outcome, SettleError};
+use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{AgentConfig, RetryPolicy};
 use crate::runtime::retry::RetryTarget;
@@ -34,17 +35,20 @@ impl KindSpec for ConnectorSpec {
     }
 
     fn settle(&self, state: &SessionState, id: &str, outcome: Outcome) -> Vec<EventPayload> {
+        let Some(path) = ConnectionPath::parse(id) else {
+            return Vec::new();
+        };
         match outcome {
             Outcome::Connector {
                 prefix,
                 tools,
                 instructions,
             } => {
-                state.report_filter(id, &tools, prefix.as_deref());
+                state.report_filter(&path, &tools, prefix.as_deref());
                 // The run tail promotes whatever this fetch was parking.
                 vec![EventPayload::ConnectorSyncCompleted(Box::new(
                     ConnectorSyncCompleted {
-                        id: id.to_string(),
+                        path,
                         prefix,
                         tools,
                         instructions,
@@ -57,6 +61,7 @@ impl KindSpec for ConnectorSpec {
     }
 
     fn errored(&self, state: &SessionState, id: &str, e: &SettleError) -> Option<EventPayload> {
+        let path = ConnectionPath::parse(id)?;
         if let Some(t) = state.tracking(EffectKind::ConnectorSync, id) {
             report_failure(
                 id,
@@ -67,7 +72,7 @@ impl KindSpec for ConnectorSpec {
             );
         }
         Some(EventPayload::ConnectorSyncErrored(ConnectorSyncErrored {
-            id: id.to_string(),
+            path,
             error: e.error.clone(),
             retryable: e.retryable,
             auth: e.auth,
@@ -91,12 +96,15 @@ impl KindSpec for ConnectorSpec {
     }
 
     fn retry(&self, state: &SessionState, id: &str) -> Vec<EventPayload> {
-        let Some(t) = state.tracking(EffectKind::ConnectorSync, id) else {
+        let (Some(path), Some(t)) = (
+            ConnectionPath::parse(id),
+            state.tracking(EffectKind::ConnectorSync, id),
+        ) else {
             return Vec::new();
         };
         vec![EventPayload::ConnectorSyncRequested(
             ConnectorSyncRequested {
-                id: id.to_string(),
+                path,
                 attempt: t.retry.attempts,
                 retry: t.retry_policy.clone(),
             },
@@ -117,11 +125,11 @@ pub(in crate::runtime::session) fn owed(state: &SessionState, leaf: Option<&str>
     if let Some(config) = state.resolve_agent_for(leaf) {
         for c in state.servers_for(&config) {
             if state
-                .tracking(EffectKind::ConnectorSync, &c.id)
+                .tracking(EffectKind::ConnectorSync, &c.path.to_string())
                 .is_some_and(EffectTracking::is_in_flight)
             {
                 deps.push(Dep::ConnectorSettled {
-                    connection_id: c.id.clone(),
+                    connection_id: c.path.clone(),
                 });
             }
         }
@@ -141,10 +149,10 @@ pub(in crate::runtime::session) fn sync(
     state
         .servers_for(config)
         .iter()
-        .filter(|c| !state.has_effect(EffectKind::ConnectorSync, &c.id))
+        .filter(|c| !state.has_effect(EffectKind::ConnectorSync, &c.path.to_string()))
         .map(|c| {
             EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
-                id: c.id.clone(),
+                path: c.path.clone(),
                 attempt: 0,
                 retry: retry.clone(),
             })
@@ -187,7 +195,12 @@ impl SessionState {
     /// facts about the config, identical on every turn, and a worker cannot act
     /// on them anyway — an `include` that matches nothing is a typo for whoever
     /// wrote the config, not a runtime condition for the agent to handle.
-    fn report_filter(&self, connection_id: &str, offered: &[RemoteTool], prefix: Option<&str>) {
+    fn report_filter(
+        &self,
+        connection_id: &ConnectionPath,
+        offered: &[RemoteTool],
+        prefix: Option<&str>,
+    ) {
         let leaf = self.head_id.clone();
         let Some(config) = self.resolve_agent_for(leaf.as_deref()) else {
             return;
@@ -195,7 +208,7 @@ impl SessionState {
         let Some(connector) = self
             .servers_for(&config)
             .into_iter()
-            .find(|c| c.id == connection_id)
+            .find(|c| c.path == *connection_id)
         else {
             return;
         };

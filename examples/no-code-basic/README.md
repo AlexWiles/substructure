@@ -18,7 +18,7 @@ Deploy the file and give it a key:
 ```sh
 subs login
 subs apply
-subs llm set-key openrouter
+subs auth llm.openrouter
 ```
 
 The agent now runs on the deployment `[remote]` names, on the key you uploaded.

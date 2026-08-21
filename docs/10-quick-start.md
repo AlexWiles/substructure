@@ -63,7 +63,7 @@ after every change to the file.
 ## Add your LLM key
 
 ```sh
-subs llm set-key openrouter
+subs auth llm.openrouter
 ```
 
 The command reads the key from stdin. Calls run on your key.

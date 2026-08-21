@@ -49,7 +49,7 @@ url = "https://api.substructure.ai"
 
 ```sh
 subs apply
-subs llm set-key openrouter
+subs auth llm.openrouter
 subs slack connect
 ```
 

@@ -13,8 +13,8 @@ node mock-server.mjs &
 export SUBS_SECRET_KEY="$(openssl rand -hex 32)"
 export ANTHROPIC_API_KEY=sk-ant-...
 
-subs mcp list                    # mail … not connected
-subs mcp login mail              # browser consent; the mock auto-approves
+subs list                    # mail … not connected
+subs auth mcp.mail              # browser consent; the mock auto-approves
 subs run "Whose mail account is connected?"
 ```
 

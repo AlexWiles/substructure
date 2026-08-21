@@ -20,7 +20,7 @@ llm = "claude"
 model = "claude-sonnet-5"
 plugins = [
   "pdf",
-  { id = "crm", tools = { read_only = true }, approve = "destructive" },
+  { id = "mcp.crm", tools = { read_only = true }, approve = "destructive" },
 ]
 ```
 
@@ -79,24 +79,32 @@ The model does not enable plugins. `skill` reads a skill and nothing else.
 
 ## Servers and credentials
 
-A plugin's `mcp.json` servers join the connection registry as
-`<plugin>-<server>`, so the `pdf` plugin's `renderer` server becomes
-`pdf-renderer`. They authorize like any connection: `subs mcp login
-pdf-renderer`, `subs mcp set-token pdf-renderer`. The engine skips `stdio`
-servers with a notice: plugin code does not run in a deployment. Files under
-`scripts/` in a skill travel with the plugin as readable files only.
+A plugin's `mcp.json` servers join the connection registry, and a file names one
+by where it is declared: the `pdf` plugin's `renderer` server is
+`plugin.pdf.mcp.renderer`. They authorize like any connection:
+`subs auth plugin.pdf.mcp.renderer`. The engine skips `stdio` servers with a
+notice: plugin code does not run in a deployment. Files under `scripts/` in a
+skill travel with the plugin as readable files only.
 
-`mcp.json` has no field for how a server authenticates, so override it on
-the declaration when you know better:
+`mcp.json` carries what the plugin author knows. What this deployment knows goes
+in a section of its own, one per server:
 
 ```toml
 [plugin.pdf]
 path = "./plugins/pdf-tools"
-auth = { renderer = "none" }
+
+[plugin.pdf.mcp.renderer]
+auth = "none"
 ```
 
-`none` is the one that matters: it says the server wants no credential, so
-nothing keeps asking you to authorize it.
+`auth = "none"` says the server wants no credential, so nothing keeps asking you
+to authorize it. `url` belongs here too: point a plugin's server at a staging
+host without forking the plugin.
+
+```toml
+[plugin.pdf.mcp.renderer]
+url = "https://pdf.staging.example.com/mcp"
+```
 
 ## Next
 

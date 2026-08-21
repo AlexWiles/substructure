@@ -18,20 +18,15 @@ use tokio::sync::Mutex;
 use super::mcp::McpClient;
 use super::oauth::{ClientId, Probed};
 use super::{AuthNeed, ConnectorError, CredentialSource, RemoteTool, Requester, Slot, Visibility};
+pub use crate::protocol::ConnectionPath;
 use crate::protocol::ConnectorProtocol;
 use crate::protocol::StoredResult;
 use crate::runtime::blob::BlobStore;
 
-/// A connection as configured: where it is and how to authenticate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ConnectionSpec {
+pub struct ConnectionDecl {
     pub url: String,
-    /// Which protocol reaches this connection. Not written in the config: it
-    /// follows from the section the connection was declared under, and a second
-    /// copy would only be a way for the two to disagree. The loader stamps it.
-    #[serde(skip)]
-    pub protocol: ConnectorProtocol,
     /// How this connection authenticates, when the file says. Absent is the
     /// usual case: a server announces OAuth or answers without a challenge, so
     /// asking it beats writing down what it would have said.
@@ -63,8 +58,9 @@ pub struct ConnectionSpec {
     /// Turning it off is safe — a name that collides with another connection, a
     /// declared tool, or a sub-agent is dropped and reported rather than
     /// silently shadowing anything.
-    /// Written only when turned off, so a config `subs mcp add` rewrites does
-    /// not gain a line per connection saying what the default already says.
+    ///
+    /// Written only when turned off, so a rewritten config does not gain a line
+    /// per connection saying what the default already says.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub prefix_tools: bool,
 }
@@ -77,21 +73,39 @@ fn is_yes(v: &bool) -> bool {
     *v
 }
 
+impl ConnectionDecl {
+    pub fn at(self, path: ConnectionPath, protocol: ConnectorProtocol) -> ConnectionSpec {
+        ConnectionSpec {
+            path,
+            protocol,
+            decl: self,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectionSpec {
+    pub path: ConnectionPath,
+    /// Which protocol reaches this connection. Not written in the config: it
+    /// follows from the section the connection was declared under, and a second
+    /// copy would only be a way for the two to disagree. The loader stamps it.
+    pub protocol: ConnectorProtocol,
+    pub decl: ConnectionDecl,
+}
+
 impl ConnectionSpec {
-    /// The prefix to expand `id`'s tools under, or `None` when this connection
-    /// offers its tools under their own names.
-    pub fn prefix_for<'a>(&self, id: &'a str) -> Option<&'a str> {
-        self.prefix_tools.then_some(id)
+    pub fn prefix(&self) -> Option<String> {
+        self.decl.prefix_tools.then(|| self.path.tool_prefix())
     }
 
     pub fn effective_scope(&self) -> CredentialScope {
-        self.credential.unwrap_or(CredentialScope::Shared)
+        self.decl.credential.unwrap_or(CredentialScope::Shared)
     }
 
     pub fn configured_client(&self) -> Option<ClientId> {
         Some(ClientId::Registered {
-            client_id: env_value(self.client_id_env.as_deref()?)?,
-            client_secret: self.client_secret_env.as_deref().and_then(env_value),
+            client_id: env_value(self.decl.client_id_env.as_deref()?)?,
+            client_secret: self.decl.client_secret_env.as_deref().and_then(env_value),
         })
     }
 }
@@ -125,8 +139,8 @@ impl CredentialScope {
 /// How a connection is authenticated, where the file overrides what asking the
 /// server would answer. Never *what with*: a file meant to be committed must
 /// not be able to hold a secret, so the credential itself is always set out of
-/// band — `subs mcp login` or `subs mcp set-token` — and an attempt to write
-/// one here is a loud parse error.
+/// band — `subs auth <path>` — and an attempt to write one here is a loud
+/// parse error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthKind {
@@ -185,7 +199,7 @@ impl<'de> Deserialize<'de> for AuthKind {
             fn visit_map<A: serde::de::MapAccess<'de>>(self, _: A) -> Result<AuthKind, A::Error> {
                 Err(serde::de::Error::custom(
                     "`auth` is a string now: write `auth = \"token\"` and set the credential \
-                     with `subs mcp set-token <id>`",
+                     with `subs auth <path>`",
                 ))
             }
         }
@@ -239,33 +253,41 @@ impl From<RegistryError> for ConnectorError {
 
 #[async_trait]
 pub trait ConnectionRegistry: Send + Sync {
-    async fn resolve(&self, tenant_id: &str, id: &str) -> Result<ConnectionSpec, RegistryError>;
+    async fn resolve(
+        &self,
+        tenant_id: &str,
+        path: &ConnectionPath,
+    ) -> Result<ConnectionSpec, RegistryError>;
 }
 
 /// Every connection declared in `substructure.toml`, granted to the single
 /// tenant a local engine serves. The grant check is a constant `true` here; it
 /// is a real lookup in the cloud.
 pub struct LocalRegistry {
-    connections: BTreeMap<String, ConnectionSpec>,
+    connections: BTreeMap<ConnectionPath, ConnectionSpec>,
 }
 
 impl LocalRegistry {
-    pub fn new(connections: BTreeMap<String, ConnectionSpec>) -> Self {
+    pub fn new(connections: BTreeMap<ConnectionPath, ConnectionSpec>) -> Self {
         Self { connections }
     }
 
-    pub fn ids(&self) -> impl Iterator<Item = &str> {
-        self.connections.keys().map(String::as_str)
+    pub fn paths(&self) -> impl Iterator<Item = &ConnectionPath> {
+        self.connections.keys()
     }
 }
 
 #[async_trait]
 impl ConnectionRegistry for LocalRegistry {
-    async fn resolve(&self, _tenant_id: &str, id: &str) -> Result<ConnectionSpec, RegistryError> {
+    async fn resolve(
+        &self,
+        _tenant_id: &str,
+        path: &ConnectionPath,
+    ) -> Result<ConnectionSpec, RegistryError> {
         self.connections
-            .get(id)
+            .get(path)
             .cloned()
-            .ok_or_else(|| RegistryError::Unknown(id.to_string()))
+            .ok_or_else(|| RegistryError::Unknown(path.to_string()))
     }
 }
 
@@ -401,10 +423,11 @@ impl Connections {
     pub async fn list_tools(
         &self,
         tenant_id: &str,
-        id: &str,
+        path: &ConnectionPath,
         requester: &Requester,
     ) -> Result<Offer, ConnectorError> {
-        let spec = self.registry.resolve(tenant_id, id).await?;
+        let spec = self.registry.resolve(tenant_id, path).await?;
+        let id = &path.to_string();
         let subject = Self::slot_for(id, &spec, requester)?;
         let (tools, instructions) = self
             .attempt(tenant_id, id, &subject, &spec, |client| async move {
@@ -413,7 +436,7 @@ impl Connections {
             })
             .await?;
         Ok(Offer {
-            prefix: spec.prefix_for(id).map(str::to_string),
+            prefix: spec.prefix(),
             tools,
             instructions,
         })
@@ -422,12 +445,13 @@ impl Connections {
     pub async fn call_tool(
         &self,
         tenant_id: &str,
-        id: &str,
+        path: &ConnectionPath,
         requester: &Requester,
         name: &str,
         arguments: &Value,
     ) -> Result<StoredResult, ConnectorError> {
-        let spec = self.registry.resolve(tenant_id, id).await?;
+        let spec = self.registry.resolve(tenant_id, path).await?;
+        let id = &path.to_string();
         let subject = Self::slot_for(id, &spec, requester)?;
         self.attempt(tenant_id, id, &subject, &spec, |client| async move {
             client.call_tool(name, arguments).await
@@ -469,7 +493,7 @@ impl Connections {
                 return retried;
             }
         }
-        Err(self.explain_refusal(id, spec, err).await)
+        Err(self.explain_refusal(spec, err).await)
     }
 
     async fn client(
@@ -495,7 +519,7 @@ impl Connections {
         let client = match spec.protocol {
             ConnectorProtocol::Mcp => Arc::new(McpClient::new(
                 self.http.clone(),
-                spec.url.clone(),
+                spec.decl.url.clone(),
                 source,
                 self.blobs.clone(),
                 tenant_id,
@@ -537,23 +561,19 @@ impl Connections {
     /// A refusal is also the answer to how the connection authenticates, where
     /// the file did not say — so this is where a declaration-free connection
     /// finds out, at the one moment it matters and at no cost until then.
-    async fn explain_refusal(
-        &self,
-        id: &str,
-        spec: &ConnectionSpec,
-        err: ConnectorError,
-    ) -> ConnectorError {
-        match spec.auth {
+    async fn explain_refusal(&self, spec: &ConnectionSpec, err: ConnectorError) -> ConnectorError {
+        match spec.decl.auth {
             // The file already said how. A refusal means the credential is
             // wrong or spent, and the command that replaces it is the answer.
             Some(AuthKind::Token) => ConnectorError::unauthorized(
                 AuthNeed::TokenRejected,
                 format!(
-                    "connection `{id}` rejected its token: run `subs mcp set-token {id}` ({err})"
+                    "connection `{}` rejected its token: run `subs auth {}` ({err})",
+                    spec.path, spec.path
                 ),
             ),
             Some(_) => err,
-            None => self.explain(id, spec).await.unwrap_or(err),
+            None => self.explain(spec).await.unwrap_or(err),
         }
     }
 
@@ -564,31 +584,38 @@ impl Connections {
     /// Asked once per server per process. A refused connection is retried, and
     /// probing on every attempt would double the traffic we send somewhere that
     /// is already turning us away.
-    async fn explain(&self, id: &str, spec: &ConnectionSpec) -> Option<ConnectorError> {
+    async fn explain(&self, spec: &ConnectionSpec) -> Option<ConnectorError> {
         // Dropped before the miss branch runs: a guard held across the `await`
         // below would wait on a lock this task is the one holding.
-        let cached = self.probed.lock().await.get(&spec.url).copied();
+        let cached = self.probed.lock().await.get(&spec.decl.url).copied();
         let probed = match cached {
             Some(probed) => probed,
             None => {
-                let probed = crate::connectors::oauth::sniff(&self.http, &spec.url)
+                let probed = crate::connectors::oauth::sniff(&self.http, &spec.decl.url)
                     .await
                     .ok()?;
-                self.probed.lock().await.insert(spec.url.clone(), probed);
+                self.probed
+                    .lock()
+                    .await
+                    .insert(spec.decl.url.clone(), probed);
                 probed
             }
         };
         match probed {
             Probed::Oauth => Some(ConnectorError::unauthorized(
                 AuthNeed::NeverAuthorized,
-                format!("connection `{id}` is not authorized: run `subs mcp login {id}`"),
+                format!(
+                    "connection `{}` is not authorized: run `subs auth {}`",
+                    spec.path, spec.path
+                ),
             )),
             Probed::Protected => Some(ConnectorError::unauthorized(
                 AuthNeed::NeverAuthorized,
                 format!(
-                    "connection `{id}` wants a credential and publishes no way to obtain one. \
-                     If it accepts a static token, declare `auth = \"token\"` on [mcp.{id}] \
-                     and run `subs mcp set-token {id}`"
+                    "connection `{path}` wants a credential and publishes no way to obtain one. \
+                     If it accepts a static token, declare `auth = \"token\"` on [{path}] \
+                     and run `subs auth {path}`",
+                    path = spec.path
                 ),
             )),
             Probed::NoChallenge => None,
@@ -706,9 +733,8 @@ mod tests {
     }
 
     async fn connections(url: String, credentials: Arc<Rotating>) -> Connections {
-        let spec = ConnectionSpec {
+        let spec = ConnectionDecl {
             url,
-            protocol: ConnectorProtocol::Mcp,
             auth: Some(AuthKind::Oauth),
             header: None,
             credential: None,
@@ -716,10 +742,11 @@ mod tests {
             client_id_env: None,
             client_secret_env: None,
             prefix_tools: true,
-        };
+        }
+        .at(ConnectionPath::Mcp("x".into()), ConnectorProtocol::Mcp);
         Connections::new(
             Arc::new(LocalRegistry::new(BTreeMap::from([(
-                "sentry".to_string(),
+                ConnectionPath::Mcp("sentry".into()),
                 spec,
             )]))),
             credentials,
@@ -733,7 +760,11 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", Some("fresh")));
         let offer = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry", &Requester::machine())
+            .list_tools(
+                "t",
+                &ConnectionPath::Mcp("sentry".into()),
+                &Requester::machine(),
+            )
             .await
             .expect("the retry carries the refreshed token");
 
@@ -748,15 +779,22 @@ mod tests {
         let connections = connections(url, credentials.clone()).await;
 
         connections
-            .list_tools("t", "sentry", &Requester::machine())
+            .list_tools(
+                "t",
+                &ConnectionPath::Mcp("sentry".into()),
+                &Requester::machine(),
+            )
             .await
             .expect_err("the stored credential is refused and cannot be refreshed");
 
-        // What `subs mcp login` does, from another process.
         *credentials.current.lock().await = "fresh".to_string();
 
         let offer = connections
-            .list_tools("t", "sentry", &Requester::machine())
+            .list_tools(
+                "t",
+                &ConnectionPath::Mcp("sentry".into()),
+                &Requester::machine(),
+            )
             .await
             .expect("the credential written elsewhere goes out on the next request");
 
@@ -774,7 +812,11 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", Some("also-stale")));
         let err = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry", &Requester::machine())
+            .list_tools(
+                "t",
+                &ConnectionPath::Mcp("sentry".into()),
+                &Requester::machine(),
+            )
             .await
             .expect_err("the second refusal stands");
 
@@ -784,9 +826,8 @@ mod tests {
 
     #[test]
     fn a_configured_client_comes_from_the_environment_or_not_at_all() {
-        let mut spec = ConnectionSpec {
+        let mut spec = ConnectionDecl {
             url: "https://gmailmcp.googleapis.com/mcp/v1".into(),
-            protocol: ConnectorProtocol::Mcp,
             auth: None,
             header: None,
             credential: None,
@@ -794,11 +835,12 @@ mod tests {
             client_id_env: None,
             client_secret_env: None,
             prefix_tools: true,
-        };
+        }
+        .at(ConnectionPath::Mcp("x".into()), ConnectorProtocol::Mcp);
         assert!(spec.configured_client().is_none(), "named none");
 
-        spec.client_id_env = Some("SUBS_TEST_CORE_CLIENT_ID".into());
-        spec.client_secret_env = Some("SUBS_TEST_CORE_CLIENT_SECRET".into());
+        spec.decl.client_id_env = Some("SUBS_TEST_CORE_CLIENT_ID".into());
+        spec.decl.client_secret_env = Some("SUBS_TEST_CORE_CLIENT_SECRET".into());
         assert!(spec.configured_client().is_none(), "named but unset");
 
         unsafe {
@@ -813,7 +855,7 @@ mod tests {
             })
         );
 
-        spec.client_secret_env = None;
+        spec.decl.client_secret_env = None;
         assert_eq!(
             spec.configured_client(),
             Some(ClientId::Registered {
@@ -850,7 +892,11 @@ mod tests {
         let credentials = Arc::new(Rotating::new("stale", None));
         let err = connections(url, credentials.clone())
             .await
-            .list_tools("t", "sentry", &Requester::machine())
+            .list_tools(
+                "t",
+                &ConnectionPath::Mcp("sentry".into()),
+                &Requester::machine(),
+            )
             .await
             .expect_err("a refusal it cannot correct");
 
@@ -860,7 +906,7 @@ mod tests {
 
     #[test]
     fn an_inline_token_is_a_parse_error_not_a_silent_secret() {
-        let err = toml::from_str::<ConnectionSpec>(
+        let err = toml::from_str::<ConnectionDecl>(
             r#"
             url = "https://example.test/mcp"
             token = "sk-live-oops"
@@ -875,7 +921,7 @@ mod tests {
 
     #[test]
     fn the_old_auth_table_answers_with_the_migration() {
-        let err = toml::from_str::<ConnectionSpec>(
+        let err = toml::from_str::<ConnectionDecl>(
             r#"
             url = "https://example.test/mcp"
             auth = { token_env = "GITHUB_TOKEN" }
@@ -883,15 +929,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("subs mcp set-token"),
+            err.to_string().contains("subs auth <path>"),
             "a file written against the old shape is told what to write instead; got {err}"
         );
     }
 
     #[test]
     fn a_connection_defaults_to_mcp_and_to_discovery() {
-        let spec: ConnectionSpec = toml::from_str(r#"url = "https://example.test/mcp""#).unwrap();
-        assert_eq!(spec.protocol, ConnectorProtocol::Mcp);
+        let spec: ConnectionDecl = toml::from_str(r#"url = "https://example.test/mcp""#).unwrap();
         assert_eq!(
             spec.auth, None,
             "a bare connection is discovered, not assumed"
@@ -904,9 +949,8 @@ mod tests {
     #[test]
     fn the_scope_and_requester_decide_whose_slot_a_call_reads() {
         use crate::protocol::Visibility;
-        let shared = ConnectionSpec {
+        let shared = ConnectionDecl {
             url: "https://mcp.sentry.dev/mcp".into(),
-            protocol: ConnectorProtocol::Mcp,
             auth: None,
             header: None,
             credential: None,
@@ -914,11 +958,13 @@ mod tests {
             client_id_env: None,
             client_secret_env: None,
             prefix_tools: true,
-        };
-        let personal = ConnectionSpec {
+        }
+        .at(ConnectionPath::Mcp("x".into()), ConnectorProtocol::Mcp);
+        let personal = ConnectionDecl {
             credential: Some(CredentialScope::User),
-            ..shared.clone()
-        };
+            ..shared.decl.clone()
+        }
+        .at(shared.path.clone(), shared.protocol);
         let person =
             |visibility| Requester::new(Subject::new(Issuer::slack(), "T1:U1"), visibility);
 
@@ -966,9 +1012,8 @@ mod tests {
                             tenant_id: "t".into(),
                             id: format!("c{i}"),
                             subject: Slot::Shared,
-                            spec: ConnectionSpec {
+                            spec: ConnectionDecl {
                                 url: "https://example.test/mcp".into(),
-                                protocol: ConnectorProtocol::Mcp,
                                 auth: None,
                                 header: None,
                                 credential: None,
@@ -976,7 +1021,8 @@ mod tests {
                                 client_id_env: None,
                                 client_secret_env: None,
                                 prefix_tools: true,
-                            },
+                            }
+                            .at(ConnectionPath::Mcp("x".into()), ConnectorProtocol::Mcp),
                         }),
                         Arc::new(crate::runtime::blob::MemoryBlobStore::new()),
                         "t",
@@ -995,16 +1041,27 @@ mod tests {
 
     #[test]
     fn the_scope_is_read_from_the_file_and_defaults_to_shared() {
-        let bare: ConnectionSpec = toml::from_str(r#"url = "https://mcp.sentry.dev/mcp""#).unwrap();
-        assert_eq!(bare.effective_scope(), CredentialScope::Shared);
+        let bare: ConnectionDecl = toml::from_str(r#"url = "https://mcp.sentry.dev/mcp""#).unwrap();
+        assert_eq!(
+            bare.clone()
+                .at(ConnectionPath::Mcp("x".into()), ConnectorProtocol::Mcp)
+                .effective_scope(),
+            CredentialScope::Shared
+        );
         assert!(
             !toml::to_string(&bare).unwrap().contains("credential"),
             "the default is not written back"
         );
 
-        let personal: ConnectionSpec =
+        let personal: ConnectionDecl =
             toml::from_str("url = \"https://mcp.sentry.dev/mcp\"\ncredential = \"user\"").unwrap();
-        assert_eq!(personal.effective_scope(), CredentialScope::User);
+        assert_eq!(
+            personal
+                .clone()
+                .at(ConnectionPath::Mcp("x".into()), ConnectorProtocol::Mcp)
+                .effective_scope(),
+            CredentialScope::User
+        );
         assert!(toml::to_string(&personal)
             .unwrap()
             .contains("credential = \"user\""));
@@ -1017,7 +1074,7 @@ mod tests {
             ("token", AuthKind::Token),
             ("none", AuthKind::None),
         ] {
-            let spec: ConnectionSpec = toml::from_str(&format!(
+            let spec: ConnectionDecl = toml::from_str(&format!(
                 "url = \"https://example.test/mcp\"\nauth = \"{written}\""
             ))
             .unwrap();
@@ -1027,7 +1084,7 @@ mod tests {
 
     #[test]
     fn an_unknown_auth_kind_names_the_ones_that_exist() {
-        let err = toml::from_str::<ConnectionSpec>(
+        let err = toml::from_str::<ConnectionDecl>(
             r#"
             url = "https://example.test/mcp"
             auth = "bearer"
@@ -1080,9 +1137,8 @@ mod tests {
             }
         }
 
-        let spec = ConnectionSpec {
+        let spec = ConnectionDecl {
             url: url.clone(),
-            protocol: ConnectorProtocol::Mcp,
             auth: None,
             header: None,
             credential: None,
@@ -1090,10 +1146,11 @@ mod tests {
             client_id_env: None,
             client_secret_env: None,
             prefix_tools: true,
-        };
+        }
+        .at(ConnectionPath::Mcp("x".into()), ConnectorProtocol::Mcp);
         let connections = Connections::new(
             Arc::new(LocalRegistry::new(BTreeMap::from([(
-                "x".to_string(),
+                ConnectionPath::Mcp("x".into()),
                 spec.clone(),
             )]))),
             Arc::new(NoCredential),
@@ -1102,10 +1159,10 @@ mod tests {
 
         for _ in 0..3 {
             let explained = connections
-                .explain("x", &spec)
+                .explain(&spec)
                 .await
                 .expect("a 401 explains itself");
-            assert!(explained.to_string().contains("subs mcp login x"));
+            assert!(explained.to_string().contains("subs auth mcp.x"));
         }
         assert_eq!(
             probes.load(Ordering::SeqCst),
@@ -1117,7 +1174,10 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_id_is_reported_as_unconfigured() {
         let registry = LocalRegistry::new(BTreeMap::new());
-        let err = registry.resolve("t", "sentry").await.unwrap_err();
-        assert_eq!(err, RegistryError::Unknown("sentry".to_string()));
+        let err = registry
+            .resolve("t", &ConnectionPath::Mcp("sentry".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(err, RegistryError::Unknown("mcp.sentry".to_string()));
     }
 }

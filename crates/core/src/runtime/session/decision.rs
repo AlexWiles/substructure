@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::connectors::registry::ConnectionPath;
 use crate::protocol::{
     ClientContext, DeferToolsStrategy, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest,
     LlmResponse, RetryOverride, RetryPolicy, StoredResult, ToolResult, Usage,
@@ -412,7 +413,7 @@ pub enum Action {
         payload: serde_json::Value,
     },
     #[serde(rename = "connector.sync")]
-    SyncConnector { id: String },
+    SyncConnector { path: ConnectionPath },
     #[serde(rename = "done")]
     Done {
         #[serde(default)]

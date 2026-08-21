@@ -4,6 +4,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use super::decision::{LlmHandler, ToolHandler, Trigger};
+use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{AuthNeed, RemoteTool};
 pub use crate::protocol::EffectKind;
 use crate::protocol::{
@@ -200,7 +201,7 @@ pub struct LlmCallErrored {
 /// a config rewritten for unrelated reasons must not cost another round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncRequested {
-    pub id: String,
+    pub path: ConnectionPath,
     pub attempt: u32,
     pub retry: RetryPolicy,
 }
@@ -211,7 +212,7 @@ pub struct ConnectorSyncRequested {
 /// live session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncCompleted {
-    pub id: String,
+    pub path: ConnectionPath,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
     pub tools: Vec<RemoteTool>,
@@ -222,7 +223,7 @@ pub struct ConnectorSyncCompleted {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncErrored {
-    pub id: String,
+    pub path: ConnectionPath,
     pub error: ErrorInfo,
     #[serde(default)]
     pub retryable: bool,
@@ -234,7 +235,7 @@ pub struct ConnectorSyncErrored {
 /// separately with its own error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorAuthFailed {
-    pub id: String,
+    pub path: ConnectionPath,
     pub auth: AuthNeed,
 }
 
@@ -263,18 +264,37 @@ pub struct SubAgentErrored {
     pub retryable: bool,
 }
 
-/// Where an engine-executed call lands: the connection, and the name that
-/// connection knows the tool by. Frozen onto the call beside its handler, so a
-/// config change cannot reroute a call already in flight — and so the audit
-/// record names the connection rather than only the model's prefixed alias.
+/// Where an engine-executed call lands. Frozen onto the call beside its
+/// handler, so a config change cannot reroute a call already in flight — and
+/// so the audit record names the connection rather than only the model's
+/// prefixed alias.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ConnectorTarget {
-    pub connector: String,
-    /// Empty for a `find_tools`, and for a `call_tool` whose name the filter
-    /// refused. An empty name is what keeps the connection out of the call.
-    pub remote_name: String,
-    #[serde(default)]
-    pub kind: ConnectorToolKind,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConnectorTarget {
+    /// Call `remote_name` on the connection.
+    Remote {
+        path: ConnectionPath,
+        remote_name: String,
+    },
+    /// Search the recorded offer. This reaches nothing.
+    Find,
+    /// A `call_tool` naming nothing reachable; the engine answers the fault.
+    Call,
+    /// Load a skill's instructions from a plugin bundle. `plugin` is empty
+    /// when the model wrote a name without one; the executor answers the
+    /// fault.
+    Skill { plugin: String, skill: String },
+}
+
+impl ConnectorTarget {
+    pub fn kind(&self) -> ConnectorToolKind {
+        match self {
+            Self::Remote { .. } => ConnectorToolKind::Remote,
+            Self::Find => ConnectorToolKind::Find,
+            Self::Call => ConnectorToolKind::Call,
+            Self::Skill { .. } => ConnectorToolKind::Skill,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -52,7 +52,7 @@ and give it a key:
 ```sh
 subs login
 subs apply
-subs llm set-key openrouter
+subs auth llm.openrouter
 ```
 
 Install the bot into your workspace:

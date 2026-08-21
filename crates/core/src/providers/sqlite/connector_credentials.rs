@@ -13,7 +13,7 @@ use super::SqliteDb;
 ///
 /// The rows here hold no token: each one references the secret store, which is
 /// the only table that holds secret material and the only place it is
-/// encrypted. `subs mcp login` and `subs mcp set-token` write here and the
+/// encrypted. `subs auth` writes here and the
 /// engine reads here, so one environment is one file and one set of
 /// credentials.
 pub struct SqliteCredentialStore {
