@@ -38,39 +38,15 @@ impl RetryPolicy {
         }
     }
 
-    /// The engine's default when neither the action nor the agent config names a
-    /// policy. Every target is bounded except the client tool, so a dead worker
-    /// or a hung child fails its turn instead of stalling it forever.
     pub fn default_for(target: RetryTarget) -> Self {
         let (attempt, total, max_attempts, base, max) = match target {
-            // Idempotent, and the providers classify their own retryable
-            // failures (429/5xx/connect/timeout).
             RetryTarget::Llm => (Some(180), Some(1800), 5, 2, 30),
-            // Bounded but never repeated: the engine cannot vouch for a tool's
-            // idempotency, so a retry is the author's call, not ours.
             RetryTarget::WorkerTool => (Some(120), Some(600), 1, 0, 0),
-            // Async by design — a client tool waits for a human, so a
-            // deadline would settle it as failed while it is still legitimately
-            // open. See `docs/110-async-tools.md`.
             RetryTarget::ClientTool => (None, None, 1, 0, 0),
-            // The engine places this call itself, so a transport failure is its
-            // own to absorb. Still shallow: the turn waits behind it.
             RetryTarget::ConnectorTool => (Some(60), Some(300), 2, 1, 10),
-            // The spawn is idempotent — the child session id is deterministic
-            // and an already-created session counts as success — so re-issuing
-            // one is safe. `total` is generous because it also bounds the child
-            // turn, which is `Running` and off the attempt clock.
-            RetryTarget::SubAgent => (Some(60), Some(3600), 3, 2, 15),
-            // Every decision that would prompt the model waits behind this, so
-            // it is deliberately shorter and shallower than an LLM call: a
-            // connection that cannot answer promptly should settle as failed and
-            // let the worker decide, not hold the turn.
-            RetryTarget::ConnectorSync => (Some(30), Some(120), 3, 1, 10),
-            // A dequeued decision is never redelivered, so one lost between
-            // dispatch and reply — a dead push loop, a restart — has no recovery
-            // path but its deadline. Deciding replays durable state and submits
-            // are idempotent by decision id, so retries are safe.
-            RetryTarget::Decision => (Some(300), Some(1800), 10, 2, 60),
+            RetryTarget::SubAgent => (Some(10), Some(3600), 3, 2, 15),
+            RetryTarget::ConnectorSync => (Some(5), Some(30), 2, 2, 10),
+            RetryTarget::Decision => (Some(20), Some(300), 10, 2, 60),
         };
         RetryPolicy {
             attempt_timeout_secs: attempt,

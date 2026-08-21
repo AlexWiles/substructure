@@ -17,9 +17,9 @@ It stops when the attempts run out or when a failure cannot be retried.
 | Tool call (worker) | 120s | 600s | **1** |
 | Tool call (client) | none | none | 1 |
 | Tool call (connector) | 60s | 300s | 2 |
-| Sub-agent start | 60s | 3600s | 3 |
-| Connector fetch | 30s | 120s | 3 |
-| Worker decision | 300s | 1800s | 10 |
+| Sub-agent start | 10s | 3600s | 3 |
+| Connector fetch | 5s | 30s | 2 |
+| Worker decision | 20s | 300s | 10 |
 
 A worker tool has timeouts, and the engine never repeats it. The engine cannot
 know whether your tool is safe to run twice. You decide when to retry.
