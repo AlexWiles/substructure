@@ -9,6 +9,8 @@ together at the same version.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-21
+
 ### Fixed
 
 - Allow local HTTP MCP servers.
@@ -117,7 +119,8 @@ together at the same version.
 - The changelog starts again at this release. For the changes before it, refer
   to the git history.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/substructureai/substructure/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/substructureai/substructure/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/substructureai/substructure/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/substructureai/substructure/compare/v0.5.0...v0.6.0
