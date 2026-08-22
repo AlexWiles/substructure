@@ -58,6 +58,7 @@ tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"]
 ctrlc = "3.5.2"
 rmcp = { version = "3.1.2", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 aes-gcm = "0.10"
+pulldown-cmark = { version = "0.13.4", default-features = false }
 
 [dev-dependencies]
 proptest = "1.11.0"

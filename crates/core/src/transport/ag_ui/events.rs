@@ -18,6 +18,10 @@ fn reasoning() -> &'static str {
     "reasoning"
 }
 
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AgUiEvent {
@@ -32,6 +36,8 @@ pub enum AgUiEvent {
         result: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<RunOutcome>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
     },
 
     #[serde(rename = "RUN_ERROR")]
@@ -51,7 +57,11 @@ pub enum AgUiEvent {
     TextMessageContent { message_id: String, delta: String },
 
     #[serde(rename = "TEXT_MESSAGE_END", rename_all = "camelCase")]
-    TextMessageEnd { message_id: String },
+    TextMessageEnd {
+        message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
+    },
 
     #[serde(rename = "TOOL_CALL_START", rename_all = "camelCase")]
     ToolCallStart {
@@ -72,6 +82,10 @@ pub enum AgUiEvent {
         message_id: String,
         tool_call_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        retryable: bool,
         #[serde(skip_deserializing, default = "tool")]
         role: &'static str,
     },
@@ -96,6 +110,23 @@ pub enum AgUiEvent {
 
     #[serde(rename = "REASONING_END", rename_all = "camelCase")]
     ReasoningEnd { message_id: String },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgUiUsage {
+    pub input: u64,
+    pub output: u64,
+}
+
+impl AgUiUsage {
+    pub fn metadata(&self) -> Value {
+        serde_json::json!({ "usage": self })
+    }
+
+    pub fn of(metadata: Option<&Value>) -> Option<Self> {
+        serde_json::from_value(metadata?.get("usage")?.clone()).ok()
+    }
 }
 
 /// `RUN_FINISHED.outcome` per the AG-UI interrupt-aware run lifecycle.
@@ -223,6 +254,7 @@ mod tests {
                 run_id: "r".into(),
                 result: None,
                 outcome: None,
+                metadata: None,
             },
             AgUiEvent::RunError {
                 message: "no".into(),
@@ -237,6 +269,7 @@ mod tests {
             },
             AgUiEvent::TextMessageEnd {
                 message_id: "m".into(),
+                metadata: None,
             },
             AgUiEvent::ToolCallStart {
                 tool_call_id: "t".into(),
@@ -254,6 +287,8 @@ mod tests {
                 message_id: "m".into(),
                 tool_call_id: "t".into(),
                 content: "ok".into(),
+                is_error: false,
+                retryable: false,
                 role: "tool",
             },
             AgUiEvent::ReasoningMessageStart {

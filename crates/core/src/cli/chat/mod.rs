@@ -9,7 +9,6 @@ use anyhow::{Context as _, Result};
 use clap::Args;
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -21,11 +20,18 @@ use crate::session::tool_contract;
 use crate::transport::ag_ui::events::AgUiInterrupt;
 use crate::transport::channel::ChannelKind;
 
+use crate::manifest::McpRef;
+
+use super::cloud::project_config::ProjectConfig;
 use super::cloud::{project_config, CloudGlobals};
 use super::env::OutputFormat;
-use super::pretty::{self, Renderer};
+use super::output::Status;
+use super::output::{self, Renderer};
 use super::resume_hint::print_resume_hint;
 use super::turns::{self, message_input, select_agent, Open, Turns};
+
+mod editor;
+use editor::ChatEditor;
 
 const PROMPT: &str = "> ";
 
@@ -85,12 +91,12 @@ pub async fn chat(args: ChatArgs) -> Result<()> {
     )
     .await?;
 
-    banner(&agent_id, &session_id);
+    banner(&cfg, &agent_id, &session_id);
     repl(turns.as_mut(), &agent_id, &session_id).await
 }
 
 async fn repl(turns: &mut dyn Turns, agent_id: &str, session_id: &str) -> Result<()> {
-    let mut editor = DefaultEditor::new().context("terminal input")?;
+    let mut editor = editor::build().context("terminal input")?;
     let history = history_path();
     if let Some(path) = &history {
         if let Err(e) = editor.load_history(path) {
@@ -98,16 +104,20 @@ async fn repl(turns: &mut dyn Turns, agent_id: &str, session_id: &str) -> Result
         }
     }
 
-    let mut renderer = Renderer::new(OutputFormat::Pretty, pretty::color()).at_a_prompt();
+    let status = Status::start();
+    let mut renderer = Renderer::new(OutputFormat::Pretty, output::color())
+        .at_a_prompt()
+        .with_status(status.clone());
 
     let parked = turns.parked().await?;
     let mut open = settle(turns, parked, &mut renderer).await?;
+    status.idle();
 
     while open {
         let (returned, line) = read_line(editor).await?;
         editor = returned;
         let Some(line) = line else { break };
-        let line = line.trim().to_string();
+        let line = editor::joined(line.trim());
         if line.is_empty() {
             continue;
         }
@@ -120,12 +130,22 @@ async fn repl(turns: &mut dyn Turns, agent_id: &str, session_id: &str) -> Result
             tracing::debug!(error = %e, "line not kept in history");
         }
 
-        let end = turns
-            .drive(message_input(line, agent_id.to_string()), &mut renderer)
-            .await?;
-        open = settle(turns, end.interrupts, &mut renderer).await?;
+        let input = message_input(line, agent_id.to_string());
+        let end = tokio::select! {
+            driven = turns.drive(input, &mut renderer) => driven,
+            _ = tokio::signal::ctrl_c() => {
+                status.stop();
+                output::note("\nstopped watching. The turn keeps running — resume the session to read it.");
+                break;
+            }
+        };
+        status.idle();
+        open = settle(turns, end?.interrupts, &mut renderer).await?;
+        status.idle();
+        println!();
     }
 
+    status.stop();
     turns.wait_for_index().await;
     print_resume_hint(session_id, None);
     Ok(())
@@ -146,7 +166,7 @@ async fn settle(
 }
 
 /// `readline` blocks, and an engine here shares this runtime.
-async fn read_line(mut editor: DefaultEditor) -> Result<(DefaultEditor, Option<String>)> {
+async fn read_line(mut editor: ChatEditor) -> Result<(ChatEditor, Option<String>)> {
     tokio::task::spawn_blocking(move || match editor.readline(PROMPT) {
         Ok(line) => Ok((editor, Some(line))),
         Err(ReadlineError::Interrupted | ReadlineError::Eof) => Ok((editor, None)),
@@ -208,7 +228,7 @@ fn typed_answer(message: &str, schema: Option<&Value>) -> Result<Option<Value>> 
         };
         match tool_contract::output_violation(schema, &typed) {
             None => return Ok(Some(as_payload(typed))),
-            Some(violation) => pretty::note(&format!("that answer does not fit: {violation}")),
+            Some(violation) => output::note(&format!("that answer does not fit: {violation}")),
         }
     }
 }
@@ -265,9 +285,57 @@ fn resume(
     })
 }
 
-fn banner(agent_id: &str, session_id: &str) {
-    pretty::note(&format!("substructure · {agent_id} · {session_id}"));
+fn banner(cfg: &ProjectConfig, agent_id: &str, session_id: &str) {
+    output::note(agent_id);
+    for (label, value) in agent_rows(cfg, agent_id, session_id) {
+        output::note(&format!("  {label:<8}{value}"));
+    }
     eprintln!();
+}
+
+fn agent_rows(
+    cfg: &ProjectConfig,
+    agent_id: &str,
+    session_id: &str,
+) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    let Some(agent) = cfg.agent.get(agent_id) else {
+        rows.push(("session", session_id.to_string()));
+        return rows;
+    };
+
+    if let Some(model) = &agent.model {
+        rows.push(("model", model.clone()));
+    }
+    if let Some(llm) = &agent.llm {
+        let named = match cfg.llm.get(llm) {
+            Some(spec) => format!("{llm} ({})", spec.kind.name()),
+            None => llm.clone(),
+        };
+        rows.push(("llm", named));
+    }
+    if let Some(effort) = &agent.effort {
+        rows.push(("effort", format!("{effort:?}").to_lowercase()));
+    }
+    if let Some(worker) = &agent.worker {
+        rows.push(("worker", worker.clone()));
+    }
+    let mcp: Vec<&str> = agent.mcp.iter().map(mcp_id).collect();
+    if !mcp.is_empty() {
+        rows.push(("mcp", mcp.join(", ")));
+    }
+    if !agent.sub_agents.is_empty() {
+        rows.push(("agents", agent.sub_agents.join(", ")));
+    }
+    rows.push(("session", session_id.to_string()));
+    rows
+}
+
+fn mcp_id(reference: &McpRef) -> &str {
+    match reference {
+        McpRef::All(id) => id,
+        McpRef::Filtered(entry) => &entry.id,
+    }
 }
 
 fn history_path() -> Option<std::path::PathBuf> {
@@ -293,6 +361,67 @@ mod tests {
             expires_at: None,
             metadata,
         }
+    }
+
+    fn config(toml: &str) -> ProjectConfig {
+        toml::from_str(toml).expect("a readable file")
+    }
+
+    /// What the file says about the agent, in the order it reads.
+    #[test]
+    fn the_banner_reads_the_agent_out_of_the_file() {
+        let cfg = config(
+            r#"
+            name = "example"
+            [llm.claude]
+            type = "anthropic"
+            [agent.my-agent]
+            llm = "claude"
+            model = "claude-haiku-4-5-20251001"
+            worker = "http://localhost:4444"
+            mcp = ["bash", { id = "files" }]
+            "#,
+        );
+        assert_eq!(
+            agent_rows(&cfg, "my-agent", "sess-1"),
+            vec![
+                ("model", "claude-haiku-4-5-20251001".to_string()),
+                ("llm", "claude (anthropic)".to_string()),
+                ("worker", "http://localhost:4444".to_string()),
+                ("mcp", "bash, files".to_string()),
+                ("session", "sess-1".to_string()),
+            ]
+        );
+    }
+
+    /// A row for something the file leaves out would name a default this chat
+    /// cannot promise.
+    #[test]
+    fn what_the_file_leaves_out_gets_no_row() {
+        let cfg = config(
+            r#"
+            name = "example"
+            [agent.bare]
+            worker = "http://localhost:4444"
+            "#,
+        );
+        assert_eq!(
+            agent_rows(&cfg, "bare", "sess-1"),
+            vec![
+                ("worker", "http://localhost:4444".to_string()),
+                ("session", "sess-1".to_string()),
+            ]
+        );
+    }
+
+    /// An agent declared nowhere still says which session it opened.
+    #[test]
+    fn an_undeclared_agent_still_names_its_session() {
+        let cfg = config(r#"name = "example""#);
+        assert_eq!(
+            agent_rows(&cfg, "ghost", "sess-1"),
+            vec![("session", "sess-1".to_string())]
+        );
     }
 
     #[test]

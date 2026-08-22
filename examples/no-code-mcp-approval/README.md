@@ -42,8 +42,7 @@ subs run "which issues mention the login page?"
 ```
 
 ```text
-→ issues__search_issues {"q":"login page"}
-← issues__search_issues {"q":"login page"}
+● issues__search_issues {"q":"login page"}
   #7: the login page is blank
 ```
 
@@ -96,7 +95,6 @@ subs chat
 
 ````console
 > delete issue 7
-→ issues__delete_issue {"id":"7"}
 ? Run `issues__delete_issue`?
 
 ```
@@ -113,8 +111,7 @@ on in the same chat:
 
 ```console
 ✔ Run `issues__delete_issue`? · Run it
-→ issues__delete_issue {"id":"7"}
-← issues__delete_issue {"id":"7"}
+● issues__delete_issue {"id":"7"}
   deleted issue #7
 Done. Issue 7 deleted.
 

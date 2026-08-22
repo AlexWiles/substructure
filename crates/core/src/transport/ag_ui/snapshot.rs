@@ -69,6 +69,7 @@ pub fn snapshot_events(
             run_id,
             result: None,
             outcome,
+            metadata: None,
         },
     ]
 }

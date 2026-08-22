@@ -27,8 +27,8 @@ use super::cloud::context::Context as CloudContext;
 use super::cloud::project_config::ProjectConfig;
 use super::cloud::{CloudGlobals, ProjectScope};
 use super::env::{EnvVars, OutputFormat};
-use super::pretty::Renderer;
-use super::render::{unfinished, TurnEnd, TurnRender};
+use super::output::Renderer;
+use super::output::{unfinished, TurnEnd, TurnRender};
 use super::target::target;
 use super::{local, run_remote, DEFAULT_TENANT, LOCAL_SUBJECT};
 

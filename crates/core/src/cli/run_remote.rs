@@ -12,8 +12,8 @@ use crate::transport::ag_ui::events::AgUiEvent;
 
 use super::cloud::context::Context;
 use super::env::OutputFormat;
-use super::pretty::Renderer;
-use super::render::{unfinished, TurnEnd, TurnRender};
+use super::output::Renderer;
+use super::output::{unfinished, TurnEnd, TurnRender};
 
 pub(crate) fn format_for(output: OutputFormat) -> RunFormat {
     match output {
@@ -159,6 +159,7 @@ mod tests {
             run_id: "r".into(),
             result: None,
             outcome: None,
+            metadata: None,
         }));
         // An error is an ending too: the reader has been told what happened.
         assert!(saw(&AgUiEvent::RunError {

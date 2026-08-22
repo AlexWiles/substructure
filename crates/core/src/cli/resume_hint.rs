@@ -1,10 +1,10 @@
-use super::pretty;
+use super::output;
 
 /// `payload` is the message or `--input` this invocation sent. A command that
 /// sends none — `subs chat` prompts for its own — gets no placeholder.
 pub(crate) fn print_resume_hint(session_id: &str, payload: Option<&str>) {
     let argv: Vec<String> = std::env::args().collect();
-    pretty::note(&format!(
+    output::note(&format!(
         "\ncontinue this session with:\n  {}",
         resume_command(&argv, session_id, payload)
     ));

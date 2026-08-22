@@ -22,7 +22,7 @@ use crate::Caller;
 use super::cloud::context::Context;
 use super::cloud::{print, CloudGlobals, ProjectScope};
 use super::env::OutputFormat;
-use super::pretty::{self, write_json, Renderer};
+use super::output::{self, write_json, Renderer};
 use super::target::target;
 use super::DEFAULT_TENANT;
 
@@ -276,7 +276,7 @@ impl Replay {
     fn new(session_id: String, output: OutputFormat) -> Self {
         Self {
             session_id,
-            renderer: Renderer::new(output, pretty::color()),
+            renderer: Renderer::new(output, output::color()),
             turn: None,
         }
     }

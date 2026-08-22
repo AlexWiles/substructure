@@ -3,7 +3,7 @@
 
 use crate::transport::ag_ui::events::{AgUiEvent, AgUiInterrupt, RunOutcome};
 
-use super::pretty::{write_json, Renderer};
+use super::{write_json, Renderer};
 
 /// What a finished turn left for its caller to answer.
 #[derive(Debug, Default)]
@@ -106,6 +106,7 @@ mod tests {
             outcome: Some(RunOutcome::Interrupt {
                 interrupts: vec![interrupt("int-1")],
             }),
+            metadata: None,
         }]);
         assert_eq!(end.interrupts.len(), 1);
         assert_eq!(end.interrupts[0].id, "int-1");
@@ -120,6 +121,7 @@ mod tests {
             run_id: "r".into(),
             result: None,
             outcome: Some(RunOutcome::Success),
+            metadata: None,
         }]);
         assert!(end.interrupts.is_empty());
         assert!(end.error.is_none());

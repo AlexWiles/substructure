@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use super::cloud::project_config;
 use super::env::OutputFormat;
-use super::pretty::{self, Renderer};
+use super::output::{self, Renderer};
 use super::resume_hint::print_resume_hint;
 use super::turns::{self, message_input, select_agent, Open};
 use crate::protocol::ClientInput;
@@ -108,8 +108,11 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
     )
     .await?;
 
-    let mut renderer = Renderer::new(output_mode, pretty::color());
-    turns.drive(input, &mut renderer).await?;
+    let status = super::output::Status::start();
+    let mut renderer = Renderer::new(output_mode, output::color()).with_status(status.clone());
+    let driven = turns.drive(input, &mut renderer).await;
+    status.stop();
+    driven?;
 
     turns.wait_for_index().await;
     print_resume_hint(&session_id, payload.as_deref());

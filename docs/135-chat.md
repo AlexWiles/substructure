@@ -12,7 +12,10 @@ subs chat
 ```
 
 ```console
-substructure · assistant · 01a02417-7d46-7441-8090-23b20d0f980f
+assistant
+  model   claude-sonnet-5
+  llm     claude (anthropic)
+  session 01a02417-7d46-7441-8090-23b20d0f980f
 
 > what is the capital of Portugal?
 The capital of Portugal is Lisbon.
@@ -72,6 +75,75 @@ engine is the same kind of thing. See [Conversations](./120-conversations.md).
 history is beside your credentials, in
 `$XDG_CONFIG_HOME/substructure/chat_history`.
 
+A line ending in `\` is not finished, so `Enter` opens the next one and the
+message carries the newline. `Alt-Enter` and `Ctrl-J` do the same.
+
+```console
+> summarise this: \
+  the first point \
+  the second point
+```
+
+`Shift-Enter` is not one of them, and cannot be: a terminal sends the same
+byte for `Enter` and `Shift-Enter`, so nothing downstream can tell them apart.
+Terminals that let you map a key can send `Alt-Enter`'s bytes — `ESC` then
+`CR` — for it:
+
+```
+kitty      map shift+enter send_text all \x1b\r
+wezterm    { key = "Enter", mods = "SHIFT", action = act.SendString("\x1b\r") }
+alacritty  { key = "Return", mods = "Shift", chars = "\u001b\r" }
+iTerm2     Keys → Key Bindings → Shift-Enter → Send Hex Code → 0x1b 0x0d
+```
+
+## While a turn runs
+
+A turn is quiet between the model call and its first token, and again while a
+tool runs. A line below the transcript names the step in progress and counts
+the time it takes.
+
+```console
+⠙ fetch_url (7s)
+```
+
+It names one call, counts a batch of them (`2 tools`), and counts the attempts
+when the engine tries the same call again. The line is drawn on stderr and
+erased before anything else is written, so `subs run` piped into another
+program still writes only the turn.
+
+A call is written once, when it is answered: the status line is what says it
+is running, so the transcript keeps one line per call.
+
+```console
+● get_current_time (180ms)
+  2026-08-22T09:50:33.010Z
+↻ fetch_url {"url":"https://example.com"} (attempt 1, 2.1s)
+  503 Service Unavailable
+● fetch_url {"url":"https://example.com"} (attempt 2, 1.4s)
+  {"status":"ok"}
+```
+
+`●` answered, `✗` failed, `↻` failed and will be tried again. A call that took
+less than a moment shows no time. A result that is only text reads as that
+text.
+
+A result longer than the screen is cut short, and the rest is counted:
+
+```console
+  … +182 lines
+```
+
+## What the answer looks like
+
+The answer is markdown, and it reads as markdown: headings, `code`, **bold**,
+lists, quotes, and links carry their styling rather than their markers. A line
+is styled once it is whole and a fenced block once it closes, so the transcript
+is written once and never rewritten.
+
+A model told to answer in another dialect is read as CommonMark all the same —
+Slack's `*bold*` is CommonMark's *italic*, so an agent whose system prompt asks
+for Slack mrkdwn reads differently here than it does in Slack.
+
 ## Interrupt prompts
 
 A turn that stops to ask something renders the question where you are, and
@@ -108,8 +180,11 @@ channel answered and which option was picked, the same way Slack's does. See
 ## What it does not do
 
 The first cut renders a turn and answers what it parks on. It has no slash
-commands, it cannot send a message while a turn is running, and `Ctrl-C` at
-the prompt ends the chat rather than the turn.
+commands, and it cannot send a message while a turn is running.
+
+Nothing here stops a turn the engine has started. `Ctrl-C` during a turn stops
+watching it and prints how to pick the session back up; the turn runs to its
+end, and the next chat on that session reads what it wrote.
 
 A client tool ends the turn with nothing to settle it, so chat says so and
 stops rather than offering an input it cannot send:

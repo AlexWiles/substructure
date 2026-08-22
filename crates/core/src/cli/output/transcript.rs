@@ -1,112 +1,30 @@
-use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
+//! The AG-UI event stream as the text a reader sees.
 
-use super::env::OutputFormat;
+use std::collections::HashMap;
+use std::io::{self, Write};
+
+use super::markdown::Markdown;
+use super::reasoning::Reasoning;
+use super::status::{Phase, Status};
+use super::term::{fold, held_lines, indent, Theme, DARK};
+use super::tool::{format_result, head_of, PendingTool, RESULT_LINES};
 use crate::transport::ag_ui::events::{AgUiEvent, RunOutcome};
 
-/// Where translated AG-UI events go. `Jsonl` renders nothing: the caller writes
-/// the engine events.
-pub(crate) enum Renderer {
-    AgUi,
-    Jsonl,
-    Pretty(PrettyPrinter),
-}
-
-impl Renderer {
-    pub(crate) fn new(output: OutputFormat, color: bool) -> Self {
-        match output {
-            OutputFormat::AgUi => Renderer::AgUi,
-            OutputFormat::Jsonl => Renderer::Jsonl,
-            OutputFormat::Pretty => Renderer::Pretty(PrettyPrinter::new(color)),
-        }
-    }
-
-    pub(crate) fn is_raw(&self) -> bool {
-        matches!(self, Renderer::Jsonl)
-    }
-
-    /// Drop the `--input` hints. A chat has no `--input`.
-    pub(crate) fn at_a_prompt(mut self) -> Self {
-        if let Renderer::Pretty(printer) = &mut self {
-            printer.reader = Reader::Prompt;
-        }
-        self
-    }
-
-    pub(crate) fn emit(
-        &mut self,
-        stdout: &mut std::io::Stdout,
-        events: Vec<AgUiEvent>,
-    ) -> anyhow::Result<()> {
-        match self {
-            Renderer::AgUi => {
-                for ev in events {
-                    write_json(stdout, &ev)?;
-                }
-            }
-            Renderer::Pretty(printer) => {
-                for ev in &events {
-                    printer.render(stdout, ev)?;
-                }
-            }
-            Renderer::Jsonl => {}
-        }
-        Ok(())
-    }
-}
-
-/// Serializes first and writes second, so a closed pipe gives an `io::Error`.
-pub(crate) fn write_json<T: serde::Serialize>(
-    stdout: &mut std::io::Stdout,
-    value: &T,
-) -> anyhow::Result<()> {
-    let mut line = serde_json::to_vec(value)?;
-    line.push(b'\n');
-    stdout.write_all(&line)?;
-    stdout.flush()?;
-    Ok(())
-}
-
-pub(crate) fn color() -> bool {
-    std::io::stdout().is_terminal()
-}
-
-/// Secondary text on stderr. Faint on a terminal, plain when piped.
-pub(crate) fn note(text: &str) {
-    if std::io::stderr().is_terminal() {
-        eprintln!("{DIM}{text}{RESET}");
-    } else {
-        eprintln!("{text}");
-    }
-}
-
-/// Who reads the output: a shell running `subs run`, or a chat prompt.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Reader {
     Shell,
     Prompt,
 }
 
-const RESET: &str = "\x1b[0m";
-const DIM: &str = "\x1b[2m";
-const CYAN: &str = "\x1b[36m";
-const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
-
-struct PendingTool {
-    name: String,
-    args: String,
-}
-
-/// Renders the AG-UI event stream as human-readable terminal text. Assistant
-/// text streams inline; reasoning, tool calls, results, and the final outcome
-/// each get their own marked block. ANSI styling is applied only when `color`
-/// is set (i.e. stdout is a terminal).
 pub struct PrettyPrinter {
     color: bool,
     at_line_start: bool,
     tools: HashMap<String, PendingTool>,
     reader: Reader,
+    status: Status,
+    reasoning: Reasoning,
+    markdown: Markdown,
+    theme: &'static Theme,
 }
 
 impl PrettyPrinter {
@@ -116,23 +34,65 @@ impl PrettyPrinter {
             at_line_start: true,
             tools: HashMap::new(),
             reader: Reader::Shell,
+            status: Status::disabled(),
+            reasoning: Reasoning::default(),
+            markdown: Markdown::default(),
+            theme: &DARK,
         }
     }
 
+    pub(super) fn at_a_prompt(&mut self) {
+        self.reader = Reader::Prompt;
+    }
+
+    pub(super) fn with_status(&mut self, status: Status) {
+        self.status = status;
+    }
+
     pub fn render(&mut self, w: &mut impl Write, event: &AgUiEvent) -> io::Result<()> {
+        self.status.writing();
+        let rendered = self.render_event(w, event);
+        self.status.wrote(self.at_line_start);
+        rendered?;
+        w.flush()
+    }
+
+    fn render_event(&mut self, w: &mut impl Write, event: &AgUiEvent) -> io::Result<()> {
         match event {
-            AgUiEvent::TextMessageContent { delta, .. } => self.write_body(w, delta)?,
-            AgUiEvent::TextMessageEnd { .. } => self.break_line(w)?,
+            AgUiEvent::RunStarted { .. } => self.status.set(Phase::Thinking),
+
+            AgUiEvent::TextMessageContent { delta, .. } => {
+                let shown = self.markdown.take(delta, self.theme, self.color);
+                self.write_body(w, &shown)?;
+            }
+            AgUiEvent::TextMessageEnd { .. } => {
+                let rest = self.markdown.flush(self.theme, self.color);
+                self.write_body(w, &rest)?;
+                self.break_line(w)?;
+            }
 
             AgUiEvent::ReasoningMessageStart { .. } => {
                 self.break_line(w)?;
-                self.write_styled(w, DIM, "thinking")?;
+                let dim = self.theme.dim;
+                self.write_styled(w, dim, "thinking")?;
                 self.newline(w)?;
-                self.open(w, DIM)?;
+                let dim = self.theme.dim;
+                self.open(w, dim)?;
+                self.reasoning.start();
             }
-            AgUiEvent::ReasoningMessageContent { delta, .. } => self.write_body(w, delta)?,
+            AgUiEvent::ReasoningMessageContent { delta, .. } => {
+                let kept = self.reasoning.take(delta);
+                self.write_body(w, &kept)?;
+            }
             AgUiEvent::ReasoningEnd { .. } => {
                 self.close(w)?;
+                let held = self.reasoning.held();
+                if held > 0 {
+                    let dim = self.theme.dim;
+                    self.break_line(w)?;
+                    self.write_styled(w, dim, &held_lines(held))?;
+                    self.newline(w)?;
+                }
                 self.break_line(w)?;
             }
 
@@ -143,11 +103,9 @@ impl PrettyPrinter {
             } => {
                 self.tools.insert(
                     tool_call_id.clone(),
-                    PendingTool {
-                        name: tool_call_name.clone(),
-                        args: String::new(),
-                    },
+                    PendingTool::new(tool_call_name.clone()),
                 );
+                self.status.set(self.tool_phase());
             }
             AgUiEvent::ToolCallArgs {
                 tool_call_id,
@@ -157,39 +115,51 @@ impl PrettyPrinter {
                     tool.args.push_str(delta);
                 }
             }
-            AgUiEvent::ToolCallEnd { tool_call_id } => {
-                if let Some(tool) = self.tools.get(tool_call_id) {
-                    let line = format!("→ {} {}", tool.name, compact_args(&tool.args));
-                    self.break_line(w)?;
-                    self.write_styled(w, CYAN, &line)?;
-                    self.newline(w)?;
-                }
-            }
+            AgUiEvent::ToolCallEnd { .. } => {}
             AgUiEvent::ToolCallResult {
                 tool_call_id,
                 content,
+                is_error,
+                retryable,
                 ..
             } => {
                 self.break_line(w)?;
-                // Name the call this result answers so parallel calls stay legible;
-                // echo non-empty args to tell same-named calls apart.
-                if let Some(tool) = self.tools.remove(tool_call_id) {
-                    let args = compact_args(&tool.args);
-                    let head = if args == "{}" {
-                        format!("← {}", tool.name)
-                    } else {
-                        format!("← {} {args}", tool.name)
+                let again = *is_error && *retryable;
+                let outcome = match again {
+                    true => self.tools.get_mut(tool_call_id).map(|tool| {
+                        tool.attempt += 1;
+                        let head = head_of(tool, *is_error, again);
+                        tool.started = std::time::Instant::now();
+                        head
+                    }),
+                    false => self.tools.remove(tool_call_id).map(|mut tool| {
+                        tool.attempt += 1;
+                        head_of(&tool, *is_error, again)
+                    }),
+                };
+                if let Some(head) = outcome {
+                    let style = match *is_error {
+                        true => self.theme.error,
+                        false => self.theme.tool,
                     };
-                    self.write_styled(w, CYAN, &head)?;
+                    self.write_styled(w, style, &head)?;
                     self.newline(w)?;
                 }
-                self.open(w, DIM)?;
-                self.write_body(w, &indent(&format_result(content)))?;
+                let dim = self.theme.dim;
+                self.open(w, dim)?;
+                let (body, held) = fold(&format_result(content), RESULT_LINES);
+                self.write_body(w, &indent(&body))?;
                 self.close(w)?;
                 self.break_line(w)?;
+                if held > 0 {
+                    self.write_styled(w, dim, &indent(&held_lines(held)))?;
+                    self.newline(w)?;
+                }
+                self.status.set(self.tool_phase());
             }
 
             AgUiEvent::RunFinished { outcome, .. } => {
+                self.status.set(Phase::Idle);
                 if let Some(RunOutcome::Interrupt { interrupts }) = outcome {
                     for it in interrupts {
                         if let Some(id) = &it.tool_call_id {
@@ -198,10 +168,10 @@ impl PrettyPrinter {
                         if self.reader == Reader::Shell {
                             self.break_line(w)?;
                             let msg = it.message.as_deref().unwrap_or("(no message)");
-                            // The id is what an `interrupt.resume` input needs.
+                            let warn = self.theme.warn;
                             self.write_styled(
                                 w,
-                                YELLOW,
+                                warn,
                                 &format!("⚠ interrupt {} [{}]: {msg}", it.id, it.reason),
                             )?;
                             self.newline(w)?;
@@ -211,8 +181,10 @@ impl PrettyPrinter {
                 self.render_pending_settlements(w)?;
             }
             AgUiEvent::RunError { message } => {
+                self.status.set(Phase::Idle);
                 self.break_line(w)?;
-                self.write_styled(w, RED, &format!("✗ error: {message}"))?;
+                let error = self.theme.error;
+                self.write_styled(w, error, &format!("✗ error: {message}"))?;
                 self.newline(w)?;
             }
 
@@ -221,11 +193,6 @@ impl PrettyPrinter {
         w.flush()
     }
 
-    /// A client tool yields the run with no result event, so its call stays in
-    /// `tools` after every worker call and sub-agent has been removed by its
-    /// result. On finish, surface each leftover call's id and a ready-to-edit
-    /// settle input — `tool.result` requires the id, which the streamed `→`
-    /// line alone doesn't show.
     fn render_pending_settlements(&mut self, w: &mut impl Write) -> io::Result<()> {
         let mut pending: Vec<(String, String)> = self
             .tools
@@ -235,12 +202,10 @@ impl PrettyPrinter {
         pending.sort();
         for (id, name) in pending {
             self.break_line(w)?;
-            // Nothing in a chat settles a client tool, so say that the turn
-            // stopped rather than offer a way to finish it.
             if self.reader == Reader::Prompt {
                 self.write_styled(
                     w,
-                    YELLOW,
+                    self.theme.warn,
                     &format!("⧗ {name} is waiting on a client-side result, which this chat cannot settle."),
                 )?;
                 self.newline(w)?;
@@ -248,21 +213,34 @@ impl PrettyPrinter {
             }
             self.write_styled(
                 w,
-                YELLOW,
+                self.theme.warn,
                 &format!("⧗ {name} awaiting result — settle with:"),
             )?;
             self.newline(w)?;
             let hint = format!(
                 "    --input '{{\"type\":\"tool.result\",\"id\":\"{id}\",\"result\":\"...\"}}'"
             );
-            self.write_styled(w, DIM, &hint)?;
+            self.write_styled(w, self.theme.dim, &hint)?;
             self.newline(w)?;
         }
         Ok(())
     }
 
-    /// Body text that streams verbatim; tracks whether the cursor is at the
-    /// start of a line so block markers land on their own line.
+    fn tool_phase(&self) -> Phase {
+        let mut pending = self.tools.values();
+        match (pending.next(), pending.next()) {
+            (None, _) => Phase::Thinking,
+            (Some(tool), None) => Phase::Tool {
+                name: tool.name.clone(),
+                about: tool.about(),
+            },
+            (Some(_), Some(_)) => Phase::Tool {
+                name: format!("{} tools", self.tools.len()),
+                about: None,
+            },
+        }
+    }
+
     fn write_body(&mut self, w: &mut impl Write, text: &str) -> io::Result<()> {
         if text.is_empty() {
             return Ok(());
@@ -274,7 +252,7 @@ impl PrettyPrinter {
 
     fn write_styled(&mut self, w: &mut impl Write, style: &str, text: &str) -> io::Result<()> {
         if self.color {
-            self.write_body(w, &format!("{style}{text}{RESET}"))
+            self.write_body(w, &format!("{style}{text}{}", self.theme.reset))
         } else {
             self.write_body(w, text)
         }
@@ -289,7 +267,7 @@ impl PrettyPrinter {
 
     fn close(&mut self, w: &mut impl Write) -> io::Result<()> {
         if self.color {
-            w.write_all(RESET.as_bytes())?;
+            w.write_all(self.theme.reset.as_bytes())?;
         }
         Ok(())
     }
@@ -300,8 +278,6 @@ impl PrettyPrinter {
         Ok(())
     }
 
-    /// A single newline only if we're mid-line, so blocks separate without piling
-    /// up blank lines.
     fn break_line(&mut self, w: &mut impl Write) -> io::Result<()> {
         if !self.at_line_start {
             self.newline(w)?;
@@ -310,35 +286,11 @@ impl PrettyPrinter {
     }
 }
 
-/// Collapse streamed tool arguments to one line; empty args read as `{}`.
-fn compact_args(raw: &str) -> String {
-    if raw.trim().is_empty() {
-        return "{}".to_string();
-    }
-    match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| raw.to_string()),
-        Err(_) => raw.to_string(),
-    }
-}
-
-/// Tool results are usually JSON; pretty-print when they parse, else pass through.
-fn format_result(content: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(content) {
-        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| content.to_string()),
-        Err(_) => content.to_string(),
-    }
-}
-
-fn indent(text: &str) -> String {
-    text.lines()
-        .map(|line| format!("  {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::output::status::Phase;
+    use crate::transport::ag_ui::events::RunOutcome;
 
     fn render_all(events: Vec<AgUiEvent>) -> String {
         render_with(PrettyPrinter::new(false), events)
@@ -352,8 +304,6 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
-    /// What a chat renders with: it answers the interrupt itself, so the
-    /// `--input` vocabulary belongs to `run` alone.
     fn at_a_prompt() -> PrettyPrinter {
         let mut printer = PrettyPrinter::new(false);
         printer.reader = Reader::Prompt;
@@ -378,6 +328,7 @@ mod tests {
             text("c1", "lo"),
             AgUiEvent::TextMessageEnd {
                 message_id: "c1".into(),
+                metadata: None,
             },
         ]);
         assert_eq!(out, "Hello\n");
@@ -403,7 +354,7 @@ mod tests {
                 tool_call_id: "x".into(),
             },
         ]);
-        assert_eq!(out, "→ get_weather {\"city\":\"SF\"}\n");
+        assert_eq!(out, "");
     }
 
     #[test]
@@ -418,7 +369,7 @@ mod tests {
                 tool_call_id: "x".into(),
             },
         ]);
-        assert_eq!(out, "→ now {}\n");
+        assert_eq!(out, "");
     }
 
     #[test]
@@ -445,6 +396,8 @@ mod tests {
             message_id: "x".into(),
             tool_call_id: "x".into(),
             content: r#"{"temp":62}"#.into(),
+            is_error: false,
+            retryable: false,
             role: "tool",
         }]);
         assert_eq!(out, "  {\n    \"temp\": 62\n  }\n");
@@ -468,6 +421,19 @@ mod tests {
             message_id: id.into(),
             tool_call_id: id.into(),
             content: content.into(),
+            is_error: false,
+            retryable: false,
+            role: "tool",
+        }
+    }
+
+    fn failed(id: &str, content: &str, retryable: bool) -> AgUiEvent {
+        AgUiEvent::ToolCallResult {
+            message_id: id.into(),
+            tool_call_id: id.into(),
+            content: content.into(),
+            is_error: true,
+            retryable,
             role: "tool",
         }
     }
@@ -477,10 +443,7 @@ mod tests {
         let mut evs = call("x", "get_current_time");
         evs.push(result("x", "2026-07-10T04:14:56.322Z"));
         let out = render_all(evs);
-        assert_eq!(
-            out,
-            "→ get_current_time {}\n← get_current_time\n  2026-07-10T04:14:56.322Z\n"
-        );
+        assert_eq!(out, "● get_current_time\n  2026-07-10T04:14:56.322Z\n");
     }
 
     #[test]
@@ -492,9 +455,8 @@ mod tests {
         let out = render_all(evs);
         assert_eq!(
             out,
-            "→ get_current_time_zone {}\n→ get_current_time {}\n\
-             ← get_current_time_zone\n  Asia/Bangkok\n\
-             ← get_current_time\n  2026-07-10T04:14:56.322Z\n"
+            "● get_current_time_zone\n  Asia/Bangkok\n\
+             ● get_current_time\n  2026-07-10T04:14:56.322Z\n"
         );
     }
 
@@ -502,14 +464,10 @@ mod tests {
     fn results_pair_by_id_regardless_of_completion_order() {
         let mut evs = call("a", "first");
         evs.extend(call("b", "second"));
-        // Results arrive in reverse dispatch order.
         evs.push(result("b", "B"));
         evs.push(result("a", "A"));
         let out = render_all(evs);
-        assert_eq!(
-            out,
-            "→ first {}\n→ second {}\n← second\n  B\n← first\n  A\n"
-        );
+        assert_eq!(out, "● second\n  B\n● first\n  A\n");
     }
 
     #[test]
@@ -529,10 +487,7 @@ mod tests {
             },
             result("a", "68"),
         ]);
-        assert_eq!(
-            out,
-            "→ get_weather {\"city\":\"Paris\"}\n← get_weather {\"city\":\"Paris\"}\n  68\n"
-        );
+        assert_eq!(out, "● get_weather {\"city\":\"Paris\"}\n  68\n");
     }
 
     #[test]
@@ -542,6 +497,7 @@ mod tests {
             run_id: "r".into(),
             result: Some(serde_json::json!({"answer": 42})),
             outcome: None,
+            metadata: None,
         }]);
         assert_eq!(out, "");
     }
@@ -563,6 +519,7 @@ mod tests {
                     metadata: None,
                 }],
             }),
+            metadata: None,
         }]);
         assert_eq!(out, "⚠ interrupt int-1 [confirmation]: Send the email?\n");
     }
@@ -583,6 +540,7 @@ mod tests {
                     metadata: None,
                 }],
             }),
+            metadata: None,
         }
     }
 
@@ -595,17 +553,12 @@ mod tests {
         assert_eq!(render_with(at_a_prompt(), vec![interrupted()]), "");
     }
 
-    /// A gated call is pending because the interrupt parked it, and the resume
-    /// is what settles it — `tool.result` would be the wrong input to offer.
     #[test]
     fn a_call_the_interrupt_parked_is_not_reported_as_awaiting_a_settlement() {
         let mut evs = call("toolu_1", "issues__delete_issue");
         evs.push(parked_on(Some("toolu_1")));
         let out = render_all(evs);
-        assert_eq!(
-            out,
-            "→ issues__delete_issue {}\n⚠ interrupt int-1 [confirmation]: Send the email?\n"
-        );
+        assert_eq!(out, "⚠ interrupt int-1 [confirmation]: Send the email?\n");
         assert!(!out.contains("awaiting result"), "got {out}");
 
         let chatting = render_with(at_a_prompt(), {
@@ -613,7 +566,7 @@ mod tests {
             evs.push(parked_on(Some("toolu_1")));
             evs
         });
-        assert_eq!(chatting, "→ issues__delete_issue {}\n");
+        assert_eq!(chatting, "");
     }
 
     #[test]
@@ -624,8 +577,6 @@ mod tests {
         assert!(out.contains("get_weather awaiting result"), "got {out}");
     }
 
-    /// Nothing in a chat settles a client tool, so the turn's stopping is
-    /// still reported — just not as an `--input` to send.
     #[test]
     fn at_a_prompt_a_pending_client_tool_says_it_cannot_be_settled() {
         let mut evs = call("call_a", "get_weather");
@@ -633,7 +584,7 @@ mod tests {
         let out = render_with(at_a_prompt(), evs);
         assert_eq!(
             out,
-            "→ get_weather {}\n⧗ get_weather is waiting on a client-side result, \
+            "⧗ get_weather is waiting on a client-side result, \
              which this chat cannot settle.\n"
         );
         assert!(!out.contains("--input"), "got {out}");
@@ -657,6 +608,7 @@ mod tests {
             text("c1", "Let me check."),
             AgUiEvent::TextMessageEnd {
                 message_id: "c1".into(),
+                metadata: None,
             },
             AgUiEvent::ToolCallStart {
                 tool_call_id: "x".into(),
@@ -667,7 +619,7 @@ mod tests {
                 tool_call_id: "x".into(),
             },
         ]);
-        assert_eq!(out, "Let me check.\n→ get_weather {}\n");
+        assert_eq!(out, "Let me check.\n");
     }
 
     fn run_finished() -> AgUiEvent {
@@ -676,6 +628,7 @@ mod tests {
             run_id: "r".into(),
             result: None,
             outcome: None,
+            metadata: None,
         }
     }
 
@@ -698,7 +651,7 @@ mod tests {
         ]);
         assert_eq!(
             out,
-            "→ get_weather {\"city\":\"SF\"}\n⧗ get_weather awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_x\",\"result\":\"...\"}'\n"
+            "⧗ get_weather awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_x\",\"result\":\"...\"}'\n"
         );
     }
 
@@ -710,8 +663,122 @@ mod tests {
         let out = render_all(evs);
         assert_eq!(
             out,
-            "→ get_weather {}\n→ get_time {}\n⧗ get_weather awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_a\",\"result\":\"...\"}'\n⧗ get_time awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_b\",\"result\":\"...\"}'\n"
+            "⧗ get_weather awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_a\",\"result\":\"...\"}'\n⧗ get_time awaiting result — settle with:\n    --input '{\"type\":\"tool.result\",\"id\":\"call_b\",\"result\":\"...\"}'\n"
         );
+    }
+
+    #[test]
+    fn a_failed_call_is_marked_as_one() {
+        let mut evs = call("a", "read_file");
+        evs.push(failed("a", "no such file", false));
+        let out = render_all(evs);
+        assert_eq!(out, "✗ read_file\n  no such file\n");
+    }
+
+    #[test]
+    fn a_retried_call_counts_its_attempts() {
+        let mut evs = call("a", "fetch_url");
+        evs.push(failed("a", "503", true));
+        evs.push(failed("a", "503", true));
+        evs.push(result("a", "ok"));
+        let out = render_all(evs);
+        assert!(out.contains("↻ fetch_url (attempt 1)\n"), "got {out}");
+        assert!(out.contains("↻ fetch_url (attempt 2)\n"), "got {out}");
+        assert!(out.contains("● fetch_url (attempt 3)\n"), "got {out}");
+    }
+
+    #[test]
+    fn a_retried_call_that_succeeds_leaves_no_pending_hint() {
+        let mut evs = call("a", "fetch_url");
+        evs.push(failed("a", "503", true));
+        evs.push(result("a", "ok"));
+        evs.push(run_finished());
+        let out = render_all(evs);
+        assert!(!out.contains("awaiting result"), "got {out}");
+    }
+
+    #[test]
+    fn a_long_result_is_folded_and_the_rest_counted() {
+        let body: String = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut evs = call("a", "read_file");
+        evs.push(result("a", &body));
+        let out = render_all(evs);
+        assert!(out.contains("  line 12\n"), "got {out}");
+        assert!(!out.contains("line 13"), "got {out}");
+        assert!(out.contains("  … +8 lines\n"), "got {out}");
+    }
+
+    #[test]
+    fn a_short_result_is_not_folded() {
+        let mut evs = call("a", "read_file");
+        evs.push(result("a", "one\ntwo"));
+        let out = render_all(evs);
+        assert!(!out.contains("…"), "got {out}");
+    }
+
+    #[test]
+    fn the_live_line_names_the_call_and_counts_its_attempts() {
+        let mut printer = PrettyPrinter::new(false);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut phase = |printer: &mut PrettyPrinter, event: &AgUiEvent| {
+            printer.render(&mut buf, event).unwrap();
+            printer.tool_phase()
+        };
+
+        assert_eq!(
+            phase(&mut printer, &call("a", "fetch_url")[0]),
+            Phase::Tool {
+                name: "fetch_url".into(),
+                about: None
+            }
+        );
+        assert_eq!(
+            phase(&mut printer, &failed("a", "503", true)),
+            Phase::Tool {
+                name: "fetch_url".into(),
+                about: Some("attempt 2".into())
+            }
+        );
+        assert_eq!(
+            phase(&mut printer, &failed("a", "503", true)),
+            Phase::Tool {
+                name: "fetch_url".into(),
+                about: Some("attempt 3".into())
+            }
+        );
+        assert_eq!(phase(&mut printer, &result("a", "ok")), Phase::Thinking);
+    }
+
+    #[test]
+    fn the_live_line_counts_a_batch() {
+        let mut printer = PrettyPrinter::new(false);
+        let mut buf: Vec<u8> = Vec::new();
+        for id in ["a", "b", "c"] {
+            printer.render(&mut buf, &call(id, "read_file")[0]).unwrap();
+        }
+        assert_eq!(
+            printer.tool_phase(),
+            Phase::Tool {
+                name: "3 tools".into(),
+                about: None
+            }
+        );
+
+        printer.render(&mut buf, &result("a", "ok")).unwrap();
+        printer.render(&mut buf, &result("b", "ok")).unwrap();
+        assert_eq!(
+            printer.tool_phase(),
+            Phase::Tool {
+                name: "read_file".into(),
+                about: None
+            }
+        );
+
+        printer.render(&mut buf, &result("c", "ok")).unwrap();
+        assert_eq!(printer.tool_phase(), Phase::Thinking);
     }
 
     #[test]
@@ -720,9 +787,6 @@ mod tests {
         evs.push(result("a", "2026-07-10T04:14:56.322Z"));
         evs.push(run_finished());
         let out = render_all(evs);
-        assert_eq!(
-            out,
-            "→ get_current_time {}\n← get_current_time\n  2026-07-10T04:14:56.322Z\n"
-        );
+        assert_eq!(out, "● get_current_time\n  2026-07-10T04:14:56.322Z\n");
     }
 }
