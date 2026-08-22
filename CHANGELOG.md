@@ -9,34 +9,9 @@ together at the same version.
 
 ## [Unreleased]
 
-### Added
-
-- An agent can name one of a plugin's servers, instead of the whole plugin.
-- `[plugin.<id>.mcp.<server>]` sets the auth, the URL, and the other connection
-  keys for one of a plugin's servers.
-- `subs list` shows every connection and `[llm.*]` block, and what each one
-  still needs.
-
 ### Changed
 
-- A connection is named by where it is declared: `mcp.sentry`,
-  `plugin.reggu.mcp.code`. The file, the CLI, the wire, and the credential
-  store all use that path. Set every credential again. Stored sessions and
-  pending authorize links from before this release do not carry over.
-- The worker protocol carries the path. `McpServer` and `connector.sync` take
-  `path` in place of `id`, and a plugin lists its servers as paths.
-- The model sees a plugin server's tools under `<plugin>_<server>__<tool>`.
-- `subs auth` replaces `subs mcp login`, `subs mcp set-token`, and
-  `subs llm set-key`. It does what the connection declares.
-- `subs revoke` replaces `subs mcp logout` and `subs llm delete-key`.
-- `subs mcp list` and `subs llm list` become `subs list`.
-- Errors that suggest a command now spell a path the CLI accepts. The Slack
-  prompts do too.
-
-### Removed
-
-- `auth = { <server> = ... }` on `[plugin.<id>]`. Write
-  `[plugin.<id>.mcp.<server>]`.
+- Manifest format updates
 
 ## [0.7.2] - 2026-08-21
 
