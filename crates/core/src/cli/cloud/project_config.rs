@@ -179,9 +179,14 @@ impl ProjectConfig {
 
     /// The engine's database, beside the file that names it. One file is one
     /// project, so two files in a directory hold two engines rather than
-    /// writing each other's sessions and credentials.
+    /// writing each other's sessions and credentials. With no file behind it,
+    /// it sits beside the credentials in the user config dir, so `subs chat`
+    /// and `subs run` keep one set of sessions wherever they are run.
     pub fn db_path(&self) -> String {
         let named = self.db.clone().unwrap_or_else(|| default_db(&self.source));
+        if self.source.as_os_str().is_empty() {
+            return user_db_path(named);
+        }
         match self.source.parent() {
             // `join` keeps an absolute `db` absolute.
             Some(dir) if !dir.as_os_str().is_empty() => dir.join(named).display().to_string(),
@@ -272,6 +277,31 @@ impl ProjectConfig {
             .map_err(|e| anyhow!("{at}: {e}"))?;
         config.source = path.to_path_buf();
         Ok(config)
+    }
+}
+
+/// Make the directory a database is about to be created in. The default one is
+/// the config dir, which is private: it holds the tokens too.
+pub fn ensure_parent(path: &str) -> Result<()> {
+    let Some(dir) = Path::new(path)
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    match super::credentials::config_dir().is_ok_and(|c| c == dir) {
+        true => super::credentials::ensure_config_dir(dir),
+        false => fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display())),
+    }
+}
+
+/// No file behind the config: the database joins the credentials under
+/// `~/.config/substructure`, rather than being written into whichever
+/// directory the command was run from.
+fn user_db_path(named: String) -> String {
+    match super::credentials::config_dir() {
+        Ok(dir) => dir.join(&named).display().to_string(),
+        Err(_) => named,
     }
 }
 
@@ -548,9 +578,21 @@ mod tests {
                 ..Default::default()
             }
         );
-        // No file behind it at all: an engine running on flags alone.
-        assert_eq!(ProjectConfig::default().db_path(), DEFAULT_DB);
         assert!(ProjectConfig::default().serve_auth());
+    }
+
+    /// No file behind it at all — `subs chat` in a directory that is not a
+    /// project. The database joins the credentials rather than landing in
+    /// whichever directory the command was run from.
+    #[test]
+    fn no_file_puts_the_database_beside_the_credentials() {
+        let expected = super::super::credentials::config_dir()
+            .unwrap()
+            .join(DEFAULT_DB);
+        assert_eq!(
+            ProjectConfig::default().db_path(),
+            expected.display().to_string()
+        );
     }
 
     /// One file is one project, so a second file in a directory is a second

@@ -24,7 +24,7 @@ use crate::transport::push::PushAdapter;
 use crate::{Caller, Runtime};
 
 use super::cloud::context::Context as CloudContext;
-use super::cloud::project_config::ProjectConfig;
+use super::cloud::project_config::{self, ProjectConfig};
 use super::cloud::{CloudGlobals, ProjectScope};
 use super::env::{EnvVars, OutputFormat};
 use super::output::Renderer;
@@ -120,11 +120,7 @@ pub(crate) async fn open(cfg: &ProjectConfig, o: Open) -> Result<Box<dyn Turns>>
     };
 
     let db_path = o.db.unwrap_or_else(|| cfg.db_path());
-    if let Some(parent) = std::path::Path::new(&db_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
+    project_config::ensure_parent(&db_path)?;
 
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
     let blobs = Arc::new(SqliteBlobStore::new(db.clone()));

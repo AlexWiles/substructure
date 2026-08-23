@@ -40,7 +40,8 @@ pub struct RunArgs {
     /// to use the engine that runs there.
     #[arg(long)]
     url: Option<String>,
-    /// SQLite dev database path. [default: substructure.db]
+    /// SQLite dev database path. [default: beside `substructure.toml`, or
+    /// `~/.config/substructure/substructure.db` with no file]
     #[arg(long)]
     db: Option<String>,
     /// Output mode. (Engine logs go to stderr at error level; set RUST_LOG=info for more.)

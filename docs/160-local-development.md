@@ -159,7 +159,8 @@ subs serve -c substructure.dev.toml
 ```
 
 `db` defaults to the file's name. `substructure.toml` uses `substructure.db`.
-`substructure.dev.toml` uses `substructure.dev.db`.
+`substructure.dev.toml` uses `substructure.dev.db`. With no file, the engine
+uses `~/.config/substructure/substructure.db`.
 
 ## Develop against a cloud project
 

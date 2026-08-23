@@ -79,6 +79,10 @@ deploys a separate project.
 `substructure.toml` uses `substructure.db`. `subs.staging.toml` uses
 `subs.staging.db`. Two files in one directory are two engines.
 
+With no file at all, the engine uses
+`~/.config/substructure/substructure.db`, beside `credentials.toml`, so
+`subs chat` and `subs run` keep one set of sessions wherever you run them.
+
 ## `[llm.<id>]`
 
 Where a model call runs. An agent names a block by its ID.
