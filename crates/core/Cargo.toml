@@ -59,6 +59,7 @@ ctrlc = "3.5.2"
 rmcp = { version = "3.1.2", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 aes-gcm = "0.10"
 pulldown-cmark = { version = "0.13.4", default-features = false }
+console = "0.16.4"
 
 [dev-dependencies]
 proptest = "1.11.0"

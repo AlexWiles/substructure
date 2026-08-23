@@ -140,6 +140,10 @@ lists, quotes, and links carry their styling rather than their markers. A line
 is styled once it is whole and a fenced block once it closes, so the transcript
 is written once and never rewritten.
 
+Styling is bold, dim, italic, and underline, and nothing else. No colour is
+set, so the transcript reads on a light background as well as a dark one and
+there is no theme to keep right.
+
 A model told to answer in another dialect is read as CommonMark all the same —
 Slack's `*bold*` is CommonMark's *italic*, so an agent whose system prompt asks
 for Slack mrkdwn reads differently here than it does in Slack.

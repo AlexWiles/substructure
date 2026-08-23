@@ -2,47 +2,24 @@
 
 use std::io::IsTerminal;
 
+// Attributes only. A colour is tuned for one background and wrong on the
+// other, and there is no theme here to keep them right.
 pub(super) const RESET: &str = "\x1b[0m";
+pub(super) const BOLD: &str = "\x1b[1m";
 pub(super) const DIM: &str = "\x1b[2m";
-pub(super) const CYAN: &str = "\x1b[36m";
-pub(super) const YELLOW: &str = "\x1b[33m";
-pub(super) const RED: &str = "\x1b[31m";
+pub(super) const ITALIC: &str = "\x1b[3m";
+pub(super) const UNDERLINE: &str = "\x1b[4m";
 
-/// What each part of the transcript is coloured with. One place to change,
-/// and the shape a loaded theme would fill.
-pub(super) struct Theme {
-    pub reset: &'static str,
-    pub dim: &'static str,
-    pub bold: &'static str,
-    pub italic: &'static str,
-    pub tool: &'static str,
-    pub warn: &'static str,
-    pub error: &'static str,
-    pub heading: &'static str,
-    pub code: &'static str,
-    pub code_block: &'static str,
-    pub link: &'static str,
-    pub quote: &'static str,
-    pub rule: &'static str,
-    pub bullet: &'static str,
+/// The terminal's width, for what cannot be drawn without one. Committed at
+/// the width it was written: a resize reflows what the terminal wrapped, not
+/// what we did.
+pub(super) fn width() -> usize {
+    console::Term::stdout()
+        .size_checked()
+        .map(|(_, cols)| cols as usize)
+        .unwrap_or(80)
+        .clamp(20, 200)
 }
-
-pub(super) const DARK: Theme = Theme {
-    reset: RESET,
-    dim: DIM,
-    bold: "\x1b[1m",
-    italic: "\x1b[3m",
-    tool: CYAN,
-    warn: YELLOW,
-    error: RED,
-    heading: "\x1b[1m\x1b[38;5;222m",
-    code: "\x1b[38;5;115m",
-    code_block: "\x1b[38;5;143m",
-    link: "\x1b[38;5;110m",
-    quote: "\x1b[38;5;245m",
-    rule: "\x1b[38;5;240m",
-    bullet: "\x1b[38;5;115m",
-};
 
 pub(crate) fn color() -> bool {
     std::io::stdout().is_terminal()
@@ -69,6 +46,13 @@ pub(super) fn held_lines(held: usize) -> String {
     match held {
         1 => "… +1 line".to_string(),
         _ => format!("… +{held} lines"),
+    }
+}
+
+pub(super) fn paint(style: &str, text: &str, color: bool) -> String {
+    match color {
+        true => format!("{style}{text}{RESET}"),
+        false => text.to_string(),
     }
 }
 

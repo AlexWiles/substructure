@@ -26,8 +26,7 @@ async function decide({ trigger, proposed }) {
         return {
             agent: {
                 ...proposed.agent,
-                tools: tools.map(({ name, description }) => ({ name, description })),
-                system: "Please answer is slack compatible mrkdwn"
+                tools: tools.map(({ name, description }) => ({ name, description }))
             }
         };
     }

@@ -2,6 +2,8 @@
 
 use std::time::{Duration, Instant};
 
+use super::term::{paint, BOLD, DIM};
+
 pub(super) const RESULT_LINES: usize = 12;
 const SLOW: Duration = Duration::from_millis(100);
 
@@ -27,17 +29,22 @@ impl PendingTool {
     }
 }
 
-pub(super) fn head_of(tool: &PendingTool, is_error: bool, again: bool) -> String {
+/// The name reads first and the arguments recede: what a tool was asked is
+/// worth less of the eye than which tool answered.
+pub(super) fn head_of(tool: &PendingTool, is_error: bool, again: bool, color: bool) -> String {
     let glyph = match (is_error, again) {
         (_, true) => "↻",
         (true, false) => "✗",
         (false, false) => "●",
     };
+    let mut head = paint(BOLD, &format!("{glyph} {}", tool.name), color);
+
     let args = compact_args(&tool.args);
-    let head = match args.as_str() {
-        "{}" => format!("{glyph} {}", tool.name),
-        _ => format!("{glyph} {} {args}", tool.name),
-    };
+    if !args.is_empty() {
+        head.push(' ');
+        head.push_str(&paint(DIM, &args, color));
+    }
+
     let mut about = Vec::new();
     if again || tool.attempt > 1 {
         about.push(format!("attempt {}", tool.attempt));
@@ -45,10 +52,11 @@ pub(super) fn head_of(tool: &PendingTool, is_error: bool, again: bool) -> String
     if let Some(took) = duration(tool.started.elapsed()) {
         about.push(took);
     }
-    match about.is_empty() {
-        true => head,
-        false => format!("{head} ({})", about.join(", ")),
+    if !about.is_empty() {
+        head.push(' ');
+        head.push_str(&paint(DIM, &format!("({})", about.join(", ")), color));
     }
+    head
 }
 
 fn duration(took: Duration) -> Option<String> {
@@ -63,13 +71,26 @@ fn duration(took: Duration) -> Option<String> {
     })
 }
 
+const ARG_WIDTH: usize = 72;
+
+/// Verbatim, only shorter. Nothing here knows what any tool's arguments mean,
+/// so none of them are picked over the others.
 fn compact_args(raw: &str) -> String {
     if raw.trim().is_empty() {
-        return "{}".to_string();
+        return String::new();
     }
-    match serde_json::from_str::<serde_json::Value>(raw) {
+    let compact = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Object(map)) if map.is_empty() => return String::new(),
         Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| raw.to_string()),
         Err(_) => raw.to_string(),
+    };
+    let compact = compact.replace('\n', " ");
+    match compact.chars().count() > ARG_WIDTH {
+        true => format!(
+            "{}…",
+            compact.chars().take(ARG_WIDTH - 1).collect::<String>()
+        ),
+        false => compact,
     }
 }
 
@@ -101,21 +122,37 @@ mod tests {
         assert_eq!(duration(Duration::from_secs(75)).unwrap(), "1m 15s");
     }
 
+    /// Nothing here knows what a tool's arguments mean, so they are shown as
+    /// written rather than picked over.
     #[test]
-    fn empty_args_read_as_an_object() {
-        assert_eq!(compact_args(""), "{}");
-        assert_eq!(compact_args(r#"{"city": "SF"}"#), r#"{"city":"SF"}"#);
+    fn arguments_are_shown_as_written() {
+        assert_eq!(compact_args(""), "");
+        assert_eq!(compact_args("{}"), "");
+        assert_eq!(
+            compact_args(r#"{"path": "src/lib.rs"}"#),
+            r#"{"path":"src/lib.rs"}"#
+        );
         assert_eq!(compact_args("not json"), "not json");
+    }
+
+    #[test]
+    fn arguments_are_read_on_one_line_and_clipped_when_long() {
+        // JSON escapes a newline, so a serialised argument is one line already.
+        assert_eq!(compact_args("{\"cmd\":\"a\\nb\"}"), r#"{"cmd":"a\nb"}"#);
+        assert_eq!(compact_args("raw\nlines"), "raw lines");
+        let long = compact_args(&format!(r#"{{"q":"{}"}}"#, "x".repeat(200)));
+        assert_eq!(long.chars().count(), ARG_WIDTH);
+        assert!(long.ends_with('…'), "got {long}");
     }
 
     #[test]
     fn a_settled_call_is_marked_by_how_it_ended() {
         assert_eq!(
-            head_of(&tool("read_file", "", 1), false, false),
+            head_of(&tool("read_file", "", 1), false, false, false),
             "● read_file"
         );
         assert_eq!(
-            head_of(&tool("read_file", "", 1), true, false),
+            head_of(&tool("read_file", "", 1), true, false, false),
             "✗ read_file"
         );
     }
@@ -123,11 +160,11 @@ mod tests {
     #[test]
     fn attempts_are_counted_in_brackets() {
         assert_eq!(
-            head_of(&tool("fetch_url", "", 1), true, true),
+            head_of(&tool("fetch_url", "", 1), true, true, false),
             "↻ fetch_url (attempt 1)"
         );
         assert_eq!(
-            head_of(&tool("fetch_url", "", 3), false, false),
+            head_of(&tool("fetch_url", "", 3), false, false, false),
             "● fetch_url (attempt 3)"
         );
     }
@@ -135,7 +172,12 @@ mod tests {
     #[test]
     fn args_tell_same_named_calls_apart() {
         assert_eq!(
-            head_of(&tool("get_weather", r#"{"city":"Paris"}"#, 1), false, false),
+            head_of(
+                &tool("get_weather", r#"{"city":"Paris"}"#, 1),
+                false,
+                false,
+                false
+            ),
             r#"● get_weather {"city":"Paris"}"#
         );
     }

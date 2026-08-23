@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use super::markdown::Markdown;
 use super::reasoning::Reasoning;
 use super::status::{Phase, Status};
-use super::term::{fold, held_lines, indent, Theme, DARK};
+use super::term::{fold, held_lines, indent, BOLD, DIM, RESET};
 use super::tool::{format_result, head_of, PendingTool, RESULT_LINES};
 use crate::transport::ag_ui::events::{AgUiEvent, RunOutcome};
 
@@ -24,7 +24,6 @@ pub struct PrettyPrinter {
     status: Status,
     reasoning: Reasoning,
     markdown: Markdown,
-    theme: &'static Theme,
 }
 
 impl PrettyPrinter {
@@ -37,7 +36,6 @@ impl PrettyPrinter {
             status: Status::disabled(),
             reasoning: Reasoning::default(),
             markdown: Markdown::default(),
-            theme: &DARK,
         }
     }
 
@@ -62,22 +60,20 @@ impl PrettyPrinter {
             AgUiEvent::RunStarted { .. } => self.status.set(Phase::Thinking),
 
             AgUiEvent::TextMessageContent { delta, .. } => {
-                let shown = self.markdown.take(delta, self.theme, self.color);
+                let shown = self.markdown.take(delta, self.color);
                 self.write_body(w, &shown)?;
             }
             AgUiEvent::TextMessageEnd { .. } => {
-                let rest = self.markdown.flush(self.theme, self.color);
+                let rest = self.markdown.flush(self.color);
                 self.write_body(w, &rest)?;
                 self.break_line(w)?;
             }
 
             AgUiEvent::ReasoningMessageStart { .. } => {
                 self.break_line(w)?;
-                let dim = self.theme.dim;
-                self.write_styled(w, dim, "thinking")?;
+                self.write_styled(w, DIM, "thinking")?;
                 self.newline(w)?;
-                let dim = self.theme.dim;
-                self.open(w, dim)?;
+                self.open(w, DIM)?;
                 self.reasoning.start();
             }
             AgUiEvent::ReasoningMessageContent { delta, .. } => {
@@ -88,9 +84,8 @@ impl PrettyPrinter {
                 self.close(w)?;
                 let held = self.reasoning.held();
                 if held > 0 {
-                    let dim = self.theme.dim;
                     self.break_line(w)?;
-                    self.write_styled(w, dim, &held_lines(held))?;
+                    self.write_styled(w, DIM, &held_lines(held))?;
                     self.newline(w)?;
                 }
                 self.break_line(w)?;
@@ -125,34 +120,30 @@ impl PrettyPrinter {
             } => {
                 self.break_line(w)?;
                 let again = *is_error && *retryable;
+                let color = self.color;
                 let outcome = match again {
                     true => self.tools.get_mut(tool_call_id).map(|tool| {
                         tool.attempt += 1;
-                        let head = head_of(tool, *is_error, again);
+                        let head = head_of(tool, *is_error, again, color);
                         tool.started = std::time::Instant::now();
                         head
                     }),
                     false => self.tools.remove(tool_call_id).map(|mut tool| {
                         tool.attempt += 1;
-                        head_of(&tool, *is_error, again)
+                        head_of(&tool, *is_error, again, color)
                     }),
                 };
                 if let Some(head) = outcome {
-                    let style = match *is_error {
-                        true => self.theme.error,
-                        false => self.theme.tool,
-                    };
-                    self.write_styled(w, style, &head)?;
+                    self.write_body(w, &head)?;
                     self.newline(w)?;
                 }
-                let dim = self.theme.dim;
-                self.open(w, dim)?;
+                self.open(w, DIM)?;
                 let (body, held) = fold(&format_result(content), RESULT_LINES);
                 self.write_body(w, &indent(&body))?;
                 self.close(w)?;
                 self.break_line(w)?;
                 if held > 0 {
-                    self.write_styled(w, dim, &indent(&held_lines(held)))?;
+                    self.write_styled(w, DIM, &indent(&held_lines(held)))?;
                     self.newline(w)?;
                 }
                 self.status.set(self.tool_phase());
@@ -168,10 +159,9 @@ impl PrettyPrinter {
                         if self.reader == Reader::Shell {
                             self.break_line(w)?;
                             let msg = it.message.as_deref().unwrap_or("(no message)");
-                            let warn = self.theme.warn;
                             self.write_styled(
                                 w,
-                                warn,
+                                BOLD,
                                 &format!("⚠ interrupt {} [{}]: {msg}", it.id, it.reason),
                             )?;
                             self.newline(w)?;
@@ -183,8 +173,7 @@ impl PrettyPrinter {
             AgUiEvent::RunError { message } => {
                 self.status.set(Phase::Idle);
                 self.break_line(w)?;
-                let error = self.theme.error;
-                self.write_styled(w, error, &format!("✗ error: {message}"))?;
+                self.write_styled(w, BOLD, &format!("✗ error: {message}"))?;
                 self.newline(w)?;
             }
 
@@ -205,22 +194,18 @@ impl PrettyPrinter {
             if self.reader == Reader::Prompt {
                 self.write_styled(
                     w,
-                    self.theme.warn,
+                    BOLD,
                     &format!("⧗ {name} is waiting on a client-side result, which this chat cannot settle."),
                 )?;
                 self.newline(w)?;
                 continue;
             }
-            self.write_styled(
-                w,
-                self.theme.warn,
-                &format!("⧗ {name} awaiting result — settle with:"),
-            )?;
+            self.write_styled(w, BOLD, &format!("⧗ {name} awaiting result — settle with:"))?;
             self.newline(w)?;
             let hint = format!(
                 "    --input '{{\"type\":\"tool.result\",\"id\":\"{id}\",\"result\":\"...\"}}'"
             );
-            self.write_styled(w, self.theme.dim, &hint)?;
+            self.write_styled(w, DIM, &hint)?;
             self.newline(w)?;
         }
         Ok(())
@@ -252,7 +237,7 @@ impl PrettyPrinter {
 
     fn write_styled(&mut self, w: &mut impl Write, style: &str, text: &str) -> io::Result<()> {
         if self.color {
-            self.write_body(w, &format!("{style}{text}{}", self.theme.reset))
+            self.write_body(w, &format!("{style}{text}{RESET}"))
         } else {
             self.write_body(w, text)
         }
@@ -267,7 +252,7 @@ impl PrettyPrinter {
 
     fn close(&mut self, w: &mut impl Write) -> io::Result<()> {
         if self.color {
-            w.write_all(self.theme.reset.as_bytes())?;
+            w.write_all(RESET.as_bytes())?;
         }
         Ok(())
     }
