@@ -580,6 +580,7 @@ impl World {
                         connection_id,
                         None,
                         Outcome::Connector {
+                            server: None,
                             prefix: None,
                             tools: vec![],
                             instructions: None,

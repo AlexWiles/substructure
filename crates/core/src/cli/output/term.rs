@@ -2,18 +2,16 @@
 
 use std::io::IsTerminal;
 
-// Attributes only. A colour is tuned for one background and wrong on the
-// other, and there is no theme here to keep them right.
-pub(super) const RESET: &str = "\x1b[0m";
-pub(super) const BOLD: &str = "\x1b[1m";
-pub(super) const DIM: &str = "\x1b[2m";
-pub(super) const ITALIC: &str = "\x1b[3m";
-pub(super) const UNDERLINE: &str = "\x1b[4m";
+pub const RESET: &str = "\x1b[0m";
+pub const BOLD: &str = "\x1b[1m";
+pub const DIM: &str = "\x1b[2m";
+pub const ITALIC: &str = "\x1b[3m";
+pub const UNDERLINE: &str = "\x1b[4m";
 
 /// The terminal's width, for what cannot be drawn without one. Committed at
 /// the width it was written: a resize reflows what the terminal wrapped, not
 /// what we did.
-pub(super) fn width() -> usize {
+pub fn width() -> usize {
     console::Term::stdout()
         .size_checked()
         .map(|(_, cols)| cols as usize)
@@ -21,11 +19,11 @@ pub(super) fn width() -> usize {
         .clamp(20, 200)
 }
 
-pub(crate) fn color() -> bool {
+pub fn color() -> bool {
     std::io::stdout().is_terminal()
 }
 
-pub(crate) fn note(text: &str) {
+pub fn note(text: &str) {
     if std::io::stderr().is_terminal() {
         eprintln!("{DIM}{text}{RESET}");
     } else {
@@ -33,7 +31,7 @@ pub(crate) fn note(text: &str) {
     }
 }
 
-pub(super) fn fold(text: &str, cap: usize) -> (String, usize) {
+pub fn fold(text: &str, cap: usize) -> (String, usize) {
     let total = text.lines().count();
     if total <= cap {
         return (text.to_string(), 0);
@@ -42,21 +40,21 @@ pub(super) fn fold(text: &str, cap: usize) -> (String, usize) {
     (kept.join("\n"), total - cap)
 }
 
-pub(super) fn held_lines(held: usize) -> String {
+pub fn held_lines(held: usize) -> String {
     match held {
         1 => "… +1 line".to_string(),
         _ => format!("… +{held} lines"),
     }
 }
 
-pub(super) fn paint(style: &str, text: &str, color: bool) -> String {
+pub fn paint(style: &str, text: &str, color: bool) -> String {
     match color {
         true => format!("{style}{text}{RESET}"),
         false => text.to_string(),
     }
 }
 
-pub(super) fn indent(text: &str) -> String {
+pub fn indent(text: &str) -> String {
     text.lines()
         .map(|line| format!("  {line}"))
         .collect::<Vec<_>>()

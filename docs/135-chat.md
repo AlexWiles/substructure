@@ -123,6 +123,13 @@ is running, so the transcript keeps one line per call.
   {"status":"ok"}
 ```
 
+A call on a connection is named by the server and the tool, as each of them
+says it is called:
+
+```console
+● deepwiki Ask a question  {"q":"login page"} (1.2s)
+```
+
 `●` answered, `✗` failed, `↻` failed and will be tried again. A call that took
 less than a moment shows no time. A result that is only text reads as that
 text.

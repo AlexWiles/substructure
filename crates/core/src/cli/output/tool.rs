@@ -4,40 +4,59 @@ use std::time::{Duration, Instant};
 
 use super::term::{paint, BOLD, DIM};
 
-pub(super) const RESULT_LINES: usize = 12;
+pub const RESULT_LINES: usize = 12;
 const SLOW: Duration = Duration::from_millis(100);
 
-pub(super) struct PendingTool {
+pub struct PendingTool {
     pub name: String,
+    pub server: Option<String>,
+    pub title: Option<String>,
     pub args: String,
     pub started: Instant,
     pub attempt: u32,
 }
 
 impl PendingTool {
-    pub(super) fn new(name: String) -> Self {
+    pub fn new(name: String, server: Option<String>, title: Option<String>) -> Self {
         Self {
             name,
+            server,
+            title,
             args: String::new(),
             started: Instant::now(),
             attempt: 0,
         }
     }
 
-    pub(super) fn about(&self) -> Option<String> {
+    pub fn called(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.name)
+    }
+
+    pub fn heading(&self, color: bool) -> String {
+        match &self.server {
+            Some(server) => format!(
+                "{} {}",
+                paint(DIM, server, color),
+                paint(BOLD, self.called(), color)
+            ),
+            None => paint(BOLD, self.called(), color),
+        }
+    }
+
+    pub fn about(&self) -> Option<String> {
         (self.attempt > 0).then(|| format!("attempt {}", self.attempt + 1))
     }
 }
 
-/// The name reads first and the arguments recede: what a tool was asked is
-/// worth less of the eye than which tool answered.
-pub(super) fn head_of(tool: &PendingTool, is_error: bool, again: bool, color: bool) -> String {
+pub fn head_of(tool: &PendingTool, is_error: bool, again: bool, color: bool) -> String {
     let glyph = match (is_error, again) {
         (_, true) => "↻",
         (true, false) => "✗",
         (false, false) => "●",
     };
-    let mut head = paint(BOLD, &format!("{glyph} {}", tool.name), color);
+    let mut head = paint(BOLD, glyph, color);
+    head.push(' ');
+    head.push_str(&tool.heading(color));
 
     let args = compact_args(&tool.args);
     if !args.is_empty() {
@@ -73,8 +92,6 @@ fn duration(took: Duration) -> Option<String> {
 
 const ARG_WIDTH: usize = 72;
 
-/// Verbatim, only shorter. Nothing here knows what any tool's arguments mean,
-/// so none of them are picked over the others.
 fn compact_args(raw: &str) -> String {
     if raw.trim().is_empty() {
         return String::new();
@@ -94,7 +111,7 @@ fn compact_args(raw: &str) -> String {
     }
 }
 
-pub(super) fn format_result(content: &str) -> String {
+pub fn format_result(content: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(content) {
         Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| content.to_string()),
         Err(_) => content.to_string(),
@@ -108,6 +125,8 @@ mod tests {
     fn tool(name: &str, args: &str, attempt: u32) -> PendingTool {
         PendingTool {
             name: name.into(),
+            server: None,
+            title: None,
             args: args.into(),
             started: Instant::now(),
             attempt,
@@ -122,8 +141,6 @@ mod tests {
         assert_eq!(duration(Duration::from_secs(75)).unwrap(), "1m 15s");
     }
 
-    /// Nothing here knows what a tool's arguments mean, so they are shown as
-    /// written rather than picked over.
     #[test]
     fn arguments_are_shown_as_written() {
         assert_eq!(compact_args(""), "");
@@ -137,12 +154,20 @@ mod tests {
 
     #[test]
     fn arguments_are_read_on_one_line_and_clipped_when_long() {
-        // JSON escapes a newline, so a serialised argument is one line already.
         assert_eq!(compact_args("{\"cmd\":\"a\\nb\"}"), r#"{"cmd":"a\nb"}"#);
         assert_eq!(compact_args("raw\nlines"), "raw lines");
         let long = compact_args(&format!(r#"{{"q":"{}"}}"#, "x".repeat(200)));
         assert_eq!(long.chars().count(), ARG_WIDTH);
         assert!(long.ends_with('…'), "got {long}");
+    }
+
+    #[test]
+    fn a_title_is_used_where_a_connection_gave_one() {
+        let mut named = tool("deepwiki__ask", "", 1);
+        assert_eq!(named.called(), "deepwiki__ask");
+        named.title = Some("Ask a question".into());
+        assert_eq!(named.called(), "Ask a question");
+        assert_eq!(head_of(&named, false, false, false), "● Ask a question");
     }
 
     #[test]

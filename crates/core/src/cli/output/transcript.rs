@@ -39,11 +39,11 @@ impl PrettyPrinter {
         }
     }
 
-    pub(super) fn at_a_prompt(&mut self) {
+    pub fn at_a_prompt(&mut self) {
         self.reader = Reader::Prompt;
     }
 
-    pub(super) fn with_status(&mut self, status: Status) {
+    pub fn with_status(&mut self, status: Status) {
         self.status = status;
     }
 
@@ -94,11 +94,18 @@ impl PrettyPrinter {
             AgUiEvent::ToolCallStart {
                 tool_call_id,
                 tool_call_name,
+                metadata,
                 ..
             } => {
+                let named = |key: &str| {
+                    metadata
+                        .as_ref()
+                        .and_then(|m| m.get(key)?.as_str())
+                        .map(str::to_string)
+                };
                 self.tools.insert(
                     tool_call_id.clone(),
-                    PendingTool::new(tool_call_name.clone()),
+                    PendingTool::new(tool_call_name.clone(), named("server"), named("title")),
                 );
                 self.status.set(self.tool_phase());
             }
@@ -216,7 +223,7 @@ impl PrettyPrinter {
         match (pending.next(), pending.next()) {
             (None, _) => Phase::Thinking,
             (Some(tool), None) => Phase::Tool {
-                name: tool.name.clone(),
+                name: tool.called().to_string(),
                 about: tool.about(),
             },
             (Some(_), Some(_)) => Phase::Tool {
@@ -326,6 +333,7 @@ mod tests {
                 tool_call_id: "x".into(),
                 tool_call_name: "get_weather".into(),
                 parent_message_id: None,
+                metadata: None,
             },
             AgUiEvent::ToolCallArgs {
                 tool_call_id: "x".into(),
@@ -349,6 +357,7 @@ mod tests {
                 tool_call_id: "x".into(),
                 tool_call_name: "now".into(),
                 parent_message_id: None,
+                metadata: None,
             },
             AgUiEvent::ToolCallEnd {
                 tool_call_id: "x".into(),
@@ -394,6 +403,7 @@ mod tests {
                 tool_call_id: id.into(),
                 tool_call_name: name.into(),
                 parent_message_id: None,
+                metadata: None,
             },
             AgUiEvent::ToolCallEnd {
                 tool_call_id: id.into(),
@@ -462,6 +472,7 @@ mod tests {
                 tool_call_id: "a".into(),
                 tool_call_name: "get_weather".into(),
                 parent_message_id: None,
+                metadata: None,
             },
             AgUiEvent::ToolCallArgs {
                 tool_call_id: "a".into(),
@@ -599,6 +610,7 @@ mod tests {
                 tool_call_id: "x".into(),
                 tool_call_name: "get_weather".into(),
                 parent_message_id: None,
+                metadata: None,
             },
             AgUiEvent::ToolCallEnd {
                 tool_call_id: "x".into(),
@@ -624,6 +636,7 @@ mod tests {
                 tool_call_id: "call_x".into(),
                 tool_call_name: "get_weather".into(),
                 parent_message_id: None,
+                metadata: None,
             },
             AgUiEvent::ToolCallArgs {
                 tool_call_id: "call_x".into(),

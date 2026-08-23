@@ -421,6 +421,13 @@ pub fn merge<'a>(
 /// `None` when the name would be longer than a provider accepts. Truncating
 /// would risk two tools collapsing onto one name, which is worse than the
 /// connector being one tool short and saying so.
+pub fn qualified_name(prefix: Option<&str>, remote_name: &str) -> String {
+    match prefix {
+        Some(prefix) => format!("{}{SEPARATOR}{remote_name}", name_prefix(prefix)),
+        None => remote_name.to_string(),
+    }
+}
+
 fn expand(
     path: &ConnectionPath,
     tool: &RemoteTool,
@@ -428,10 +435,7 @@ fn expand(
     defer: bool,
     approve: bool,
 ) -> Option<ConnectorTool> {
-    let name = match prefix {
-        Some(prefix) => format!("{}{SEPARATOR}{}", name_prefix(prefix), tool.name),
-        None => tool.name.clone(),
-    };
+    let name = qualified_name(prefix, &tool.name);
     if !defer && name.len() > MAX_NAME {
         return None;
     }
@@ -532,6 +536,7 @@ mod tests {
     fn tool(name: &str, annotations: ToolAnnotations) -> RemoteTool {
         RemoteTool {
             name: name.to_string(),
+            title: None,
             description: format!("does {name}"),
             input: Some(serde_json::json!({ "type": "object" })),
             output: None,

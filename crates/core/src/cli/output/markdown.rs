@@ -9,7 +9,7 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use super::term::{paint, width, BOLD, DIM, ITALIC, RESET, UNDERLINE};
 
 #[derive(Default)]
-pub(super) struct Markdown {
+pub struct Markdown {
     pending: String,
     fence: Option<Fence>,
 }
@@ -26,7 +26,7 @@ struct Fence {
 impl Markdown {
     /// What the deltas so far can be shown as. Text that is not yet a whole
     /// line is held back.
-    pub(super) fn take(&mut self, delta: &str, color: bool) -> String {
+    pub fn take(&mut self, delta: &str, color: bool) -> String {
         self.pending.push_str(delta);
         let mut out = String::new();
         while let Some(at) = self.pending.find('\n') {
@@ -38,7 +38,7 @@ impl Markdown {
     }
 
     /// Whatever is left when the message ends, whole or not.
-    pub(super) fn flush(&mut self, color: bool) -> String {
+    pub fn flush(&mut self, color: bool) -> String {
         if self.pending.is_empty() {
             self.fence = None;
             return String::new();

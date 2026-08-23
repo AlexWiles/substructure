@@ -41,6 +41,7 @@ impl KindSpec for ConnectorSpec {
         match outcome {
             Outcome::Connector {
                 prefix,
+                server,
                 tools,
                 instructions,
             } => {
@@ -50,6 +51,7 @@ impl KindSpec for ConnectorSpec {
                     ConnectorSyncCompleted {
                         path,
                         prefix,
+                        server,
                         tools,
                         instructions,
                     },

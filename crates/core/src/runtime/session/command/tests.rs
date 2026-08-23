@@ -6477,6 +6477,7 @@ fn connector_config(ids: &[&str]) -> AgentConfig {
 fn remote_tool(name: &str) -> RemoteTool {
     RemoteTool {
         name: name.to_string(),
+        title: None,
         description: "a remote tool".to_string(),
         input: None,
         output: None,
@@ -6519,6 +6520,7 @@ fn settle_sync_at(agg: &mut SessionAggregate, written: &str, tools: &[&str]) -> 
             written.to_string(),
             None,
             Outcome::Connector {
+                server: None,
                 prefix: Some(id.to_string()),
                 tools: tools.iter().map(|t| remote_tool(t)).collect(),
                 instructions: None,
@@ -7845,9 +7847,11 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
             "mcp.sentry".to_string(),
             None,
             Outcome::Connector {
+                server: None,
                 prefix: Some("sentry".to_string()),
                 tools: vec![RemoteTool {
                     name: "search_issues".to_string(),
+                    title: None,
                     description: "search".to_string(),
                     input: Some(serde_json::json!({
                         "type": "object",
@@ -8144,6 +8148,7 @@ fn a_deferred_connector_tool_carries_its_output_contract() {
             "mcp.sentry".to_string(),
             None,
             Outcome::Connector {
+                server: None,
                 prefix: Some("sentry".to_string()),
                 tools: vec![RemoteTool {
                     output: Some(schema.clone()),

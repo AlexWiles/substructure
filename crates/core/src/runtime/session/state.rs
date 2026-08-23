@@ -2698,6 +2698,7 @@ mod agent_version_tests {
                 prefix: Some("sentry".to_string()),
                 tools: vec![RemoteTool {
                     name: "search_issues".to_string(),
+                    title: None,
                     description: String::new(),
                     input: None,
                     output: None,

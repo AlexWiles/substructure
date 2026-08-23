@@ -4,11 +4,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::events::{AgUiEvent, AgUiInterrupt, AgUiUsage, RunOutcome};
-use crate::protocol::TokenDelta;
-use crate::session::events::EventPayload;
+use crate::connectors::filter::qualified_name;
+use crate::protocol::{TokenDelta, Usage};
+use crate::session::events::{ConnectorSyncCompleted, EventPayload};
 use crate::session::SessionEvent;
 
-fn ag_ui_usage(usage: &crate::protocol::Usage) -> AgUiUsage {
+fn ag_ui_usage(usage: &Usage) -> AgUiUsage {
     AgUiUsage {
         input: usage.input,
         output: usage.output,
@@ -38,6 +39,7 @@ pub struct AgUiTranslator {
     current_call_id: Option<String>,
     open_tools: HashSet<String>,
     sub_agent_calls: HashMap<String, String>,
+    called: HashMap<String, (String, String)>,
     terminated: bool,
 }
 
@@ -56,6 +58,7 @@ impl AgUiTranslator {
             current_call_id: None,
             open_tools: HashSet::new(),
             sub_agent_calls: HashMap::new(),
+            called: HashMap::new(),
             terminated: false,
         }
     }
@@ -131,9 +134,11 @@ impl AgUiTranslator {
             }
             if self.open_tools.insert(tc.id.clone()) {
                 self.streamed_tool_calls.insert(tc.id.clone());
+                let name = tc.name.unwrap_or_default();
                 out.push(AgUiEvent::ToolCallStart {
+                    metadata: self.title_of(&name),
                     tool_call_id: tc.id.clone(),
-                    tool_call_name: tc.name.unwrap_or_default(),
+                    tool_call_name: name,
                     parent_message_id: self.current_call_id.clone(),
                 });
             }
@@ -190,6 +195,7 @@ impl AgUiTranslator {
                 } else {
                     vec![
                         AgUiEvent::ToolCallStart {
+                            metadata: self.title_of(&t.name),
                             tool_call_id: t.id.clone(),
                             tool_call_name: t.name.clone(),
                             parent_message_id: self.current_call_id.clone(),
@@ -228,6 +234,10 @@ impl AgUiTranslator {
                 }
                 out
             }
+            EventPayload::ConnectorSyncCompleted(sync) => {
+                self.learn_titles(&sync);
+                vec![]
+            }
             EventPayload::SubAgentRequested(s) => {
                 // A delegation surfaces to the client as a tool call named for the
                 // sub-agent; its answer arrives later on `sub_agent.turn_completed`,
@@ -242,6 +252,7 @@ impl AgUiTranslator {
                 } else {
                     vec![
                         AgUiEvent::ToolCallStart {
+                            metadata: None,
                             tool_call_id: s.tool_call_id.clone(),
                             tool_call_name: s.agent_id,
                             parent_message_id: self.current_call_id.clone(),
@@ -345,6 +356,23 @@ impl AgUiTranslator {
         } else {
             vec![]
         }
+    }
+
+    fn learn_titles(&mut self, sync: &ConnectorSyncCompleted) {
+        let server = sync
+            .server
+            .clone()
+            .unwrap_or_else(|| sync.path.tool_prefix());
+        for tool in &sync.tools {
+            let qualified = qualified_name(sync.prefix.as_deref(), &tool.name);
+            let called = tool.title.clone().unwrap_or_else(|| tool.name.clone());
+            self.called.insert(qualified, (server.clone(), called));
+        }
+    }
+
+    fn title_of(&self, name: &str) -> Option<serde_json::Value> {
+        let (server, title) = self.called.get(name)?;
+        Some(serde_json::json!({ "server": server, "title": title }))
     }
 
     /// Emit a sub-agent's answer as the result of its delegating tool call,
@@ -533,7 +561,8 @@ pub fn run_ag_ui_translation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ToolCallChunk;
+    use crate::connectors::RemoteTool;
+    use crate::protocol::{ConnectionPath, ToolCallChunk};
     use serde_json::{json, Value};
 
     fn ev(v: Value) -> EventPayload {
@@ -1326,6 +1355,34 @@ mod tests {
         let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!("done")), true));
         assert_eq!(kinds(&done), ["TOOL_CALL_RESULT", "RUN_FINISHED"]);
         assert!(t.terminated());
+    }
+
+    #[test]
+    fn a_title_from_a_connection_names_the_call() {
+        let mut tr = AgUiTranslator::new("t".into(), "r".into());
+        tr.on_event(
+            EventPayload::ConnectorSyncCompleted(Box::new(ConnectorSyncCompleted {
+                path: ConnectionPath::Mcp("deepwiki".into()),
+                server: None,
+                prefix: Some("deepwiki".into()),
+                tools: vec![RemoteTool {
+                    name: "ask".into(),
+                    title: Some("Ask a question".into()),
+                    description: String::new(),
+                    input: None,
+                    output: None,
+                    annotations: Default::default(),
+                }],
+                instructions: None,
+            })),
+            false,
+        );
+        assert_eq!(
+            tr.title_of("deepwiki__ask"),
+            Some(serde_json::json!({ "server": "deepwiki", "title": "Ask a question" }))
+        );
+        assert_eq!(tr.title_of("ask"), None);
+        assert_eq!(tr.title_of("other__ask"), None);
     }
 
     #[test]

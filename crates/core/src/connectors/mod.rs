@@ -40,6 +40,8 @@ impl std::fmt::Display for Slot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoteTool {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default)]
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

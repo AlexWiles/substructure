@@ -692,9 +692,11 @@ mod tests {
                 "mcp.sentry".to_string(),
                 None,
                 Outcome::Connector {
+                    server: None,
                     prefix: Some("sentry".to_string()),
                     tools: vec![RemoteTool {
                         name: "delete_issue".to_string(),
+                        title: None,
                         description: "Delete an issue.".to_string(),
                         input: None,
                         output: None,

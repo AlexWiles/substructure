@@ -339,6 +339,7 @@ impl CredentialSource for Resolved {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Offer {
     pub prefix: Option<String>,
+    pub server: Option<String>,
     pub tools: Vec<RemoteTool>,
     /// What the server said it is for at the handshake, if it said anything.
     pub instructions: Option<String>,
@@ -429,14 +430,19 @@ impl Connections {
         let spec = self.registry.resolve(tenant_id, path).await?;
         let id = &path.to_string();
         let subject = Self::slot_for(id, &spec, requester)?;
-        let (tools, instructions) = self
+        let (tools, instructions, server) = self
             .attempt(tenant_id, id, &subject, &spec, |client| async move {
                 let tools = client.list_tools().await?;
-                Ok((tools, client.instructions().await))
+                Ok((
+                    tools,
+                    client.instructions().await,
+                    client.server_title().await,
+                ))
             })
             .await?;
         Ok(Offer {
             prefix: spec.prefix(),
+            server,
             tools,
             instructions,
         })

@@ -7,14 +7,14 @@ use super::{write_json, Renderer};
 
 /// What a finished turn left for its caller to answer.
 #[derive(Debug, Default)]
-pub(crate) struct TurnEnd {
+pub struct TurnEnd {
     /// The engine parks at most one interrupt per path.
     pub interrupts: Vec<AgUiInterrupt>,
     pub error: Option<String>,
 }
 
 impl TurnEnd {
-    pub(crate) fn note(&mut self, events: &[AgUiEvent]) {
+    pub fn note(&mut self, events: &[AgUiEvent]) {
         for event in events {
             match event {
                 AgUiEvent::RunFinished {
@@ -36,11 +36,11 @@ fn is_terminal(event: &AgUiEvent) -> bool {
     )
 }
 
-pub(crate) fn unfinished() -> anyhow::Error {
+pub fn unfinished() -> anyhow::Error {
     anyhow::anyhow!("event stream ended before the run finished")
 }
 
-pub(crate) struct TurnRender<'a> {
+pub struct TurnRender<'a> {
     renderer: &'a mut Renderer,
     stdout: std::io::Stdout,
     end: TurnEnd,
@@ -48,7 +48,7 @@ pub(crate) struct TurnRender<'a> {
 }
 
 impl<'a> TurnRender<'a> {
-    pub(crate) fn new(renderer: &'a mut Renderer) -> Self {
+    pub fn new(renderer: &'a mut Renderer) -> Self {
         Self {
             renderer,
             stdout: std::io::stdout(),
@@ -57,25 +57,25 @@ impl<'a> TurnRender<'a> {
         }
     }
 
-    pub(crate) fn accept(&mut self, events: Vec<AgUiEvent>) -> anyhow::Result<()> {
+    pub fn accept(&mut self, events: Vec<AgUiEvent>) -> anyhow::Result<()> {
         self.end.note(&events);
         self.terminated |= events.iter().any(is_terminal);
         self.renderer.emit(&mut self.stdout, events)
     }
 
     /// The engine's own event, written only when `--output jsonl` asked for it.
-    pub(crate) fn raw<T: serde::Serialize>(&mut self, value: &T) -> anyhow::Result<()> {
+    pub fn raw<T: serde::Serialize>(&mut self, value: &T) -> anyhow::Result<()> {
         if !self.renderer.is_raw() {
             return Ok(());
         }
         write_json(&mut self.stdout, value)
     }
 
-    pub(crate) fn terminated(&self) -> bool {
+    pub fn terminated(&self) -> bool {
         self.terminated
     }
 
-    pub(crate) fn into_end(self) -> TurnEnd {
+    pub fn into_end(self) -> TurnEnd {
         self.end
     }
 }

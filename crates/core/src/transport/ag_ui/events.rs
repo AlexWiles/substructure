@@ -69,6 +69,8 @@ pub enum AgUiEvent {
         tool_call_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
     },
 
     #[serde(rename = "TOOL_CALL_ARGS", rename_all = "camelCase")]
@@ -275,6 +277,7 @@ mod tests {
                 tool_call_id: "t".into(),
                 tool_call_name: "search".into(),
                 parent_message_id: None,
+                metadata: None,
             },
             AgUiEvent::ToolCallArgs {
                 tool_call_id: "t".into(),

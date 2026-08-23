@@ -3,18 +3,18 @@
 const REASONING_LINES: usize = 24;
 
 #[derive(Default)]
-pub(super) struct Reasoning {
+pub struct Reasoning {
     lines: usize,
     held: usize,
 }
 
 impl Reasoning {
-    pub(super) fn start(&mut self) {
+    pub fn start(&mut self) {
         self.lines = 0;
         self.held = 0;
     }
 
-    pub(super) fn take(&mut self, delta: &str) -> String {
+    pub fn take(&mut self, delta: &str) -> String {
         let mut kept = String::new();
         for piece in delta.split_inclusive('\n') {
             if self.lines < REASONING_LINES {
@@ -29,7 +29,7 @@ impl Reasoning {
         kept
     }
 
-    pub(super) fn held(&self) -> usize {
+    pub fn held(&self) -> usize {
         self.held
     }
 }

@@ -8,24 +8,24 @@ mod tool;
 mod transcript;
 mod turn;
 
-pub(crate) use status::Status;
-pub(crate) use term::{color, note};
-pub(crate) use transcript::PrettyPrinter;
-pub(crate) use turn::{unfinished, TurnEnd, TurnRender};
+pub use status::Status;
+pub use term::{color, note};
+pub use transcript::PrettyPrinter;
+pub use turn::{unfinished, TurnEnd, TurnRender};
 
 use std::io::Write;
 
 use super::env::OutputFormat;
 use crate::transport::ag_ui::events::AgUiEvent;
 
-pub(crate) enum Renderer {
+pub enum Renderer {
     AgUi,
     Jsonl,
     Pretty(PrettyPrinter),
 }
 
 impl Renderer {
-    pub(crate) fn new(output: OutputFormat, color: bool) -> Self {
+    pub fn new(output: OutputFormat, color: bool) -> Self {
         match output {
             OutputFormat::AgUi => Renderer::AgUi,
             OutputFormat::Jsonl => Renderer::Jsonl,
@@ -33,25 +33,25 @@ impl Renderer {
         }
     }
 
-    pub(crate) fn is_raw(&self) -> bool {
+    pub fn is_raw(&self) -> bool {
         matches!(self, Renderer::Jsonl)
     }
 
-    pub(crate) fn at_a_prompt(mut self) -> Self {
+    pub fn at_a_prompt(mut self) -> Self {
         if let Renderer::Pretty(printer) = &mut self {
             printer.at_a_prompt();
         }
         self
     }
 
-    pub(crate) fn with_status(mut self, status: Status) -> Self {
+    pub fn with_status(mut self, status: Status) -> Self {
         if let Renderer::Pretty(printer) = &mut self {
             printer.with_status(status);
         }
         self
     }
 
-    pub(crate) fn emit(
+    pub fn emit(
         &mut self,
         stdout: &mut std::io::Stdout,
         events: Vec<AgUiEvent>,
@@ -73,7 +73,7 @@ impl Renderer {
     }
 }
 
-pub(crate) fn write_json<T: serde::Serialize>(
+pub fn write_json<T: serde::Serialize>(
     stdout: &mut std::io::Stdout,
     value: &T,
 ) -> anyhow::Result<()> {

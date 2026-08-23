@@ -18,7 +18,7 @@ const RESET: &str = "\x1b[0m";
 const ERASE: &str = "\r\x1b[2K";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Phase {
+pub enum Phase {
     Idle,
     Thinking,
     Tool { name: String, about: Option<String> },
@@ -52,16 +52,16 @@ struct Inner {
 }
 
 #[derive(Clone)]
-pub(crate) struct Status {
+pub struct Status {
     inner: Option<Arc<Mutex<Inner>>>,
 }
 
 impl Status {
-    pub(crate) fn disabled() -> Self {
+    pub fn disabled() -> Self {
         Self { inner: None }
     }
 
-    pub(crate) fn start() -> Self {
+    pub fn start() -> Self {
         if !std::io::stderr().is_terminal() || tokio::runtime::Handle::try_current().is_err() {
             return Self::disabled();
         }
@@ -79,7 +79,7 @@ impl Status {
         Self { inner: Some(inner) }
     }
 
-    pub(crate) fn set(&self, phase: Phase) {
+    pub fn set(&self, phase: Phase) {
         let Some(inner) = &self.inner else { return };
         let mut state = inner.lock().unwrap();
         if state.phase == phase {
@@ -91,23 +91,23 @@ impl Status {
         erase(&mut state);
     }
 
-    pub(crate) fn writing(&self) {
+    pub fn writing(&self) {
         let Some(inner) = &self.inner else { return };
         let mut state = inner.lock().unwrap();
         state.last_write = Instant::now();
         erase(&mut state);
     }
 
-    pub(crate) fn wrote(&self, at_line_start: bool) {
+    pub fn wrote(&self, at_line_start: bool) {
         let Some(inner) = &self.inner else { return };
         inner.lock().unwrap().at_line_start = at_line_start;
     }
 
-    pub(crate) fn idle(&self) {
+    pub fn idle(&self) {
         self.set(Phase::Idle);
     }
 
-    pub(crate) fn stop(&self) {
+    pub fn stop(&self) {
         let Some(inner) = &self.inner else { return };
         let mut state = inner.lock().unwrap();
         state.stopped = true;

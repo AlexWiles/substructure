@@ -294,9 +294,11 @@ mod tests {
                         plugin: "pdf".into(),
                         server: "renderer".into(),
                     },
+                    server: None,
                     prefix: Some("pdf_renderer".to_string()),
                     tools: vec![RemoteTool {
                         name: "fill_form".to_string(),
+                        title: None,
                         description: String::new(),
                         input: None,
                         output: None,

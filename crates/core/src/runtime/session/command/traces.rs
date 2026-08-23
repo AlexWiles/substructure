@@ -576,9 +576,11 @@ fn flow_connector_gating() -> Trace {
             "mcp.conn-1".to_string(),
             Some(0),
             Outcome::Connector {
+                server: None,
                 prefix: None,
                 tools: vec![RemoteTool {
                     name: "lookup".to_string(),
+                    title: None,
                     description: "d".to_string(),
                     input: None,
                     output: None,

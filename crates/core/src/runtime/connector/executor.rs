@@ -89,6 +89,7 @@ async fn handle_task(
                     connection_id.to_string(),
                     Some(attempt),
                     Outcome::Connector {
+                        server: offer.server,
                         prefix: offer.prefix,
                         tools: offer.tools,
                         instructions: offer.instructions,
