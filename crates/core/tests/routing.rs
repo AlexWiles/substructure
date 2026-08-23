@@ -13,10 +13,10 @@ use async_trait::async_trait;
 use substructure_core::event_store::Seq;
 use substructure_core::llm::{
     CallContext, InMemoryTokenDeltaTransport, LlmBlock, LlmBlocks, LlmCallError, LlmCallable,
-    LlmProviderRegistry, LlmProviderTrait, LlmTask, TokenDeltaTransport,
+    LlmProviderRegistry, LlmProviderTrait, LlmTask,
 };
 use substructure_core::protocol::{
-    AgentConfig, ClientInput, Content, DecisionResponse, DecisionTrigger, DraftMessage, ErrorCode,
+    AgentConfig, ChannelKind, ClientInput, Content, DecisionResponse, DraftMessage, ErrorCode,
     LlmResponse, PromptContent, PromptRequest, Role, SessionOwner, SubAgent, ToolCall,
     ToolCallFunction,
 };
@@ -38,10 +38,8 @@ use substructure_core::transport::channel::ChannelContext;
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::worker::push::TransportRegistry;
-use substructure_core::worker::push::{PushError, PushTransport};
-use substructure_core::worker::{
-    AgentEntry, Hosting, StaticAgentDirectory, WorkerDecisionRequest, WorkerEndpoint,
-};
+use substructure_core::worker::ChannelProposer;
+use substructure_core::worker::{AgentEntry, Hosting, StaticAgentDirectory, WorkerEndpoint};
 use substructure_core::{Caller, HandleClientInput, Runtime, RuntimeConfig, RuntimeDeps};
 use tokio_util::sync::CancellationToken;
 
@@ -158,31 +156,6 @@ fn worker_hosted(llm: &str, url: &str) -> AgentEntry {
     }
 }
 
-struct InProcess {
-    seen: Mutex<Vec<String>>,
-}
-
-#[async_trait]
-impl PushTransport for InProcess {
-    async fn push(
-        &self,
-        decision: &WorkerDecisionRequest,
-        _deltas: Arc<dyn TokenDeltaTransport>,
-    ) -> Result<DecisionResponse, PushError> {
-        self.seen
-            .lock()
-            .unwrap()
-            .push(decision.trigger.kind().to_string());
-        Ok(match decision.trigger {
-            DecisionTrigger::SessionStart => DecisionResponse {
-                agent: Some(config("claude")),
-                ..Default::default()
-            },
-            _ => decision.proposed.clone(),
-        })
-    }
-}
-
 /// An agent that delegates everything: the file names the URL and nothing else.
 fn delegating(url: &str) -> AgentEntry {
     AgentEntry {
@@ -197,12 +170,44 @@ fn delegating(url: &str) -> AgentEntry {
 struct Harness {
     runtime: Arc<Runtime>,
     model: Arc<StubModel>,
+    issuer: Issuer,
     // Held for the test's life: dropping it aborts the decision loops.
     _adapter: Arc<PushAdapter>,
 }
 
 /// A real engine over a temp database, routing per `agents`.
 async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
+    start_with(agents, Vec::new(), Issuer::app()).await
+}
+
+struct Recorder {
+    channel: ChannelKind,
+    rendered: Arc<Mutex<Vec<String>>>,
+}
+
+impl ChannelProposer for Recorder {
+    fn channel(&self) -> ChannelKind {
+        self.channel
+    }
+
+    fn render(
+        &self,
+        cx: &substructure_core::worker::Proposal<'_>,
+        _proposed: &DecisionResponse,
+    ) -> Option<serde_json::Value> {
+        self.rendered
+            .lock()
+            .unwrap()
+            .push(cx.trigger.kind().to_string());
+        Some(serde_json::json!({ "seen": cx.trigger.kind() }))
+    }
+}
+
+async fn start_with(
+    agents: BTreeMap<String, AgentEntry>,
+    proposers: Vec<Arc<dyn ChannelProposer>>,
+    issuer: Issuer,
+) -> Harness {
     let db = SqliteDb::open(
         tmpdir().join("substructure.db").to_str().unwrap(),
         std::time::Duration::from_secs(5),
@@ -246,7 +251,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
                 config.connector_executor_workers as u32,
             )) as Arc<dyn TaskQueue<ConnectorTask>>,
             worker_queue: Arc::new(SqliteWorkerQueue::new(db.clone()).unwrap()),
-            channel_proposers: Vec::new(),
+            channel_proposers: proposers,
             session_index_store: Arc::new(SqliteSessionIndexStore::new(db.clone()).unwrap()),
             cursor_store: Arc::new(SqliteCursorStore::new(db.clone()).unwrap()),
             wake_store: Arc::new(SqliteWakeStore::new(db).unwrap()),
@@ -266,6 +271,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
     Harness {
         runtime,
         model,
+        issuer,
         _adapter: adapter,
     }
 }
@@ -317,7 +323,7 @@ async fn drain(
             owner: SessionOwner {
                 tenant_id: TENANT.to_string(),
                 requester: Requester::new(
-                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Subject::new(h.issuer.clone(), "user-1".to_string()),
                     Default::default(),
                 ),
                 metadata: Default::default(),
@@ -978,36 +984,35 @@ async fn a_started_turn_translates_to_a_finished_run() {
 }
 
 #[tokio::test]
-async fn an_in_process_decider_runs_a_turn() {
-    let decider = Arc::new(InProcess {
-        seen: Mutex::new(Vec::new()),
-    });
-    let h = start(BTreeMap::from([(
-        "assistant".to_string(),
-        AgentEntry {
-            config: None,
-            hosting: Hosting::InProcess(decider.clone()),
-        },
-    )]))
+async fn a_proposer_sees_only_the_sessions_its_own_channel_owns() {
+    let mine = Arc::new(Mutex::new(Vec::new()));
+    let theirs = Arc::new(Mutex::new(Vec::new()));
+    let proposers: Vec<Arc<dyn ChannelProposer>> = vec![
+        Arc::new(Recorder {
+            channel: ChannelKind::CLI,
+            rendered: mine.clone(),
+        }),
+        Arc::new(Recorder {
+            channel: ChannelKind::SLACK,
+            rendered: theirs.clone(),
+        }),
+    ];
+    let h = start_with(
+        BTreeMap::from([("assistant".to_string(), engine_hosted("claude"))]),
+        proposers,
+        Issuer::cli(),
+    )
     .await;
 
-    let events = turn(&h, "assistant", "hi").await;
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
-        "the turn completes: {events:#?}"
-    );
+    turn(&h, "assistant", "hi").await;
 
-    let seen = decider.seen.lock().unwrap();
-    assert_eq!(
-        seen.first().map(String::as_str),
-        Some("session.start"),
-        "it authors the identity first; got {seen:?}"
+    assert!(
+        !mine.lock().unwrap().is_empty(),
+        "the owning channel renders the decision"
     );
     assert!(
-        seen.len() > 1,
-        "and keeps deciding for the rest of the turn; got {seen:?}"
+        theirs.lock().unwrap().is_empty(),
+        "another channel never sees it: {:?}",
+        theirs.lock().unwrap()
     );
-    assert_eq!(h.model.seen.lock().unwrap().len(), 1, "one model call");
 }

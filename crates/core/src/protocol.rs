@@ -817,6 +817,32 @@ impl Requester {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChannelKind(&'static str);
+
+impl ChannelKind {
+    pub const SLACK: Self = Self("slack");
+    pub const AG_UI: Self = Self("ag-ui");
+    pub const CLI: Self = Self("cli");
+
+    pub const fn as_str(&self) -> &'static str {
+        self.0
+    }
+
+    pub fn owning(owner: &SessionOwner) -> Option<Self> {
+        let issuer = owner.requester.subject.as_ref()?.issuer.as_str();
+        [Self::SLACK, Self::AG_UI, Self::CLI]
+            .into_iter()
+            .find(|kind| kind.as_str() == issuer)
+    }
+}
+
+impl std::fmt::Display for ChannelKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOwner {
     pub tenant_id: String,
@@ -2367,6 +2393,50 @@ pub struct DecisionRequest<'a> {
     pub attempts: u32,
     pub deadline: &'a Option<DateTime<Utc>>,
     pub turn_id: &'a Option<String>,
+}
+
+#[cfg(test)]
+mod channel_kind_tests {
+    use super::*;
+
+    fn owned_by(issuer: Issuer) -> SessionOwner {
+        SessionOwner {
+            tenant_id: "t1".into(),
+            requester: Requester::new(Subject::new(issuer, "u1"), Visibility::Private),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_session_belongs_to_the_channel_that_opened_it() {
+        assert_eq!(
+            ChannelKind::owning(&owned_by(Issuer::slack())),
+            Some(ChannelKind::SLACK)
+        );
+        assert_eq!(
+            ChannelKind::owning(&owned_by(Issuer::cli())),
+            Some(ChannelKind::CLI)
+        );
+    }
+
+    #[test]
+    fn a_browser_frontend_names_no_channel() {
+        assert_eq!(ChannelKind::owning(&owned_by(Issuer::app())), None);
+        assert_ne!(Issuer::app().as_str(), ChannelKind::AG_UI.as_str());
+    }
+
+    #[test]
+    fn a_session_no_channel_opened_belongs_to_none() {
+        assert_eq!(ChannelKind::owning(&owned_by(Issuer::operator())), None);
+        assert_eq!(ChannelKind::owning(&owned_by(Issuer::app())), None);
+
+        let anonymous = SessionOwner {
+            tenant_id: "t1".into(),
+            requester: Requester::machine(),
+            metadata: Default::default(),
+        };
+        assert_eq!(ChannelKind::owning(&anonymous), None);
+    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,10 @@ together at the same version.
 - Manifest format updates
 - The engine now uses `~/.config/substructure/substructure.db` unless `db` names another, and no longer makes a database name from the config file's name.
 
+### Fixed
+
+- A connection that needs authorizing now stops the session in every channel, and answering the prompt gets its tools again.
+
 ## [0.7.2] - 2026-08-21
 
 ### Fixed

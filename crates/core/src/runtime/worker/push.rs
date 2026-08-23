@@ -9,7 +9,7 @@ use crate::runtime::llm::TokenDeltaTransport;
 use super::WorkerDecisionRequest;
 
 #[async_trait]
-pub trait PushTransport: Send + Sync {
+pub trait Decider: Send + Sync {
     async fn push(
         &self,
         decision: &WorkerDecisionRequest,
@@ -84,7 +84,7 @@ impl std::fmt::Display for PushError {
 }
 
 pub type TransportConstructor =
-    Box<dyn Fn(serde_json::Value) -> Result<Arc<dyn PushTransport>, String> + Send + Sync>;
+    Box<dyn Fn(serde_json::Value) -> Result<Arc<dyn Decider>, String> + Send + Sync>;
 
 pub struct TransportRegistry {
     constructors: std::collections::HashMap<String, TransportConstructor>,
@@ -104,7 +104,7 @@ impl TransportRegistry {
         &self,
         transport_type: &str,
         config: serde_json::Value,
-    ) -> Result<Arc<dyn PushTransport>, String> {
+    ) -> Result<Arc<dyn Decider>, String> {
         let constructor = self
             .constructors
             .get(transport_type)

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+
+pub use crate::protocol::ChannelKind;
 use axum::Router;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -89,28 +91,6 @@ impl ChannelContext {
         self.runtime
             .spawn_processor(processor, config, start_at_tail)
             .await
-    }
-}
-
-/// A channel's name. Used for its mount path, its key in a proposal's
-/// `channels` map, and the `responder.channel` it stamps on a settled
-/// interrupt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ChannelKind(&'static str);
-
-impl ChannelKind {
-    pub const SLACK: Self = Self("slack");
-    pub const AG_UI: Self = Self("ag-ui");
-    pub const CLI: Self = Self("cli");
-
-    pub const fn as_str(&self) -> &'static str {
-        self.0
-    }
-}
-
-impl std::fmt::Display for ChannelKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
     }
 }
 

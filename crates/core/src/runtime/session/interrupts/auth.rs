@@ -33,12 +33,12 @@ impl InterruptKind for Auth {
 }
 
 /// Derived from the connection, so a redelivery keeps one prompt.
-pub fn interrupt_id(connection: &ConnectionPath) -> String {
+fn interrupt_id(connection: &ConnectionPath) -> String {
     format!("{PREFIX}{connection}")
 }
 
 /// The first connection that needs a person and has not been asked about.
-pub fn needing(state: &SessionState) -> Option<(ConnectionPath, AuthNeed)> {
+fn needing(state: &SessionState) -> Option<(ConnectionPath, AuthNeed)> {
     let leaf = state.head_id.clone();
     let config = state.resolve_agent_for(leaf.as_deref())?;
     state.servers_for(&config).into_iter().find_map(|server| {
@@ -51,4 +51,174 @@ pub fn needing(state: &SessionState) -> Option<(ConnectionPath, AuthNeed)> {
             .is_none()
             .then(|| (server.path.clone(), need))
     })
+}
+
+pub fn prompt(state: &SessionState) -> Option<DecisionAction> {
+    let (connection, need) = needing(state)?;
+
+    let authorize = Authorize {
+        requester: Requester::of_owner(state.owner.as_ref()),
+        connection: connection.clone(),
+    };
+
+    Some(DecisionAction::Interrupt {
+        interrupt_id: Some(interrupt_id(&connection)),
+        reason: format!("connection `{connection}` needs authorizing"),
+        payload: serde_json::json!({
+            "message": ask(&connection, need),
+            "authorize": authorize,
+            "metadata": { "options": [{
+                "label": "Retry",
+                "value": { "connection": connection },
+            }] },
+        }),
+    })
+}
+
+fn ask(connection: &ConnectionPath, need: AuthNeed) -> String {
+    match need {
+        AuthNeed::NeverAuthorized => {
+            format!("`{connection}` is not authorized yet, so I cannot use it.")
+        }
+        AuthNeed::Reauthorize => {
+            format!("`{connection}` needs to be authorized again. Its access expired.")
+        }
+        AuthNeed::TokenRejected => format!(
+            "`{connection}` rejected its token. An operator must set a new one \
+             with `subs auth {connection}`."
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::InterruptOrigin;
+    use crate::protocol::{
+        AgentConfig, AuthFailure, DecisionAction, Issuer, McpServer, RetryPolicy, SessionOwner,
+        Subject,
+    };
+    use crate::runtime::session::events::{
+        AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested, EventPayload,
+    };
+    use crate::runtime::session::state::{ApplyContext, OpenInterrupt};
+
+    fn ctx() -> ApplyContext {
+        ApplyContext {
+            occurred_at: chrono::Utc::now(),
+            sequence: 1,
+        }
+    }
+
+    fn config(policy: AuthFailure) -> AgentConfig {
+        AgentConfig {
+            llm: None,
+            model: "m1".to_string(),
+            system: None,
+            retry: None,
+            tools: vec![],
+            sub_agents: vec![],
+            mcp: vec![McpServer {
+                path: ConnectionPath::Mcp("sentry".into()),
+                tools: None,
+                auth_failure: policy,
+                approve: Default::default(),
+            }],
+            defer_tools: None,
+            announce_mcp: Default::default(),
+            plugins: Vec::new(),
+            effort: None,
+        }
+    }
+
+    fn needing_auth(need: AuthNeed, policy: AuthFailure) -> SessionState {
+        let mut s = SessionState::new("s1".to_string());
+        s.owner = Some(SessionOwner {
+            tenant_id: "t".to_string(),
+            requester: crate::protocol::Requester::new(
+                Subject::new(Issuer::slack(), "T1:U1"),
+                Default::default(),
+            ),
+            metadata: Default::default(),
+        });
+        s.apply(
+            &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                config: config(policy),
+                anchor: None,
+            }),
+            &ctx(),
+        );
+        s.apply(
+            &EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
+                path: ConnectionPath::Mcp("sentry".into()),
+                attempt: 0,
+                retry: RetryPolicy::no_retry(),
+            }),
+            &ctx(),
+        );
+        s.apply(
+            &EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
+                path: ConnectionPath::Mcp("sentry".into()),
+                auth: need,
+            }),
+            &ctx(),
+        );
+        s
+    }
+
+    #[test]
+    fn a_connection_that_needs_a_person_is_asked_about_by_name() {
+        let action =
+            prompt(&needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt)).expect("it asks");
+        let DecisionAction::Interrupt {
+            interrupt_id,
+            payload,
+            ..
+        } = action
+        else {
+            panic!("expected an interrupt");
+        };
+        assert_eq!(interrupt_id.as_deref(), Some("mcp-auth:mcp.sentry"));
+        let message = payload["message"].as_str().expect("a message");
+        assert!(message.contains("authorized again"), "got {message}");
+        assert_eq!(payload["authorize"]["connection"], "mcp.sentry");
+        assert_eq!(payload["metadata"]["options"][0]["label"], "Retry");
+    }
+
+    #[test]
+    fn a_rejected_token_names_the_command_an_operator_runs() {
+        let action = prompt(&needing_auth(
+            AuthNeed::TokenRejected,
+            AuthFailure::Interrupt,
+        ))
+        .expect("it asks");
+        let DecisionAction::Interrupt { payload, .. } = action else {
+            panic!("expected an interrupt");
+        };
+        let message = payload["message"].as_str().expect("a message");
+        assert!(message.contains("subs auth mcp.sentry"), "got {message}");
+    }
+
+    #[test]
+    fn a_connection_configured_to_degrade_is_never_asked_about() {
+        assert!(prompt(&needing_auth(AuthNeed::Reauthorize, AuthFailure::Degrade)).is_none());
+    }
+
+    #[test]
+    fn a_connection_already_asked_about_is_not_asked_about_again() {
+        let mut state = needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt);
+        state.open_interrupts.push(OpenInterrupt {
+            interrupt_id: interrupt_id(&ConnectionPath::Mcp("sentry".into())),
+            origin: InterruptOrigin::Frontend,
+            reason: "hold".to_string(),
+            payload: serde_json::Value::Null,
+            anchor: None,
+        });
+        assert!(prompt(&state).is_none());
+    }
+
+    #[test]
+    fn a_session_with_nothing_wrong_is_not_asked_about() {
+        assert!(prompt(&SessionState::new("s1".to_string())).is_none());
+    }
 }

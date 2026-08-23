@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{DecisionResponse, DecisionTrigger, Message};
+use crate::protocol::{ChannelKind, DecisionResponse, DecisionTrigger, Message};
 use crate::runtime::blob::BlobStore;
 use crate::runtime::event_store::{EventFilter, EventStore, Seq};
 use crate::runtime::processor::{
@@ -10,26 +10,32 @@ use crate::runtime::processor::{
     ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
+use crate::runtime::session::interrupts::auth;
 use crate::runtime::session::propose::{propose, Proposing};
 use crate::runtime::session::state::SessionState;
 use crate::runtime::session::wire::to_wire_trigger;
 use crate::runtime::session::SessionEvent;
+use serde_json::Value;
 
 use super::{AgentDirectory, WorkerDecisionRequest, WorkerQueue};
 
-/// A channel's own proposal for a decision, added at delivery. Takes the
-/// proposal so far and returns it amended, replaced, or untouched. Must be a
-/// pure function of its inputs, so a redelivery proposes the same thing.
 pub trait ChannelProposer: Send + Sync {
-    fn propose(
-        &self,
-        session_id: &str,
-        trigger: &DecisionTrigger,
-        state: &SessionState,
-        events: &[SessionEvent],
-        transcript: &[Message],
-        proposed: DecisionResponse,
-    ) -> DecisionResponse;
+    fn channel(&self) -> ChannelKind;
+
+    fn translate(&self, _cx: &Proposal<'_>) -> Option<DecisionResponse> {
+        None
+    }
+
+    fn render(&self, _cx: &Proposal<'_>, _proposed: &DecisionResponse) -> Option<Value> {
+        None
+    }
+}
+
+pub struct Proposal<'a> {
+    pub trigger: &'a DecisionTrigger,
+    pub state: &'a SessionState,
+    pub events: &'a [SessionEvent],
+    pub transcript: &'a [Message],
 }
 
 struct WorkerDecisionProjection {
@@ -187,6 +193,9 @@ async fn extract(
         ))
     })?;
     let connector_tools = state.connector_tools(message_tree.head_id.as_deref()).tools;
+
+    let auth_prompt = auth::prompt(&state);
+
     let proposed = propose(
         &trigger,
         &Proposing {
@@ -197,6 +206,7 @@ async fn extract(
             config: agent_config.as_ref(),
             connector_tools: &connector_tools,
             decision_id: &req.id,
+            auth_prompt: auth_prompt.as_ref(),
         },
     )
     // `session.start` is the one trigger the engine cannot derive from the
@@ -215,9 +225,12 @@ async fn extract(
             })
     })
     .unwrap_or_default();
+    let owning = ChannelKind::owning(owner);
+    let proposer = proposers.iter().find(|p| Some(p.channel()) == owning);
+
     // The current turn's events, as of this delivery. Bounded by the turn's
     // start, so the read costs one turn and not the whole session.
-    let turn_events: Vec<SessionEvent> = match (proposers.is_empty(), state.turn_started_seq) {
+    let turn_events: Vec<SessionEvent> = match (proposer.is_none(), state.turn_started_seq) {
         (false, Some(start)) => store
             .query_events(&EventFilter {
                 session_id: Some(event.session_id.clone()),
@@ -243,16 +256,26 @@ async fn extract(
         }
         _ => turn_events,
     };
-    let proposed = proposers.iter().fold(proposed, |p, proposer| {
-        proposer.propose(
-            &event.session_id,
-            &trigger,
-            &state,
-            &turn_events,
-            &transcript,
-            p,
-        )
-    });
+    let cx = Proposal {
+        trigger: &trigger,
+        state: &state,
+        events: &turn_events,
+        transcript: &transcript,
+    };
+    let mut proposed = match (proposer, &trigger) {
+        (Some(p), DecisionTrigger::ClientAction { .. }) => p.translate(&cx).unwrap_or(proposed),
+        _ => proposed,
+    };
+    if let Some(view) = proposer.and_then(|p| p.render(&cx, &proposed)) {
+        let key = owning
+            .expect("a proposer ran, so the session has a channel")
+            .to_string();
+        debug_assert!(
+            !proposed.channels.contains_key(&key),
+            "{key} rendered over what it translated"
+        );
+        proposed.channels.insert(key, view);
+    }
 
     Ok(Some(WorkerDecisionRequest {
         session_id: event.session_id.clone(),

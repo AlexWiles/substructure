@@ -32,6 +32,7 @@ impl InterruptKind for Approval {
             config,
             connector_tools,
             decision_id,
+            auth_prompt: _,
         } = p;
         let Some((at, call)) = asked_about(tail, transcript, dispatched) else {
             return Some(match config {

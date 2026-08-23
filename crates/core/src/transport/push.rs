@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use crate::protocol::{DecisionResponse, ErrorCode};
 use crate::session::wire::resolve_response;
 use crate::worker::directory::declared;
-use crate::worker::push::{PushError, PushTransport, TransportRegistry};
+use crate::worker::push::{Decider, PushError, TransportRegistry};
 use crate::worker::{
     AgentDirectory, DequeueFilter, FailDecision, Hosting, SubmitDecision, WorkerDecisionRequest,
 };
@@ -15,7 +15,7 @@ use crate::{Caller, Runtime};
 
 /// Who decides for one agent.
 enum Route {
-    Push(Arc<dyn PushTransport>),
+    Push(Arc<dyn Decider>),
     Engine,
 }
 
@@ -105,7 +105,7 @@ struct Router {
     /// One transport per `(tenant, agent)` with a worker, built on first use: a
     /// transport holds a connection pool, so rebuilding it per decision would
     /// throw away every keep-alive.
-    built: Mutex<HashMap<(String, String), Arc<dyn PushTransport>>>,
+    built: Mutex<HashMap<(String, String), Arc<dyn Decider>>>,
 }
 
 impl Router {
@@ -118,7 +118,6 @@ impl Router {
         };
         let worker = match entry.hosting {
             Hosting::Engine => return Ok(Route::Engine),
-            Hosting::InProcess(transport) => return Ok(Route::Push(transport)),
             Hosting::Http(endpoint) => endpoint,
         };
 

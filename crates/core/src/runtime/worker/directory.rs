@@ -1,37 +1,12 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use crate::protocol::AgentConfig;
 use crate::runtime::llm::LlmBlocks;
 
-use super::push::PushTransport;
-
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hosting {
     Engine,
     Http(WorkerEndpoint),
-    InProcess(Arc<dyn PushTransport>),
-}
-
-impl std::fmt::Debug for Hosting {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Engine => f.write_str("Engine"),
-            Self::Http(endpoint) => f.debug_tuple("Http").field(endpoint).finish(),
-            Self::InProcess(_) => f.write_str("InProcess"),
-        }
-    }
-}
-
-impl PartialEq for Hosting {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Engine, Self::Engine) => true,
-            (Self::Http(a), Self::Http(b)) => a == b,
-            (Self::InProcess(a), Self::InProcess(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        }
-    }
 }
 
 /// One agent as declared: the config the app seeds, plus the hosting that never
@@ -41,7 +16,7 @@ impl PartialEq for Hosting {
 /// the declaration says the agent exists and where its decisions go, and the
 /// worker authors the identity on `session.start`. An engine-hosted agent
 /// always has one; nothing else could supply it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct AgentEntry {
     pub config: Option<AgentConfig>,
     pub hosting: Hosting,
