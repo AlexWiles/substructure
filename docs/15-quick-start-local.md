@@ -69,8 +69,9 @@ continue this session with:
 subs run --session <session-id> "what did I just ask?"
 ```
 
-The agent remembers. The engine saves the whole session in `substructure.db`
-beside the file, so you can stop everything and pick the session up tomorrow.
+The agent remembers. The engine saves the whole session in
+`~/.config/substructure/substructure.db`, so you can stop everything and pick
+the session up tomorrow.
 
 ```sh
 subs sessions list

@@ -53,8 +53,8 @@ pub struct ChatArgs {
     /// the engine that runs there.
     #[arg(long)]
     url: Option<String>,
-    /// SQLite dev database path. [default: beside `substructure.toml`, or
-    /// `~/.config/substructure/substructure.db` with no file]
+    /// SQLite dev database path. [default: `db` in `substructure.toml`, else
+    /// `~/.config/substructure/substructure.db`]
     #[arg(long)]
     db: Option<String>,
 }

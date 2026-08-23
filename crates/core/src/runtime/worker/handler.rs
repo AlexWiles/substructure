@@ -400,7 +400,7 @@ mod tests {
                 "agent-1".to_string(),
                 AgentEntry {
                     config: Some(config),
-                    worker: None,
+                    hosting: crate::worker::Hosting::Engine,
                 },
             )]),
             Default::default(),

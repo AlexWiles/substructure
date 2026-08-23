@@ -47,8 +47,8 @@ pub struct ServeArgs {
     /// [default: 8080]
     #[arg(long)]
     port: Option<u16>,
-    /// [default: beside `substructure.toml`, or
-    /// `~/.config/substructure/substructure.db` with no file]
+    /// [default: `db` in `substructure.toml`, else
+    /// `~/.config/substructure/substructure.db`]
     #[arg(long)]
     db: Option<String>,
     /// Environment file (default: walks up from cwd looking for

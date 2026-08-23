@@ -466,11 +466,21 @@ mod tests {
     const A_REMOTE: &str = "[remote]\nurl = \"https://subs.test\"\n";
 
     #[test]
-    fn a_file_naming_no_remote_reads_the_database_beside_it() {
-        let (globals, dir) = wrote(ENGINE_HERE);
+    fn a_file_naming_no_remote_reads_the_engines_database() {
+        let (globals, _dir) = wrote(ENGINE_HERE);
         assert_eq!(
             local_path(source(&globals, None).unwrap()),
-            dir.join("substructure.db").display().to_string()
+            project_config::ProjectConfig::default().db_path()
+        );
+    }
+
+    /// A file that names its own database is read where it named it.
+    #[test]
+    fn a_file_naming_a_database_reads_the_one_beside_it() {
+        let (globals, dir) = wrote(&format!("db = \"engine.db\"\n{ENGINE_HERE}"));
+        assert_eq!(
+            local_path(source(&globals, None).unwrap()),
+            dir.join("engine.db").display().to_string()
         );
     }
 

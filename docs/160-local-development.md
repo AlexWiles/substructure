@@ -68,8 +68,9 @@ continue this session with:
 subs run --session <session-id> "what was my first question?"
 ```
 
-The agent remembers. The engine saves the whole session in `substructure.db`.
-Stop everything, come back tomorrow, and the session continues.
+The agent remembers. The engine saves the whole session in
+`~/.config/substructure/substructure.db`. Stop everything, come back tomorrow,
+and the session continues.
 
 ## Read what happened
 
@@ -78,7 +79,7 @@ subs sessions list
 subs sessions events <session-id>
 ```
 
-These read `substructure.db` directly, so they work with nothing running. A
+These read that database directly, so they work with nothing running. A
 file naming a `[remote]` asks the deployment instead; `--db <path>` reads a
 file whatever the config says.
 
@@ -151,16 +152,21 @@ environment's `db`.
 
 ## Two environments
 
-A second environment is a second file. Each one gets its own database.
+A second environment is a second file.
 
 ```sh
 subs run -c substructure.dev.toml "hi"
 subs serve -c substructure.dev.toml
 ```
 
-`db` defaults to the file's name. `substructure.toml` uses `substructure.db`.
-`substructure.dev.toml` uses `substructure.dev.db`. With no file, the engine
-uses `~/.config/substructure/substructure.db`.
+Both read `~/.config/substructure/substructure.db` until one names its own.
+Set `db` in each file to keep their sessions and credentials apart.
+
+```toml title="substructure.dev.toml"
+db = "dev.db"
+```
+
+A relative path resolves against the file that names it.
 
 ## Develop against a cloud project
 

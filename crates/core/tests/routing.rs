@@ -13,11 +13,12 @@ use async_trait::async_trait;
 use substructure_core::event_store::Seq;
 use substructure_core::llm::{
     CallContext, InMemoryTokenDeltaTransport, LlmBlock, LlmBlocks, LlmCallError, LlmCallable,
-    LlmProviderRegistry, LlmProviderTrait, LlmTask,
+    LlmProviderRegistry, LlmProviderTrait, LlmTask, TokenDeltaTransport,
 };
 use substructure_core::protocol::{
-    AgentConfig, ClientInput, Content, DraftMessage, ErrorCode, LlmResponse, PromptContent,
-    PromptRequest, Role, SessionOwner, SubAgent, ToolCall, ToolCallFunction,
+    AgentConfig, ClientInput, Content, DecisionResponse, DecisionTrigger, DraftMessage, ErrorCode,
+    LlmResponse, PromptContent, PromptRequest, Role, SessionOwner, SubAgent, ToolCall,
+    ToolCallFunction,
 };
 use substructure_core::protocol::{Issuer, Requester, Subject};
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
@@ -37,7 +38,10 @@ use substructure_core::transport::channel::ChannelContext;
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::worker::push::TransportRegistry;
-use substructure_core::worker::{AgentEntry, StaticAgentDirectory, WorkerEndpoint};
+use substructure_core::worker::push::{PushError, PushTransport};
+use substructure_core::worker::{
+    AgentEntry, Hosting, StaticAgentDirectory, WorkerDecisionRequest, WorkerEndpoint,
+};
 use substructure_core::{Caller, HandleClientInput, Runtime, RuntimeConfig, RuntimeDeps};
 use tokio_util::sync::CancellationToken;
 
@@ -140,17 +144,42 @@ fn config(llm: &str) -> AgentConfig {
 fn engine_hosted(llm: &str) -> AgentEntry {
     AgentEntry {
         config: Some(config(llm)),
-        worker: None,
+        hosting: Hosting::Engine,
     }
 }
 
 fn worker_hosted(llm: &str, url: &str) -> AgentEntry {
     AgentEntry {
         config: Some(config(llm)),
-        worker: Some(WorkerEndpoint {
+        hosting: Hosting::Http(WorkerEndpoint {
             url: url.to_string(),
             signing_secret: None,
         }),
+    }
+}
+
+struct InProcess {
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl PushTransport for InProcess {
+    async fn push(
+        &self,
+        decision: &WorkerDecisionRequest,
+        _deltas: Arc<dyn TokenDeltaTransport>,
+    ) -> Result<DecisionResponse, PushError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(decision.trigger.kind().to_string());
+        Ok(match decision.trigger {
+            DecisionTrigger::SessionStart => DecisionResponse {
+                agent: Some(config("claude")),
+                ..Default::default()
+            },
+            _ => decision.proposed.clone(),
+        })
     }
 }
 
@@ -158,7 +187,7 @@ fn worker_hosted(llm: &str, url: &str) -> AgentEntry {
 fn delegating(url: &str) -> AgentEntry {
     AgentEntry {
         config: None,
-        worker: Some(WorkerEndpoint {
+        hosting: Hosting::Http(WorkerEndpoint {
             url: url.to_string(),
             signing_secret: None,
         }),
@@ -793,7 +822,7 @@ async fn a_delegation_opens_its_child_with_the_message() {
             "boss".to_string(),
             AgentEntry {
                 config: Some(boss),
-                worker: None,
+                hosting: Hosting::Engine,
             },
         ),
         ("helper".to_string(), engine_hosted("claude")),
@@ -946,4 +975,39 @@ async fn a_started_turn_translates_to_a_finished_run() {
         matches!(seen.last(), Some(AgUiEvent::RunFinished { .. })),
         "and ends with RunFinished: {seen:#?}"
     );
+}
+
+#[tokio::test]
+async fn an_in_process_decider_runs_a_turn() {
+    let decider = Arc::new(InProcess {
+        seen: Mutex::new(Vec::new()),
+    });
+    let h = start(BTreeMap::from([(
+        "assistant".to_string(),
+        AgentEntry {
+            config: None,
+            hosting: Hosting::InProcess(decider.clone()),
+        },
+    )]))
+    .await;
+
+    let events = turn(&h, "assistant", "hi").await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completes: {events:#?}"
+    );
+
+    let seen = decider.seen.lock().unwrap();
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some("session.start"),
+        "it authors the identity first; got {seen:?}"
+    );
+    assert!(
+        seen.len() > 1,
+        "and keeps deciding for the rest of the turn; got {seen:?}"
+    );
+    assert_eq!(h.model.seen.lock().unwrap().len(), 1, "one model call");
 }

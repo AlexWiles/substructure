@@ -26,7 +26,7 @@ use crate::protocol::{
     Handler, LlmFormat, McpServer, McpTools, RetryConfig, SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
-use crate::runtime::worker::{AgentEntry, WorkerEndpoint};
+use crate::runtime::worker::{AgentEntry, Hosting, WorkerEndpoint};
 
 pub use crate::cli::env::ProviderKind;
 
@@ -470,13 +470,16 @@ impl AgentSection {
     pub fn to_entry(&self, manifest: &Manifest) -> AgentEntry {
         AgentEntry {
             config: self.to_agent_config(manifest),
-            worker: self.worker.clone().map(|url| WorkerEndpoint {
-                url,
-                signing_secret: self
-                    .signing_secret_env
-                    .as_deref()
-                    .and_then(crate::cli::env_value),
-            }),
+            hosting: match self.worker.clone() {
+                None => Hosting::Engine,
+                Some(url) => Hosting::Http(WorkerEndpoint {
+                    url,
+                    signing_secret: self
+                        .signing_secret_env
+                        .as_deref()
+                        .and_then(crate::cli::env_value),
+                }),
+            },
         }
     }
 }

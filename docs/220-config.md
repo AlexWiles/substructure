@@ -73,15 +73,13 @@ deploys a separate project.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `name` | string | none | The project's name. `subs apply` creates the project from it and renames it when it changes. |
-| `db` | path | the file's name with a `.db` suffix | The SQLite file holding events, sessions, and connector credentials. A relative path resolves against the file. |
+| `db` | path | `~/.config/substructure/substructure.db` | The SQLite file holding events, sessions, and connector credentials. A relative path resolves against the file. |
 | `log` | string | `error` for `run`, `info` for `serve` | A `RUST_LOG` filter. `$RUST_LOG` wins over it. |
 
-`substructure.toml` uses `substructure.db`. `subs.staging.toml` uses
-`subs.staging.db`. Two files in one directory are two engines.
-
-With no file at all, the engine uses
-`~/.config/substructure/substructure.db`, beside `credentials.toml`, so
-`subs chat` and `subs run` keep one set of sessions wherever you run them.
+Unset, `db` is `~/.config/substructure/substructure.db`, beside
+`credentials.toml`. Every command on the machine reads that one, whichever
+directory it runs in and whether or not a file is there. Set `db` to give a
+project its own — two files that both set it are two engines.
 
 ## `[llm.<id>]`
 

@@ -60,9 +60,10 @@ pub struct ProjectConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Engine state: events, sessions, and the credentials `subs auth`
-    /// authorized. Defaults to this file's own name — `substructure.toml` keeps
-    /// `substructure.db`, and `subs.staging.toml` gets `subs.staging.db`, so two
-    /// files in one directory are two engines rather than one they share.
+    /// authorized. Unset, it is `~/.config/substructure/substructure.db`,
+    /// beside the credentials — one engine per machine, whichever directory a
+    /// command is run from. Set it to give this project its own, resolved
+    /// against this file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<String>,
     /// Log filter in `RUST_LOG` syntax: a bare level (`info`) or per-target
@@ -177,16 +178,13 @@ impl ProjectConfig {
         Ok(self.resolved_manifest()?.0.connections())
     }
 
-    /// The engine's database, beside the file that names it. One file is one
-    /// project, so two files in a directory hold two engines rather than
-    /// writing each other's sessions and credentials. With no file behind it,
-    /// it sits beside the credentials in the user config dir, so `subs chat`
-    /// and `subs run` keep one set of sessions wherever they are run.
+    /// The engine's database: the one beside the credentials, unless the file
+    /// names another. A named one sits beside the file that names it, so a
+    /// project that wants its own says so and gets it where it is read.
     pub fn db_path(&self) -> String {
-        let named = self.db.clone().unwrap_or_else(|| default_db(&self.source));
-        if self.source.as_os_str().is_empty() {
-            return user_db_path(named);
-        }
+        let Some(named) = self.db.clone() else {
+            return user_db_path();
+        };
         match self.source.parent() {
             // `join` keeps an absolute `db` absolute.
             Some(dir) if !dir.as_os_str().is_empty() => dir.join(named).display().to_string(),
@@ -295,23 +293,13 @@ pub fn ensure_parent(path: &str) -> Result<()> {
     }
 }
 
-/// No file behind the config: the database joins the credentials under
-/// `~/.config/substructure`, rather than being written into whichever
-/// directory the command was run from.
-fn user_db_path(named: String) -> String {
+/// The database nothing named: beside the credentials under
+/// `~/.config/substructure`, rather than in whichever directory the command
+/// was run from.
+fn user_db_path() -> String {
     match super::credentials::config_dir() {
-        Ok(dir) => dir.join(&named).display().to_string(),
-        Err(_) => named,
-    }
-}
-
-/// `substructure.toml` → `substructure.db`, `subs.staging.toml` →
-/// `subs.staging.db`. A config with no file behind it keeps the plain default,
-/// which is what an engine running on flags alone uses.
-fn default_db(source: &Path) -> String {
-    match source.file_stem().and_then(|s| s.to_str()) {
-        Some(stem) if !stem.is_empty() => format!("{stem}.db"),
-        _ => DEFAULT_DB.to_string(),
+        Ok(dir) => dir.join(DEFAULT_DB).display().to_string(),
+        Err(_) => DEFAULT_DB.to_string(),
     }
 }
 
@@ -544,7 +532,7 @@ mod tests {
 
         let deployment = ok("[remote]\norg = \"org_1\"\n");
         assert_eq!(deployment.org(), Some("org_1"));
-        assert_eq!(deployment.db_path(), DEFAULT_DB);
+        assert_eq!(deployment.db_path(), user_db_path());
 
         // One system: served here, administered there, declared once.
         let both = ok(r#"
@@ -595,10 +583,10 @@ mod tests {
         );
     }
 
-    /// One file is one project, so a second file in a directory is a second
-    /// engine rather than one that writes the first's sessions and credentials.
+    /// A file names a project, not a database: what it does not ask for, it
+    /// shares with every other command on the machine.
     #[test]
-    fn the_database_defaults_to_the_files_own_name() {
+    fn a_file_that_names_no_database_uses_the_one_beside_the_credentials() {
         let dir = tmpdir();
         let named = |name: &str| {
             let path = dir.join(name);
@@ -606,17 +594,13 @@ mod tests {
             load_explicit(&path).unwrap().config.db_path()
         };
 
-        // The usual file keeps the name it always had.
-        assert_eq!(
-            named(FILENAME),
-            dir.join("substructure.db").to_str().unwrap()
-        );
-        assert_eq!(
-            named("subs.staging.toml"),
-            dir.join("subs.staging.db").to_str().unwrap()
-        );
+        assert_eq!(named(FILENAME), user_db_path());
+        assert_eq!(named("subs.staging.toml"), user_db_path());
+    }
 
-        // An explicit `db` still wins, and sits beside the file that names it.
+    #[test]
+    fn a_named_database_sits_beside_the_file_that_names_it() {
+        let dir = tmpdir();
         let path = dir.join("explicit.toml");
         fs::write(&path, "db = \"engine.db\"\n").unwrap();
         assert_eq!(
@@ -789,7 +773,10 @@ mod tests {
         "#);
         let entry = &cfg.agents()["reggu"];
         assert!(entry.config.is_none(), "nothing to seed");
-        assert!(entry.worker.is_some(), "the worker authors it");
+        assert!(
+            matches!(entry.hosting, crate::worker::Hosting::Http(_)),
+            "the worker authors it"
+        );
     }
 
     /// …but only a worker can author one, so an agent that declares neither a
@@ -979,12 +966,12 @@ mod tests {
             worker = "https://triage.internal/agent"
         "#);
         let agents = cfg.agents();
-        assert!(agents["assistant"].worker.is_none(), "the engine decides");
+        assert_eq!(agents["assistant"].hosting, crate::worker::Hosting::Engine);
         assert!(agents["assistant"].config.is_some(), "and needs a config");
-        assert_eq!(
-            agents["triage"].worker.as_ref().map(|w| w.url.as_str()),
-            Some("https://triage.internal/agent")
-        );
+        let crate::worker::Hosting::Http(endpoint) = &agents["triage"].hosting else {
+            panic!("a declared worker is hosted over http");
+        };
+        assert_eq!(endpoint.url, "https://triage.internal/agent");
         // The hosting never crosses the wire.
         let wire = serde_json::to_value(agents["triage"].config.as_ref().unwrap()).unwrap();
         assert!(wire.get("worker").is_none(), "got {wire}");

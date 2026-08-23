@@ -16,7 +16,7 @@ together at the same version.
 ### Changed
 
 - Manifest format updates
-- With no `substructure.toml`, the engine now uses `~/.config/substructure/substructure.db` instead of a database in the current directory.
+- The engine now uses `~/.config/substructure/substructure.db` unless `db` names another, and no longer makes a database name from the config file's name.
 
 ## [0.7.2] - 2026-08-21
 

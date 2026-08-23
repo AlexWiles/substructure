@@ -233,6 +233,40 @@ impl Runtime {
         self.queue.dequeue(filter).await
     }
 
+    /// Opens the session and queues its `session.start`, without submitting
+    /// anything to it. `false` when the session was already open.
+    pub async fn create_session(
+        &self,
+        session_id: &str,
+        caller: &Caller,
+        agent_id: String,
+        owner: SessionOwner,
+    ) -> Result<bool, RuntimeError> {
+        let worker_retry = self.worker_retry_resolver.resolve(caller.tenant_id()).await;
+        let result = execute(
+            &*self.store,
+            ExecuteInput {
+                session_id: session_id.to_string(),
+                caller: caller.clone(),
+                command: CommandPayload::CreateSession {
+                    agent_id,
+                    owner,
+                    ancestry: vec![],
+                    worker_retry,
+                },
+                span: SpanContext::root().child("create_session"),
+            },
+            &ConflictRetry::default(),
+        )
+        .await;
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(ExecuteError::Command(SessionError::SessionAlreadyCreated)) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Submit a client payload to a session. Returns immediately with the
     /// resolved session and turn ids; an idempotent re-submission resolves to
     /// the existing turn id. Use `stream` to observe events, including
@@ -247,34 +281,8 @@ impl Runtime {
 
         let span = SpanContext::root();
 
-        let worker_retry = self
-            .worker_retry_resolver
-            .resolve(input.caller.tenant_id())
-            .await;
-
-        // Create session (ignore if already exists)
-        let create_result = execute(
-            &*self.store,
-            ExecuteInput {
-                session_id: session_id.clone(),
-                caller: input.caller.clone(),
-                command: CommandPayload::CreateSession {
-                    agent_id: input.agent_id,
-                    owner: input.owner,
-                    ancestry: vec![],
-                    worker_retry,
-                },
-                span: span.child("create_session"),
-            },
-            &ConflictRetry::default(),
-        )
-        .await;
-
-        match create_result {
-            Ok(_) => {}
-            Err(ExecuteError::Command(SessionError::SessionAlreadyCreated)) => {}
-            Err(e) => return Err(e.into()),
-        }
+        self.create_session(&session_id, &input.caller, input.agent_id, input.owner)
+            .await?;
 
         // Try to submit the payload (idempotency guard may reject)
         let send_result = execute(
