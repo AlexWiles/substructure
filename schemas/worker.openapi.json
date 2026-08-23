@@ -110,9 +110,9 @@
             "type": "string"
           },
           "servers": {
-            "description": "Connection-registry ids of this plugin's servers.",
+            "description": "Where each of this plugin's servers is declared.",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ConnectionPath"
             },
             "type": "array"
           },
@@ -245,6 +245,10 @@
         },
         "title": "ClientContext",
         "type": "object"
+      },
+      "ConnectionPath": {
+        "description": "Where a connection is declared: `mcp.<id>` or `plugin.<id>.mcp.<server>`",
+        "type": "string"
       },
       "Content": {
         "anyOf": [
@@ -677,8 +681,8 @@
             "additionalProperties": false,
             "description": "Fetch a connection's tools again, after a person replaced its\ncredential.",
             "properties": {
-              "id": {
-                "type": "string"
+              "path": {
+                "$ref": "#/components/schemas/ConnectionPath"
               },
               "type": {
                 "const": "connector.sync",
@@ -687,7 +691,7 @@
             },
             "required": [
               "type",
-              "id"
+              "path"
             ],
             "type": "object"
           },
@@ -1575,7 +1579,7 @@
       },
       "McpServer": {
         "additionalProperties": false,
-        "description": "An MCP server the agent draws tools from. `id` resolves against the engine's\nconnection registry — locally from `[mcp]` in `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
+        "description": "An MCP server the agent draws tools from. `path` resolves against the\nengine's connection registry — locally from `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
         "properties": {
           "approve": {
             "$ref": "#/components/schemas/Approve"
@@ -1583,8 +1587,8 @@
           "auth_failure": {
             "$ref": "#/components/schemas/AuthFailure"
           },
-          "id": {
-            "type": "string"
+          "path": {
+            "$ref": "#/components/schemas/ConnectionPath"
           },
           "tools": {
             "anyOf": [
@@ -1599,7 +1603,7 @@
           }
         },
         "required": [
-          "id"
+          "path"
         ],
         "title": "McpServer",
         "type": "object"

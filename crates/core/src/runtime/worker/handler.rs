@@ -277,6 +277,7 @@ async fn extract(
 
 #[cfg(test)]
 mod tests {
+    use crate::connectors::registry::ConnectionPath;
     use std::collections::HashMap;
 
     use chrono::Utc;
@@ -673,7 +674,7 @@ mod tests {
                 state: None,
                 agent: Some(AgentConfig {
                     mcp: vec![McpServer {
-                        id: "sentry".to_string(),
+                        path: ConnectionPath::Mcp("sentry".into()),
                         tools: None,
                         auth_failure: Default::default(),
                         approve: Approve::Destructive,
@@ -688,7 +689,7 @@ mod tests {
             &mut agg,
             CommandPayload::settle(
                 EffectKind::ConnectorSync,
-                "sentry".to_string(),
+                "mcp.sentry".to_string(),
                 None,
                 Outcome::Connector {
                     prefix: Some("sentry".to_string()),

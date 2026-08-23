@@ -10,13 +10,13 @@
 use anyhow::{Context as _, Result};
 
 use crate::api::v1::{Notice, NoticesResponse};
-use crate::cli::mcp::Needs;
+use crate::cli::connections::Needs;
 
 use super::cloud::context::Context as CloudContext;
 use super::cloud::project_config::{self, Found};
 use super::cloud::{notices, print, slack, ProjectScope};
 use super::target::target;
-use super::{env_value, mcp};
+use super::{connections, env_value};
 
 /// The two variables a bot answering over Socket Mode reads, with an example of
 /// what each holds.
@@ -89,17 +89,17 @@ async fn here(found: &Found, env: impl Fn(&str) -> Option<String>) -> Result<Vec
         );
     }
 
-    for (id, needs) in mcp::unauthorized_local(config).await? {
+    for (path, needs) in connections::unauthorized_local(config).await? {
         out.push(match needs {
-            Needs::Token => Notice::action(format!("Set the token for [mcp.{id}]"))
-                .with_command(format!("subs mcp set-token {id}")),
-            Needs::Login => Notice::action(format!("Authorize the [mcp.{id}] connection"))
-                .with_command(format!("subs mcp login {id}")),
+            Needs::Token => Notice::action(format!("Set the token for [{path}]"))
+                .with_command(format!("subs auth {path}")),
+            Needs::Login => Notice::action(format!("Authorize the [{path}] connection"))
+                .with_command(format!("subs auth {path}")),
             Needs::Declaration => Notice::action(format!(
-                "[mcp.{id}] wants a credential it publishes no way to get; declare \
+                "[{path}] wants a credential it publishes no way to get; declare \
                  `auth = \"token\"` and set one"
             ))
-            .with_command(format!("subs mcp set-token {id}")),
+            .with_command(format!("subs auth {path}")),
         });
     }
 
@@ -211,11 +211,11 @@ mod tests {
         };
         assert_eq!(
             command("[mcp.linear]").as_deref(),
-            Some("subs mcp login linear")
+            Some("subs auth mcp.linear")
         );
         assert_eq!(
             command("[mcp.github]").as_deref(),
-            Some("subs mcp set-token github")
+            Some("subs auth mcp.github")
         );
     }
 

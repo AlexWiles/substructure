@@ -141,7 +141,7 @@ subs serve --no-auth --slack-agent my-agent
 ## Connect MCP servers locally
 
 ```sh
-subs mcp login sentry
+subs auth mcp.sentry
 ```
 
 The engine on this machine runs the OAuth flow. The credential goes into that

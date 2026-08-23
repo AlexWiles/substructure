@@ -145,8 +145,8 @@ api_key_env = "MY_ANTHROPIC_KEY"   # local only
 **In the cloud**, the deployment holds the key. Upload it once.
 
 ```sh
-subs llm set-key claude    # reads the key from stdin
-subs llm list
+subs auth llm.claude    # reads the key from stdin
+subs list
 ```
 
 Calls then run on your key. Until you set one, every call on that block fails

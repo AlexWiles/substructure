@@ -2675,7 +2675,7 @@ mod tests {
         fn payload(requester: Requester) -> serde_json::Value {
             serde_json::json!({
                 "message": "*gmail* is not authorized yet.",
-                "authorize": auth::Authorize { connection: "gmail".into(), requester },
+                "authorize": auth::Authorize { connection: crate::connectors::registry::ConnectionPath::Mcp("gmail".into()), requester },
             })
         }
 
@@ -2708,9 +2708,8 @@ mod tests {
         fn engine(path: &std::path::Path) -> Arc<dyn Consent> {
             let db =
                 SqliteDb::open(path.to_str().unwrap(), std::time::Duration::from_secs(5)).unwrap();
-            let spec = crate::connectors::registry::ConnectionSpec {
+            let spec = crate::connectors::registry::ConnectionDecl {
                 url: "https://mcp.gmail.test/mcp".into(),
-                protocol: ConnectorProtocol::Mcp,
                 auth: None,
                 header: None,
                 credential: Some(crate::connectors::registry::CredentialScope::User),
@@ -2718,11 +2717,19 @@ mod tests {
                 client_id_env: None,
                 client_secret_env: None,
                 prefix_tools: true,
-            };
+            }
+            .at(
+                crate::connectors::registry::ConnectionPath::Mcp("x".into()),
+                ConnectorProtocol::Mcp,
+            );
             Arc::new(EngineConsent(Arc::new(AuthorizeLinks::new(
                 "https://agent.test",
                 Arc::new(SqliteAuthFlows::new(db)),
-                [("gmail".to_string(), spec)].into(),
+                [(
+                    crate::connectors::registry::ConnectionPath::Mcp("gmail".into()),
+                    spec,
+                )]
+                .into(),
             ))))
         }
 
@@ -2757,7 +2764,7 @@ mod tests {
             let bot = bot(engine(&path));
             for refused in [Requester::machine(), person(Visibility::Shared)] {
                 let how = shown(bot.way_in("t", &payload(refused)).await).unwrap();
-                assert_eq!(how, "Run `subs mcp login gmail` to authorize it.");
+                assert_eq!(how, "Run `subs auth mcp.gmail` to authorize it.");
             }
             cleanup(&path);
         }
@@ -2783,7 +2790,7 @@ mod tests {
                         .await
                 )
                 .unwrap(),
-                "Run `subs mcp login gmail` to authorize it."
+                "Run `subs auth mcp.gmail` to authorize it."
             );
         }
 

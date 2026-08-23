@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Changed
+
+- Manifest format updates
+
 ## [0.7.2] - 2026-08-21
 
 ### Fixed

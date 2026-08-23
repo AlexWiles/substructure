@@ -1,3 +1,4 @@
+use crate::connectors::registry::ConnectionPath;
 use crate::protocol::StoredResult;
 use std::collections::HashMap;
 
@@ -12,8 +13,8 @@ use super::super::state::{AgentVersion, Logged};
 use super::*;
 use crate::connectors::{AuthNeed, RemoteTool};
 use crate::protocol::{
-    AgentTool, ConnectorToolKind, DeferToolsStrategy, Handler, LlmTool, McpServer, McpTools,
-    Message, RetryConfig, RetryOverride,
+    AgentTool, DeferToolsStrategy, Handler, LlmTool, McpServer, McpTools, Message, RetryConfig,
+    RetryOverride,
 };
 use crate::protocol::{Content, LlmResponse};
 use crate::runtime::retry::RetryTarget;
@@ -6463,7 +6464,7 @@ fn connector_config(ids: &[&str]) -> AgentConfig {
         mcp: ids
             .iter()
             .map(|id| McpServer {
-                id: id.to_string(),
+                path: ConnectionPath::Mcp(id.to_string()),
                 tools: None,
                 auth_failure: Default::default(),
                 approve: Default::default(),
@@ -6483,11 +6484,11 @@ fn remote_tool(name: &str) -> RemoteTool {
     }
 }
 
-fn sync_requests(events: &[EventPayload]) -> Vec<&str> {
+fn sync_requests(events: &[EventPayload]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            EventPayload::ConnectorSyncRequested(p) => Some(p.id.as_str()),
+            EventPayload::ConnectorSyncRequested(p) => Some(p.path.tool_prefix()),
             _ => None,
         })
         .collect()
@@ -6504,11 +6505,18 @@ fn promotions(events: &[EventPayload]) -> Vec<&str> {
 }
 
 fn settle_sync(agg: &mut SessionAggregate, id: &str, tools: &[&str]) -> Vec<EventPayload> {
+    settle_sync_at(agg, &format!("mcp.{id}"), tools)
+}
+
+fn settle_sync_at(agg: &mut SessionAggregate, written: &str, tools: &[&str]) -> Vec<EventPayload> {
+    let id = ConnectionPath::parse(written)
+        .expect("a path")
+        .tool_prefix();
     dispatch(
         agg,
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            id.to_string(),
+            written.to_string(),
             None,
             Outcome::Connector {
                 prefix: Some(id.to_string()),
@@ -6540,7 +6548,8 @@ fn declaring_a_connector_fetches_it_and_parks_the_turn() {
         Some(connector_config(&["sentry"])),
     );
     assert!(
-        agg.state.has_effect(EffectKind::ConnectorSync, "sentry"),
+        agg.state
+            .has_effect(EffectKind::ConnectorSync, "mcp.sentry"),
         "the config write fetches the connection it names"
     );
 
@@ -6588,7 +6597,7 @@ fn syncing_a_connection_again_revives_its_settled_failure() {
         &mut agg,
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            "sentry".to_string(),
+            "mcp.sentry".to_string(),
             None,
             SettleError::new(ErrorInfo::internal("401".to_string()), false)
                 .auth(Some(AuthNeed::Reauthorize)),
@@ -6597,7 +6606,7 @@ fn syncing_a_connection_again_revives_its_settled_failure() {
     );
     assert_eq!(
         agg.state
-            .tracking(EffectKind::ConnectorSync, "sentry")
+            .tracking(EffectKind::ConnectorSync, "mcp.sentry")
             .map(|t| t.status()),
         Some(EffectStatus::Failed),
     );
@@ -6609,7 +6618,7 @@ fn syncing_a_connection_again_revives_its_settled_failure() {
             decision_id: d,
             transcript: vec![],
             actions: vec![Action::SyncConnector {
-                id: "sentry".to_string(),
+                path: ConnectionPath::Mcp("sentry".into()),
             }],
             state: None,
             agent: None,
@@ -6621,7 +6630,7 @@ fn syncing_a_connection_again_revives_its_settled_failure() {
     assert_eq!(sync_requests(&events), ["sentry"]);
     let tracking = agg
         .state
-        .tracking(EffectKind::ConnectorSync, "sentry")
+        .tracking(EffectKind::ConnectorSync, "mcp.sentry")
         .expect("the same entry, re-armed");
     assert_eq!(tracking.status(), EffectStatus::Pending);
     assert_eq!(
@@ -6632,7 +6641,7 @@ fn syncing_a_connection_again_revives_its_settled_failure() {
     settle_sync(&mut agg, "sentry", &["search_issues"]);
     assert!(
         agg.state
-            .connector_sync("sentry")
+            .connector_sync(&ConnectionPath::Mcp("sentry".into()))
             .is_some_and(|c| c.auth.is_none() && !c.tools.is_empty()),
         "the offer lands and the connection is authorized again"
     );
@@ -6671,7 +6680,9 @@ fn syncing_a_connection_again_clears_an_auth_failure_a_call_found() {
         &system(),
     );
     assert_eq!(
-        agg.state.connector_sync("sentry").and_then(|c| c.auth),
+        agg.state
+            .connector_sync(&ConnectionPath::Mcp("sentry".into()))
+            .and_then(|c| c.auth),
         Some(AuthNeed::Reauthorize),
         "the fetch is still Completed; only the credential died"
     );
@@ -6684,7 +6695,7 @@ fn syncing_a_connection_again_clears_an_auth_failure_a_call_found() {
             decision_id: d,
             transcript: vec![],
             actions: vec![Action::SyncConnector {
-                id: "sentry".to_string(),
+                path: ConnectionPath::Mcp("sentry".into()),
             }],
             state: None,
             agent: None,
@@ -6694,7 +6705,10 @@ fn syncing_a_connection_again_clears_an_auth_failure_a_call_found() {
     );
     settle_sync(&mut agg, "sentry", &["search_issues", "create_issue"]);
 
-    let sync = agg.state.connector_sync("sentry").expect("still one entry");
+    let sync = agg
+        .state
+        .connector_sync(&ConnectionPath::Mcp("sentry".into()))
+        .expect("still one entry");
     assert_eq!(sync.auth, None, "the fetch that succeeded proves the fix");
     assert_eq!(sync.tools.len(), 2, "and its offer replaces the old one");
 }
@@ -6709,7 +6723,7 @@ fn syncing_a_connection_the_config_does_not_name_is_refused() {
             decision_id: d,
             transcript: vec![],
             actions: vec![Action::SyncConnector {
-                id: "linear".to_string(),
+                path: ConnectionPath::Mcp("linear".into()),
             }],
             state: None,
             agent: None,
@@ -6719,7 +6733,9 @@ fn syncing_a_connection_the_config_does_not_name_is_refused() {
     );
 
     assert!(sync_requests(&events).is_empty(), "got {events:?}");
-    assert!(!agg.state.has_effect(EffectKind::ConnectorSync, "linear"));
+    assert!(!agg
+        .state
+        .has_effect(EffectKind::ConnectorSync, "mcp.linear"));
 }
 
 #[test]
@@ -6745,7 +6761,7 @@ fn a_call_refused_for_its_credential_marks_the_connection_not_just_the_call() {
     );
     assert!(
         agg.state
-            .connector_sync("sentry")
+            .connector_sync(&ConnectionPath::Mcp("sentry".into()))
             .is_some_and(|c| c.auth.is_none()),
         "the connection starts clean: its fetch succeeded"
     );
@@ -6766,7 +6782,9 @@ fn a_call_refused_for_its_credential_marks_the_connection_not_just_the_call() {
     );
 
     assert_eq!(
-        agg.state.connector_sync("sentry").and_then(|c| c.auth),
+        agg.state
+            .connector_sync(&ConnectionPath::Mcp("sentry".into()))
+            .and_then(|c| c.auth),
         Some(AuthNeed::Reauthorize),
         "the connection now needs authorizing, however the call settled"
     );
@@ -6806,7 +6824,7 @@ fn a_plain_call_failure_leaves_the_connection_authorized() {
 
     assert!(
         agg.state
-            .connector_sync("sentry")
+            .connector_sync(&ConnectionPath::Mcp("sentry".into()))
             .is_some_and(|c| c.auth.is_none()),
         "a tool saying no is not the credential being refused"
     );
@@ -6972,7 +6990,7 @@ fn a_terminally_failed_fetch_releases_the_turn_rather_than_parking_it() {
         &mut agg,
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            "sentry".to_string(),
+            "mcp.sentry".to_string(),
             None,
             SettleError::new(ErrorInfo::internal("connection refused".to_string()), false)
                 .auth(None),
@@ -7010,7 +7028,7 @@ fn a_retryable_failure_keeps_parking_until_it_is_exhausted() {
         &mut agg,
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            "sentry".to_string(),
+            "mcp.sentry".to_string(),
             None,
             SettleError::new(ErrorInfo::internal("503".to_string()), true).auth(None),
         ),
@@ -7039,7 +7057,7 @@ fn a_hung_fetch_times_out_rather_than_parking_the_session_forever() {
     );
     let deadline = agg
         .state
-        .tracking(EffectKind::ConnectorSync, "sentry")
+        .tracking(EffectKind::ConnectorSync, "mcp.sentry")
         .and_then(|t| t.deadline)
         .expect("a fetch is bounded");
     let events = agg
@@ -7149,7 +7167,7 @@ fn searching_connector_config(ids: &[&str]) -> AgentConfig {
         mcp: ids
             .iter()
             .map(|id| McpServer {
-                id: id.to_string(),
+                path: ConnectionPath::Mcp(id.to_string()),
                 tools: Some(McpTools {
                     defer: Some(true),
                     ..Default::default()
@@ -7293,7 +7311,7 @@ fn a_connection_is_announced_once_in_the_system_prefix() {
         _ => panic!("a notice is text"),
     };
     assert!(
-        text.starts_with("{\"mcp_server\":\"sentry\""),
+        text.starts_with("{\"mcp_server\":\"mcp.sentry\""),
         "the name leads: a server's own words can be long, and a label after them \
          is not a label: {text}"
     );
@@ -7416,26 +7434,10 @@ fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
     assert_eq!(answer["tools"][0]["name"], "sentry__search_issues");
     assert_eq!(answer["matched"], 1);
     assert_eq!(
-        agg.state
-            .tool_call("tc-1")
-            .unwrap()
-            .target
-            .as_ref()
-            .unwrap()
-            .kind,
-        ConnectorToolKind::Find,
-        "the route is frozen, so a config change cannot turn this into a remote call"
-    );
-    assert!(
-        agg.state
-            .tool_call("tc-1")
-            .unwrap()
-            .target
-            .as_ref()
-            .unwrap()
-            .remote_name
-            .is_empty(),
-        "it stands for no tool on the connection"
+        agg.state.tool_call("tc-1").unwrap().target,
+        Some(ConnectorTarget::Find),
+        "the route is frozen, so a config change cannot turn this into a remote call, \
+         and it stands for no tool on the connection"
     );
 }
 
@@ -7458,15 +7460,14 @@ fn call_tool_becomes_the_call_it_names() {
         .target
         .clone()
         .expect("a connector target");
-    assert_eq!(target.connector, "sentry");
     assert_eq!(
-        target.remote_name, "search_issues",
-        "the executor calls the tool the model named, not the wrapper"
-    );
-    assert_eq!(
-        target.kind,
-        ConnectorToolKind::Remote,
-        "a `call_tool` becomes the call it names, so nothing downstream sees a wrapper"
+        target,
+        ConnectorTarget::Remote {
+            path: ConnectionPath::Mcp("sentry".into()),
+            remote_name: "search_issues".into(),
+        },
+        "a `call_tool` becomes the call it names, so nothing downstream sees a wrapper \
+         and the executor calls the tool the model named"
     );
     assert_eq!(
         agg.state.tool_call("tc-1").unwrap().name,
@@ -7488,7 +7489,7 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
         "user-1",
         Some(AgentConfig {
             mcp: vec![McpServer {
-                id: "sentry".to_string(),
+                path: ConnectionPath::Mcp("sentry".into()),
                 tools: Some(McpTools {
                     exclude: vec!["resolve_*".to_string()],
                     defer: Some(true),
@@ -7522,16 +7523,10 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
         message.contains("search_issues"),
         "and what it could have asked for: {message}"
     );
-    assert!(
-        agg.state
-            .tool_call("tc-1")
-            .unwrap()
-            .target
-            .as_ref()
-            .unwrap()
-            .remote_name
-            .is_empty(),
-        "an empty remote name is what keeps the connection out of it"
+    assert_eq!(
+        agg.state.tool_call("tc-1").unwrap().target,
+        Some(ConnectorTarget::Call),
+        "a target naming no connection is what keeps the connection out of it"
     );
 }
 
@@ -7625,13 +7620,13 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
         Some(AgentConfig {
             mcp: vec![
                 McpServer {
-                    id: "sentry".to_string(),
+                    path: ConnectionPath::Mcp("sentry".into()),
                     tools: None,
                     auth_failure: Default::default(),
                     approve: Default::default(),
                 },
                 McpServer {
-                    id: "aws".to_string(),
+                    path: ConnectionPath::Mcp("aws".into()),
                     tools: Some(McpTools {
                         defer: Some(true),
                         ..Default::default()
@@ -7681,7 +7676,11 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
     );
     let target = agg.state.tool_call("tc-2").unwrap().target.clone().unwrap();
     assert_eq!(
-        target.remote_name, "search_issues",
+        target,
+        ConnectorTarget::Remote {
+            path: ConnectionPath::Mcp("sentry".into()),
+            remote_name: "search_issues".into(),
+        },
         "a listed tool has two routes, and both work"
     );
 }
@@ -7703,7 +7702,7 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
                 defer: None,
             }],
             mcp: vec![McpServer {
-                id: "sentry".to_string(),
+                path: ConnectionPath::Mcp("sentry".into()),
                 tools: Some(McpTools {
                     defer: Some(true),
                     ..Default::default()
@@ -7776,7 +7775,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
                 announce_mcp: Default::default(),
                 plugins: Vec::new(),
                 mcp: vec![McpServer {
-                    id: "sentry".to_string(),
+                    path: ConnectionPath::Mcp("sentry".into()),
                     tools: None,
                     auth_failure: Default::default(),
                     approve: Default::default(),
@@ -7807,7 +7806,7 @@ fn a_connection_overrides_the_agents_default() {
             announce_mcp: Default::default(),
             plugins: Vec::new(),
             mcp: vec![McpServer {
-                id: "sentry".to_string(),
+                path: ConnectionPath::Mcp("sentry".into()),
                 tools: Some(McpTools {
                     defer: Some(false),
                     ..Default::default()
@@ -7843,7 +7842,7 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
         &mut agg,
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            "sentry".to_string(),
+            "mcp.sentry".to_string(),
             None,
             Outcome::Connector {
                 prefix: Some("sentry".to_string()),
@@ -7880,15 +7879,9 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
         message.contains("query"),
         "the message names the field: {message}"
     );
-    assert!(
-        agg.state
-            .tool_call("tc-1")
-            .unwrap()
-            .target
-            .as_ref()
-            .unwrap()
-            .remote_name
-            .is_empty(),
+    assert_eq!(
+        agg.state.tool_call("tc-1").unwrap().target,
+        Some(ConnectorTarget::Call),
         "the provider held no schema for the inner tool, so the engine stops the call"
     );
 }
@@ -8148,7 +8141,7 @@ fn a_deferred_connector_tool_carries_its_output_contract() {
         &mut agg,
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            "sentry".to_string(),
+            "mcp.sentry".to_string(),
             None,
             Outcome::Connector {
                 prefix: Some("sentry".to_string()),
@@ -8223,7 +8216,7 @@ fn a_call_beside_a_new_connector_waits_for_the_fetch_and_gets_its_tools() {
     );
     assert_eq!(
         super::schedule::waiting_on(&agg.state)[&(EffectKind::LlmCall, "call-1".to_string())],
-        vec!["connector_sync:sentry".to_string()]
+        vec!["connector_sync:mcp.sentry".to_string()]
     );
 
     let events = settle_sync(&mut agg, "sentry", &["search_issues"]);
@@ -8271,7 +8264,7 @@ fn a_dead_connection_dispatches_the_call_without_its_tools() {
         &mut agg,
         CommandPayload::settle(
             EffectKind::ConnectorSync,
-            "sentry".to_string(),
+            "mcp.sentry".to_string(),
             None,
             SettleError::new(ErrorInfo::internal("unreachable".to_string()), false).auth(None),
         ),
@@ -8477,7 +8470,7 @@ fn a_filter_change_re_derives_without_another_fetch() {
 
     let narrowed = AgentConfig {
         mcp: vec![McpServer {
-            id: "sentry".to_string(),
+            path: ConnectionPath::Mcp("sentry".into()),
             tools: Some(McpTools {
                 include: vec!["search_*".to_string()],
                 ..Default::default()
@@ -8517,7 +8510,7 @@ fn a_fork_keeps_the_offer_it_already_fetched() {
     let rewound = agg.state.clone().rewind(0, None);
     assert!(
         rewound
-            .tracking(EffectKind::ConnectorSync, "sentry")
+            .tracking(EffectKind::ConnectorSync, "mcp.sentry")
             .unwrap()
             .is_ready(),
         "a fork refetches nothing"
@@ -10891,7 +10884,10 @@ fn plugin_config() -> AgentConfig {
                 name: "form-filling".to_string(),
                 description: "Fill out PDF forms.".to_string(),
             }],
-            servers: vec!["pdf-renderer".to_string()],
+            servers: vec![ConnectionPath::PluginServer {
+                plugin: "pdf".into(),
+                server: "renderer".into(),
+            }],
             tools: None,
             auth_failure: Default::default(),
             approve: Default::default(),
@@ -10914,10 +10910,10 @@ fn a_declared_plugin_offers_the_skill_tool_and_fetches_its_servers() {
     );
     assert!(
         agg.state
-            .has_effect(EffectKind::ConnectorSync, "pdf-renderer"),
+            .has_effect(EffectKind::ConnectorSync, "plugin.pdf.mcp.renderer"),
         "naming a plugin is what turns it on"
     );
-    settle_sync(&mut agg, "pdf-renderer", &["fill_form"]);
+    settle_sync_at(&mut agg, "plugin.pdf.mcp.renderer", &["fill_form"]);
     assert!(
         held(&agg).contains(&"pdf_renderer__fill_form".to_string()),
         "the server's tools join under the derived id: {:?}",
@@ -10939,7 +10935,7 @@ fn using_a_skill_only_freezes_the_call() {
 fn the_catalog_rides_the_first_prompt_once() {
     let mut agg = plugin_session();
     // A call waits for the plugin's servers, so settle them first.
-    settle_sync(&mut agg, "pdf-renderer", &["fill_form"]);
+    settle_sync_at(&mut agg, "plugin.pdf.mcp.renderer", &["fill_form"]);
     let prompt = |agg: &mut SessionAggregate, id: &str| {
         dispatch(
             agg,
@@ -10984,7 +10980,7 @@ fn a_worker_adding_a_plugin_mid_session_wakes_its_servers() {
         create_session_with_config("sess-1", "tenant-a", "user-1", Some(agent_config("m1")));
     assert!(!agg
         .state
-        .has_effect(EffectKind::ConnectorSync, "pdf-renderer"));
+        .has_effect(EffectKind::ConnectorSync, "plugin.pdf.mcp.renderer"));
 
     let d = open_decision(&mut agg, "hi");
     let events = dispatch(
@@ -11001,7 +10997,7 @@ fn a_worker_adding_a_plugin_mid_session_wakes_its_servers() {
     );
     assert_eq!(
         sync_requests(&events),
-        ["pdf-renderer"],
+        ["pdf_renderer"],
         "the config write reads its own plugins"
     );
 }

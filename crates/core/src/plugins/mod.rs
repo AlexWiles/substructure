@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::connectors::registry::ConnectionSpec;
-use crate::protocol::{ConnectorProtocol, SkillMeta, OCTET_STREAM};
+use crate::protocol::{SkillMeta, OCTET_STREAM};
 use crate::runtime::blob::{BlobStore, NewBlob};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -23,7 +22,12 @@ pub struct PluginBundle {
     pub skills: Vec<Skill>,
     /// `mcp.json`'s remote servers, keyed by their name in the file.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub servers: BTreeMap<String, ConnectionSpec>,
+    pub servers: BTreeMap<String, BundleServer>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BundleServer {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -137,11 +141,6 @@ impl Loaded {
         }
         format!("{:x}", digest.finalize())
     }
-}
-
-/// The connection id of a plugin's server.
-pub fn server_id(plugin_id: &str, server_name: &str) -> String {
-    format!("{plugin_id}-{server_name}")
 }
 
 /// Read a plugin directory. A broken component gives a notice; only a broken
@@ -446,10 +445,7 @@ fn named_mime(path: &str) -> Option<&'static str> {
     Some(mime)
 }
 
-fn load_servers(
-    path: &Path,
-    notices: &mut Vec<String>,
-) -> Result<BTreeMap<String, ConnectionSpec>> {
+fn load_servers(path: &Path, notices: &mut Vec<String>) -> Result<BTreeMap<String, BundleServer>> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Ok(BTreeMap::new());
     };
@@ -466,23 +462,10 @@ fn load_servers(
                 if !server.headers.is_empty() {
                     notices.push(format!(
                         "mcp server `{name}` declares `headers`; static credentials are set \
-                         with `subs mcp set-token`, not carried in a plugin"
+                         with `subs auth`, not carried in a plugin"
                     ));
                 }
-                servers.insert(
-                    name,
-                    ConnectionSpec {
-                        url,
-                        protocol: ConnectorProtocol::Mcp,
-                        auth: None,
-                        header: None,
-                        credential: None,
-                        scopes: Vec::new(),
-                        client_id_env: None,
-                        client_secret_env: None,
-                        prefix_tools: true,
-                    },
-                );
+                servers.insert(name, BundleServer { url });
             }
             "stdio" => notices.push(format!(
                 "mcp server `{name}` is stdio; plugin code does not run here, so it was skipped"
@@ -552,6 +535,7 @@ fn strip_escapes(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::registry::ConnectionPath;
 
     fn write(root: &Path, rel: &str, content: &str) {
         let path = root.join(rel);
@@ -773,7 +757,11 @@ mod tests {
 
     #[test]
     fn server_ids_are_tool_prefix_safe() {
-        assert_eq!(server_id("pdf", "renderer"), "pdf-renderer");
-        crate::manifest::check_id(&server_id("pdf", "renderer")).unwrap();
+        let path = ConnectionPath::PluginServer {
+            plugin: "pdf".into(),
+            server: "renderer".into(),
+        };
+        assert_eq!(path.tool_prefix(), "pdf_renderer");
+        crate::manifest::check_id(&path.tool_prefix()).unwrap();
     }
 }

@@ -209,7 +209,7 @@ pub struct AgentSecret {
     pub signing_secret: String,
 }
 
-/// One declared `[llm.*]` block, as `subs llm list` reads it.
+/// One declared `[llm.*]` block, as `subs list` reads it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmBlockView {

@@ -34,46 +34,46 @@ and a server that wants no credential answers without a challenge.
 Write `auth` for the one thing that asking cannot answer — a static token — or
 to override a server whose discovery is broken.
 
-| `auth` | Means | Fill it with |
+| `auth` | Means | What `subs auth` does |
 | --- | --- | --- |
-| unset (default) | Ask the server. | `subs mcp login <id>`, if it wants one. |
-| `"token"` | A static token you hold. Nothing on the wire announces this. | `subs mcp set-token <id>` |
-| `"oauth"` | Use OAuth, whatever the server advertises. | `subs mcp login <id>` |
-| `"none"` | Send nothing, whatever the server says. | Nothing. |
+| unset (default) | Ask the server. | Asks, then opens a browser or says what to write. |
+| `"token"` | A static token you hold. Nothing on the wire announces this. | Takes the token. |
+| `"oauth"` | Use OAuth, whatever the server advertises. | Opens a browser for consent. |
+| `"none"` | Send nothing, whatever the server says. | Says there is nothing to do. |
 
 ## Authorize it
 
 ```sh
-subs mcp login sentry
-subs mcp set-token github
-subs mcp list
+subs auth mcp.sentry
+subs auth mcp.github
+subs list
 ```
 
-You type a token at a prompt, pipe it in, or name a variable that holds it — the
-same three ways that `subs llm set-key` takes a key. A token never appears in
-the command line.
+One verb for every kind. `subs auth` reads what the connection declares and does
+what that needs — consent in a browser, or a token you type at a prompt, pipe
+in, or name a variable for. A token never appears in the command line.
 
 ```sh
-subs mcp set-token github --env GITHUB_TOKEN
-gh auth token | subs mcp set-token github
+subs auth mcp.github --env GITHUB_TOKEN
+gh auth token | subs auth mcp.github
 ```
 
-`subs mcp logout <id>` empties a connection's credentials — every holder's —
+`subs revoke <path>` empties a connection's credentials — every holder's —
 but keeps the declaration. If you delete the `[mcp.<id>]` section instead, the
 engine disconnects the connection for good, and its credentials go with it.
 
-The credential belongs to the ID. Declare one server twice to connect two
-accounts. Authorize each ID on its own.
+The credential belongs to the path. Declare one server twice to connect two
+accounts. Authorize each path on its own.
 
 ```toml title="substructure.toml"
 [mcp.sentry]
-url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry
+url = "https://mcp.sentry.dev/mcp"       # subs auth mcp.sentry
 
 [mcp.sentry2]
-url = "https://mcp.sentry.dev/mcp"       # subs mcp login sentry2
+url = "https://mcp.sentry.dev/mcp"       # subs auth mcp.sentry2
 ```
 
-An agent with both sees `sentry__` and `sentry2__` tools.
+An agent names them by path, and sees `sentry__` and `sentry2__` tools.
 
 ## What it asks for
 
@@ -112,7 +112,7 @@ The redirect URI that you register differs by what runs the flow. An engine uses
 `<base_url>/mcp/callback`, one address that every connection shares. The CLI
 binds a fresh loopback port on every run, so register the CLI as a native or
 desktop client, which does not match on the port. If a server issues no client
-and the file names none, `subs mcp login` prints the URI that it bound.
+and the file names none, `subs auth` prints the URI that it bound.
 
 ## Where the credential lives
 
@@ -131,7 +131,7 @@ With a `[remote]`, authorizing takes two steps.
   `[mcp.<id>]` in the file.
 - **Authorizing** is the consent.
 
-`subs mcp login` and `subs mcp set-token` each do both. A declared connection
+`subs auth` and `subs auth` each do both. A declared connection
 reaches nothing until it holds a credential.
 
 If you change `auth` on a connection that already holds a credential, the engine
@@ -152,19 +152,31 @@ Some deployments allow only the URLs in their own catalog. The error lists them.
 
 ## Give it to an agent
 
-An agent names a connection by ID. An ID on its own gives the agent every tool
-that the connection offers. To take fewer, use the table form.
+An agent names a connection by its path — where the connection is declared. A
+path on its own gives the agent every tool that the connection offers. To take
+fewer, use the table form.
 
 ```toml title="substructure.toml"
 [agent.support]
-mcp = ["sentry"]
+mcp = ["mcp.sentry"]
 
 [agent.triage]
-mcp = [{ id = "sentry", tools = { read_only = true } }]
+mcp = [{ id = "mcp.sentry", tools = { read_only = true } }]
 ```
 
 The filter belongs to the agent. These two agents share one connection and one
 credential, and see different tools.
+
+A plugin's server has a path like any other, so an agent can take one of them
+without the rest of the bundle.
+
+```toml title="substructure.toml"
+[agent.searcher]
+mcp = ["plugin.reggu.mcp.code"]
+```
+
+Name it once: a server granted this way and through `plugins = ["reggu"]` would
+carry two policies, and that is an error rather than a winner.
 
 A worker declares the same thing in the config it returns.
 
@@ -209,7 +221,7 @@ whether the engine announces at all.
 
 ```toml title="substructure.toml"
 [agent.support]
-mcp = ["sentry"]
+mcp = ["mcp.sentry"]
 announce_mcp = "never"
 ```
 
@@ -264,7 +276,7 @@ and ask a person first.
 
 ```toml title="substructure.toml"
 [agent.support]
-mcp = [{ id = "sentry", approve = "destructive" }]
+mcp = [{ id = "mcp.sentry", approve = "destructive" }]
 ```
 
 | `approve` | Asks about |
@@ -363,7 +375,7 @@ and the model searches for a tool instead of reading a list of tools.
 
 ```toml title="substructure.toml"
 [agent.support]
-mcp = [{ id = "aws", tools = { defer = true } }]
+mcp = [{ id = "mcp.aws", tools = { defer = true } }]
 ```
 
 `defer_tools` defers every tool of an agent. A connection overrides it.
@@ -372,8 +384,8 @@ mcp = [{ id = "aws", tools = { defer = true } }]
 [agent.support]
 defer_tools = true
 mcp = [
-  "aws",                                         # deferred, from the agent
-  { id = "sentry", tools = { defer = false } },  # this one is listed
+  "mcp.aws",                                        # deferred, from the agent
+  { id = "mcp.sentry", tools = { defer = false } }, # this one is listed
 ]
 ```
 
@@ -446,7 +458,7 @@ If that fails, a person must act. There are three cases.
 | --- | --- |
 | Nothing stored | Authorize the connection. |
 | A grant the server refuses | Authorize it again. |
-| A static token the server refuses | Set a new one with `subs mcp set-token`. |
+| A static token the server refuses | Set a new one with `subs auth`. |
 
 The session then stops and asks. In Slack the bot posts the question in the
 thread with a link, and a `Retry` button that fetches the tools again after a
@@ -460,10 +472,10 @@ that names the connection.
 
 ```toml title="substructure.toml"
 [agent.support]
-mcp = ["sentry"]                                       # stops and asks
+mcp = ["mcp.sentry"]                                       # stops and asks
 
 [agent.digest]
-mcp = [{ id = "sentry", auth_failure = "degrade" }]    # runs without it
+mcp = [{ id = "mcp.sentry", auth_failure = "degrade" }]    # runs without it
 ```
 
 Use `degrade` for an agent that runs on a schedule, or anywhere no person is

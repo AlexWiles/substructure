@@ -1502,7 +1502,7 @@ mod tests {
             description: String::new(),
             input: None,
             output: None,
-            connector: "sentry".to_string(),
+            connector: Some(crate::protocol::ConnectionPath::Mcp("sentry".into())),
             via: Default::default(),
             remote_name: name.to_string(),
             kind: ConnectorToolKind::Remote,

@@ -1,3 +1,3 @@
 node_modules
-# The engine's database, which holds what `subs mcp login` authorized.
+# The engine's database, which holds what `subs auth` authorized.
 *.db*

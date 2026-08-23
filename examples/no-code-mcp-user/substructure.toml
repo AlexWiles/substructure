@@ -7,7 +7,7 @@ type = "anthropic"
 llm = "claude"
 model = "claude-haiku-4-5-20251001"
 system = "You are a careful assistant. When asked about the connected account, call the whoami tool and repeat its answer exactly."
-mcp = ["mail"]
+mcp = ["mcp.mail"]
 
 [run]
 agent = "assistant"

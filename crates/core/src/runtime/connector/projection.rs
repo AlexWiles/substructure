@@ -10,7 +10,7 @@ use crate::runtime::processor::{
     ProcessorError,
 };
 use crate::runtime::session::decision::ToolHandler;
-use crate::runtime::session::events::EventPayload;
+use crate::runtime::session::events::{ConnectorTarget, EventPayload};
 use crate::runtime::session::SessionEvent;
 
 use super::ConnectorTask;
@@ -43,7 +43,7 @@ impl EventProcessor for ConnectorDispatchProjection {
                     source_event_id: event.id,
                     session_id: event.session_id.clone(),
                     tenant_id: event.tenant_id.clone(),
-                    connection_id: req.id.clone(),
+                    connection_id: req.path.clone(),
                     requester: Requester::of_owner(session.state.owner.as_ref()),
                     attempt: req.attempt,
                     span: event.span,
@@ -74,16 +74,16 @@ impl EventProcessor for ConnectorDispatchProjection {
                         tc.name
                     )));
                 };
-                if target.kind.is_remote() {
+                if let ConnectorTarget::Remote { path, remote_name } = target {
                     ConnectorTask::CallTool {
                         source_event_id: event.id,
                         session_id: event.session_id.clone(),
                         tenant_id: event.tenant_id.clone(),
                         tool_call_id: d.id.clone(),
                         attempt: d.attempt,
-                        connection_id: target.connector.clone(),
+                        connection_id: path.clone(),
                         requester: Requester::of_owner(session.state.owner.as_ref()),
-                        remote_name: target.remote_name.clone(),
+                        remote_name: remote_name.clone(),
                         // The recorded arguments are the tool's own: a `call_tool`
                         // was unwrapped into the real call before it was
                         // recorded.

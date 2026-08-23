@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::connectors::credential::{Credential, CredentialStore};
-use crate::connectors::registry::{ConnectionSpec, Connections};
+use crate::connectors::registry::{ConnectionPath, ConnectionSpec, Connections};
 use crate::connectors::{oauth, Requester, Slot};
 use crate::providers::sqlite::{Flow, Link, SqliteAuthFlows, SqliteCredentialStore};
 use crate::runtime::secret::{SecretRef, SecretStore};
@@ -48,14 +48,14 @@ fn hash(value: &str) -> String {
 pub struct AuthorizeLinks {
     base_url: String,
     flows: Arc<SqliteAuthFlows>,
-    connections: std::collections::BTreeMap<String, ConnectionSpec>,
+    connections: std::collections::BTreeMap<ConnectionPath, ConnectionSpec>,
 }
 
 impl AuthorizeLinks {
     pub fn new(
         base_url: &str,
         flows: Arc<SqliteAuthFlows>,
-        connections: std::collections::BTreeMap<String, ConnectionSpec>,
+        connections: std::collections::BTreeMap<ConnectionPath, ConnectionSpec>,
     ) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -65,7 +65,7 @@ impl AuthorizeLinks {
     }
 
     pub fn spec(&self, connection_id: &str) -> Option<&ConnectionSpec> {
-        self.connections.get(connection_id)
+        self.connections.get(&ConnectionPath::parse(connection_id)?)
     }
 
     /// Where every flow's redirect lands.
@@ -82,7 +82,7 @@ impl AuthorizeLinks {
         requester: &Requester,
         now: DateTime<Utc>,
     ) -> Result<Option<String>, String> {
-        let Some(spec) = self.connections.get(connection_id) else {
+        let Some(spec) = self.spec(connection_id) else {
             return Ok(None);
         };
         let Ok(subject) = Connections::slot_for(connection_id, spec, requester) else {
@@ -100,7 +100,7 @@ impl AuthorizeLinks {
         subject: Slot,
         now: DateTime<Utc>,
     ) -> Result<Option<String>, String> {
-        if !self.connections.contains_key(connection_id) {
+        if self.spec(connection_id).is_none() {
             return Ok(None);
         }
         let mut raw = [0u8; 32];
@@ -177,7 +177,7 @@ async fn begin(deps: &McpAuthDeps, token: &str) -> Result<String, String> {
         .ok_or(SPENT)?;
     let spec = deps.links.spec(&link.connection_id).ok_or(SPENT)?;
 
-    let discovered = oauth::discover(&deps.http, &spec.url)
+    let discovered = oauth::discover(&deps.http, &spec.decl.url)
         .await
         .map_err(|e| format!("discovery failed for `{}`: {e}", link.connection_id))?;
     let redirect_uri = deps.links.callback_url();
@@ -193,7 +193,7 @@ async fn begin(deps: &McpAuthDeps, token: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?,
     };
-    let pending = oauth::authorize(&discovered, &client, &redirect_uri, &spec.scopes)
+    let pending = oauth::authorize(&discovered, &client, &redirect_uri, &spec.decl.scopes)
         .map_err(|e| e.to_string())?;
 
     let held = PendingFlow {
@@ -339,14 +339,14 @@ pub fn spawn_sweeper(
 mod tests {
     use super::*;
     use crate::connectors::registry::CredentialScope;
-    use crate::protocol::{ConnectorProtocol, Visibility};
+    use crate::connectors::registry::{ConnectionDecl, ConnectionPath};
+    use crate::protocol::Visibility;
     use crate::protocol::{Issuer, Subject};
     use crate::providers::sqlite::SqliteDb;
 
     fn spec(credential: Option<CredentialScope>) -> ConnectionSpec {
-        ConnectionSpec {
+        ConnectionDecl {
             url: "https://mcp.gmail.test/mcp".into(),
-            protocol: ConnectorProtocol::Mcp,
             auth: None,
             header: None,
             credential,
@@ -355,6 +355,10 @@ mod tests {
             client_secret_env: None,
             prefix_tools: true,
         }
+        .at(
+            ConnectionPath::Mcp("gmail".into()),
+            crate::protocol::ConnectorProtocol::Mcp,
+        )
     }
 
     fn links(
@@ -367,7 +371,7 @@ mod tests {
         let links = AuthorizeLinks::new(
             "https://agent.test/",
             flows.clone(),
-            [("gmail".to_string(), spec(credential))].into(),
+            [(ConnectionPath::Mcp("gmail".into()), spec(credential))].into(),
         );
         (links, flows, path)
     }
@@ -390,7 +394,7 @@ mod tests {
         let url = links
             .mint_for(
                 "default",
-                "gmail",
+                "mcp.gmail",
                 &Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Visibility::Private),
                 now,
             )
@@ -408,7 +412,7 @@ mod tests {
             link.subject,
             Slot::Of(Subject::new(Issuer::slack(), "T1:U1".to_string()))
         );
-        assert_eq!(link.connection_id, "gmail");
+        assert_eq!(link.connection_id, "mcp.gmail");
         assert_eq!(link.tenant_id, "default");
         cleanup(&path);
     }
@@ -422,7 +426,7 @@ mod tests {
             Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Visibility::Shared),
         ] {
             assert!(links
-                .mint_for("default", "gmail", &refused, Utc::now())
+                .mint_for("default", "mcp.gmail", &refused, Utc::now())
                 .await
                 .unwrap()
                 .is_none());
@@ -436,7 +440,7 @@ mod tests {
         let (links, flows, path) = links(None);
         let now = Utc::now();
         let url = links
-            .mint_for("default", "gmail", &Requester::machine(), now)
+            .mint_for("default", "mcp.gmail", &Requester::machine(), now)
             .await
             .unwrap()
             .expect("a shared connection has a slot for anybody");
@@ -466,12 +470,12 @@ mod tests {
         let (links, _, path) = links(None);
         let now = Utc::now();
         let one = links
-            .mint_for("default", "gmail", &Requester::machine(), now)
+            .mint_for("default", "mcp.gmail", &Requester::machine(), now)
             .await
             .unwrap()
             .unwrap();
         let two = links
-            .mint_for("default", "gmail", &Requester::machine(), now)
+            .mint_for("default", "mcp.gmail", &Requester::machine(), now)
             .await
             .unwrap()
             .unwrap();

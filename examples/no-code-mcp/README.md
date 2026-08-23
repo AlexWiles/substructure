@@ -22,7 +22,7 @@ Deploy the file and give it a key:
 ```sh
 subs login
 subs apply
-subs llm set-key openrouter
+subs auth llm.openrouter
 ```
 
 ```sh
@@ -67,7 +67,7 @@ url = "https://mcp.sentry.dev/mcp"
 ```
 
 ```sh
-subs mcp login sentry
+subs auth mcp.sentry
 ```
 
 The file holds the id and the URL. The credential goes where the engine runs.

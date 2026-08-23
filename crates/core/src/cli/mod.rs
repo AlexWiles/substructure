@@ -1,9 +1,10 @@
 pub mod auth;
+pub mod authorize;
 pub mod cloud;
+pub mod connections;
 pub mod doctor;
 pub mod env;
 pub mod local;
-pub mod mcp;
 mod pretty;
 pub mod run;
 pub mod run_remote;
@@ -34,7 +35,6 @@ pub fn project_log_filter(config: Option<&std::path::Path>) -> Option<String> {
 pub(crate) const DEFAULT_TENANT: &str = "default";
 
 /// The one person at an installation nothing authenticates. `subs run` acts
-/// as this, and `subs mcp login` fills its slot. Prefixed so it cannot
 /// collide with a subject an identity source issues.
 pub(crate) const LOCAL_SUBJECT: &str = "local";
 
@@ -106,12 +106,6 @@ pub enum Command {
         #[command(subcommand)]
         command: cloud::agents::AgentsCommand,
     },
-    /// Bind the keys behind a project's `[llm.*]` blocks.
-    #[command(after_help = GLOBAL_FLAGS_HELP)]
-    Llm {
-        #[command(subcommand)]
-        command: cloud::llm::LlmCommand,
-    },
     /// Manage API keys for a project.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Keys {
@@ -147,11 +141,18 @@ pub enum Command {
         #[command(subcommand)]
         command: cloud::apply::ConfigCommand,
     },
-    /// Authorize the MCP connections this project declares.
-    Mcp {
-        #[command(subcommand)]
-        command: mcp::McpCommand,
-    },
+    /// Give a path what it needs to work: a consent, a token, or a key —
+    /// whichever the file says. `mcp.sentry`, `plugin.reggu.mcp.code`,
+    /// `llm.openrouter`.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Auth(authorize::AuthCommand),
+    /// Forget what a path holds. Every holder's, whichever way it was obtained.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Revoke(authorize::RevokeCommand),
+    /// Show every connection and `[llm.*]` block this project declares, and
+    /// whether each one holds what it needs.
+    #[command(name = "list", visible_alias = "ls", after_help = GLOBAL_FLAGS_HELP)]
+    List(authorize::ListCommand),
     /// Connect a Slack workspace to the deployment that answers for it.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Slack {
@@ -186,7 +187,6 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         Command::Orgs { command } => cloud::orgs::run(command).await,
         Command::Projects { command } => cloud::projects::run(command).await,
         Command::Agents { command } => cloud::agents::run(command).await,
-        Command::Llm { command } => cloud::llm::run(command).await,
         Command::Keys { command } => cloud::keys::run(command).await,
         Command::Sessions { command } => sessions::run(command).await,
         Command::Open {
@@ -197,7 +197,9 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         Command::Link(cmd) => cloud::link::run(cmd).await,
         Command::Apply(cmd) => cloud::apply::run(cmd).await,
         Command::Config { command } => cloud::apply::config(command).await,
-        Command::Mcp { command } => mcp::run(command).await,
+        Command::Auth(cmd) => authorize::auth(cmd).await,
+        Command::Revoke(cmd) => authorize::revoke(cmd).await,
+        Command::List(cmd) => authorize::list(cmd).await,
         Command::Slack { command } => cloud::slack::run(command).await,
         Command::Doctor { scope } => doctor::run(scope).await,
     }
@@ -208,7 +210,6 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
 // users pass on the command line.
 fn command_path(cmd: &Command) -> &'static str {
     use cloud::agents::AgentsCommand;
-    use cloud::llm::LlmCommand;
     use cloud::{keys::KeysCommand, orgs::OrgsCommand, projects::ProjectsCommand};
     use sessions::SessionsCommand;
     match cmd {
@@ -223,12 +224,9 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Config { command } => match command {
             cloud::apply::ConfigCommand::Log { .. } => "config log",
         },
-        Command::Mcp { command } => match command {
-            mcp::McpCommand::Login { .. } => "mcp login",
-            mcp::McpCommand::SetToken { .. } => "mcp set-token",
-            mcp::McpCommand::Logout { .. } => "mcp logout",
-            mcp::McpCommand::List { .. } => "mcp list",
-        },
+        Command::Auth(_) => "auth",
+        Command::Revoke(_) => "revoke",
+        Command::List(_) => "list",
         Command::Slack { command } => match command {
             cloud::slack::SlackCommand::Connect { .. } => "slack connect",
         },
@@ -246,11 +244,6 @@ fn command_path(cmd: &Command) -> &'static str {
             AgentsCommand::Show { .. } => "agents show",
             AgentsCommand::Secret { .. } => "agents secret",
             AgentsCommand::RotateSecret { .. } => "agents rotate-secret",
-        },
-        Command::Llm { command } => match command {
-            LlmCommand::List { .. } => "llm list",
-            LlmCommand::SetKey { .. } => "llm set-key",
-            LlmCommand::DeleteKey { .. } => "llm delete-key",
         },
         Command::Keys { command } => match command {
             KeysCommand::List { .. } => "keys list",

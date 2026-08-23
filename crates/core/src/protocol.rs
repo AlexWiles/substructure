@@ -12,6 +12,84 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Where a connection is declared, which is what a file, the CLI, and the wire
+/// name it by.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ConnectionPath {
+    Mcp(String),
+    PluginServer { plugin: String, server: String },
+}
+
+impl ConnectionPath {
+    pub fn parse(path: &str) -> Option<Self> {
+        if let Some(id) = path.strip_prefix("mcp.") {
+            return (!id.is_empty() && !id.contains('.')).then(|| Self::Mcp(id.to_string()));
+        }
+        let rest = path.strip_prefix("plugin.")?;
+        let (plugin, server) = rest.split_once(".mcp.")?;
+        let named = !plugin.is_empty() && !server.is_empty();
+        let flat = !plugin.contains('.') && !server.contains('.');
+        (named && flat).then(|| Self::PluginServer {
+            plugin: plugin.to_string(),
+            server: server.to_string(),
+        })
+    }
+
+    /// The model-facing prefix. Anything a provider would reject in a tool
+    /// name is flattened to `_`, here rather than where names are built, so
+    /// validation and expansion cannot disagree about a collision.
+    pub fn tool_prefix(&self) -> String {
+        let raw = match self {
+            Self::Mcp(id) => id.clone(),
+            Self::PluginServer { plugin, server } => format!("{plugin}_{server}"),
+        };
+        raw.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    }
+}
+
+impl Serialize for ConnectionPath {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConnectionPath {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let written = String::deserialize(d)?;
+        Self::parse(&written).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "`{written}` is not a connection path: `mcp.<id>` or `plugin.<id>.mcp.<server>`"
+            ))
+        })
+    }
+}
+
+impl JsonSchema for ConnectionPath {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConnectionPath".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = <String as JsonSchema>::json_schema(generator);
+        schema.insert(
+            "description".to_string(),
+            "Where a connection is declared: `mcp.<id>` or `plugin.<id>.mcp.<server>`".into(),
+        );
+        schema
+    }
+}
+
+impl std::fmt::Display for ConnectionPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mcp(id) => write!(f, "mcp.{id}"),
+            Self::PluginServer { plugin, server } => write!(f, "plugin.{plugin}.mcp.{server}"),
+        }
+    }
+}
+
 /// `Decimal` serializes as a string (`rust_decimal` default); pin the schema
 /// to match instead of schemars' string-or-number union.
 fn decimal_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -969,7 +1047,10 @@ pub struct ConnectorTool {
     pub input: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
-    pub connector: String,
+    /// The connection this tool dials. `None` for the engine's own tools,
+    /// which reach no connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<ConnectionPath>,
     /// The protocol of the connection, not of this tool: the engine's own tools
     /// carry `Mcp` whether or not they dial it.
     pub via: ConnectorProtocol,
@@ -1019,14 +1100,14 @@ pub enum ConnectorProtocol {
     Mcp,
 }
 
-/// An MCP server the agent draws tools from. `id` resolves against the engine's
-/// connection registry — locally from `[mcp]` in `substructure.toml`, in the
+/// An MCP server the agent draws tools from. `path` resolves against the
+/// engine's connection registry — locally from `substructure.toml`, in the
 /// cloud from the connections an admin granted this app. The worker never names
 /// a URL or a credential.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "McpServer")]
 pub struct McpServer {
-    pub id: String,
+    pub path: ConnectionPath,
     /// Narrows what the model sees. Absent ⇒ every tool the connection grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
@@ -1115,9 +1196,9 @@ pub struct AgentPlugin {
     pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillMeta>,
-    /// Connection-registry ids of this plugin's servers.
+    /// Where each of this plugin's servers is declared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub servers: Vec<String>,
+    pub servers: Vec<ConnectionPath>,
     /// Applied to each of the plugin's servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
@@ -1129,9 +1210,9 @@ pub struct AgentPlugin {
 
 impl AgentPlugin {
     /// One of the plugin's servers, with the plugin's policy on it.
-    pub fn server(&self, id: &str) -> McpServer {
+    pub fn server(&self, path: &ConnectionPath) -> McpServer {
         McpServer {
-            id: id.to_string(),
+            path: path.clone(),
             tools: self.tools.clone(),
             auth_failure: self.auth_failure,
             approve: self.approve,
@@ -2207,7 +2288,7 @@ pub enum DecisionAction {
     /// Fetch a connection's tools again, after a person replaced its
     /// credential.
     #[serde(rename = "connector.sync")]
-    SyncConnector { id: String },
+    SyncConnector { path: ConnectionPath },
     #[serde(rename = "done")]
     Done {
         #[serde(default)]

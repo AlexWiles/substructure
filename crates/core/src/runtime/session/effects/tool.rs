@@ -17,6 +17,7 @@
 //! the tool failing, not the model.
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
+use crate::connectors::registry::ConnectionPath;
 use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo, StoredResult};
 use crate::protocol::{RetryOverride, RetryPolicy};
 use crate::runtime::session::command::SessionError;
@@ -99,7 +100,7 @@ impl KindSpec for ToolSpec {
         })];
         if let (Some(auth), Some(target)) = (e.auth, connector_target(state, id)) {
             events.push(EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
-                id: target,
+                path: target,
                 auth,
             }));
         }
@@ -155,11 +156,14 @@ fn name_of(state: &SessionState, id: &str) -> String {
         .unwrap_or_default()
 }
 
-fn connector_target(state: &SessionState, id: &str) -> Option<String> {
+fn connector_target(state: &SessionState, id: &str) -> Option<ConnectionPath> {
     state
         .tool_call(id)
         .and_then(|t| t.target.as_ref())
-        .map(|t| t.connector.clone())
+        .and_then(|t| match t {
+            ConnectorTarget::Remote { path, .. } => Some(path.clone()),
+            _ => None,
+        })
 }
 
 /// A tool result: record it and queue `tool.finished`. Also the client-view
@@ -206,23 +210,22 @@ pub(in crate::runtime::session) fn request(
         Some(tool) if tool.kind == ConnectorToolKind::Skill => {
             let named = argument(&arguments, "name").unwrap_or_default();
             let (plugin, skill) = crate::runtime::session::engine_tools::split_skill(&named);
-            let target = ConnectorTarget {
-                connector: plugin.to_string(),
-                remote_name: skill.to_string(),
-                kind: tool.kind,
+            let target = ConnectorTarget::Skill {
+                plugin: plugin.to_string(),
+                skill: skill.to_string(),
             };
             (name, arguments, ToolHandler::Server, Some(target))
         }
-        Some(tool) => (
-            name,
-            arguments,
-            ToolHandler::Server,
-            Some(ConnectorTarget {
-                connector: tool.connector,
-                remote_name: tool.remote_name,
-                kind: tool.kind,
-            }),
-        ),
+        Some(tool) => {
+            let target = match tool.connector {
+                Some(path) => ConnectorTarget::Remote {
+                    path,
+                    remote_name: tool.remote_name,
+                },
+                None => ConnectorTarget::Find,
+            };
+            (name, arguments, ToolHandler::Server, Some(target))
+        }
         None => (name.clone(), arguments, state.tool_handler_for(&name), None),
     };
     // Resolved here, not at the seam: the default follows the handler, and a
@@ -275,25 +278,28 @@ fn unwrap_call(
             name,
             arguments,
             ToolHandler::Server,
-            Some(ConnectorTarget {
-                connector: String::new(),
-                remote_name: String::new(),
-                kind: ConnectorToolKind::Call,
-            }),
+            Some(ConnectorTarget::Call),
         );
     };
     let inner = inner_arguments(&serde_json::from_str(&arguments).unwrap_or_default());
     match target {
-        CallTarget::Connector(tool) => (
-            tool.name.clone(),
-            inner,
-            ToolHandler::Server,
-            Some(ConnectorTarget {
-                connector: tool.connector,
-                remote_name: tool.remote_name,
-                kind: ConnectorToolKind::Remote,
-            }),
-        ),
+        CallTarget::Connector(tool) => match tool.connector {
+            Some(path) => (
+                tool.name.clone(),
+                inner,
+                ToolHandler::Server,
+                Some(ConnectorTarget::Remote {
+                    path,
+                    remote_name: tool.remote_name,
+                }),
+            ),
+            None => (
+                name,
+                arguments,
+                ToolHandler::Server,
+                Some(ConnectorTarget::Call),
+            ),
+        },
         CallTarget::Declared(tool) => (tool.name, inner, ToolHandler::declared(tool.handler), None),
     }
 }

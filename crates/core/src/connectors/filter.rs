@@ -17,8 +17,8 @@ use std::num::NonZeroUsize;
 
 use crate::connectors::RemoteTool;
 use crate::protocol::{
-    Approve, ConnectorProtocol, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, LlmTool,
-    McpServer, McpTools,
+    Approve, ConnectionPath, ConnectorProtocol, ConnectorTool, ConnectorToolKind,
+    DeferToolsStrategy, LlmTool, McpServer, McpTools,
 };
 
 /// Separates the connector id from the tool's own name. Doubled because both
@@ -99,7 +99,7 @@ pub fn resolve(
         // A deferred name never reaches the request, so no provider's name
         // limit applies to it.
         match expand(
-            &connector.id,
+            &connector.path,
             tool,
             prefix,
             defer,
@@ -208,7 +208,7 @@ fn engine_tool(
         description,
         input: Some(input),
         output: None,
-        connector: String::new(),
+        connector: None,
         via: ConnectorProtocol::Mcp,
         remote_name: String::new(),
         kind,
@@ -422,7 +422,7 @@ pub fn merge<'a>(
 /// would risk two tools collapsing onto one name, which is worse than the
 /// connector being one tool short and saying so.
 fn expand(
-    connector_id: &str,
+    path: &ConnectionPath,
     tool: &RemoteTool,
     prefix: Option<&str>,
     defer: bool,
@@ -440,7 +440,7 @@ fn expand(
         description: tool.description.clone(),
         input: tool.input.clone(),
         output: tool.output.clone(),
-        connector: connector_id.to_string(),
+        connector: Some(path.clone()),
         via: ConnectorProtocol::Mcp,
         remote_name: tool.name.clone(),
         kind: ConnectorToolKind::Remote,
@@ -526,6 +526,7 @@ fn glob_match(pattern: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::registry::ConnectionPath;
     use crate::connectors::ToolAnnotations;
 
     fn tool(name: &str, annotations: ToolAnnotations) -> RemoteTool {
@@ -566,7 +567,7 @@ mod tests {
 
     fn connector(id: &str, tools: Option<McpTools>) -> McpServer {
         McpServer {
-            id: id.to_string(),
+            path: ConnectionPath::Mcp(id.to_string()),
             tools,
             auth_failure: Default::default(),
             approve: Default::default(),
@@ -610,7 +611,10 @@ mod tests {
             false,
         );
         assert_eq!(r.tools[0].remote_name, "search_issues");
-        assert_eq!(r.tools[0].connector, "sentry");
+        assert_eq!(
+            r.tools[0].connector,
+            Some(ConnectionPath::Mcp("sentry".into()))
+        );
         assert_eq!(r.tools[0].name, "sentry__search_issues");
     }
 
@@ -780,7 +784,8 @@ mod tests {
         let r = resolve(&connector("sentry", None), &offered, None, false);
         assert_eq!(names(&r), vec!["search_issues"]);
         assert_eq!(
-            r.tools[0].connector, "sentry",
+            r.tools[0].connector,
+            Some(ConnectionPath::Mcp("sentry".into())),
             "provenance survives even when the name does not carry it"
         );
         assert_eq!(r.tools[0].remote_name, "search_issues");
@@ -1066,7 +1071,7 @@ mod tests {
             !tools[0].description.contains("sentry"),
             "no connection reaches a definition, so adding one cannot rewrite it"
         );
-        assert!(tools.iter().all(|t| t.connector.is_empty()));
+        assert!(tools.iter().all(|t| t.connector.is_none()));
     }
 
     #[test]

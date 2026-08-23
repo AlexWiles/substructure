@@ -57,6 +57,7 @@ use super::decision::Trigger;
 use super::state::{
     EffectKind, EffectPayload, EffectTracking, QueueEntry, SessionState, SessionStatus,
 };
+use crate::connectors::registry::ConnectionPath;
 use crate::protocol::EffectStatus;
 
 /// One unmet prerequisite of a queue entry — an edge of the dependency graph,
@@ -66,7 +67,7 @@ use crate::protocol::EffectStatus;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dep {
     /// A connection's fetch must settle (completed or terminally failed).
-    ConnectorSettled { connection_id: String },
+    ConnectorSettled { connection_id: ConnectionPath },
     /// Another decision must settle first: the live slot, or the
     /// `session.start` prerequisite.
     DecisionSettled { decision_id: String },
@@ -96,7 +97,7 @@ impl Dep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduleStep {
     /// Fetch a connection's tool list — a prerequisite the config in force owes.
-    RequestFetch { connection_id: String },
+    RequestFetch { connection_id: ConnectionPath },
     /// Start the queued entry.
     Dispatch { kind: EffectKind, id: String },
     /// A queue entry naming work that no longer exists. Voiding it lets the
@@ -538,7 +539,7 @@ mod tests {
             tools: Vec::new(),
             sub_agents: Vec::new(),
             mcp: vec![McpServer {
-                id: connection.to_string(),
+                path: ConnectionPath::Mcp(connection.to_string()),
                 tools: None,
                 auth_failure: Default::default(),
                 approve: Default::default(),
@@ -591,7 +592,7 @@ mod tests {
         // call ahead of the tool call cannot start, so neither does the tool.
         set_config(&mut s, config_with_mcp("conn-1"));
         s.put_effect(EffectState::new(
-            "conn-1",
+            "mcp.conn-1",
             tracking(EffectStatus::Pending),
             EffectPayload::ConnectorSync(ConnectorSyncState {
                 tools: vec![],
@@ -609,7 +610,7 @@ mod tests {
         assert_eq!(plan(&s, epoch()), vec![], "strict head of line");
         assert_eq!(
             waiting_on(&s)[&(EffectKind::LlmCall, "call-1".to_string())],
-            vec!["connector_sync:conn-1".to_string()],
+            vec!["connector_sync:mcp.conn-1".to_string()],
             "the head names its own dep"
         );
         assert_eq!(
@@ -629,7 +630,7 @@ mod tests {
         assert_eq!(
             plan(&s, epoch()),
             vec![ScheduleStep::RequestFetch {
-                connection_id: "conn-1".to_string()
+                connection_id: ConnectionPath::Mcp("conn-1".into())
             }],
             "a prerequisite cannot queue behind its dependent"
         );

@@ -2,6 +2,7 @@
 //! the interrupt re-fetches the tools with the new credential.
 
 use super::InterruptKind;
+use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{AuthNeed, Requester};
 use crate::protocol::{AuthFailure, DecisionAction};
 use crate::runtime::session::state::SessionState;
@@ -13,7 +14,7 @@ pub const PREFIX: &str = "mcp-auth:";
 /// log holds none.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Authorize {
-    pub connection: String,
+    pub connection: ConnectionPath,
     pub requester: Requester,
 }
 
@@ -25,29 +26,29 @@ impl InterruptKind for Auth {
     }
 
     fn on_resolved(&self, tail: &str) -> Vec<DecisionAction> {
-        vec![DecisionAction::SyncConnector {
-            id: tail.to_string(),
-        }]
+        ConnectionPath::parse(tail)
+            .map(|path| vec![DecisionAction::SyncConnector { path }])
+            .unwrap_or_default()
     }
 }
 
 /// Derived from the connection, so a redelivery keeps one prompt.
-pub fn interrupt_id(connection: &str) -> String {
+pub fn interrupt_id(connection: &ConnectionPath) -> String {
     format!("{PREFIX}{connection}")
 }
 
 /// The first connection that needs a person and has not been asked about.
-pub fn needing(state: &SessionState) -> Option<(String, AuthNeed)> {
+pub fn needing(state: &SessionState) -> Option<(ConnectionPath, AuthNeed)> {
     let leaf = state.head_id.clone();
     let config = state.resolve_agent_for(leaf.as_deref())?;
     state.servers_for(&config).into_iter().find_map(|server| {
         if server.auth_failure == AuthFailure::Degrade {
             return None;
         }
-        let need = state.connector_sync(&server.id)?.auth?;
+        let need = state.connector_sync(&server.path)?.auth?;
         state
-            .open_interrupt(&interrupt_id(&server.id))
+            .open_interrupt(&interrupt_id(&server.path))
             .is_none()
-            .then(|| (server.id.clone(), need))
+            .then(|| (server.path.clone(), need))
     })
 }

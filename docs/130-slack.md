@@ -153,7 +153,7 @@ page where a person authorizes it. See
 
 The link is there when the file has a `[remote]` pinned to a project on the
 hosted cloud, which is the only deployment whose dashboard address follows from
-its API address. Anywhere else the prompt names `subs mcp login <id>`, which is
+its API address. Anywhere else the prompt names `subs auth <path>`, which is
 what an operator runs on the machine where the engine runs.
 
 `Retry` fetches the connection's tools again, and the turn continues with them.

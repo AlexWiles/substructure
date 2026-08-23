@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::activity::TurnActivity;
 use super::render;
 use super::{clip, display_of, with_footer, ButtonValue};
+use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{AuthNeed, Requester};
 use crate::protocol::{
     Content, DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution,
@@ -128,7 +129,7 @@ impl SlackProposer {
 
 /// Why the session stopped. A rejected token names its fix here, because no
 /// consent flow can replace a static token.
-fn ask(connection: &str, need: AuthNeed) -> String {
+fn ask(connection: &ConnectionPath, need: AuthNeed) -> String {
     match need {
         AuthNeed::NeverAuthorized => {
             format!("*{connection}* is not authorized yet, so I cannot use it.")
@@ -138,7 +139,7 @@ fn ask(connection: &str, need: AuthNeed) -> String {
         }
         AuthNeed::TokenRejected => format!(
             "*{connection}* rejected its token. An operator must set a new one \
-             with `subs mcp set-token {connection}`."
+             with `subs auth {connection}`."
         ),
     }
 }
@@ -392,7 +393,7 @@ mod tests {
     fn state_needing_auth_twice() -> SessionState {
         let mut s = state();
         let server = |id: &str| McpServer {
-            id: id.to_string(),
+            path: ConnectionPath::Mcp(id.to_string()),
             tools: None,
             auth_failure: AuthFailure::Interrupt,
             approve: Default::default(),
@@ -410,7 +411,7 @@ mod tests {
         for id in ["gmail", "drive"] {
             s.apply(
                 &EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
-                    id: id.to_string(),
+                    path: ConnectionPath::Mcp(id.to_string()),
                     attempt: 0,
                     retry: RetryPolicy::no_retry(),
                 }),
@@ -418,14 +419,14 @@ mod tests {
             );
             s.apply(
                 &EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
-                    id: id.to_string(),
+                    path: ConnectionPath::Mcp(id.to_string()),
                     auth: AuthNeed::NeverAuthorized,
                 }),
                 &ctx(),
             );
         }
         s.open_interrupts.push(OpenInterrupt {
-            interrupt_id: "mcp-auth:gmail".to_string(),
+            interrupt_id: "mcp-auth:mcp.gmail".to_string(),
             origin: InterruptOrigin::Frontend,
             reason: "hold".to_string(),
             payload: serde_json::json!({
@@ -461,7 +462,7 @@ mod tests {
             &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
                 config: AgentConfig {
                     mcp: vec![McpServer {
-                        id: "sentry".to_string(),
+                        path: ConnectionPath::Mcp("sentry".into()),
                         tools: None,
                         auth_failure: policy,
                         approve: Default::default(),
@@ -486,7 +487,7 @@ mod tests {
         );
         s.apply(
             &EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
-                id: "sentry".to_string(),
+                path: ConnectionPath::Mcp("sentry".into()),
                 attempt: 0,
                 retry: RetryPolicy::no_retry(),
             }),
@@ -494,7 +495,7 @@ mod tests {
         );
         s.apply(
             &EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
-                id: "sentry".to_string(),
+                path: ConnectionPath::Mcp("sentry".into()),
                 auth: need,
             }),
             &ctx(),
@@ -617,7 +618,7 @@ mod tests {
                 payload,
                 ..
             }] => {
-                assert_eq!(interrupt_id.as_deref(), Some("mcp-auth:sentry"));
+                assert_eq!(interrupt_id.as_deref(), Some("mcp-auth:mcp.sentry"));
                 let message = payload["message"].as_str().unwrap();
                 assert!(message.contains("authorized again"), "got {message}");
                 // Why, and the facts a way in is built from. The link itself
@@ -625,7 +626,7 @@ mod tests {
                 assert!(!message.contains("http"), "got {message}");
                 let authorize: auth::Authorize =
                     serde_json::from_value(payload["authorize"].clone()).unwrap();
-                assert_eq!(authorize.connection, "sentry");
+                assert_eq!(authorize.connection.to_string(), "mcp.sentry");
                 assert_eq!(
                     authorize.requester,
                     Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Default::default())
@@ -722,7 +723,7 @@ mod tests {
     fn a_connection_already_asked_about_is_not_asked_about_again() {
         let mut state = state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt);
         state.open_interrupts.push(OpenInterrupt {
-            interrupt_id: "mcp-auth:sentry".to_string(),
+            interrupt_id: "mcp-auth:mcp.sentry".to_string(),
             origin: InterruptOrigin::Frontend,
             reason: "hold".to_string(),
             payload: Value::Null,
@@ -790,10 +791,7 @@ mod tests {
             panic!("expected an interrupt; got {:?}", p.actions);
         };
         let message = payload["message"].as_str().unwrap();
-        assert!(
-            message.contains("subs mcp set-token sentry"),
-            "got {message}"
-        );
+        assert!(message.contains("subs auth mcp.sentry"), "got {message}");
         assert!(
             !message.contains("authorize"),
             "no link to click; got {message}"
@@ -804,29 +802,31 @@ mod tests {
     fn clicking_an_authorization_prompt_also_asks_for_the_tools_again() {
         let mut state = state();
         state.open_interrupts.push(OpenInterrupt {
-            interrupt_id: "mcp-auth:sentry".to_string(),
+            interrupt_id: "mcp-auth:mcp.sentry".to_string(),
             origin: InterruptOrigin::Frontend,
             reason: "hold".to_string(),
             payload: serde_json::json!({
                 "message": "authorize it",
                 "metadata": { "options": [
-                    { "label": "Retry", "value": { "connection": "sentry" } },
+                    { "label": "Retry", "value": { "connection": "mcp.sentry" } },
                 ]},
             }),
             anchor: None,
         });
         let p = propose(
             SESSION,
-            &action(r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:sentry","option":0}"#),
+            &action(
+                r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:mcp.sentry","option":0}"#,
+            ),
             &state,
             &[],
             DecisionResponse::default(),
         );
         match &p.actions[..] {
-            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { id }] =>
+            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { path }] =>
             {
-                assert_eq!(interrupt_id, "mcp-auth:sentry");
-                assert_eq!(id, "sentry");
+                assert_eq!(interrupt_id, "mcp-auth:mcp.sentry");
+                assert_eq!(path.to_string(), "mcp.sentry");
             }
             other => panic!("expected resolve then sync; got {other:?}"),
         }
@@ -840,16 +840,18 @@ mod tests {
     fn a_click_is_answered_even_when_another_connection_also_needs_authorizing() {
         let p = propose(
             SESSION,
-            &action(r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:gmail","option":0}"#),
+            &action(
+                r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:mcp.gmail","option":0}"#,
+            ),
             &state_needing_auth_twice(),
             &[],
             DecisionResponse::default(),
         );
         match &p.actions[..] {
-            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { id }] =>
+            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { path }] =>
             {
-                assert_eq!(interrupt_id, "mcp-auth:gmail");
-                assert_eq!(id, "gmail");
+                assert_eq!(interrupt_id, "mcp-auth:mcp.gmail");
+                assert_eq!(path.to_string(), "mcp.gmail");
             }
             other => panic!("expected the click to be answered; got {other:?}"),
         }

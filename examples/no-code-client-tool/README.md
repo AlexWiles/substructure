@@ -19,7 +19,7 @@ Deploy the file and give it a key:
 ```sh
 subs login
 subs apply
-subs llm set-key openrouter
+subs auth llm.openrouter
 ```
 
 Ask something that depends on where you are. The model calls `get_location`, and

@@ -22,7 +22,7 @@ Deploy the file and give it a key:
 ```sh
 subs login
 subs apply
-subs llm set-key openrouter
+subs auth llm.openrouter
 ```
 
 Install the bot into your workspace:
@@ -47,5 +47,5 @@ url = "https://mcp.deepwiki.com/mcp"
 
 The tools belong to the agent that answers. They are not a request the model can
 refuse. A server that needs a credential takes one more step,
-`subs mcp login <id>`, and the credential goes to the deployment. See
+`subs auth <path>`, and the credential goes to the deployment. See
 [no-code-mcp](../no-code-mcp).

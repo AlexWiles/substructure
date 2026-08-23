@@ -86,7 +86,7 @@ async fn handle_task(
             let command = match listed {
                 Ok(offer) => CommandPayload::settle(
                     EffectKind::ConnectorSync,
-                    connection_id.clone(),
+                    connection_id.to_string(),
                     Some(attempt),
                     Outcome::Connector {
                         prefix: offer.prefix,
@@ -96,7 +96,7 @@ async fn handle_task(
                 ),
                 Err(err) => CommandPayload::settle(
                     EffectKind::ConnectorSync,
-                    connection_id.clone(),
+                    connection_id.to_string(),
                     Some(attempt),
                     SettleError::new(
                         ErrorInfo::new(ErrorCode::HandlerError, err.message.clone()),

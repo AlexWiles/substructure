@@ -65,9 +65,10 @@ The model does not turn the plugin on; naming it in the config did that.
 
 ## The plugin's server is a connection
 
-`mcp.json`'s `files` joins the registry as `runbooks-files` —
-`<plugin>-<server>` — and everything about connections applies to it:
-filters, approval, `subs mcp login runbooks-files` when a server needs one.
+`mcp.json`'s `files` joins the registry as `plugin.runbooks.mcp.files`, and
+everything about connections applies to it: filters, approval,
+`subs auth plugin.runbooks.mcp.files` when a server needs one. The model sees
+its tools under `runbooks_files__<tool>`.
 `mcp.json` has no field for how a server authenticates, so the declaration
 says it where it knows better:
 

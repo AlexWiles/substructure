@@ -538,7 +538,7 @@ impl Working {
                 let config = self.state.retry_config();
                 self.emit(EventPayload::ConnectorSyncRequested(
                     ConnectorSyncRequested {
-                        id: connection_id,
+                        path: connection_id,
                         attempt: 0,
                         retry: RetryPolicy::resolve(
                             None,
@@ -833,12 +833,12 @@ impl Working {
                     )
                 }
                 // A fetch in flight is already the answer this asks for.
-                Action::SyncConnector { id } => {
+                Action::SyncConnector { path: id } => {
                     let named = self
                         .resolve_agent_for(self.head_id.as_deref())
-                        .is_some_and(|c| c.mcp.iter().any(|m| m.id == id));
+                        .is_some_and(|c| c.mcp.iter().any(|m| m.path == id));
                     let settled = self
-                        .tracking(EffectKind::ConnectorSync, &id)
+                        .tracking(EffectKind::ConnectorSync, &id.to_string())
                         .is_some_and(|t| !t.is_in_flight());
                     if !named || !settled {
                         tracing::warn!(
@@ -852,7 +852,7 @@ impl Working {
                     let config = self.state.retry_config();
                     self.emit(EventPayload::ConnectorSyncRequested(
                         ConnectorSyncRequested {
-                            id,
+                            path: id,
                             attempt: 0,
                             retry: RetryPolicy::resolve(
                                 None,
