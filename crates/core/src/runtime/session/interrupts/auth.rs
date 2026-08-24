@@ -5,7 +5,7 @@ use super::InterruptKind;
 use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{AuthNeed, Requester};
 use crate::protocol::{AuthFailure, DecisionAction};
-use crate::runtime::session::state::SessionState;
+use crate::runtime::session::state::SessionStateAtNode;
 
 pub const PREFIX: &str = "mcp-auth:";
 
@@ -38,9 +38,9 @@ fn interrupt_id(connection: &ConnectionPath) -> String {
 }
 
 /// The first connection that needs a person and has not been asked about.
-fn needing(state: &SessionState) -> Option<(ConnectionPath, AuthNeed)> {
-    let leaf = state.head_id.clone();
-    let config = state.resolve_agent_for(leaf.as_deref())?;
+fn needing(at: SessionStateAtNode) -> Option<(ConnectionPath, AuthNeed)> {
+    let state = at.state();
+    let config = at.resolve_agent_for()?;
     state.servers_for(&config).into_iter().find_map(|server| {
         if server.auth_failure == AuthFailure::Degrade {
             return None;
@@ -53,11 +53,11 @@ fn needing(state: &SessionState) -> Option<(ConnectionPath, AuthNeed)> {
     })
 }
 
-pub fn prompt(state: &SessionState) -> Option<DecisionAction> {
-    let (connection, need) = needing(state)?;
+pub fn prompt(at: SessionStateAtNode) -> Option<DecisionAction> {
+    let (connection, need) = needing(at)?;
 
     let authorize = Authorize {
-        requester: Requester::of_owner(state.owner.as_ref()),
+        requester: Requester::of_owner(at.state().owner.as_ref()),
         connection: connection.clone(),
     };
 
@@ -101,7 +101,7 @@ mod tests {
     use crate::runtime::session::events::{
         AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested, EventPayload,
     };
-    use crate::runtime::session::state::{ApplyContext, OpenInterrupt};
+    use crate::runtime::session::state::{ApplyContext, OpenInterrupt, SessionState};
 
     fn ctx() -> ApplyContext {
         ApplyContext {
@@ -168,8 +168,8 @@ mod tests {
 
     #[test]
     fn a_connection_that_needs_a_person_is_asked_about_by_name() {
-        let action =
-            prompt(&needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt)).expect("it asks");
+        let action = prompt(needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt).at_head())
+            .expect("it asks");
         let DecisionAction::Interrupt {
             interrupt_id,
             payload,
@@ -187,11 +187,9 @@ mod tests {
 
     #[test]
     fn a_rejected_token_names_the_command_an_operator_runs() {
-        let action = prompt(&needing_auth(
-            AuthNeed::TokenRejected,
-            AuthFailure::Interrupt,
-        ))
-        .expect("it asks");
+        let action =
+            prompt(needing_auth(AuthNeed::TokenRejected, AuthFailure::Interrupt).at_head())
+                .expect("it asks");
         let DecisionAction::Interrupt { payload, .. } = action else {
             panic!("expected an interrupt");
         };
@@ -201,7 +199,9 @@ mod tests {
 
     #[test]
     fn a_connection_configured_to_degrade_is_never_asked_about() {
-        assert!(prompt(&needing_auth(AuthNeed::Reauthorize, AuthFailure::Degrade)).is_none());
+        assert!(
+            prompt(needing_auth(AuthNeed::Reauthorize, AuthFailure::Degrade).at_head()).is_none()
+        );
     }
 
     #[test]
@@ -214,11 +214,11 @@ mod tests {
             payload: serde_json::Value::Null,
             anchor: None,
         });
-        assert!(prompt(&state).is_none());
+        assert!(prompt(state.at_head()).is_none());
     }
 
     #[test]
     fn a_session_with_nothing_wrong_is_not_asked_about() {
-        assert!(prompt(&SessionState::new("s1".to_string())).is_none());
+        assert!(prompt(SessionState::new("s1".to_string()).at_head()).is_none());
     }
 }

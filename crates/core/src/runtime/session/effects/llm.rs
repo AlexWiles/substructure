@@ -102,11 +102,11 @@ impl KindSpec for LlmSpec {
     /// dispatch merges the tools in force, so it waits for every fetch the
     /// config *at its own anchor* owes — not the head's, which may have moved.
     fn deps(&self, state: &SessionState, entry: &QueueEntry) -> Vec<Dep> {
-        let leaf = state
+        let node = state
             .effect(EffectKind::LlmCall, &entry.id)
             .and_then(|e| e.anchor.clone())
             .or_else(|| state.head_id.clone());
-        super::connector::owed(state, leaf.as_deref())
+        super::connector::owed(state.at(node.as_deref()))
     }
 
     fn retry(&self, state: &SessionState, id: &str) -> Vec<EventPayload> {
@@ -212,7 +212,8 @@ pub(in crate::runtime::session) fn request(
     // request and the tools merged into it must lower the same way, and a
     // replay must lower the way the original did.
     let defer_tools_strategy = state
-        .resolve_agent_for(state.head_id.as_deref())
+        .at_head()
+        .resolve_agent_for()
         .map(|c| c.defer_strategy())
         .unwrap_or_default();
     Ok(vec![EventPayload::LlmCallRequested(LlmCallRequested {

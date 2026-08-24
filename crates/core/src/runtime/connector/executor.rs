@@ -183,9 +183,8 @@ async fn handle_task(
                         false => plugins.resolve(&tenant_id, &call.plugin_id).await,
                     };
                     Some(engine_tools::skill_answer(
-                        &session.state,
+                        session.state.at(call.node.as_deref()),
                         bundle.as_ref(),
-                        call.leaf.as_deref(),
                         &call.arguments,
                     ))
                 }

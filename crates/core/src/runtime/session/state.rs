@@ -89,7 +89,7 @@ pub(in crate::runtime::session) fn inner_arguments(raw: &serde_json::Value) -> S
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillCall {
-    pub leaf: Option<String>,
+    pub node: Option<String>,
     pub plugin_id: String,
     pub arguments: String,
 }
@@ -978,6 +978,14 @@ impl SessionState {
         }
     }
 
+    pub fn at<'a, 'n>(&'a self, node: Option<&'n str>) -> SessionStateAtNode<'a, 'n> {
+        SessionStateAtNode { state: self, node }
+    }
+
+    pub fn at_head(&self) -> SessionStateAtNode<'_, '_> {
+        self.at(self.head_id.as_deref())
+    }
+
     /// The turn events belong to: the live one, or — once it has completed —
     /// the one that just finished. The tail matters: `TurnCompleted` is stamped
     /// after it applies, so a turn-scoped stream would otherwise miss its own
@@ -1122,13 +1130,14 @@ impl SessionState {
     /// (dispatch is when derived context is current), start the deadline clock,
     /// leave the queue.
     fn apply_llm_dispatched(&mut self, payload: &LlmCallDispatched, now: DateTime<Utc>) {
-        let leaf = self
+        let node = self
             .effect(EffectKind::LlmCall, &payload.id)
             .and_then(|e| e.anchor.clone())
             .or_else(|| self.head_id.clone());
-        let connector_tools = self.connector_tools(leaf.as_deref()).tools;
-        let owed = prompt_context::owed(self, leaf.as_deref(), &payload.id);
-        let system_open = self.system_prefix_open(leaf.as_deref(), &payload.id);
+        let at = self.at(node.as_deref());
+        let connector_tools = at.connector_tools().tools;
+        let owed = prompt_context::owed(at, &payload.id);
+        let system_open = at.system_prefix_open(&payload.id);
         if let Some(effect) = self.effect_mut(EffectKind::LlmCall, &payload.id) {
             effect.tracking.dispatch(now);
             if let Some(call) = effect.llm_mut() {
@@ -1555,7 +1564,7 @@ impl SessionState {
         if live > 1 {
             return Err(format!("decision slot violated: {live} live decisions"));
         }
-        if live > 0 && self.has_pending_connector_sync(self.head_id.as_deref()) {
+        if live > 0 && self.at_head().has_pending_connector_sync() {
             return Err(
                 "a decision is live while a fetch its config owes is in flight".to_string(),
             );
@@ -1591,24 +1600,6 @@ impl SessionState {
         Ok(())
     }
 
-    /// Newest open interrupt on the path to `leaf`; unanchored matches any path.
-    pub fn active_interrupt_for(&self, leaf: Option<&str>) -> Option<&OpenInterrupt> {
-        let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
-        resolve_on_path(&self.open_interrupts, &on_path)
-    }
-
-    /// All open interrupts on the path to `leaf`, oldest first.
-    pub fn interrupts_for(&self, leaf: Option<&str>) -> Vec<&OpenInterrupt> {
-        let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
-        self.open_interrupts
-            .iter()
-            .filter(|i| match i.anchor.as_deref() {
-                None => true,
-                Some(a) => on_path.contains(a),
-            })
-            .collect()
-    }
-
     /// An open interrupt by id, on any path.
     pub fn open_interrupt(&self, id: &str) -> Option<&OpenInterrupt> {
         self.open_interrupts.iter().find(|i| i.interrupt_id == id)
@@ -1616,12 +1607,12 @@ impl SessionState {
 
     /// Whether an open interrupt parks the active branch.
     pub fn head_parked(&self) -> bool {
-        self.active_interrupt_for(self.head_id.as_deref()).is_some()
+        self.at_head().active_interrupt_for().is_some()
     }
 
     /// Stored status, overridden when an interrupt parks the head path.
     pub fn projected_status(&self) -> SessionStatus {
-        match self.active_interrupt_for(self.head_id.as_deref()) {
+        match self.at_head().active_interrupt_for() {
             Some(i) => SessionStatus::Interrupted {
                 interrupt_id: i.interrupt_id.clone(),
                 origin: i.origin,
@@ -1658,8 +1649,8 @@ impl SessionState {
     /// on the head, off-head anchors on their own path.
     pub fn anchor_parked(&self, anchor: Option<&str>) -> bool {
         match anchor {
-            Some(a) if !self.anchor_on_path(self.head_id.as_deref(), Some(a)) => {
-                self.active_interrupt_for(Some(a)).is_some()
+            Some(a) if !self.at_head().anchor_on_path(Some(a)) => {
+                self.at(Some(a)).active_interrupt_for().is_some()
             }
             _ => self.head_parked(),
         }
@@ -1699,15 +1690,13 @@ impl SessionState {
                 self.nodes.iter().map(|n| n.message.id.as_str()).collect();
             let plan = super::reconcile::plan_reconcile(&known, &messages);
             let landing = super::reconcile::landing_leaf(&messages, &plan);
-            return self.active_interrupt_for(landing.as_deref());
+            return self.at(landing.as_deref()).active_interrupt_for();
         }
-        let anchor = self.trigger_anchor(trigger);
-        match anchor {
-            Some(a) if !self.anchor_on_path(self.head_id.as_deref(), Some(a)) => {
-                self.active_interrupt_for(Some(a))
-            }
-            _ => self.active_interrupt_for(self.head_id.as_deref()),
-        }
+        let at = match self.trigger_anchor(trigger) {
+            Some(a) if !self.at_head().anchor_on_path(Some(a)) => self.at(Some(a)),
+            _ => self.at_head(),
+        };
+        at.active_interrupt_for()
     }
 
     pub fn has_pending_worker_decision(&self) -> bool {
@@ -1730,15 +1719,15 @@ impl SessionState {
             .filter(move |e| e.tracking.status == status)
     }
 
-    /// All message ids on the root→`leaf` chain.
-    pub fn path_ids<'a>(&'a self, leaf: &'a str) -> std::collections::HashSet<&'a str> {
+    /// All message ids on the root→`node` chain.
+    pub fn path_ids<'a>(&'a self, node: &'a str) -> std::collections::HashSet<&'a str> {
         let by_id: HashMap<&str, &Logged<NewMessage>> = self
             .nodes
             .iter()
             .map(|n| (n.message.id.as_str(), n))
             .collect();
         let mut ids = std::collections::HashSet::new();
-        let mut cursor = Some(leaf);
+        let mut cursor = Some(node);
         while let Some(id) = cursor {
             let Some(node) = by_id.get(id) else { break };
             if !ids.insert(id) {
@@ -1747,22 +1736,6 @@ impl SessionState {
             cursor = node.parent_id.as_deref();
         }
         ids
-    }
-
-    /// Whether `anchor` lies on the root→`leaf` path. A `None` anchor matches any path.
-    pub fn anchor_on_path(&self, leaf: Option<&str>, anchor: Option<&str>) -> bool {
-        match anchor {
-            None => true,
-            Some(a) => leaf.is_some_and(|l| self.path_ids(l).contains(a)),
-        }
-    }
-
-    /// Newest worker state whose anchor is on the path to `leaf`; unanchored matches any path.
-    pub fn resolve_state_for(&self, leaf: Option<&str>) -> WorkerState {
-        let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
-        resolve_on_path(&self.state_versions, &on_path)
-            .map(|v| v.value.clone())
-            .unwrap_or_default()
     }
 
     /// Where a call to `name` runs, per the config in force on the current path.
@@ -1775,7 +1748,7 @@ impl SessionState {
     /// A declared tool is checked first, matching `merge`: a name the config
     /// claims is never taken by a connector.
     pub fn tool_handler_for(&self, name: &str) -> ToolHandler {
-        let config = self.resolve_agent_for(self.head_id.as_deref());
+        let config = self.at_head().resolve_agent_for();
         match config.as_ref().and_then(|c| c.tool(name)) {
             Some(t) => ToolHandler::declared(t.handler),
             None if self.connector_tool_for(name).is_some() => ToolHandler::Server,
@@ -1799,27 +1772,11 @@ impl SessionState {
     /// The connector tool `name` resolves to on the current path, if any. The
     /// executor reads `connector`/`remote_name` off this to place the call.
     pub fn connector_tool_for(&self, name: &str) -> Option<ConnectorTool> {
-        self.connector_tools(self.head_id.as_deref())
+        self.at_head()
+            .connector_tools()
             .tools
             .into_iter()
             .find(|t| t.name == name)
-    }
-
-    /// The connector tools in force on the path to `leaf`, derived by filtering
-    /// each fetched offer through the config's `McpServer` entry.
-    ///
-    /// Pure, and recomputed rather than stored: the offer is the recorded fact,
-    /// so editing a filter or flipping `prefix_tools` re-derives without another
-    /// round trip. `collisions` reports every name dropped for clashing with a
-    /// declared tool, a sub-agent, or another connector.
-    pub fn connector_tools(&self, leaf: Option<&str>) -> filter::Merged {
-        let Some(config) = self.resolve_agent_for(leaf) else {
-            return filter::Merged {
-                tools: Vec::new(),
-                collisions: Vec::new(),
-            };
-        };
-        self.connector_tools_for_config(&config)
     }
 
     pub fn connector_tools_for_config(&self, config: &AgentConfig) -> filter::Merged {
@@ -1868,57 +1825,14 @@ impl SessionState {
         filter::merge(resolutions, taken)
     }
 
-    /// The connection as the config at `leaf` names it, with the offer this
-    /// session recorded.
-    fn connector_source(
-        &self,
-        connector_id: &ConnectionPath,
-        leaf: Option<&str>,
-    ) -> Option<Source> {
-        let config = self.resolve_agent_for(leaf)?;
-        let server = self
-            .servers_for(&config)
-            .into_iter()
-            .find(|c| c.path == *connector_id)?;
-        let sync = self.connector_sync(connector_id)?;
-        Some(Source {
-            server,
-            offered: sync.tools.clone(),
-            instructions: sync.instructions.clone(),
-        })
-    }
-
-    /// Every connection of the agent whose offer has arrived, with that offer.
-    /// What the pair of search tools answers over.
-    ///
-    /// Every connection, not only the searched ones. A connection on `all` is
-    /// listed up front *and* findable, so one search covers the agent and an
-    /// answer of nothing means nothing is there.
-    ///
-    /// Readiness belongs here and not in the tool list: a connection that
-    /// arrives during a session joins the next answer, and no definition moves.
-    fn searchable_connectors(&self, leaf: Option<&str>) -> Vec<Source> {
-        let Some(config) = self.resolve_agent_for(leaf) else {
-            return Vec::new();
-        };
-        self.servers_for(&config)
-            .iter()
-            .filter(|c| {
-                self.effect(EffectKind::ConnectorSync, &c.path.to_string())
-                    .is_some_and(|e| e.tracking.is_ready())
-            })
-            .filter_map(|c| self.connector_source(&c.path, leaf))
-            .collect()
-    }
-
     /// The engine's answer to one of its own tools, or `None` when the call is
     /// the connection's. Read from state, so a replay answers the same.
     pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<StoredResult> {
         let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
-        let leaf = effect.anchor.clone();
+        let node = effect.anchor.clone();
         let tc = effect.tool()?;
         let target = tc.target.as_ref()?;
-        super::engine_tools::answer(self, target.kind(), leaf.as_deref(), &tc.arguments)
+        super::engine_tools::answer(self.at(node.as_deref()), target.kind(), &tc.arguments)
     }
 
     /// A skill call's branch, plugin, and arguments. `None` for every other
@@ -1930,92 +1844,10 @@ impl SessionState {
             return None;
         };
         Some(SkillCall {
-            leaf: effect.anchor.clone(),
+            node: effect.anchor.clone(),
             plugin_id: plugin.clone(),
             arguments: tc.arguments.clone(),
         })
-    }
-
-    /// Every tool the agent can reach, deferred or not, as the model would see
-    /// it. What a search answers over.
-    ///
-    /// Each source, not only the connections: deferral is a property of a tool,
-    /// so a search that skipped one source would report an absence that is not
-    /// real. The engine's own two are left out — they are how you search, not
-    /// something to find — and so are the sub-agents, which a `call_tool`
-    /// cannot place.
-    pub fn searchable_tools(&self, leaf: Option<&str>) -> Vec<LlmTool> {
-        let Some(config) = self.resolve_agent_for(leaf) else {
-            return Vec::new();
-        };
-        let declared = config
-            .tools
-            .iter()
-            .map(|t| t.to_llm_tool(config.defers_tools()));
-        let connector = self
-            .connector_tools_for_config(&config)
-            .tools
-            .into_iter()
-            .filter(|t| t.kind.is_remote())
-            .map(|t| t.to_llm_tool())
-            .collect::<Vec<_>>();
-        declared.chain(connector).collect()
-    }
-
-    /// What one connection is, for an announcement: its size, and its own
-    /// words. `None` while the connection has not settled, so a notice never
-    /// claims a server the engine cannot yet reach.
-    pub fn connection_summary(&self, path: &ConnectionPath, leaf: Option<&str>) -> Option<String> {
-        let source = self
-            .searchable_connectors(leaf)
-            .into_iter()
-            .find(|source| source.server.path == *path)?;
-        serde_json::to_string(&Summary {
-            mcp_server: &source.server.path,
-            tools: filter::callable(&source.server, &source.offered).len(),
-            about: source.instructions.as_deref(),
-        })
-        .ok()
-    }
-
-    /// Context ids that an earlier call of this path already carried.
-    ///
-    /// Read from the effects on the path, so a fork that never held a call does
-    /// not inherit what it said, and a rewind that removed one lets it be said
-    /// again.
-    pub fn context_ids_on_path(
-        &self,
-        leaf: Option<&str>,
-        exclude: &str,
-    ) -> std::collections::HashSet<String> {
-        let path = self.path_set(leaf);
-        self.effects
-            .values()
-            .filter(|e| e.id != exclude && Self::anchored_on(&path, e.anchor.as_deref()))
-            .filter_map(EffectState::llm)
-            .flat_map(|call| call.context_ids.iter().cloned())
-            .collect()
-    }
-
-    /// Whether the system prefix is still free to write.
-    ///
-    /// It is free until a call commits it. A provider caches the prefix, and
-    /// the Anthropic wire gathers every system message into it whatever the
-    /// position, so a system message added later rewrites what is cached.
-    pub fn system_prefix_open(&self, leaf: Option<&str>, exclude: &str) -> bool {
-        let path = self.path_set(leaf);
-        !self.effects.values().any(|e| {
-            e.id != exclude
-                && matches!(e.payload, EffectPayload::LlmCall(_))
-                && Self::anchored_on(&path, e.anchor.as_deref())
-                && e.tracking.status() != EffectStatus::Queued
-        })
-    }
-
-    /// The ids from the root to `leaf`, walked once. A caller that asked per
-    /// effect would walk the whole path again for each one.
-    fn path_set<'a>(&'a self, leaf: Option<&'a str>) -> std::collections::HashSet<&'a str> {
-        leaf.map(|l| self.path_ids(l)).unwrap_or_default()
     }
 
     /// An unanchored effect belongs to every path, the same way an unanchored
@@ -2024,121 +1856,13 @@ impl SessionState {
         anchor.is_none_or(|a| path.contains(a))
     }
 
-    /// The tool a `call_tool` names, and where a call to it runs.
-    pub fn call_tool_target(&self, named: &str, leaf: Option<&str>) -> Option<CallTarget> {
-        let config = self.resolve_agent_for(leaf)?;
-        if let Some(declared) = config.tool(named) {
-            return Some(CallTarget::Declared(declared.clone()));
-        }
-        self.connector_tool_for(named)
-            .filter(|t| t.kind.is_remote())
-            .map(CallTarget::Connector)
-    }
-
-    /// Why a `call_tool` cannot be placed, if it cannot: an unknown name, or
-    /// arguments that break that tool's schema.
-    ///
-    /// Each fault carries what the model needs to fix it. The engine holds the
-    /// schema the provider never received, so a fault that withheld it would
-    /// leave the model to guess or to search again.
-    ///
-    /// One function for two callers. The route freezes an empty remote name
-    /// when this answers `Some`, and the answer reads the same fault again to
-    /// tell the model which of the three it was.
-    pub fn call_tool_fault(&self, arguments: &str, leaf: Option<&str>) -> Option<String> {
-        let raw: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
-        let named = raw
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-
-        let Some(target) = self.call_tool_target(&named, leaf) else {
-            // The name is the query: a wrong name is usually a near miss, and
-            // the same search the model should have run ranks the neighbours.
-            let tools = self.searchable_tools(leaf);
-            let cap = self
-                .resolve_agent_for(leaf)
-                .map(|c| c.defer_settings())
-                .unwrap_or_default()
-                .max_matches
-                .get();
-            let near: Vec<&str> = filter::find(&tools, &named)
-                .into_iter()
-                .take(cap)
-                .map(|t| t.name.as_str())
-                .collect();
-            return Some(if near.is_empty() {
-                format!(
-                    "no tool `{named}` for this agent. Call `{}` with an empty query for every \
-                     tool.",
-                    filter::TOOL_SEARCH
-                )
-            } else {
-                format!(
-                    "no tool `{named}` for this agent. The closest are: {}. Call `{}` for the \
-                     schema of one.",
-                    near.join(", "),
-                    filter::TOOL_SEARCH
-                )
-            });
-        };
-        // The provider never received this tool's schema, so it checked
-        // nothing. The engine holds one, so the engine checks it — and hands it
-        // back, because the model is the party that can act on it.
-        let input = target.input();
-        classify_arguments(&inner_arguments(&raw), input.as_ref())
-            .error()
-            .map(|e| match &input {
-                Some(schema) => format!("`{named}`: {e}. Its input schema is: {schema}"),
-                None => format!("`{named}`: {e}"),
-            })
-    }
-
-    /// Connections the config in force on `leaf` names but has never fetched.
-    /// Each needs a `connector.sync.requested` before the model can be prompted.
-    pub fn unsynced_connectors(&self, leaf: Option<&str>) -> Vec<ConnectionPath> {
-        let Some(config) = self.resolve_agent_for(leaf) else {
-            return Vec::new();
-        };
-        self.servers_for(&config)
-            .iter()
-            .filter(|c| !self.has_effect(EffectKind::ConnectorSync, &c.path.to_string()))
-            .map(|c| c.path.clone())
-            .collect()
-    }
-
-    /// Whether a fetch the config on `leaf` depends on is still unsettled. A
-    /// decision that would prompt the model parks behind this, the same way it
-    /// parks behind an unsettled `session.start` — the config names a connection
-    /// whose tools are not known yet, so the turn cannot be authored against it.
-    ///
-    /// A terminally failed fetch is settled, so it never parks anything: the
-    /// engine unblocks and the worker decides whether a missing connector is
-    /// fatal.
-    pub fn has_pending_connector_sync(&self, leaf: Option<&str>) -> bool {
-        let Some(config) = self.resolve_agent_for(leaf) else {
-            return false;
-        };
-        self.servers_for(&config).iter().any(|c| {
-            self.tracking(EffectKind::ConnectorSync, &c.path.to_string())
-                .is_some_and(EffectTracking::is_in_flight)
-        })
-    }
-
-    /// Newest agent config whose anchor is on the path to `leaf`; unanchored matches
-    /// any path. `None` when no config was ever written on the path.
     /// The retry policies the config in force declares, if any. None ⇒ nothing
     /// declared, and every kind falls to the engine's own default.
     pub fn retry_config(&self) -> Option<RetryConfig> {
-        self.resolve_agent_for(self.head_id.as_deref())
+        self.at_head()
+            .resolve_agent_for()
             .and_then(|c| c.retry)
             .map(|b| *b)
-    }
-
-    pub fn resolve_agent_for(&self, leaf: Option<&str>) -> Option<AgentConfig> {
-        let on_path = leaf.map(|l| self.path_ids(l)).unwrap_or_default();
-        resolve_on_path(&self.agent_versions, &on_path).map(|v| v.value.clone())
     }
 
     /// Every server `config` reaches: its `mcp` entries, then each plugin's
@@ -2224,32 +1948,6 @@ impl SessionState {
         effects
     }
 
-    /// A call is open while any of its tool calls lacks a recorded answer on the
-    /// active path. The tree is frozen during a pending decision, so the call
-    /// answering the last `tool.finished` is still open when that decision is
-    /// projected — exactly when its re-issue proposal is derived.
-    pub(crate) fn open_llm_calls(&self, tree: &MessageTree) -> HashMap<String, EffectState> {
-        let Some(head) = tree.head_id.as_deref() else {
-            return HashMap::new();
-        };
-        let path = tree.path_to(head);
-        let answered: std::collections::HashSet<&str> = path
-            .iter()
-            .filter_map(|m| m.tool_call_id.as_deref())
-            .collect();
-        path.iter()
-            .filter(|m| {
-                m.tool_calls
-                    .iter()
-                    .any(|c| !answered.contains(c.id.as_str()))
-            })
-            .filter_map(|m| {
-                self.effect(EffectKind::LlmCall, &m.id)
-                    .map(|e| (m.id.clone(), e.clone()))
-            })
-            .collect()
-    }
-
     pub fn event_meta(&self, now: DateTime<Utc>) -> EventMeta {
         let mut decisions: Vec<MetaDecision> = self
             .effects_of(EffectKind::Decision)
@@ -2316,6 +2014,336 @@ impl SessionState {
         if let Some(u) = usage {
             self.turn_token_usage.add(u);
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SessionStateAtNode<'a, 'n> {
+    state: &'a SessionState,
+    node: Option<&'n str>,
+}
+
+impl<'a, 'n> SessionStateAtNode<'a, 'n> {
+    pub fn state(&self) -> &'a SessionState {
+        self.state
+    }
+
+    /// The ids from the root to the node, walked once. A caller that asked per
+    /// effect would walk the whole path again for each one.
+    fn path_set(&self) -> std::collections::HashSet<&str> {
+        self.node
+            .map(|n| self.state.path_ids(n))
+            .unwrap_or_default()
+    }
+
+    /// Newest open interrupt on the path to the node; unanchored matches any path.
+    pub fn active_interrupt_for(&self) -> Option<&'a OpenInterrupt> {
+        resolve_on_path(&self.state.open_interrupts, &self.path_set())
+    }
+
+    /// All open interrupts on the path to the node, oldest first.
+    pub fn interrupts_for(&self) -> Vec<&'a OpenInterrupt> {
+        let on_path = self.path_set();
+        self.state
+            .open_interrupts
+            .iter()
+            .filter(|i| match i.anchor.as_deref() {
+                None => true,
+                Some(a) => on_path.contains(a),
+            })
+            .collect()
+    }
+
+    /// Whether `anchor` lies on the root→node path. A `None` anchor matches any path.
+    pub fn anchor_on_path(&self, anchor: Option<&str>) -> bool {
+        SessionState::anchored_on(&self.path_set(), anchor)
+    }
+
+    /// Newest worker state whose anchor is on the path to the node; unanchored
+    /// matches any path.
+    pub fn resolve_state_for(&self) -> WorkerState {
+        resolve_on_path(&self.state.state_versions, &self.path_set())
+            .map(|v| v.value.clone())
+            .unwrap_or_default()
+    }
+
+    /// Newest agent config whose anchor is on the path to the node; unanchored
+    /// matches any path. `None` when no config was ever written on the path.
+    pub fn resolve_agent_for(&self) -> Option<AgentConfig> {
+        resolve_on_path(&self.state.agent_versions, &self.path_set()).map(|v| v.value.clone())
+    }
+
+    /// The connector tools in force on the path to the node, derived by
+    /// filtering each fetched offer through the config's `McpServer` entry.
+    ///
+    /// Pure, and recomputed rather than stored: the offer is the recorded fact,
+    /// so editing a filter or flipping `prefix_tools` re-derives without another
+    /// round trip. `collisions` reports every name dropped for clashing with a
+    /// declared tool, a sub-agent, or another connector.
+    pub fn connector_tools(&self) -> filter::Merged {
+        let Some(config) = self.resolve_agent_for() else {
+            return filter::Merged {
+                tools: Vec::new(),
+                collisions: Vec::new(),
+            };
+        };
+        self.state.connector_tools_for_config(&config)
+    }
+
+    /// The connection as the config at the node names it, with the offer this
+    /// session recorded.
+    fn connector_source(&self, connector_id: &ConnectionPath) -> Option<Source> {
+        let config = self.resolve_agent_for()?;
+        let server = self
+            .state
+            .servers_for(&config)
+            .into_iter()
+            .find(|c| c.path == *connector_id)?;
+        let sync = self.state.connector_sync(connector_id)?;
+        Some(Source {
+            server,
+            offered: sync.tools.clone(),
+            instructions: sync.instructions.clone(),
+        })
+    }
+
+    /// Every connection of the agent whose offer has arrived, with that offer.
+    /// What the pair of search tools answers over.
+    ///
+    /// Every connection, not only the searched ones. A connection on `all` is
+    /// listed up front *and* findable, so one search covers the agent and an
+    /// answer of nothing means nothing is there.
+    ///
+    /// Readiness belongs here and not in the tool list: a connection that
+    /// arrives during a session joins the next answer, and no definition moves.
+    fn searchable_connectors(&self) -> Vec<Source> {
+        let Some(config) = self.resolve_agent_for() else {
+            return Vec::new();
+        };
+        self.state
+            .servers_for(&config)
+            .iter()
+            .filter(|c| {
+                self.state
+                    .effect(EffectKind::ConnectorSync, &c.path.to_string())
+                    .is_some_and(|e| e.tracking.is_ready())
+            })
+            .filter_map(|c| self.connector_source(&c.path))
+            .collect()
+    }
+
+    /// Every tool the agent can reach, deferred or not, as the model would see
+    /// it. What a search answers over.
+    ///
+    /// Each source, not only the connections: deferral is a property of a tool,
+    /// so a search that skipped one source would report an absence that is not
+    /// real. The engine's own two are left out — they are how you search, not
+    /// something to find — and so are the sub-agents, which a `call_tool`
+    /// cannot place.
+    pub fn searchable_tools(&self) -> Vec<LlmTool> {
+        let Some(config) = self.resolve_agent_for() else {
+            return Vec::new();
+        };
+        let declared = config
+            .tools
+            .iter()
+            .map(|t| t.to_llm_tool(config.defers_tools()));
+        let connector = self
+            .state
+            .connector_tools_for_config(&config)
+            .tools
+            .into_iter()
+            .filter(|t| t.kind.is_remote())
+            .map(|t| t.to_llm_tool())
+            .collect::<Vec<_>>();
+        declared.chain(connector).collect()
+    }
+
+    /// What one connection is, for an announcement: its size, and its own
+    /// words. `None` while the connection has not settled, so a notice never
+    /// claims a server the engine cannot yet reach.
+    pub fn connection_summary(&self, path: &ConnectionPath) -> Option<String> {
+        let source = self
+            .searchable_connectors()
+            .into_iter()
+            .find(|source| source.server.path == *path)?;
+        serde_json::to_string(&Summary {
+            mcp_server: &source.server.path,
+            tools: filter::callable(&source.server, &source.offered).len(),
+            about: source.instructions.as_deref(),
+        })
+        .ok()
+    }
+
+    /// Context ids that an earlier call of this path already carried.
+    ///
+    /// Read from the effects on the path, so a fork that never held a call does
+    /// not inherit what it said, and a rewind that removed one lets it be said
+    /// again.
+    pub fn context_ids_on_path(&self, exclude: &str) -> std::collections::HashSet<String> {
+        let path = self.path_set();
+        self.state
+            .effects
+            .values()
+            .filter(|e| e.id != exclude && SessionState::anchored_on(&path, e.anchor.as_deref()))
+            .filter_map(EffectState::llm)
+            .flat_map(|call| call.context_ids.iter().cloned())
+            .collect()
+    }
+
+    /// Whether the system prefix is still free to write.
+    ///
+    /// It is free until a call commits it. A provider caches the prefix, and
+    /// the Anthropic wire gathers every system message into it whatever the
+    /// position, so a system message added later rewrites what is cached.
+    pub fn system_prefix_open(&self, exclude: &str) -> bool {
+        let path = self.path_set();
+        !self.state.effects.values().any(|e| {
+            e.id != exclude
+                && matches!(e.payload, EffectPayload::LlmCall(_))
+                && SessionState::anchored_on(&path, e.anchor.as_deref())
+                && e.tracking.status() != EffectStatus::Queued
+        })
+    }
+
+    /// The tool a `call_tool` names, and where a call to it runs.
+    pub fn call_tool_target(&self, named: &str) -> Option<CallTarget> {
+        let config = self.resolve_agent_for()?;
+        if let Some(declared) = config.tool(named) {
+            return Some(CallTarget::Declared(declared.clone()));
+        }
+        self.state
+            .connector_tool_for(named)
+            .filter(|t| t.kind.is_remote())
+            .map(CallTarget::Connector)
+    }
+
+    /// Why a `call_tool` cannot be placed, if it cannot: an unknown name, or
+    /// arguments that break that tool's schema.
+    ///
+    /// Each fault carries what the model needs to fix it. The engine holds the
+    /// schema the provider never received, so a fault that withheld it would
+    /// leave the model to guess or to search again.
+    ///
+    /// One function for two callers. The route freezes an empty remote name
+    /// when this answers `Some`, and the answer reads the same fault again to
+    /// tell the model which of the three it was.
+    pub fn call_tool_fault(&self, arguments: &str) -> Option<String> {
+        let raw: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+        let named = raw
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let Some(target) = self.call_tool_target(&named) else {
+            // The name is the query: a wrong name is usually a near miss, and
+            // the same search the model should have run ranks the neighbours.
+            let tools = self.searchable_tools();
+            let cap = self
+                .resolve_agent_for()
+                .map(|c| c.defer_settings())
+                .unwrap_or_default()
+                .max_matches
+                .get();
+            let near: Vec<&str> = filter::find(&tools, &named)
+                .into_iter()
+                .take(cap)
+                .map(|t| t.name.as_str())
+                .collect();
+            return Some(if near.is_empty() {
+                format!(
+                    "no tool `{named}` for this agent. Call `{}` with an empty query for every \
+                     tool.",
+                    filter::TOOL_SEARCH
+                )
+            } else {
+                format!(
+                    "no tool `{named}` for this agent. The closest are: {}. Call `{}` for the \
+                     schema of one.",
+                    near.join(", "),
+                    filter::TOOL_SEARCH
+                )
+            });
+        };
+        // The provider never received this tool's schema, so it checked
+        // nothing. The engine holds one, so the engine checks it — and hands it
+        // back, because the model is the party that can act on it.
+        let input = target.input();
+        classify_arguments(&inner_arguments(&raw), input.as_ref())
+            .error()
+            .map(|e| match &input {
+                Some(schema) => format!("`{named}`: {e}. Its input schema is: {schema}"),
+                None => format!("`{named}`: {e}"),
+            })
+    }
+
+    /// Connections the config in force at the node names but has never fetched.
+    /// Each needs a `connector.sync.requested` before the model can be prompted.
+    pub fn unsynced_connectors(&self) -> Vec<ConnectionPath> {
+        let Some(config) = self.resolve_agent_for() else {
+            return Vec::new();
+        };
+        self.state
+            .servers_for(&config)
+            .iter()
+            .filter(|c| {
+                !self
+                    .state
+                    .has_effect(EffectKind::ConnectorSync, &c.path.to_string())
+            })
+            .map(|c| c.path.clone())
+            .collect()
+    }
+
+    /// Whether a fetch the config at the node depends on is still unsettled. A
+    /// decision that would prompt the model parks behind this, the same way it
+    /// parks behind an unsettled `session.start` — the config names a connection
+    /// whose tools are not known yet, so the turn cannot be authored against it.
+    ///
+    /// A terminally failed fetch is settled, so it never parks anything: the
+    /// engine unblocks and the worker decides whether a missing connector is
+    /// fatal.
+    pub fn has_pending_connector_sync(&self) -> bool {
+        let Some(config) = self.resolve_agent_for() else {
+            return false;
+        };
+        self.state.servers_for(&config).iter().any(|c| {
+            self.state
+                .tracking(EffectKind::ConnectorSync, &c.path.to_string())
+                .is_some_and(EffectTracking::is_in_flight)
+        })
+    }
+
+    pub fn transcript(&self) -> Vec<Message> {
+        match self.node {
+            Some(node) => self.state.message_tree().path_to(node),
+            None => Vec::new(),
+        }
+    }
+
+    /// A call is open while any of its tool calls lacks a recorded answer on the
+    /// active path. The tree is frozen during a pending decision, so the call
+    /// answering the last `tool.finished` is still open when that decision is
+    /// projected — exactly when its re-issue proposal is derived.
+    pub(crate) fn open_llm_calls(&self) -> HashMap<String, EffectState> {
+        let path = self.transcript();
+        let answered: std::collections::HashSet<&str> = path
+            .iter()
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        path.iter()
+            .filter(|m| {
+                m.tool_calls
+                    .iter()
+                    .any(|c| !answered.contains(c.id.as_str()))
+            })
+            .filter_map(|m| {
+                self.state
+                    .effect(EffectKind::LlmCall, &m.id)
+                    .map(|e| (m.id.clone(), e.clone()))
+            })
+            .collect()
     }
 }
 
@@ -2410,7 +2438,7 @@ mod open_llm_calls_tests {
         s.put_effect(call_state("call-1"));
 
         assert!(
-            s.open_llm_calls(&s.message_tree()).contains_key("call-1"),
+            s.at_head().open_llm_calls().contains_key("call-1"),
             "unanswered tool call keeps the parent open"
         );
 
@@ -2418,7 +2446,7 @@ mod open_llm_calls_tests {
             .push(node(tool_answer("t1", "tc-1"), Some("call-1")));
         s.head_id = Some("t1".to_string());
         assert!(
-            s.open_llm_calls(&s.message_tree()).is_empty(),
+            s.at_head().open_llm_calls().is_empty(),
             "recorded answer closes the call"
         );
     }
@@ -2472,8 +2500,8 @@ mod state_version_tests {
     #[test]
     fn empty_versions_resolve_to_default() {
         let s = forked_session();
-        assert_eq!(s.resolve_state_for(Some("u2")), WorkerState::default());
-        assert_eq!(s.resolve_state_for(None), WorkerState::default());
+        assert_eq!(s.at(Some("u2")).resolve_state_for(), WorkerState::default());
+        assert_eq!(s.at(None).resolve_state_for(), WorkerState::default());
     }
 
     #[test]
@@ -2481,7 +2509,7 @@ mod state_version_tests {
         let mut s = forked_session();
         s.state_versions.push(version(json!({"v": 1}), Some("u1")));
         s.state_versions.push(version(json!({"v": 2}), Some("u2")));
-        assert_eq!(s.resolve_state_for(Some("u2")).0, json!({"v": 2}));
+        assert_eq!(s.at(Some("u2")).resolve_state_for().0, json!({"v": 2}));
     }
 
     #[test]
@@ -2490,7 +2518,7 @@ mod state_version_tests {
         s.state_versions.push(version(json!({"v": 1}), Some("u1")));
         s.state_versions.push(version(json!({"v": 2}), Some("u2")));
         // u2's version is off the u1→x1 path; the branch sees state as-of u1.
-        assert_eq!(s.resolve_state_for(Some("x1")).0, json!({"v": 1}));
+        assert_eq!(s.at(Some("x1")).resolve_state_for().0, json!({"v": 1}));
     }
 
     #[test]
@@ -2498,9 +2526,9 @@ mod state_version_tests {
         let mut s = forked_session();
         s.state_versions.push(version(json!({"v": 0}), None));
         s.state_versions.push(version(json!({"v": 2}), Some("u2")));
-        assert_eq!(s.resolve_state_for(Some("x1")).0, json!({"v": 0}));
-        assert_eq!(s.resolve_state_for(Some("u2")).0, json!({"v": 2}));
-        assert_eq!(s.resolve_state_for(None).0, json!({"v": 0}));
+        assert_eq!(s.at(Some("x1")).resolve_state_for().0, json!({"v": 0}));
+        assert_eq!(s.at(Some("u2")).resolve_state_for().0, json!({"v": 2}));
+        assert_eq!(s.at(None).resolve_state_for().0, json!({"v": 0}));
     }
 
     #[test]
@@ -2522,8 +2550,8 @@ mod state_version_tests {
         }
         // Append-only: superseded same-anchor writes stay but never win.
         assert_eq!(s.state_versions.len(), 3);
-        assert_eq!(s.resolve_state_for(s.head_id.as_deref()).0, json!({"v": 3}));
-        assert_eq!(s.resolve_state_for(Some("x1")).0, json!({"v": 1}));
+        assert_eq!(s.at_head().resolve_state_for().0, json!({"v": 3}));
+        assert_eq!(s.at(Some("x1")).resolve_state_for().0, json!({"v": 1}));
     }
 
     #[test]
@@ -2577,7 +2605,7 @@ mod state_version_tests {
         assert_eq!(s.nodes.len(), 1);
         assert_eq!(s.state_versions.len(), 1);
         assert_eq!(s.head_id.as_deref(), Some("u1"));
-        assert_eq!(s.resolve_state_for(s.head_id.as_deref()).0, json!({"v": 1}));
+        assert_eq!(s.at_head().resolve_state_for().0, json!({"v": 1}));
     }
 }
 
@@ -2643,8 +2671,8 @@ mod agent_version_tests {
     #[test]
     fn empty_versions_resolve_to_none() {
         let s = forked_session();
-        assert_eq!(s.resolve_agent_for(Some("u2")), None);
-        assert_eq!(s.resolve_agent_for(None), None);
+        assert_eq!(s.at(Some("u2")).resolve_agent_for(), None);
+        assert_eq!(s.at(None).resolve_agent_for(), None);
     }
 
     #[test]
@@ -2652,7 +2680,7 @@ mod agent_version_tests {
         let mut s = forked_session();
         s.agent_versions.push(version("m1", Some("u1")));
         s.agent_versions.push(version("m2", Some("u2")));
-        assert_eq!(s.resolve_agent_for(Some("u2")), Some(config("m2")));
+        assert_eq!(s.at(Some("u2")).resolve_agent_for(), Some(config("m2")));
     }
 
     #[test]
@@ -2661,7 +2689,7 @@ mod agent_version_tests {
         s.agent_versions.push(version("m1", Some("u1")));
         s.agent_versions.push(version("m2", Some("u2")));
         // m2 is off the u1→x1 path; the branch sees config as-of u1.
-        assert_eq!(s.resolve_agent_for(Some("x1")), Some(config("m1")));
+        assert_eq!(s.at(Some("x1")).resolve_agent_for(), Some(config("m1")));
     }
 
     /// The summary answers at a place in the tree, and not at the head.
@@ -2715,12 +2743,14 @@ mod agent_version_tests {
         }
 
         assert!(
-            s.connection_summary(&ConnectionPath::Mcp("sentry".into()), Some("x1"))
+            s.at(Some("x1"))
+                .connection_summary(&ConnectionPath::Mcp("sentry".into()))
                 .is_some(),
             "the fork still holds the connection, so a call there can describe it"
         );
         assert!(
-            s.connection_summary(&ConnectionPath::Mcp("sentry".into()), Some("u2"))
+            s.at(Some("u2"))
+                .connection_summary(&ConnectionPath::Mcp("sentry".into()))
                 .is_none(),
             "u2 dropped it, so a call there has nothing to describe"
         );
@@ -2731,9 +2761,9 @@ mod agent_version_tests {
         let mut s = forked_session();
         s.agent_versions.push(version("m0", None));
         s.agent_versions.push(version("m2", Some("u2")));
-        assert_eq!(s.resolve_agent_for(Some("x1")), Some(config("m0")));
-        assert_eq!(s.resolve_agent_for(Some("u2")), Some(config("m2")));
-        assert_eq!(s.resolve_agent_for(None), Some(config("m0")));
+        assert_eq!(s.at(Some("x1")).resolve_agent_for(), Some(config("m0")));
+        assert_eq!(s.at(Some("u2")).resolve_agent_for(), Some(config("m2")));
+        assert_eq!(s.at(None).resolve_agent_for(), Some(config("m0")));
     }
 
     #[test]
@@ -2755,11 +2785,8 @@ mod agent_version_tests {
         }
         // Append-only: superseded same-anchor writes stay but never win.
         assert_eq!(s.agent_versions.len(), 3);
-        assert_eq!(
-            s.resolve_agent_for(s.head_id.as_deref()),
-            Some(config("m3"))
-        );
-        assert_eq!(s.resolve_agent_for(Some("x1")), Some(config("m1")));
+        assert_eq!(s.at_head().resolve_agent_for(), Some(config("m3")));
+        assert_eq!(s.at(Some("x1")).resolve_agent_for(), Some(config("m1")));
     }
 }
 

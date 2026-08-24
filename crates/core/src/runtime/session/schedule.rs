@@ -145,7 +145,8 @@ pub fn plan(state: &SessionState, now: DateTime<Utc>) -> Vec<ScheduleStep> {
 /// Fetch every connection the config in force names but has never fetched.
 fn owed_fetches(state: &SessionState) -> Vec<ScheduleStep> {
     state
-        .unsynced_connectors(state.head_id.as_deref())
+        .at_head()
+        .unsynced_connectors()
         .into_iter()
         .map(|connection_id| ScheduleStep::RequestFetch { connection_id })
         .collect()

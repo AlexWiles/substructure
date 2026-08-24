@@ -2,34 +2,32 @@
 //! replay gives the same answer. Definitions live in [`filter`].
 //! An answer is a [`StoredResult`], the same as a connection's or a worker's.
 
-use super::state::SessionState;
+use super::state::SessionStateAtNode;
 use crate::connectors::filter;
 use crate::plugins::{PluginBundle, Skill};
 use crate::protocol::{ConnectorToolKind, StoredContent, StoredResult};
 
 /// `None` hands the call to its target.
 pub fn answer(
-    state: &SessionState,
+    at: SessionStateAtNode,
     kind: ConnectorToolKind,
-    leaf: Option<&str>,
     arguments: &str,
 ) -> Option<StoredResult> {
     match kind {
         ConnectorToolKind::Remote => None,
-        ConnectorToolKind::Find => Some(find(state, leaf, arguments)),
-        ConnectorToolKind::Call => Some(call(state, leaf, arguments)),
+        ConnectorToolKind::Find => Some(find(at, arguments)),
+        ConnectorToolKind::Call => Some(call(at, arguments)),
         // The bundle is not in state; the executor answers this one.
         ConnectorToolKind::Skill => None,
     }
 }
 
 /// BM25 over every tool the agent can reach.
-fn find(state: &SessionState, leaf: Option<&str>, arguments: &str) -> StoredResult {
+fn find(at: SessionStateAtNode, arguments: &str) -> StoredResult {
     StoredResult::text(filter::find_answer(
-        &state.searchable_tools(leaf),
+        &at.searchable_tools(),
         &argument(arguments, "query"),
-        state
-            .resolve_agent_for(leaf)
+        at.resolve_agent_for()
             .map(|c| c.defer_settings())
             .unwrap_or_default()
             .max_matches,
@@ -37,10 +35,9 @@ fn find(state: &SessionState, leaf: Option<&str>, arguments: &str) -> StoredResu
 }
 
 /// A `call_tool` that gets here could not be routed.
-fn call(state: &SessionState, leaf: Option<&str>, arguments: &str) -> StoredResult {
+fn call(at: SessionStateAtNode, arguments: &str) -> StoredResult {
     StoredResult::error(
-        state
-            .call_tool_fault(arguments, leaf)
+        at.call_tool_fault(arguments)
             .unwrap_or_else(|| "the call could not be routed".to_string()),
     )
 }
@@ -61,14 +58,13 @@ pub fn split_skill(named: &str) -> (&str, &str) {
 /// A skill body, or one of its files. Each fault lists what the model can ask
 /// for.
 pub fn skill_answer(
-    state: &SessionState,
+    at: SessionStateAtNode,
     bundle: Option<&PluginBundle>,
-    leaf: Option<&str>,
     arguments: &str,
 ) -> StoredResult {
     let named = argument(arguments, "name");
     let file = Some(argument(arguments, "file")).filter(|f| !f.is_empty());
-    let Some(config) = state.resolve_agent_for(leaf) else {
+    let Some(config) = at.resolve_agent_for() else {
         return StoredResult::error("this agent has no config on this branch");
     };
     let catalog = || {
@@ -161,7 +157,7 @@ mod tests {
     use crate::plugins::{PluginSet, Skill};
     use crate::protocol::{AgentConfig, AgentPlugin, SkillMeta};
     use crate::runtime::session::events::{AgentConfigUpdated, EventPayload};
-    use crate::session::state::ApplyContext;
+    use crate::session::state::{ApplyContext, SessionState};
 
     fn state_with_plugin() -> SessionState {
         let mut s = SessionState::new("sess-1".to_string());
@@ -230,9 +226,8 @@ mod tests {
     #[test]
     fn a_skill_answers_with_its_body_and_file_listing() {
         let answer = skill_answer(
-            &state_with_plugin(),
+            state_with_plugin().at(None),
             bundles().get("pdf"),
-            None,
             r#"{"name":"pdf:form-filling"}"#,
         );
         assert!(!answer.is_error, "expected a result; got {answer:?}");
@@ -248,9 +243,8 @@ mod tests {
     #[test]
     fn a_file_read_answers_with_the_content() {
         let answer = skill_answer(
-            &state_with_plugin(),
+            state_with_plugin().at(None),
             bundles().get("pdf"),
-            None,
             r#"{"name":"pdf:form-filling","file":"references/FORMS.md"}"#,
         );
         assert_eq!(answer, StoredResult::text("field rules"));
@@ -259,9 +253,8 @@ mod tests {
     #[test]
     fn a_binary_answers_with_its_blob() {
         let answer = skill_answer(
-            &state_with_plugin(),
+            state_with_plugin().at(None),
             bundles().get("pdf"),
-            None,
             r#"{"name":"pdf:form-filling","file":"references/sample.pdf"}"#,
         );
         assert_eq!(
@@ -289,7 +282,11 @@ mod tests {
             ),
         ];
         for (arguments, expected) in cases {
-            let answer = skill_answer(&state_with_plugin(), bundles().get("pdf"), None, arguments);
+            let answer = skill_answer(
+                state_with_plugin().at(None),
+                bundles().get("pdf"),
+                arguments,
+            );
             assert!(
                 answer.is_error,
                 "{arguments}: expected a fault; got {answer:?}"

@@ -11,7 +11,7 @@
 //! module decides where it lands and whether this request already holds it.
 
 use crate::protocol::{Announce, Content, Message, Role};
-use crate::runtime::session::state::SessionState;
+use crate::runtime::session::state::SessionStateAtNode;
 
 /// Where context lands. Each rung falls to the next when it cannot be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,17 +36,17 @@ pub struct PromptContext {
     pub content: String,
 }
 
-pub type Contributor = fn(&SessionState, Option<&str>, &str) -> Vec<PromptContext>;
+pub type Contributor = fn(SessionStateAtNode, &str) -> Vec<PromptContext>;
 
 /// The order is fixed: two replays that disagreed would send two different
 /// prompts.
 const CONTRIBUTORS: &[Contributor] = &[plugin_catalog, announce_servers];
 
 /// Everything the engine owes this call.
-pub fn owed(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<PromptContext> {
+pub fn owed(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
     CONTRIBUTORS
         .iter()
-        .flat_map(|contribute| contribute(state, leaf, call_id))
+        .flat_map(|contribute| contribute(at, call_id))
         .collect()
 }
 
@@ -54,15 +54,15 @@ pub fn owed(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<Prom
 ///
 /// Once means once in the prompt. The record is the context id on an earlier
 /// call of this path, so a fork that never held the server announces it.
-fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<PromptContext> {
-    let Some(config) = state.resolve_agent_for(leaf) else {
+fn announce_servers(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
+    let Some(config) = at.resolve_agent_for() else {
         return Vec::new();
     };
     if config.announce_mcp == Announce::Never {
         return Vec::new();
     }
-    let said = state.context_ids_on_path(leaf, call_id);
-    state
+    let said = at.context_ids_on_path(call_id);
+    at.state()
         .servers_for(&config)
         .into_iter()
         .map(|server| (format!("mcp:{}", server.path), server))
@@ -73,7 +73,7 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
                 placement: Placement::System,
                 // The `mcp_server` key is the label, so there is no prose here
                 // to go stale or to need configuring.
-                content: state.connection_summary(&server.path, leaf)?,
+                content: at.connection_summary(&server.path)?,
             })
         })
         .collect()
@@ -81,11 +81,11 @@ fn announce_servers(state: &SessionState, leaf: Option<&str>, call_id: &str) -> 
 
 /// One context per plugin the path has not seen. A plugin added mid-session
 /// gets its own entry and does not change what an earlier call cached.
-fn plugin_catalog(state: &SessionState, leaf: Option<&str>, call_id: &str) -> Vec<PromptContext> {
-    let Some(config) = state.resolve_agent_for(leaf) else {
+fn plugin_catalog(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
+    let Some(config) = at.resolve_agent_for() else {
         return Vec::new();
     };
-    let said = state.context_ids_on_path(leaf, call_id);
+    let said = at.context_ids_on_path(call_id);
     config
         .plugins
         .iter()
@@ -219,7 +219,7 @@ mod tests {
     use crate::runtime::session::events::{
         AgentConfigUpdated, ConnectorSyncCompleted, ConnectorSyncRequested, EventPayload,
     };
-    use crate::session::state::ApplyContext;
+    use crate::session::state::{ApplyContext, SessionState};
 
     fn apply(state: &mut SessionState, seq: u64, payload: EventPayload) {
         state.apply(
@@ -312,7 +312,7 @@ mod tests {
     }
 
     fn owed_ids(state: &SessionState) -> Vec<String> {
-        owed(state, None, "call-1")
+        owed(state.at(None), "call-1")
             .into_iter()
             .map(|c| c.id)
             .collect()
@@ -325,7 +325,7 @@ mod tests {
             owed_ids(&state),
             ["plugin:pdf", "mcp:plugin.pdf.mcp.renderer"]
         );
-        let owed = owed(&state, None, "call-1");
+        let owed = owed(state.at(None), "call-1");
         assert!(
             owed[1]
                 .content
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn the_catalog_carries_every_skill_description() {
         let state = plugin_state(false);
-        let catalog = &owed(&state, None, "call-1")[0].content;
+        let catalog = &owed(state.at(None), "call-1")[0].content;
         assert!(catalog.matches("long long").count() >= 2, "{catalog}");
         assert!(catalog.contains("pdf:text-extraction"), "{catalog}");
     }

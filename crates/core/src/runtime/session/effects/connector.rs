@@ -25,7 +25,7 @@ use crate::runtime::retry::RetryTarget;
 use crate::runtime::session::events::*;
 use crate::runtime::session::schedule::Dep;
 use crate::runtime::session::state::EffectTracking;
-use crate::runtime::session::state::{EffectKind, SessionState};
+use crate::runtime::session::state::{EffectKind, SessionState, SessionStateAtNode};
 
 pub struct ConnectorSpec;
 
@@ -114,19 +114,20 @@ impl KindSpec for ConnectorSpec {
     }
 }
 
-/// A [`Dep`] for every fetch the config in force at `leaf` still owes:
+/// A [`Dep`] for every fetch the config in force at the node still owes:
 /// connections never fetched, or fetched but unsettled. The edge other kinds
 /// wait on — a call cannot be authored against tools the engine has not
 /// fetched, and a decision cannot route them.
-pub(in crate::runtime::session) fn owed(state: &SessionState, leaf: Option<&str>) -> Vec<Dep> {
-    let mut deps: Vec<Dep> = state
-        .unsynced_connectors(leaf)
+pub(in crate::runtime::session) fn owed(at: SessionStateAtNode) -> Vec<Dep> {
+    let mut deps: Vec<Dep> = at
+        .unsynced_connectors()
         .into_iter()
         .map(|connection_id| Dep::ConnectorSettled { connection_id })
         .collect();
-    if let Some(config) = state.resolve_agent_for(leaf) {
-        for c in state.servers_for(&config) {
-            if state
+    if let Some(config) = at.resolve_agent_for() {
+        for c in at.state().servers_for(&config) {
+            if at
+                .state()
                 .tracking(EffectKind::ConnectorSync, &c.path.to_string())
                 .is_some_and(EffectTracking::is_in_flight)
             {
@@ -203,8 +204,7 @@ impl SessionState {
         offered: &[RemoteTool],
         prefix: Option<&str>,
     ) {
-        let leaf = self.head_id.clone();
-        let Some(config) = self.resolve_agent_for(leaf.as_deref()) else {
+        let Some(config) = self.at_head().resolve_agent_for() else {
             return;
         };
         let Some(connector) = self

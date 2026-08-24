@@ -1100,8 +1100,7 @@ impl SlackBot {
         let Ok(session) = ctx.get_session(&ws.tenant_id, session_id).await else {
             return;
         };
-        let head = session.state.head_id.clone();
-        let Some(open) = session.state.active_interrupt_for(head.as_deref()) else {
+        let Some(open) = session.state.at_head().active_interrupt_for() else {
             return;
         };
         let Some(text) = Self::still_waiting(&open.payload) else {

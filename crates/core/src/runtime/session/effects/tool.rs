@@ -267,11 +267,11 @@ fn unwrap_call(
     arguments: String,
 ) -> (String, String, ToolHandler, Option<ConnectorTarget>) {
     let named = argument(&arguments, "name").unwrap_or_default();
-    let here = state.head_id.as_deref();
-    let target = state
-        .call_tool_fault(&arguments, here)
+    let here = state.at_head();
+    let target = here
+        .call_tool_fault(&arguments)
         .is_none()
-        .then(|| state.call_tool_target(&named, here))
+        .then(|| here.call_tool_target(&named))
         .flatten();
     let Some(target) = target else {
         return (

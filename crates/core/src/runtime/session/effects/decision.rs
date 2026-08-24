@@ -133,7 +133,7 @@ impl KindSpec for DecisionSpec {
                 decision_id: e.id.clone(),
             })
             .collect();
-        deps.extend(super::connector::owed(state, state.head_id.as_deref()));
+        deps.extend(super::connector::owed(state.at_head()));
         deps.sort_by_key(Dep::label);
         deps.dedup();
         deps

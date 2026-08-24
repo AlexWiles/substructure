@@ -98,7 +98,8 @@ async fn run(
     let open: Vec<String> = match ctx.get_session(caller.tenant_id(), &session_id).await {
         Ok(session) => session
             .state
-            .interrupts_for(session.state.head_id.as_deref())
+            .at_head()
+            .interrupts_for()
             .into_iter()
             .map(|i| i.interrupt_id.clone())
             .collect(),

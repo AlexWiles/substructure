@@ -10,7 +10,6 @@ use crate::runtime::processor::{
     ProcessorError,
 };
 use crate::runtime::session::events::EventPayload;
-use crate::runtime::session::interrupts::auth;
 use crate::runtime::session::propose::{propose, Proposing};
 use crate::runtime::session::state::SessionState;
 use crate::runtime::session::wire::to_wire_trigger;
@@ -169,13 +168,14 @@ async fn extract(
         .as_deref()
         .map(|h| message_tree.path_to(h))
         .unwrap_or_default();
+    let at = state.at_head();
     // Call entries are keyed by immutable prompt/spec; the as-of path picks
     // the as-of subset even from the current map.
-    let open_llm_calls = state.open_llm_calls(&message_tree);
+    let open_llm_calls = at.open_llm_calls();
 
     let pending_calls = meta.pending_work(&req.id);
-    let worker_state = state.resolve_state_for(message_tree.head_id.as_deref());
-    let agent_config = state.resolve_agent_for(message_tree.head_id.as_deref());
+    let worker_state = at.resolve_state_for();
+    let agent_config = at.resolve_agent_for();
 
     let trigger = to_wire_trigger(
         trigger,
@@ -192,21 +192,12 @@ async fn extract(
             e.error.message
         ))
     })?;
-    let connector_tools = state.connector_tools(message_tree.head_id.as_deref()).tools;
-
-    let auth_prompt = auth::prompt(&state);
-
     let proposed = propose(
         &trigger,
         &Proposing {
-            transcript: &transcript,
-            llm_calls: &open_llm_calls,
+            state: at,
             pending_calls,
-            dispatched: &state.dispatched_calls(),
-            config: agent_config.as_ref(),
-            connector_tools: &connector_tools,
             decision_id: &req.id,
-            auth_prompt: auth_prompt.as_ref(),
         },
     )
     // `session.start` is the one trigger the engine cannot derive from the

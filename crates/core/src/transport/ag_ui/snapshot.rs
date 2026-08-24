@@ -38,7 +38,8 @@ fn to_snapshot(message: Message) -> SnapshotMessage {
 
 pub fn open_interrupts(session: &SessionState) -> Vec<AgUiInterrupt> {
     session
-        .interrupts_for(session.head_id.as_deref())
+        .at_head()
+        .interrupts_for()
         .into_iter()
         .map(AgUiInterrupt::from_open)
         .collect()

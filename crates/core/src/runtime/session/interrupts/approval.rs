@@ -24,16 +24,17 @@ impl InterruptKind for Approval {
 
     /// Answer the held call, then ask about the next one.
     fn resumed(&self, tail: &str, payload: &Value, p: &Proposing<'_>) -> Option<DecisionResponse> {
-        let &Proposing {
-            transcript,
-            llm_calls,
-            pending_calls,
-            dispatched,
-            config,
-            connector_tools,
-            decision_id,
-            auth_prompt: _,
-        } = p;
+        let transcript = p.state.transcript();
+        let transcript = transcript.as_slice();
+        let llm_calls = &p.state.open_llm_calls();
+        let dispatched = p.state.state().dispatched_calls();
+        let dispatched = dispatched.as_slice();
+        let config = p.state.resolve_agent_for();
+        let config = config.as_ref();
+        let connector_tools = p.state.connector_tools().tools;
+        let connector_tools = connector_tools.as_slice();
+        let pending_calls = p.pending_calls;
+        let decision_id = p.decision_id;
         let Some((at, call)) = asked_about(tail, transcript, dispatched) else {
             return Some(match config {
                 Some(c) => resumed(transcript, c),
