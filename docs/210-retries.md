@@ -11,15 +11,15 @@ It stops when the attempts run out or when a failure cannot be retried.
 
 ## Defaults
 
-| Effect | attempt | total | attempts |
-|---|---|---|---|
-| Model call | 180s | 1800s | 5 |
-| Tool call (worker) | 120s | 600s | **1** |
-| Tool call (client) | none | none | 1 |
-| Tool call (connector) | 60s | 300s | 2 |
-| Sub-agent start | 10s | 3600s | 3 |
-| Connector fetch | 5s | 30s | 2 |
-| Worker decision | 20s | 300s | 10 |
+| Effect | queue | run | total | attempts |
+|---|---|---|---|---|
+| Model call | 60s | 180s | 1800s | 5 |
+| Tool call (worker) | none | 120s | 600s | **1** |
+| Tool call (client) | none | none | none | 1 |
+| Tool call (connector) | 60s | 60s | 600s | 2 |
+| Sub-agent start | 30s | 10s | 3600s | 3 |
+| Connector fetch | 10s | 5s | 30s | 2 |
+| Worker decision | none | 20s | 300s | 10 |
 
 A worker tool has timeouts, and the engine never repeats it. The engine cannot
 know whether your tool is safe to run twice. You decide when to retry.
@@ -30,21 +30,41 @@ A client tool has no limit, because an async call can wait for a person. See
 The engine does retry a sub-agent start. A second attempt cannot create a second
 child.
 
-## Two timeouts
+## Three timeouts
 
 ```typescript
 type RetryPolicy = {
-    attempt_timeout_secs: number | null  // one attempt. null waits forever
-    total_timeout_secs: number | null    // the whole effect. null has no limit
-    max_attempts: number                 // attempts, not retries
+    queue_timeout_secs: number | null  // the wait for an executor
+    run_timeout_secs: number | null    // the work itself. null runs forever
+    total_timeout_secs: number | null  // the whole effect. null has no limit
+    max_attempts: number               // attempts, not retries
     backoff_base_secs: number
     backoff_max_secs: number
 }
 ```
 
-`attempt_timeout_secs` limits one attempt. The engine sends it on the
+An attempt waits for an executor, and then it runs. Those are separate spans and
+each has its own bound.
+
+`queue_timeout_secs` limits the wait. Work the engine runs itself is queued per
+session, so calls the model asked for in one response start together and share
+the executor. A call that waits longer than this is dropped rather than started,
+because it is stale by the time an executor reaches it.
+
+`run_timeout_secs` limits the work, measured from the moment an executor starts
+it. When it lapses the work is cancelled. The engine sends it on the
 `tool.execute` and `llm.execute` triggers as `deadline`. It restarts with each
 attempt.
+
+A queue bound of `none` means the kind has no engine queue, so there is no wait
+to bound. A worker or client tool is handed to its owner, and a decision rides
+the worker queue under its own gates.
+
+A model can ask for more calls at once than an executor runs at once. The
+surplus waits, and it waits behind calls that may each take the whole run. So
+for the kinds that arrive in batches the queue bound is never less than the run
+bound, and the tail of a wide batch waits out a full wave instead of expiring
+behind it.
 
 `total_timeout_secs` limits the whole effect, from the first attempt. It covers
 every attempt and every wait between them. A retry does not restart this clock.
@@ -73,7 +93,7 @@ The keys are `default`, `llm`, `tool`, `sub_agent`, and `connector`. They stack.
 [agent.assistant.retry]
 default = { max_attempts = 3, backoff_max_secs = 30 }
 tool    = { max_attempts = 1 }
-connector = { attempt_timeout_secs = 10 }
+connector = { run_timeout_secs = 10 }
 ```
 
 One action can carry its own `retry`. The engine applies it last.
@@ -83,7 +103,7 @@ One action can carry its own `retry`. The engine applies it last.
     "type": "tool.call",
     "name": "render_report",
     "arguments": { "topic": "q3" },
-    "retry": { "attempt_timeout_secs": 30, "max_attempts": 3 }
+    "retry": { "run_timeout_secs": 30, "max_attempts": 3 }
 }
 ```
 
@@ -121,11 +141,13 @@ The call ends with a final error in three cases.
 - A policy with no attempts left.
 - An expired `total_timeout_secs`.
 
-An attempt timeout is retryable. The next attempt might work. A total timeout is
-not.
+A queue or run timeout is retryable. The next attempt might work. A total
+timeout is not.
 
 `code` describes a failure. `retryable` decides whether the engine tries again.
-The engine sets `deadline_exceeded` on both kinds of timeout.
+The engine sets `deadline_exceeded` on every timeout, and the message says which
+bound lapsed: `deadline exceeded while queued` never ran, `deadline exceeded
+while running` ran too long.
 
 ```typescript
 type ErrorCode = "provider_error" | "rate_limited" | "refused" | "budget_exceeded" | "deadline_exceeded"

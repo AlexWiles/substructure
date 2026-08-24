@@ -9,6 +9,11 @@ together at the same version.
 
 ## [Unreleased]
 
+### Changed
+
+- Retry policy improvementss
+- Better concurrent tool execution within a turn.
+
 ## [0.8.0] - 2026-08-24
 
 ### Added

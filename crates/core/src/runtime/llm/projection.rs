@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
 use crate::providers::memory_queue::TaskQueue;
@@ -10,6 +11,7 @@ use crate::runtime::processor::{
 };
 use crate::runtime::session::decision::LlmHandler;
 use crate::runtime::session::events::EventPayload;
+use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::SessionEvent;
 
 use super::LlmTask;
@@ -49,6 +51,13 @@ impl EventProcessor for LlmDispatchProjection {
             // Settled and gone — nothing left to execute.
             return Ok(());
         };
+        let Some(retry) = session
+            .state
+            .tracking(EffectKind::LlmCall, &dispatched.id)
+            .map(|t| t.retry_policy.clone())
+        else {
+            return Ok(());
+        };
 
         // Worker-handled calls run on the worker, not the server-side executor.
         if call.handler == LlmHandler::Worker {
@@ -82,6 +91,8 @@ impl EventProcessor for LlmDispatchProjection {
             owner,
             ancestry,
             turn_id,
+            retry,
+            enqueued_at: Utc::now(),
             span: event.span,
         };
 

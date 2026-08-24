@@ -27,10 +27,10 @@ pub enum RetryTarget {
 }
 
 impl RetryPolicy {
-    /// One attempt, unbounded, never retried.
     pub fn no_retry() -> Self {
         RetryPolicy {
-            attempt_timeout_secs: None,
+            queue_timeout_secs: None,
+            run_timeout_secs: None,
             total_timeout_secs: None,
             max_attempts: 1,
             backoff_base_secs: 0,
@@ -39,17 +39,18 @@ impl RetryPolicy {
     }
 
     pub fn default_for(target: RetryTarget) -> Self {
-        let (attempt, total, max_attempts, base, max) = match target {
-            RetryTarget::Llm => (Some(180), Some(1800), 5, 2, 30),
-            RetryTarget::WorkerTool => (Some(120), Some(600), 1, 0, 0),
-            RetryTarget::ClientTool => (None, None, 1, 0, 0),
-            RetryTarget::ConnectorTool => (Some(60), Some(300), 2, 1, 10),
-            RetryTarget::SubAgent => (Some(10), Some(3600), 3, 2, 15),
-            RetryTarget::ConnectorSync => (Some(5), Some(30), 2, 2, 10),
-            RetryTarget::Decision => (Some(20), Some(300), 10, 2, 60),
+        let (queue, run, total, max_attempts, base, max) = match target {
+            RetryTarget::Llm => (Some(60), Some(180), Some(1800), 5, 2, 30),
+            RetryTarget::WorkerTool => (None, Some(120), Some(600), 1, 0, 0),
+            RetryTarget::ClientTool => (None, None, None, 1, 0, 0),
+            RetryTarget::ConnectorTool => (Some(60), Some(60), Some(600), 2, 1, 10),
+            RetryTarget::SubAgent => (Some(30), Some(10), Some(3600), 3, 2, 15),
+            RetryTarget::ConnectorSync => (Some(10), Some(5), Some(30), 2, 2, 10),
+            RetryTarget::Decision => (None, Some(20), Some(300), 10, 2, 60),
         };
         RetryPolicy {
-            attempt_timeout_secs: attempt,
+            queue_timeout_secs: queue,
+            run_timeout_secs: run,
             total_timeout_secs: total,
             max_attempts,
             backoff_base_secs: base,
@@ -79,15 +80,12 @@ impl RetryPolicy {
         }
     }
 
-    /// This policy as an override that pins every field — for re-proposing a
-    /// call under exactly the policy it already ran on.
-    ///
     /// An unset timeout stays unset, which an override cannot express, so it
-    /// re-resolves to the default instead. Unreachable in practice: only a
-    /// client tool defaults to unbounded, and its calls are never re-proposed.
+    /// re-resolves to the default instead.
     pub fn as_override(&self) -> RetryOverride {
         RetryOverride {
-            attempt_timeout_secs: self.attempt_timeout_secs,
+            queue_timeout_secs: self.queue_timeout_secs,
+            run_timeout_secs: self.run_timeout_secs,
             total_timeout_secs: self.total_timeout_secs,
             max_attempts: Some(self.max_attempts),
             backoff_base_secs: Some(self.backoff_base_secs),
@@ -95,10 +93,12 @@ impl RetryPolicy {
         }
     }
 
-    /// This policy with `o`'s named fields replaced and the rest left alone.
     pub fn with_override(mut self, o: &RetryOverride) -> Self {
-        if let Some(v) = o.attempt_timeout_secs {
-            self.attempt_timeout_secs = Some(v);
+        if let Some(v) = o.queue_timeout_secs {
+            self.queue_timeout_secs = Some(v);
+        }
+        if let Some(v) = o.run_timeout_secs {
+            self.run_timeout_secs = Some(v);
         }
         if let Some(v) = o.total_timeout_secs {
             self.total_timeout_secs = Some(v);
@@ -115,10 +115,20 @@ impl RetryPolicy {
         self
     }
 
-    /// The deadline for one attempt started at `now`. None ⇒ waits indefinitely.
+    pub fn run_timeout(&self) -> Option<std::time::Duration> {
+        self.run_timeout_secs
+            .map(|s| std::time::Duration::from_secs(u64::from(s)))
+    }
+
+    pub fn queue_timeout(&self) -> Option<std::time::Duration> {
+        self.queue_timeout_secs
+            .map(|s| std::time::Duration::from_secs(u64::from(s)))
+    }
+
     pub fn attempt_deadline(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        self.attempt_timeout_secs
-            .map(|s| now + chrono::Duration::seconds(i64::from(s)))
+        let run = self.run_timeout_secs?;
+        let queued = self.queue_timeout_secs.unwrap_or(0);
+        Some(now + chrono::Duration::seconds(i64::from(queued) + i64::from(run)))
     }
 
     /// The deadline for the whole effect, measured from its first dispatch —
@@ -238,7 +248,7 @@ mod tests {
         );
         assert_eq!(resolved.max_attempts, 5, "the named field changes");
         assert_eq!(
-            resolved.attempt_timeout_secs, base.attempt_timeout_secs,
+            resolved.run_timeout_secs, base.run_timeout_secs,
             "an unnamed timeout keeps the default bound; it is not removed"
         );
         assert_eq!(resolved.total_timeout_secs, base.total_timeout_secs);
@@ -252,7 +262,8 @@ mod tests {
             None,
             Some(&config(
                 Some(RetryOverride {
-                    attempt_timeout_secs: Some(11),
+                    queue_timeout_secs: None,
+                    run_timeout_secs: Some(11),
                     max_attempts: Some(3),
                     ..Default::default()
                 }),
@@ -262,7 +273,7 @@ mod tests {
         );
         assert_eq!(resolved.max_attempts, 5, "the kind wins where both name it");
         assert_eq!(
-            resolved.attempt_timeout_secs,
+            resolved.run_timeout_secs,
             Some(11),
             "`default` still applies where the kind is silent"
         );
@@ -277,8 +288,8 @@ mod tests {
         );
         assert_eq!(resolved.max_attempts, 7);
         assert_eq!(
-            resolved.attempt_timeout_secs,
-            RetryPolicy::default_for(RetryTarget::WorkerTool).attempt_timeout_secs,
+            resolved.run_timeout_secs,
+            RetryPolicy::default_for(RetryTarget::WorkerTool).run_timeout_secs,
             "a partial action override still keeps the engine bound"
         );
     }
@@ -323,7 +334,7 @@ mod tests {
             RetryTarget::ClientTool,
         );
         assert_eq!(
-            resolved.attempt_timeout_secs, None,
+            resolved.run_timeout_secs, None,
             "an async call stays open unless the override says otherwise"
         );
         assert_eq!(resolved.total_timeout_secs, None);
@@ -364,18 +375,18 @@ mod tests {
             RetryTarget::Decision,
         ] {
             let p = RetryPolicy::default_for(target);
-            assert!(p.attempt_timeout_secs.is_some(), "{target:?} attempt bound");
+            assert!(p.run_timeout_secs.is_some(), "{target:?} attempt bound");
             assert!(p.total_timeout_secs.is_some(), "{target:?} total bound");
         }
         let client = RetryPolicy::default_for(RetryTarget::ClientTool);
-        assert_eq!(client.attempt_timeout_secs, None, "async calls stay open");
+        assert_eq!(client.run_timeout_secs, None, "async calls stay open");
         assert_eq!(client.total_timeout_secs, None);
     }
 
     #[test]
     fn a_worker_tool_is_bounded_but_never_repeated() {
         let p = RetryPolicy::default_for(RetryTarget::WorkerTool);
-        assert_eq!(p.attempt_timeout_secs, Some(120));
+        assert_eq!(p.run_timeout_secs, Some(120));
         assert_eq!(p.max_attempts, 1, "the engine cannot vouch for idempotency");
         assert!(p.exhausted(&RetryState::default(), true), "one try only");
     }
@@ -411,7 +422,8 @@ mod tests {
         let started = Utc::now();
         let later = started + chrono::Duration::seconds(60);
         let p = RetryPolicy {
-            attempt_timeout_secs: Some(1),
+            queue_timeout_secs: None,
+            run_timeout_secs: Some(1),
             total_timeout_secs: Some(9),
             max_attempts: 3,
             backoff_base_secs: 2,
@@ -426,6 +438,127 @@ mod tests {
             p.attempt_deadline(later),
             Some(later + chrono::Duration::seconds(1)),
             "the attempt clock restarts with each attempt"
+        );
+    }
+
+    fn bounded(queue: Option<u32>, run: Option<u32>) -> RetryPolicy {
+        RetryPolicy {
+            queue_timeout_secs: queue,
+            run_timeout_secs: run,
+            total_timeout_secs: Some(600),
+            max_attempts: 2,
+            backoff_base_secs: 1,
+            backoff_max_secs: 10,
+        }
+    }
+
+    #[test]
+    fn the_attempt_backstop_covers_the_queue_wait_and_the_run() {
+        let now = Utc::now();
+        assert_eq!(
+            bounded(Some(30), Some(60)).attempt_deadline(now),
+            Some(now + chrono::Duration::seconds(90)),
+        );
+    }
+
+    #[test]
+    fn no_queue_bound_leaves_the_backstop_at_the_run() {
+        let now = Utc::now();
+        assert_eq!(
+            bounded(None, Some(120)).attempt_deadline(now),
+            Some(now + chrono::Duration::seconds(120)),
+        );
+    }
+
+    #[test]
+    fn an_unbounded_run_has_no_attempt_backstop() {
+        assert_eq!(
+            bounded(Some(30), None).attempt_deadline(Utc::now()),
+            None,
+            "only the whole-effect bound can settle it"
+        );
+    }
+
+    #[test]
+    fn engine_queued_kinds_bound_the_wait() {
+        for target in [
+            RetryTarget::Llm,
+            RetryTarget::ConnectorTool,
+            RetryTarget::ConnectorSync,
+            RetryTarget::SubAgent,
+        ] {
+            let p = RetryPolicy::default_for(target);
+            assert!(
+                p.queue_timeout_secs.is_some(),
+                "{target:?} waits on an executor"
+            );
+        }
+        for target in [
+            RetryTarget::WorkerTool,
+            RetryTarget::ClientTool,
+            RetryTarget::Decision,
+        ] {
+            let p = RetryPolicy::default_for(target);
+            assert_eq!(
+                p.queue_timeout_secs, None,
+                "{target:?} is handed to its owner, and never queues here"
+            );
+        }
+    }
+
+    #[test]
+    fn every_default_fits_its_attempts_inside_its_total() {
+        for target in [
+            RetryTarget::Llm,
+            RetryTarget::WorkerTool,
+            RetryTarget::ConnectorTool,
+            RetryTarget::SubAgent,
+            RetryTarget::ConnectorSync,
+            RetryTarget::Decision,
+        ] {
+            let p = RetryPolicy::default_for(target);
+            let (Some(queue_or_none), Some(total)) = (
+                Some(p.queue_timeout_secs.unwrap_or(0)),
+                p.total_timeout_secs,
+            ) else {
+                continue;
+            };
+            let attempt = queue_or_none + p.run_timeout_secs.unwrap_or(0);
+            assert!(
+                attempt <= total,
+                "{target:?}: one attempt of {attempt}s cannot fit in {total}s"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kind_that_arrives_in_batches_can_wait_out_a_full_wave() {
+        for target in [
+            RetryTarget::ConnectorTool,
+            RetryTarget::ConnectorSync,
+            RetryTarget::SubAgent,
+        ] {
+            let p = RetryPolicy::default_for(target);
+            assert!(
+                p.queue_timeout_secs >= p.run_timeout_secs,
+                "{target:?}: {:?}s queued cannot outlast a {:?}s wave",
+                p.queue_timeout_secs,
+                p.run_timeout_secs,
+            );
+        }
+    }
+
+    #[test]
+    fn an_override_can_name_either_bound_alone() {
+        let base = RetryPolicy::default_for(RetryTarget::ConnectorTool);
+        let queued = base.clone().with_override(&RetryOverride {
+            queue_timeout_secs: Some(5),
+            ..Default::default()
+        });
+        assert_eq!(queued.queue_timeout_secs, Some(5));
+        assert_eq!(
+            queued.run_timeout_secs, base.run_timeout_secs,
+            "naming one bound leaves the other"
         );
     }
 }

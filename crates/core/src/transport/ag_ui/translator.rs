@@ -629,7 +629,7 @@ mod tests {
             .collect()
     }
 
-    const RETRY: &str = r#"{"attempt_timeout_secs":null,"total_timeout_secs":null,"max_attempts":1,"backoff_base_secs":1,"backoff_max_secs":1}"#;
+    const RETRY: &str = r#"{"run_timeout_secs":null,"total_timeout_secs":null,"max_attempts":1,"backoff_base_secs":1,"backoff_max_secs":1}"#;
 
     fn tool_requested(id: &str, name: &str, args: &str, handler: &str) -> EventPayload {
         ev(json!({

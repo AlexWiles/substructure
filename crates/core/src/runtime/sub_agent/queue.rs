@@ -1,8 +1,11 @@
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::protocol::ErrorInfo;
 use crate::protocol::{DraftMessage, RetryPolicy, SessionOwner, Usage};
+use crate::runtime::executor::{BoundedTask, TaskBound};
+use crate::runtime::session::state::EffectKind;
 use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Clone)]
@@ -18,6 +21,7 @@ pub enum SubAgentTask {
         /// The child's opening message, sent right after its session exists.
         message: Option<DraftMessage>,
         retry: RetryPolicy,
+        enqueued_at: DateTime<Utc>,
         span: SpanContext,
     },
     SendSessionMessage {
@@ -48,6 +52,34 @@ pub enum SubAgentTask {
         child_session_id: String,
         span: SpanContext,
     },
+}
+
+impl BoundedTask for SubAgentTask {
+    fn bound(&self) -> Option<TaskBound> {
+        let SubAgentTask::SpawnSubAgent {
+            parent_session_id,
+            tenant_id,
+            child_session_id,
+            retry,
+            enqueued_at,
+            span,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(TaskBound {
+            tenant_id: tenant_id.clone(),
+            session_id: parent_session_id.clone(),
+            kind: EffectKind::SubAgent,
+            id: child_session_id.clone(),
+            attempt: None,
+            enqueued_at: *enqueued_at,
+            queue_timeout: retry.queue_timeout(),
+            run_timeout: retry.run_timeout(),
+            span: span.clone(),
+        })
+    }
 }
 
 impl SubAgentTask {

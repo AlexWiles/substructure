@@ -91,8 +91,8 @@ again.
 A client-handled call waits forever by default. It is the one effect with no
 limit, because a person might be answering it.
 
-To limit the wait, give the `tool.call` a `retry` policy with an
-`attempt_timeout_secs` or a `total_timeout_secs`. When either expires, the call
+To limit the wait, give the `tool.call` a `retry` policy with a
+`run_timeout_secs` or a `total_timeout_secs`. When either expires, the call
 fails. The engine then retries it or ends it, under the policy. See
 [Retries](./210-retries.md).
 

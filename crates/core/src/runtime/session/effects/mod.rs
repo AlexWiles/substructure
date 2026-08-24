@@ -108,8 +108,9 @@ impl From<SettleError> for Outcome {
     }
 }
 
-/// The error a swept effect settles with.
 pub const DEADLINE: &str = "deadline exceeded";
+pub const QUEUED: &str = "deadline exceeded while queued";
+pub const RUN: &str = "deadline exceeded while running";
 
 /// One kind of work, as data the engine reads rather than arms it branches on.
 ///

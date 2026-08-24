@@ -53,7 +53,8 @@ fn frontend() -> Caller {
 /// all the way from in-flight to terminally failed.
 fn policy() -> RetryPolicy {
     RetryPolicy {
-        attempt_timeout_secs: Some(5),
+        queue_timeout_secs: None,
+        run_timeout_secs: Some(5),
         total_timeout_secs: None,
         max_attempts: 2,
         backoff_base_secs: 1,

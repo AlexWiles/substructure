@@ -8,6 +8,7 @@ use crate::protocol::{ErrorCode, ErrorInfo, StreamDelta, TokenDelta};
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::blob::BlobStore;
 use crate::runtime::event_store::EventStore;
+use crate::runtime::executor::{spawn_bounded_executors, ExecutorPool};
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
 use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteInput};
@@ -21,105 +22,102 @@ pub fn spawn_llm_task_executor(
     queue: Arc<dyn TaskQueue<LlmTask>>,
     token_delta_transport: Arc<dyn TokenDeltaTransport>,
     blobs: Arc<dyn BlobStore>,
-    worker_count: usize,
+    pool: ExecutorPool,
     cancel: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
-    let worker_count = worker_count.max(1);
-    let mut handles = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
-        let store = store.clone();
+    let inner = store.clone();
+    spawn_bounded_executors(store, queue, pool, cancel, move |task| {
+        let store = inner.clone();
         let providers = providers.clone();
         let blobs = blobs.clone();
         let token_delta_transport = token_delta_transport.clone();
-        let mut rx = queue.subscribe();
-        let cancel = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            loop {
-                let task = tokio::select! {
-                    t = rx.recv() => match t {
-                        Some(t) => t,
-                        None => break,
-                    },
-                    _ = cancel.cancelled() => break,
-                };
+        async move {
+            handle_task(
+                store.as_ref(),
+                providers.as_ref(),
+                blobs.as_ref(),
+                token_delta_transport,
+                task,
+            )
+            .await
+        }
+    })
+}
 
-                let resolved = providers.resolve(&task.llm, &task.owner).await;
+async fn handle_task(
+    store: &dyn EventStore,
+    providers: &dyn LlmResolver,
+    blobs: &dyn BlobStore,
+    token_delta_transport: Arc<dyn TokenDeltaTransport>,
+    task: LlmTask,
+) {
+    let resolved = providers.resolve(&task.llm, &task.owner).await;
 
-                let command = match resolved {
-                    Ok(client) => {
-                        let ctx = CallContext {
-                            session_id: &task.session_id,
-                            tenant_id: &task.tenant_id,
-                            agent_id: &task.agent_id,
-                            call_id: &task.call_id,
-                            attempt: task.attempt,
-                            owner: &task.owner,
-                            ancestry: &task.ancestry,
-                            defer_tools_strategy: task.defer_tools_strategy,
-                        };
-                        let prompt = crate::runtime::blob::resolve(
-                            &task.request,
-                            blobs.as_ref(),
-                            &task.tenant_id,
-                        )
-                        .await;
-                        let result = match prompt {
-                            Err(err) => Err(err),
-                            Ok(prompt) if task.stream => {
-                                let (tx, rx) = mpsc::unbounded_channel();
-                                let pump =
-                                    spawn_delta_pump(&task, token_delta_transport.clone(), rx);
-                                let result = client.call_streaming(&prompt, &ctx, tx).await;
-                                let _ = pump.await;
-                                result
-                            }
-                            Ok(prompt) => client.call(&prompt, &ctx).await,
-                        };
-                        let outcome = match result {
-                            Ok(response) => Outcome::Llm(Box::new(response)),
-                            Err(err) => SettleError::new(err.error, err.retryable).into(),
-                        };
-                        CommandPayload::settle(
-                            EffectKind::LlmCall,
-                            task.call_id.clone(),
-                            Some(task.attempt),
-                            outcome,
-                        )
-                    }
-                    Err(err) => CommandPayload::settle(
-                        EffectKind::LlmCall,
-                        task.call_id.clone(),
-                        Some(task.attempt),
-                        SettleError::new(ErrorInfo::new(ErrorCode::ProviderError, err), false),
-                    ),
-                };
-
-                let result = execute(
-                    store.as_ref(),
-                    ExecuteInput {
-                        session_id: task.session_id.clone(),
-                        caller: Caller::System {
-                            tenant_id: task.tenant_id.clone(),
-                        },
-                        command,
-                        span: task.span.child("llm_call"),
-                    },
-                    &ConflictRetry::default(),
-                )
-                .await;
-
-                if let Err(err) = result {
-                    tracing::error!(
-                        session_id = %task.session_id,
-                        call_id = %task.call_id,
-                        error = %err,
-                        "failed to submit llm completion command"
-                    );
+    let command = match resolved {
+        Ok(client) => {
+            let ctx = CallContext {
+                session_id: &task.session_id,
+                tenant_id: &task.tenant_id,
+                agent_id: &task.agent_id,
+                call_id: &task.call_id,
+                attempt: task.attempt,
+                owner: &task.owner,
+                ancestry: &task.ancestry,
+                defer_tools_strategy: task.defer_tools_strategy,
+            };
+            let prompt = crate::runtime::blob::resolve(&task.request, blobs, &task.tenant_id).await;
+            let result = match prompt {
+                Err(err) => Err(err),
+                Ok(prompt) if task.stream => {
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    let pump = spawn_delta_pump(&task, token_delta_transport.clone(), rx);
+                    let result = client.call_streaming(&prompt, &ctx, tx).await;
+                    let _ = pump.await;
+                    result
                 }
-            }
-        }));
+                Ok(prompt) => client.call(&prompt, &ctx).await,
+            };
+            let outcome = match result {
+                Ok(response) => Outcome::Llm(Box::new(response)),
+                Err(err) => SettleError::new(err.error, err.retryable).into(),
+            };
+            CommandPayload::settle(
+                EffectKind::LlmCall,
+                task.call_id.clone(),
+                Some(task.attempt),
+                outcome,
+            )
+        }
+        Err(err) => CommandPayload::settle(
+            EffectKind::LlmCall,
+            task.call_id.clone(),
+            Some(task.attempt),
+            SettleError::new(ErrorInfo::new(ErrorCode::ProviderError, err), false),
+        ),
+    };
+
+    let result = execute(
+        store,
+        ExecuteInput {
+            session_id: task.session_id.clone(),
+            caller: Caller::System {
+                tenant_id: task.tenant_id.clone(),
+            },
+            command,
+            span: task.span.child("llm_call"),
+        },
+        &ConflictRetry::default(),
+    )
+    .await;
+
+    if let Err(err) = result {
+        tracing::error!(
+            session_id = %task.session_id,
+            call_id = %task.call_id,
+            error = %err,
+            "failed to submit llm completion command"
+        );
     }
-    handles
 }
 
 fn spawn_delta_pump(

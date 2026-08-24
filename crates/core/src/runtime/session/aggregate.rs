@@ -196,7 +196,7 @@ pub struct ConflictRetry {
 impl Default for ConflictRetry {
     fn default() -> Self {
         Self {
-            max_retries: 5,
+            max_retries: 32,
             base_delay: Duration::from_millis(10),
             max_delay: Duration::from_millis(500),
             jitter: true,

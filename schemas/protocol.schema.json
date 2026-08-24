@@ -2665,16 +2665,8 @@
     },
     "RetryOverride": {
       "additionalProperties": false,
-      "description": "A partial retry policy: only the fields it names change, and the rest are\ninherited. Every override is a layer over the engine's default for the effect\nkind, so tuning one knob does not mean restating the other four — and leaving\na timeout out keeps the default bound rather than removing it.\n\nAn override cannot set a timeout back to unbounded. Waiting effectively\nforever is a large number, which is also the honest way to say it.",
+      "description": "Only the fields it names change; the rest are inherited. An override cannot\nset a timeout back to unbounded.",
       "properties": {
-        "attempt_timeout_secs": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
         "backoff_base_secs": {
           "format": "uint32",
           "minimum": 0,
@@ -2692,6 +2684,22 @@
           ]
         },
         "max_attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "queue_timeout_secs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "run_timeout_secs": {
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -2713,16 +2721,7 @@
     },
     "RetryPolicy": {
       "additionalProperties": false,
-      "description": "Fully-resolved retry policy. Stored on call state and read directly by retry\nlogic.\n\nTwo timeouts, because one span cannot express both bounds: `attempt` covers a\nsingle dispatch-to-settle, `total` covers the whole effect — every attempt,\nthe backoff between them, and any time spent `Running`. An effect with only\nan attempt timeout can still stall forever once it stops being `Pending`.",
       "properties": {
-        "attempt_timeout_secs": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
         "backoff_base_secs": {
           "format": "uint32",
           "minimum": 0,
@@ -2738,6 +2737,22 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "queue_timeout_secs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "run_timeout_secs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "total_timeout_secs": {
           "format": "uint32",

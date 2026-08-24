@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::protocol::DraftMessage;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
+use crate::runtime::executor::{spawn_bounded_executors, ExecutorPool};
 use crate::runtime::session::command::{CommandPayload, Outcome, SessionError, SettleError};
 use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteError, ExecuteInput};
@@ -19,29 +20,14 @@ use crate::protocol::ErrorInfo;
 pub fn spawn_sub_agent_task_executor(
     store: Arc<dyn EventStore>,
     queue: Arc<dyn TaskQueue<SubAgentTask>>,
-    worker_count: usize,
+    pool: ExecutorPool,
     cancel: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
-    let worker_count = worker_count.max(1);
-    let mut handles = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
-        let store = store.clone();
-        let mut rx = queue.subscribe();
-        let cancel = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            loop {
-                let task = tokio::select! {
-                    t = rx.recv() => match t {
-                        Some(t) => t,
-                        None => break,
-                    },
-                    _ = cancel.cancelled() => break,
-                };
-                handle_task(store.as_ref(), task).await;
-            }
-        }));
-    }
-    handles
+    let inner = store.clone();
+    spawn_bounded_executors(store, queue, pool, cancel, move |task| {
+        let store = inner.clone();
+        async move { handle_task(store.as_ref(), task).await }
+    })
 }
 
 /// Deliver a freshly created child's opening message. Nothing to do when the

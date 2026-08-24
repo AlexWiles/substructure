@@ -19,6 +19,7 @@ export interface Protocol {
  * internally-tagged union — its seven tags produce serde's "unknown variant, expected one
  * of …" error for free. `Runtime::handle_client_input` is the single seam that dispatches
  * it (mirroring `resolve_response` on the worker side).
+ *
  * Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
  * the turn, creating the session if new) and the optional idempotency `turn_id` are
  * fields of the four submit variants only. A resume/settle addresses an interrupt/effect
@@ -257,6 +258,7 @@ export interface DecisionRequest {
 /**
  * A declared agent identity — the same shape whether it is written in an
  * `[agent.<id>]` section or returned by a worker.
+ *
  * `llm` names the `[llm.*]` block every proposed call runs on, and so decides
  * both the venue (the engine with a vendor key, or the agent's own worker) and
  * the wire shape of a worker-run call. It is effectively required: a config
@@ -266,6 +268,7 @@ export interface AgentConfig {
     /**
      * Where the engine tells the model that an MCP server is available, and
      * what that server says it is for.
+     *
      * Separate from `defer_tools`: a server exists whether or not its tools
      * are deferred, and where a notice lands is a fact about this agent's
      * prompt rather than about any server.
@@ -275,6 +278,7 @@ export interface AgentConfig {
      * Defer every tool this agent offers, from any source, unless the tool or
      * the connection says otherwise. Absent ⇒ the agent defers nothing of its
      * own; a connection may still defer on its own account.
+     *
      * Presence is the switch, so an agent cannot carry settings that do
      * nothing. Declared on the agent because an agent can hold this opinion
      * before it names a connection: one that sets it gets the search tools
@@ -297,6 +301,10 @@ export interface AgentConfig {
     mcp?: MCPServer[];
     model: string;
     /**
+     * Plugins this agent uses.
+     */
+    plugins?: AgentPlugin[];
+    /**
      * Boxed: five per-kind overrides is a lot of bytes to carry inline
      * through every command that holds a config.
      */
@@ -317,6 +325,7 @@ export interface AgentConfig {
 /**
  * Where the engine tells the model that an MCP server is available, and
  * what that server says it is for.
+ *
  * Separate from `defer_tools`: a server exists whether or not its tools
  * are deferred, and where a notice lands is a fact about this agent's
  * prompt rather than about any server.
@@ -351,10 +360,12 @@ export interface DeferTools {
  * Which tools the agent gets to reach the ones it defers.
  *
  * How the tools an agent defers reach the model.
+ *
  * The engine holds every deferred definition whatever this says, and answers
  * its own tools whatever this says. This chooses two things: which of those
  * tools the request advertises, and whether the request carries the deferred
  * definitions.
+ *
  * Declared on the agent, beside `defer_tools`: which tools an agent gets is
  * the agent's business, the same way as whether it defers at all.
  *
@@ -367,19 +378,27 @@ export type DeferToolsStrategy = "search";
 export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
 
 /**
- * An MCP server the agent draws tools from. `id` resolves against the engine's
- * connection registry — locally from `[mcp]` in `substructure.toml`, in the
+ * An MCP server the agent draws tools from. `path` resolves against the
+ * engine's connection registry — locally from `substructure.toml`, in the
  * cloud from the connections an admin granted this app. The worker never names
  * a URL or a credential.
  */
 export interface MCPServer {
+    approve?: Approve;
     auth_failure?: AuthFailure;
-    id: string;
+    path: string;
     /**
      * Narrows what the model sees. Absent ⇒ every tool the connection grants.
      */
     tools?: MCPTools | null;
 }
+
+/**
+ * Which of a connection's calls stop for a person.
+ *
+ * A tool that the connection marks `destructiveHint`.
+ */
+export type Approve = "never" | "always" | "destructive";
 
 /**
  * What a session does when a connection needs a person to authorize it. It
@@ -395,9 +414,11 @@ export type AuthFailure = "interrupt" | "degrade";
 /**
  * What the model sees of one connection, for one agent: which tools, and how
  * they reach the model.
+ *
  * The filter is applied in order — capability predicates, then `include`, then
  * `exclude` — and only ever narrowing, so a filter can never widen what the
  * connection grants. `defer` runs after it and removes nothing.
+ *
  * `include`/`exclude` are globs matched against the tool's name on the
  * connection, the name its own documentation uses, not the prefixed name the
  * model sees. Capability predicates read the MCP annotations; a tool that
@@ -418,8 +439,37 @@ export interface MCPTools {
 }
 
 /**
+ * A plugin an agent uses. The skills and servers are stamped from the bundle
+ * when the config loads. To enable a plugin, write it into the config.
+ */
+export interface AgentPlugin {
+    approve?: Approve;
+    auth_failure?: AuthFailure;
+    description?: string;
+    id: string;
+    /**
+     * Where each of this plugin's servers is declared.
+     */
+    servers?: string[];
+    skills?: SkillMeta[];
+    /**
+     * Applied to each of the plugin's servers.
+     */
+    tools?: MCPTools | null;
+}
+
+/**
+ * What the model sees of a skill before it loads it.
+ */
+export interface SkillMeta {
+    description?: string;
+    name: string;
+}
+
+/**
  * An agent's retry overrides, one per effect kind. `default` covers the kinds
  * that name nothing; a kind is layered on top of it, so the two compose.
+ *
  * Per kind because the kinds are not alike: an LLM call is idempotent and worth
  * retrying, a tool call may not be, and a connector fetch holds up every
  * decision behind it.
@@ -437,14 +487,16 @@ export interface RetryConfig {
  * inherited. Every override is a layer over the engine's default for the effect
  * kind, so tuning one knob does not mean restating the other four — and leaving
  * a timeout out keeps the default bound rather than removing it.
+ *
  * An override cannot set a timeout back to unbounded. Waiting effectively
  * forever is a large number, which is also the honest way to say it.
  */
 export interface RetryOverride {
-    attempt_timeout_secs?: number | null;
     backoff_base_secs?: number | null;
     backoff_max_secs?: number | null;
     max_attempts?: number | null;
+    queue_timeout_secs?: number | null;
+    run_timeout_secs?: number | null;
     total_timeout_secs?: number | null;
 }
 
@@ -514,16 +566,33 @@ export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled
  * the tenant. Read `kind` with `id`: only `frontend` is an end user.
  */
 export interface WorkerIdentity {
-    id?: null | string;
-    kind?: OwnerKind;
     metadata: { [key: string]: string };
+    subject?: Subject | null;
+    visibility?: Visibility;
 }
 
 /**
- * What kind of caller owns a session. Part of the identity: only `frontend` is
- * an end user, and an ownership check grants access to no other kind.
+ * One identity, as the source that authenticated it named it: OIDC's
+ * `(iss, sub)`. An id means nothing without its issuer, because it is only
+ * unique within one.
  */
-export type OwnerKind = "frontend" | "operator" | "api_key" | "system";
+export interface Subject {
+    id: string;
+    issuer: string;
+}
+
+/**
+ * Who can read what a session says. The transport sets it once, at the
+ * session's start; everything absent or unknown reads as `shared`, because
+ * `shared` is the value that never selects a personal credential.
+ *
+ * Not OAuth's `aud`, which names a resource server rather than a readership.
+ *
+ * More than one person can read the answer.
+ *
+ * One person only.
+ */
+export type Visibility = "shared" | "private";
 
 export interface MessageTree {
     head_id?: null | string;
@@ -586,6 +655,7 @@ export interface DecisionResponse {
  * agent's identity over the current view.
  *
  * `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
+ *
  * There is no `handler`: where a call runs follows from its name. A tool
  * resolved from a connector runs on the engine, a tool declared
  * `handler: client` runs on the client, and anything else runs on the
@@ -665,6 +735,7 @@ export interface DecisionAction {
     interrupt_id?: null | string;
     payload?: unknown;
     reason?: string;
+    path?: string;
     data?: unknown;
 }
 
@@ -673,6 +744,7 @@ export interface DecisionAction {
  * sentence. A closed set, and required on every [`ErrorInfo`]: an optional
  * code is one nobody fills in, which leaves every consumer handling a `None`
  * that should not exist.
+ *
  * `provider_error`, `rate_limited`, `refused`, `budget_exceeded` and
  * `deadline_exceeded` describe a call that ran and went wrong.
  * `invalid_response` — a document did not parse, or parsed into something
@@ -708,9 +780,11 @@ export interface ReasoningConfig {
 export interface LlmTool {
     /**
      * Keep this definition out of the request.
+     *
      * The engine still records it, still routes a call to it, and still finds
      * it in a search. Only the request omits it, which is what keeps a large
      * tool set out of the model's context and out of the cached prefix.
+     *
      * Any source can set it: a tool the config declares, a connection, or
      * whatever comes next. Deferral is a property of a tool, not of where it
      * came from.
@@ -818,6 +892,7 @@ export interface DecisionTrigger {
 /**
  * Why something failed. One shape on every event, on the wire, and in the
  * internal carriers that produce them — shaped after a Stripe API error.
+ *
  * `retryable` is deliberately absent: whether to try again is a decision the
  * engine makes about one attempt, not a fact about the failure, and it is
  * meaningless on a terminal like `turn.completed`. It rides on the events
@@ -893,6 +968,7 @@ export type DecisionTriggerType =
 
 /**
  * What one call read and wrote, in counts every provider means the same way.
+ *
  * Each vendor names and scopes these differently: Anthropic reports the part
  * of the prompt it did not read from the cache, OpenAI reports the whole
  * prompt including that part. A session that changes model, and a tree whose
@@ -979,6 +1055,10 @@ export interface InterruptResponder {
      * The chosen option's label, when the resolution was a pick.
      */
     label?: null | string;
+    /**
+     * The chosen option's `style`, when the resolution was a pick.
+     */
+    style?: null | string;
     /**
      * Channel-native user id.
      */

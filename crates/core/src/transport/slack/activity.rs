@@ -262,7 +262,8 @@ mod tests {
 
     fn retry() -> crate::protocol::RetryPolicy {
         crate::protocol::RetryPolicy {
-            attempt_timeout_secs: None,
+            queue_timeout_secs: None,
+            run_timeout_secs: None,
             total_timeout_secs: None,
             max_attempts: 0,
             backoff_base_secs: 1,

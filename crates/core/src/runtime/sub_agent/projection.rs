@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
 use crate::providers::memory_queue::TaskQueue;
@@ -68,6 +69,7 @@ impl EventProcessor for SubAgentDispatchProjection {
                     ancestry,
                     message: sa.message.clone(),
                     retry: effect.tracking.retry_policy.clone(),
+                    enqueued_at: Utc::now(),
                     span: event.span,
                 })
             }

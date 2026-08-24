@@ -44,6 +44,7 @@ pub mod blob;
 mod caller;
 pub mod connector;
 pub mod event_store;
+pub mod executor;
 pub mod llm;
 pub mod processor;
 pub mod retry;
@@ -60,6 +61,7 @@ pub struct RuntimeConfig {
     pub llm_executor_workers: usize,
     pub sub_agent_executor_workers: usize,
     pub connector_executor_workers: usize,
+    pub executor_concurrency: usize,
     pub wake_poll_interval: std::time::Duration,
     pub shutdown_timeout: std::time::Duration,
     pub worker_retry_resolver: Arc<dyn WorkerRetryResolver>,
@@ -68,12 +70,22 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            llm_executor_workers: 4,
-            sub_agent_executor_workers: 2,
-            connector_executor_workers: 2,
+            llm_executor_workers: 32,
+            sub_agent_executor_workers: 32,
+            connector_executor_workers: 64,
+            executor_concurrency: 32,
             wake_poll_interval: std::time::Duration::from_secs(30),
             shutdown_timeout: std::time::Duration::from_secs(5),
             worker_retry_resolver: Arc::new(DefaultWorkerRetryResolver),
+        }
+    }
+}
+
+impl RuntimeConfig {
+    fn pool(&self, workers: usize) -> executor::ExecutorPool {
+        executor::ExecutorPool {
+            workers,
+            concurrency: self.executor_concurrency,
         }
     }
 }
@@ -868,7 +880,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
             llm_task_queue,
             token_delta_transport.clone(),
             blobs.clone(),
-            config.llm_executor_workers,
+            config.pool(config.llm_executor_workers),
             cancel.clone(),
         ));
     }
@@ -888,7 +900,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
             connections,
             plugins,
             connector_task_queue,
-            config.connector_executor_workers,
+            config.pool(config.connector_executor_workers),
             cancel.clone(),
         ));
     }
@@ -902,7 +914,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     let sub_agent_executor_handles = spawn_sub_agent_task_executor(
         store.clone(),
         sub_agent_task_queue,
-        config.sub_agent_executor_workers,
+        config.pool(config.sub_agent_executor_workers),
         cancel.clone(),
     );
 
@@ -968,4 +980,34 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         worker_retry_resolver: config.worker_retry_resolver,
         blobs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use session::ConflictRetry;
+
+    #[test]
+    fn concurrency_fits_the_conflict_budget() {
+        let config = RuntimeConfig::default();
+        let budget = ConflictRetry::default().max_retries as usize;
+        assert!(
+            config.executor_concurrency <= budget + 1,
+            "{} tasks at once can conflict {} times, and the budget is {budget}",
+            config.executor_concurrency,
+            config.executor_concurrency - 1,
+        );
+    }
+
+    #[test]
+    fn every_worker_count_is_at_least_one() {
+        let config = RuntimeConfig::default();
+        for workers in [
+            config.llm_executor_workers,
+            config.sub_agent_executor_workers,
+            config.connector_executor_workers,
+        ] {
+            assert!(workers >= 1, "a subsystem with no worker drains nothing");
+        }
+    }
 }

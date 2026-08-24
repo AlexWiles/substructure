@@ -1,5 +1,9 @@
+use chrono::{DateTime, Utc};
+
 use crate::protocol::DeferToolsStrategy;
-use crate::protocol::{LlmRequest, SessionOwner};
+use crate::protocol::{LlmRequest, RetryPolicy, SessionOwner};
+use crate::runtime::executor::{BoundedTask, TaskBound};
+use crate::runtime::session::state::EffectKind;
 use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Clone)]
@@ -20,11 +24,29 @@ pub struct LlmTask {
     pub ancestry: Vec<String>,
     /// Tagged on emitted token deltas so Turn-scoped subscribers can filter.
     pub turn_id: Option<String>,
+    pub retry: RetryPolicy,
+    pub enqueued_at: DateTime<Utc>,
     pub span: SpanContext,
 }
 
 impl LlmTask {
     pub fn dedupe_key(&self) -> String {
         format!("llm:{}:{}", self.session_id, self.call_id)
+    }
+}
+
+impl BoundedTask for LlmTask {
+    fn bound(&self) -> Option<TaskBound> {
+        Some(TaskBound {
+            tenant_id: self.tenant_id.clone(),
+            session_id: self.session_id.clone(),
+            kind: EffectKind::LlmCall,
+            id: self.call_id.clone(),
+            attempt: Some(self.attempt),
+            enqueued_at: self.enqueued_at,
+            queue_timeout: self.retry.queue_timeout(),
+            run_timeout: self.retry.run_timeout(),
+            span: self.span.clone(),
+        })
     }
 }

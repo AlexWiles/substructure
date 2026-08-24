@@ -467,15 +467,17 @@ An `[agent.<id>]` section in `substructure.toml` uses these same names. See
 
 ```typescript
 type RetryPolicy = {
-    attempt_timeout_secs: number | null  // one attempt. null waits forever
-    total_timeout_secs: number | null    // the whole effect. null has no limit
-    max_attempts: number                 // attempts, not retries
+    queue_timeout_secs: number | null  // the wait for an executor
+    run_timeout_secs: number | null    // the work itself. null runs forever
+    total_timeout_secs: number | null  // the whole effect. null has no limit
+    max_attempts: number               // attempts, not retries
     backoff_base_secs: number
     backoff_max_secs: number
 }
 
 type RetryOverride = {          // names only the fields it changes
-    attempt_timeout_secs?: number
+    queue_timeout_secs?: number
+    run_timeout_secs?: number
     total_timeout_secs?: number
     max_attempts?: number
     backoff_base_secs?: number

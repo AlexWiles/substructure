@@ -9,6 +9,7 @@ use crate::plugins::PluginResolver;
 use crate::protocol::StoredResult;
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::event_store::EventStore;
+use crate::runtime::executor::{spawn_bounded_executors, ExecutorPool};
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
 use crate::runtime::session::engine_tools;
 use crate::runtime::session::state::EffectKind;
@@ -24,37 +25,24 @@ pub fn spawn_connector_task_executor(
     connections: Option<Arc<Connections>>,
     plugins: Arc<dyn PluginResolver>,
     queue: Arc<dyn TaskQueue<ConnectorTask>>,
-    worker_count: usize,
+    pool: ExecutorPool,
     cancel: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
-    let worker_count = worker_count.max(1);
-    let mut handles = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
-        let store = store.clone();
+    let inner = store.clone();
+    spawn_bounded_executors(store, queue, pool, cancel, move |task| {
+        let store = inner.clone();
         let connections = connections.clone();
         let plugins = plugins.clone();
-        let mut rx = queue.subscribe();
-        let cancel = cancel.clone();
-        handles.push(tokio::spawn(async move {
-            loop {
-                let task = tokio::select! {
-                    t = rx.recv() => match t {
-                        Some(t) => t,
-                        None => break,
-                    },
-                    _ = cancel.cancelled() => break,
-                };
-                handle_task(
-                    store.as_ref(),
-                    connections.as_deref(),
-                    plugins.as_ref(),
-                    task,
-                )
-                .await;
-            }
-        }));
-    }
-    handles
+        async move {
+            handle_task(
+                store.as_ref(),
+                connections.as_deref(),
+                plugins.as_ref(),
+                task,
+            )
+            .await
+        }
+    })
 }
 
 /// A network task with no connections settles as a terminal error, so the

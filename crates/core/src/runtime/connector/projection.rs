@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
 use crate::connectors::Requester;
@@ -11,6 +12,7 @@ use crate::runtime::processor::{
 };
 use crate::runtime::session::decision::ToolHandler;
 use crate::runtime::session::events::{ConnectorTarget, EventPayload};
+use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::SessionEvent;
 
 use super::ConnectorTask;
@@ -27,6 +29,7 @@ impl EventProcessor for ConnectorDispatchProjection {
     }
 
     async fn apply(&self, event: SessionEvent) -> Result<(), ProcessorError> {
+        let enqueued_at = Utc::now();
         let task = match &event.payload {
             // Fetches are prerequisites, never queued: requested is dispatched.
             // The requester is the owner's, read here at dispatch, and
@@ -46,6 +49,8 @@ impl EventProcessor for ConnectorDispatchProjection {
                     connection_id: req.path.clone(),
                     requester: Requester::of_owner(session.state.owner.as_ref()),
                     attempt: req.attempt,
+                    retry: req.retry.clone(),
+                    enqueued_at,
                     span: event.span,
                 }
             }
@@ -66,6 +71,13 @@ impl EventProcessor for ConnectorDispatchProjection {
                 if tc.handler != ToolHandler::Server {
                     return Ok(());
                 }
+                let Some(retry) = session
+                    .state
+                    .tracking(EffectKind::ToolCall, &d.id)
+                    .map(|t| t.retry_policy.clone())
+                else {
+                    return Ok(());
+                };
                 let Some(target) = &tc.target else {
                     // `handler: server` is only ever set alongside a target;
                     // one without the other is a bug, not a runtime condition.
@@ -89,6 +101,8 @@ impl EventProcessor for ConnectorDispatchProjection {
                         // recorded.
                         arguments: serde_json::from_str(&tc.arguments)
                             .unwrap_or_else(|_| serde_json::json!({})),
+                        retry,
+                        enqueued_at,
                         span: event.span,
                     }
                 } else {
@@ -98,6 +112,8 @@ impl EventProcessor for ConnectorDispatchProjection {
                         tenant_id: event.tenant_id.clone(),
                         tool_call_id: d.id.clone(),
                         attempt: d.attempt,
+                        retry,
+                        enqueued_at,
                         span: event.span,
                     }
                 }

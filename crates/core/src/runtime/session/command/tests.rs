@@ -2322,7 +2322,8 @@ fn fail_llm_call_emits_errored() {
 fn llm_retry_reuses_the_stored_prompt() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let retry = RetryPolicy {
-        attempt_timeout_secs: None,
+        queue_timeout_secs: None,
+        run_timeout_secs: None,
         total_timeout_secs: None,
         max_attempts: 3,
         backoff_base_secs: 1,
@@ -3341,7 +3342,8 @@ fn timed_out_effect_fires_tool_result_via_wake() {
             name: "tool_t1".to_string(),
             arguments: "{}".to_string(),
             retry: Some(RetryOverride {
-                attempt_timeout_secs: Some(60),
+                queue_timeout_secs: None,
+                run_timeout_secs: Some(60),
                 total_timeout_secs: None,
                 max_attempts: Some(0),
                 backoff_base_secs: Some(0),
@@ -3396,11 +3398,11 @@ fn a_tool_call_takes_the_default_for_where_it_runs() {
     assert_eq!(worker, RetryPolicy::default_for(RetryTarget::WorkerTool));
     assert_eq!(client, RetryPolicy::default_for(RetryTarget::ClientTool));
     assert!(
-        worker.attempt_timeout_secs.is_some(),
+        worker.run_timeout_secs.is_some(),
         "a dead worker must not hang the turn"
     );
     assert_eq!(
-        client.attempt_timeout_secs, None,
+        client.run_timeout_secs, None,
         "an async call waits for a human, however long that takes"
     );
 }
@@ -3410,7 +3412,8 @@ fn a_tool_call_takes_the_default_for_where_it_runs() {
 fn the_agent_config_binds_tool_calls_not_just_llm_calls() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let declared = RetryOverride {
-        attempt_timeout_secs: Some(7),
+        queue_timeout_secs: None,
+        run_timeout_secs: Some(7),
         total_timeout_secs: Some(70),
         max_attempts: Some(4),
         backoff_base_secs: Some(1),
@@ -6168,7 +6171,8 @@ fn turn_finished_terminal_failure_completes_as_failed_run() {
 #[test]
 fn turn_finished_retryable_failure_does_not_complete() {
     let mut agg = create_session_with_retry(RetryPolicy {
-        attempt_timeout_secs: None,
+        queue_timeout_secs: None,
+        run_timeout_secs: None,
         total_timeout_secs: None,
         max_attempts: 2,
         backoff_base_secs: 1,
@@ -6214,7 +6218,8 @@ fn turn_finished_retryable_failure_does_not_complete() {
 #[test]
 fn turn_finished_deadline_completes_when_exhausted() {
     let mut agg = create_session_with_retry(RetryPolicy {
-        attempt_timeout_secs: Some(60),
+        queue_timeout_secs: None,
+        run_timeout_secs: Some(60),
         total_timeout_secs: None,
         max_attempts: 0,
         backoff_base_secs: 0,
@@ -8729,7 +8734,8 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy {
-                attempt_timeout_secs: None,
+                queue_timeout_secs: None,
+                run_timeout_secs: None,
                 total_timeout_secs: None,
                 max_attempts: 2,
                 backoff_base_secs: 1,
@@ -9379,7 +9385,8 @@ fn fork_voids_a_retrying_effect() {
             name: "flaky".to_string(),
             arguments: "{}".to_string(),
             retry: Some(RetryOverride {
-                attempt_timeout_secs: None,
+                queue_timeout_secs: None,
+                run_timeout_secs: None,
                 total_timeout_secs: None,
                 max_attempts: Some(2),
                 backoff_base_secs: Some(1),
@@ -9709,7 +9716,8 @@ fn fork_drops_a_retrying_settle_decision() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy {
-                attempt_timeout_secs: None,
+                queue_timeout_secs: None,
+                run_timeout_secs: None,
                 total_timeout_secs: None,
                 max_attempts: 2,
                 backoff_base_secs: 1,
@@ -10248,7 +10256,8 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy {
-                attempt_timeout_secs: None,
+                queue_timeout_secs: None,
+                run_timeout_secs: None,
                 total_timeout_secs: None,
                 max_attempts: 2,
                 backoff_base_secs: 1,
@@ -10318,7 +10327,8 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
 #[test]
 fn parked_branch_deadlines_are_suppressed_but_live_branch_timers_run() {
     let deadline_policy = RetryOverride {
-        attempt_timeout_secs: Some(60),
+        queue_timeout_secs: None,
+        run_timeout_secs: Some(60),
         total_timeout_secs: None,
         max_attempts: Some(1),
         backoff_base_secs: Some(1),

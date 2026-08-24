@@ -1919,16 +1919,8 @@
       },
       "RetryOverride": {
         "additionalProperties": false,
-        "description": "A partial retry policy: only the fields it names change, and the rest are\ninherited. Every override is a layer over the engine's default for the effect\nkind, so tuning one knob does not mean restating the other four — and leaving\na timeout out keeps the default bound rather than removing it.\n\nAn override cannot set a timeout back to unbounded. Waiting effectively\nforever is a large number, which is also the honest way to say it.",
+        "description": "Only the fields it names change; the rest are inherited. An override cannot\nset a timeout back to unbounded.",
         "properties": {
-          "attempt_timeout_secs": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
           "backoff_base_secs": {
             "format": "uint32",
             "minimum": 0,
@@ -1946,6 +1938,22 @@
             ]
           },
           "max_attempts": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "queue_timeout_secs": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "run_timeout_secs": {
             "format": "uint32",
             "minimum": 0,
             "type": [

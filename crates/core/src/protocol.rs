@@ -631,17 +631,11 @@ pub enum LlmFormat {
 
 // ── Retry ────────────────────────────────────────────────────────────────
 
-/// Fully-resolved retry policy. Stored on call state and read directly by retry
-/// logic.
-///
-/// Two timeouts, because one span cannot express both bounds: `attempt` covers a
-/// single dispatch-to-settle, `total` covers the whole effect — every attempt,
-/// the backoff between them, and any time spent `Running`. An effect with only
-/// an attempt timeout can still stall forever once it stops being `Pending`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "RetryPolicy")]
 pub struct RetryPolicy {
-    pub attempt_timeout_secs: Option<u32>,
+    pub queue_timeout_secs: Option<u32>,
+    pub run_timeout_secs: Option<u32>,
     pub total_timeout_secs: Option<u32>,
     /// Cap on total attempts, not on retries: `1` allows one try and no retry.
     pub max_attempts: u32,
@@ -649,18 +643,15 @@ pub struct RetryPolicy {
     pub backoff_max_secs: u32,
 }
 
-/// A partial retry policy: only the fields it names change, and the rest are
-/// inherited. Every override is a layer over the engine's default for the effect
-/// kind, so tuning one knob does not mean restating the other four — and leaving
-/// a timeout out keeps the default bound rather than removing it.
-///
-/// An override cannot set a timeout back to unbounded. Waiting effectively
-/// forever is a large number, which is also the honest way to say it.
+/// Only the fields it names change; the rest are inherited. An override cannot
+/// set a timeout back to unbounded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "RetryOverride")]
 pub struct RetryOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attempt_timeout_secs: Option<u32>,
+    pub queue_timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_timeout_secs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_timeout_secs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

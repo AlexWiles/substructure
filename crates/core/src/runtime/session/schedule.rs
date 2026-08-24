@@ -489,7 +489,8 @@ mod tests {
     /// seconds of whole-effect budget and no attempt bound of its own.
     fn add_running_sub_agent(s: &mut SessionState, id: &str, total: Option<u32>) {
         let mut t = EffectTracking::new_queued(RetryPolicy {
-            attempt_timeout_secs: None,
+            queue_timeout_secs: None,
+            run_timeout_secs: None,
             total_timeout_secs: total,
             max_attempts: 3,
             backoff_base_secs: 1,
