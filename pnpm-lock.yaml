@@ -18,7 +18,20 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
-  packages/cli: {}
+  packages/cli:
+    optionalDependencies:
+      '@substructure.ai/cli-darwin-arm64':
+        specifier: 0.7.2
+        version: 0.7.2
+      '@substructure.ai/cli-darwin-x64':
+        specifier: 0.7.2
+        version: 0.7.2
+      '@substructure.ai/cli-linux-arm64':
+        specifier: 0.7.2
+        version: 0.7.2
+      '@substructure.ai/cli-linux-x64':
+        specifier: 0.7.2
+        version: 0.7.2
 
 packages:
 
@@ -78,6 +91,28 @@ packages:
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [win32]
+
+  '@substructure.ai/cli-darwin-arm64@0.7.2':
+    resolution: {integrity: sha512-chpU+2JMV4IEaLhIMJSietaqXVSQZ0ocCUZMiv8TMvuLxnEtbWd/U8jq6ap1ouc9krHJJ9VI5VwoeQ5yyR0oxQ==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@substructure.ai/cli-darwin-x64@0.7.2':
+    resolution: {integrity: sha512-D8UYeNvEKiZHnVg6+bx/q9kKb5b6kattmRnhGjkKSlKUfQ9KEIY/a64oS1sOGUxpPO+VYgRXmSNeuZFGtmYv4Q==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@substructure.ai/cli-linux-arm64@0.7.2':
+    resolution: {integrity: sha512-ADqqysS8WCgHQkqlKnXp7GunLqZl+jZqmZyDWVdKOKQQXFASPA6ACGu1VQPqmGmxnWO4Ua41eb1kU2Qt71aqGg==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@substructure.ai/cli-linux-x64@0.7.2':
+    resolution: {integrity: sha512-/xp47YVwgRfqe5bby5vLi2xs8f3XhTBKpyKlUQmqy87vSQQWBELCbRtHxf8LUENRZh4SPT9lsSSwG+QHfcRjEg==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
 
   lefthook-darwin-arm64@2.1.5:
     resolution: {integrity: sha512-VITTaw8PxxyE26gkZ8UcwIa5ZrWnKNRGLeeSrqri40cQdXvLTEoMq2tjjw7eiL9UcB0waRReDdzydevy9GOPUQ==}
@@ -173,6 +208,18 @@ snapshots:
     optional: true
 
   '@biomejs/cli-win32-x64@2.4.10':
+    optional: true
+
+  '@substructure.ai/cli-darwin-arm64@0.7.2':
+    optional: true
+
+  '@substructure.ai/cli-darwin-x64@0.7.2':
+    optional: true
+
+  '@substructure.ai/cli-linux-arm64@0.7.2':
+    optional: true
+
+  '@substructure.ai/cli-linux-x64@0.7.2':
     optional: true
 
   lefthook-darwin-arm64@2.1.5:
