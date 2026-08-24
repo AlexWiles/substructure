@@ -1,51 +1,96 @@
 # substructure.ai
 [substructure.ai](https://substructure.ai)
 
-Build production-ready AI agents in any language with no SDK.
+The agent harness for the cloud.
 
 [![cli](https://img.shields.io/npm/v/@substructure.ai/cli?label=cli)](https://www.npmjs.com/package/@substructure.ai/cli)
 
 > Pre-1.0: APIs and the wire protocol might change between releases.
 
-Substructure runs the agent loop for you. It calls the model, runs the tools,
-saves every step, and streams events to your frontend.
+Subs an agent harness for the cloud. It runs an unprivileged agent loop and expects you to use MCP servers for executing tools. You can use it locally or remotely. You can customize everything.
 
-You declare an agent in one file. When you need your own code in the loop, point
+You declare your agents in a config file. When you need control of the loop, point
 the agent at an HTTP endpoint that you own. Everything is HTTP, so you can write
 that endpoint in any language. There is no SDK to install.
 
-Run it on the hosted cloud, on your machine, or on your own servers. The same
-file describes all three.
+Subs handles durability, retries, timeouts, MCP connection management, tree-based session state, AG-UI, Slack connections, LLM calls, Sub agents, interrupts and more.
 
-## Put an agent in Slack
+Need a quick way to turn a sanbox into and MCP server? Check out [mcpd](https://github.com/substructureai/mcpd).
+
+# Get started
+
+## Intall the engine
 
 ```sh
 curl -fsSL https://subs.dev/cli.sh | bash
-subs login
 ```
 
-Declare the agent.
+## Run a local agent
+
+Create a `subs.toml`
 
 ```toml
-name = "oncall-bot"
+name = "example"
 
 [llm.openrouter]
 type = "openrouter"
 
-[agent.oncall]
+[agent.buddy]
 llm = "openrouter"
-model = "anthropic/claude-sonnet-4-5"
-system = "You are the on-call assistant."
+model = "deepseek/deepseek-v4-flash-0731"
+system = "You are the a helpful buddy."
+```
+
+```sh
+subs chat buddy -c subs.toml
+```
+
+## Serve the agent and connect with a client.
+
+Add this to `subs.toml`
+
+```toml
+# server config
+[serve]
+port = 9999
+auth = false
+
+# remote client config
+[remote]
+url = "http://localhost:9999"
+```
+
+Start the server
+
+```sh
+subs serve -c subs.toml
+```
+
+In another terminal:
+
+```sh
+subs chat buddy -c subs.toml
+```
+
+## Put an agent in Slack using hosted substructure
+
+```toml
+name = "example"
+
+[llm.openrouter]
+type = "openrouter"
+
+[agent.buddy]
+llm = "openrouter"
+model = "deepseek/deepseek-v4-flash-0731"
+system = "You are the a helpful buddy."
 
 [slack]
-dm = "oncall"
-mentions = "oncall"
+dm = "buddy"
 
 [remote]
 url = "https://api.substructure.ai"
 ```
-
-`[remote]` says the file describes a deployment. Ship it.
 
 ```sh
 subs apply
