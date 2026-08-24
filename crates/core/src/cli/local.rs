@@ -47,7 +47,8 @@ pub struct ServeArgs {
     /// [default: 8080]
     #[arg(long)]
     port: Option<u16>,
-    /// [default: substructure.db]
+    /// [default: `db` in `substructure.toml`, else
+    /// `~/.config/substructure/substructure.db`]
     #[arg(long)]
     db: Option<String>,
     /// Environment file (default: walks up from cwd looking for
@@ -143,6 +144,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         Some(e) => e,
         None => std::process::exit(2),
     };
+    project_config::ensure_parent(&db_path)?;
     let db = SqliteDb::open(&db_path, std::time::Duration::from_secs(5))?;
     let blobs: Arc<dyn BlobStore> = Arc::new(SqliteBlobStore::new(db.clone()));
     let slack = match slack_routing {

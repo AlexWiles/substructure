@@ -8,20 +8,22 @@ use axum::extract::{FromRef, Path, Query, State};
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
-use axum::response::sse::{KeepAlive, Sse};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
+use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::v1::{ApiError, Meta, Org, Project, RunFormat, RunRequest};
-use crate::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
+use crate::transport::ag_ui::run as ag_ui_run;
 use crate::transport::ag_ui::translator::run_ag_ui_translation;
+use crate::transport::channel::ChannelContext;
 use crate::transport::http::runtime_error_response;
 use crate::transport::session_sse::run_event_stream;
-use crate::{Caller, HandleClientInput};
+use crate::Caller;
 
 use super::routes::{self, SessionEventsParams};
 use super::{machine_auth_middleware, AdminHttpState};
@@ -61,6 +63,10 @@ pub fn router(admin: AdminHttpState) -> Router {
         .route(
             "/api/v1/projects/{project}/sessions/{session_id}/events/stream",
             get(stream_session_events),
+        )
+        .route(
+            "/api/v1/projects/{project}/sessions/{session_id}/ag-ui/connect",
+            post(connect_session_ag_ui),
         )
         .route("/api/v1/projects/{project}/run", post(run))
         .route("/api/v1/orgs", get(list_orgs))
@@ -135,51 +141,37 @@ async fn run(
         metadata: Default::default(),
     };
 
-    // Subscribe before the input, or the first events have no listener.
-    let spec = SessionSubscriptionSpec {
-        scope: SubscriptionScope::All,
-        caller: caller.clone(),
-        session_id: session_id.clone(),
-    };
-    let event_rx = match state.runtime.stream(spec, None).await {
-        Ok(rx) => rx,
-        Err(e) => return runtime_error_response(e),
-    };
-    // A token delta is a fragment of a translated message, so only the
-    // translated stream subscribes. Before the input, like the events: both are
-    // transient.
-    let delta_rx = match params.format {
-        RunFormat::AgUi => Some(
-            state
-                .runtime
-                .subscribe_token_deltas(&caller, &session_id)
-                .await,
-        ),
-        RunFormat::Events => None,
-    };
-
-    let turn = state
-        .runtime
-        .handle_client_input(HandleClientInput {
-            session_id: session_id.clone(),
-            caller,
-            owner,
-            // The tagged union carries its own addressing.
-            input: req.input,
-            span: crate::span::SpanContext::root().child("v1_run"),
-        })
-        .await;
-    let turn_id = match turn {
-        Ok(output) => output.turn_id,
-        Err(e) => return runtime_error_response(e),
-    };
-
     let shutdown = state.shutdown.clone();
-    let out = match delta_rx {
-        Some(delta_rx) => run_ag_ui_translation(event_rx, delta_rx, session_id, turn_id, shutdown),
-        None => run_event_stream(event_rx, shutdown),
+    let ctx = ChannelContext::new(state.runtime.clone(), shutdown.clone());
+    let turn = ag_ui_run::start(
+        &ctx,
+        &caller,
+        &owner,
+        &session_id,
+        req.input,
+        "v1_run",
+        matches!(params.format, RunFormat::AgUi),
+    )
+    .await;
+    let turn = match turn {
+        Ok(turn) => turn,
+        Err(e) => return runtime_error_response(e),
     };
-    Sse::new(ReceiverStream::new(out).map(Ok::<_, std::convert::Infallible>))
+
+    let out: BoxStream<'static, SseEvent> = match turn.deltas {
+        Some(deltas) => Box::pin(
+            ReceiverStream::new(run_ag_ui_translation(
+                turn.events,
+                deltas,
+                session_id,
+                turn.turn_id,
+                shutdown,
+            ))
+            .map(|e| e.to_sse()),
+        ),
+        None => Box::pin(ReceiverStream::new(run_event_stream(turn.events, shutdown))),
+    };
+    Sse::new(out.map(Ok::<_, std::convert::Infallible>))
         .keep_alive(KeepAlive::default())
         .into_response()
 }
@@ -215,6 +207,15 @@ async fn stream_session_events(
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     routes::stream_session_events(state, caller, Path(session_id), params, headers).await
+}
+
+async fn connect_session_ag_ui(
+    state: State<AdminHttpState>,
+    caller: Extension<Caller>,
+    Path((_app, session_id)): Path<(String, String)>,
+    input: Json<crate::transport::ag_ui::types::RunAgentInput>,
+) -> impl IntoResponse {
+    routes::connect_session_ag_ui(state, caller, Path(session_id), input).await
 }
 
 /// What this server offers. `single_tenant` is what lets the CLI adopt the

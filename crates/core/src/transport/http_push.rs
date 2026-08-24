@@ -16,12 +16,12 @@ use crate::protocol::{
 };
 use crate::providers::format::DeltaParser;
 use crate::runtime::llm::TokenDeltaTransport;
-use crate::worker::push::{PushError, PushTransport, TransportConstructor};
+use crate::worker::push::{Decider, PushError, TransportConstructor};
 use crate::worker::WorkerDecisionRequest;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub struct HttpPushTransport {
+pub struct HttpDecider {
     http: Client,
     endpoint_url: String,
     /// Max silence, not total duration: request → first response, and between
@@ -31,7 +31,7 @@ pub struct HttpPushTransport {
     signing_secret: Option<String>,
 }
 
-impl HttpPushTransport {
+impl HttpDecider {
     pub fn new(
         endpoint_url: String,
         idle_timeout: Option<Duration>,
@@ -50,7 +50,7 @@ impl HttpPushTransport {
 }
 
 #[async_trait]
-impl PushTransport for HttpPushTransport {
+impl Decider for HttpDecider {
     async fn push(
         &self,
         decision: &WorkerDecisionRequest,
@@ -162,7 +162,7 @@ impl PushTransport for HttpPushTransport {
     }
 }
 
-impl HttpPushTransport {
+impl HttpDecider {
     /// The whole body in hand, so a failure can quote it. `.json()` would
     /// consume the body and hand back an error that names neither.
     async fn read_body(&self, resp: reqwest::Response) -> Result<Vec<u8>, PushError> {
@@ -267,7 +267,7 @@ pub fn http_transport() -> (&'static str, TransportConstructor) {
             let c: HttpTransportConfig =
                 serde_json::from_value(config).map_err(|e| e.to_string())?;
             let timeout = c.timeout_secs.map(Duration::from_secs);
-            Ok(Arc::new(HttpPushTransport::new(
+            Ok(Arc::new(HttpDecider::new(
                 c.endpoint_url,
                 timeout,
                 c.signing_secret,

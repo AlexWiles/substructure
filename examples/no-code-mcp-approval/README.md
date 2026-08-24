@@ -42,8 +42,7 @@ subs run "which issues mention the login page?"
 ```
 
 ```text
-→ issues__search_issues {"q":"login page"}
-← issues__search_issues {"q":"login page"}
+● issues__search_issues {"q":"login page"}
   #7: the login page is blank
 ```
 
@@ -83,6 +82,53 @@ Issue #7 has been deleted. Issue #9 could not be deleted—the deletion was decl
 
 In Slack the question is a message in the thread with `Run it` and `Decline`
 buttons, and no id is typed. See [Slack](../../docs/130-slack.md#interrupt-prompts).
+
+## In a chat
+
+`subs chat` holds the session open, so the question arrives where you are and
+no id is typed here either. The options are the same ones Slack draws as
+buttons.
+
+```sh
+subs chat
+```
+
+````console
+> delete issue 7
+? Run `issues__delete_issue`?
+
+```
+{
+  "id": "7"
+}
+```  ›
+❯ Run it
+  Decline
+````
+
+`↑`/`↓` pick and `Enter` answers. `Run it` runs the call and the turn carries
+on in the same chat:
+
+```console
+✔ Run `issues__delete_issue`? · Run it
+● issues__delete_issue {"id":"7"}
+  deleted issue #7
+Done. Issue 7 deleted.
+
+>
+```
+
+`Decline` dials nothing, and the model reads the decline instead of a result:
+
+```console
+✔ Run `issues__delete_issue`? · Decline
+The deletion of issue 7 was declined. …
+```
+
+`Ctrl-C` at the question leaves it parked in the session, and
+`subs chat --session <id>` asks it again.
+
+See [Chat](../../docs/135-chat.md).
 
 ## Two calls at once
 

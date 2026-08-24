@@ -6378,10 +6378,7 @@ fn changed_state_anchors_at_the_post_reconcile_head() {
         Some("a1"),
         "the version anchors to the last appended node"
     );
-    assert_eq!(
-        agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
-        json!({"v": 1})
-    );
+    assert_eq!(agg.state.at_head().resolve_state_for().0, json!({"v": 1}));
 }
 
 #[test]
@@ -6405,10 +6402,7 @@ fn omitted_state_keeps_the_current_version() {
         None,
     );
     assert!(state_updates(&events).is_empty());
-    assert_eq!(
-        agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
-        json!({"v": 1})
-    );
+    assert_eq!(agg.state.at_head().resolve_state_for().0, json!({"v": 1}));
 }
 
 fn agent_updates(events: &[EventPayload]) -> Vec<&AgentConfigUpdated> {
@@ -6477,6 +6471,7 @@ fn connector_config(ids: &[&str]) -> AgentConfig {
 fn remote_tool(name: &str) -> RemoteTool {
     RemoteTool {
         name: name.to_string(),
+        title: None,
         description: "a remote tool".to_string(),
         input: None,
         output: None,
@@ -6519,6 +6514,7 @@ fn settle_sync_at(agg: &mut SessionAggregate, written: &str, tools: &[&str]) -> 
             written.to_string(),
             None,
             Outcome::Connector {
+                server: None,
                 prefix: Some(id.to_string()),
                 tools: tools.iter().map(|t| remote_tool(t)).collect(),
                 instructions: None,
@@ -7003,15 +6999,11 @@ fn a_terminally_failed_fetch_releases_the_turn_rather_than_parking_it() {
         "an unreachable connector unblocks the worker to decide; got {events:?}"
     );
     assert!(
-        !agg.state
-            .has_pending_connector_sync(agg.state.head_id.as_deref()),
+        !agg.state.at_head().has_pending_connector_sync(),
         "a terminal failure is settled, so it parks nothing further"
     );
     assert!(
-        agg.state
-            .connector_tools(agg.state.head_id.as_deref())
-            .tools
-            .is_empty(),
+        agg.state.at_head().connector_tools().tools.is_empty(),
         "a failed fetch contributes no tools"
     );
 }
@@ -7038,9 +7030,7 @@ fn a_retryable_failure_keeps_parking_until_it_is_exhausted() {
         promotions(&events).is_empty(),
         "a retry is still unsettled, so it still parks; got {events:?}"
     );
-    assert!(agg
-        .state
-        .has_pending_connector_sync(agg.state.head_id.as_deref()));
+    assert!(agg.state.at_head().has_pending_connector_sync());
     assert!(
         super::schedule::wake_at(&agg.state, Utc::now()).is_some(),
         "the retry is scheduled, so the session wakes for it"
@@ -7195,7 +7185,8 @@ fn session_with_searched_connector(id: &str, tools: &[&str]) -> SessionAggregate
 /// leaves out the deferred ones.
 fn offered(agg: &SessionAggregate) -> Vec<String> {
     agg.state
-        .connector_tools(None)
+        .at(None)
+        .connector_tools()
         .tools
         .into_iter()
         .filter(|t| !t.defer)
@@ -7205,7 +7196,8 @@ fn offered(agg: &SessionAggregate) -> Vec<String> {
 
 fn held(agg: &SessionAggregate) -> Vec<String> {
     agg.state
-        .connector_tools(None)
+        .at(None)
+        .connector_tools()
         .tools
         .into_iter()
         .map(|t| t.name)
@@ -7258,9 +7250,7 @@ fn a_search_answers_at_the_anchor_of_the_call() {
         &ctx,
     );
     assert!(
-        agg.state
-            .searchable_tools(agg.state.head_id.as_deref())
-            .is_empty(),
+        agg.state.at_head().searchable_tools().is_empty(),
         "the head has dropped the connection, so a new call would find nothing"
     );
 
@@ -7715,7 +7705,7 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
     );
     settle_sync(&mut agg, "sentry", &["search_issues"]);
 
-    let merged = agg.state.connector_tools(None);
+    let merged = agg.state.at(None).connector_tools();
     assert_eq!(
         offered(&agg),
         ["call_tool"],
@@ -7820,7 +7810,8 @@ fn a_connection_overrides_the_agents_default() {
     settle_sync(&mut agg, "sentry", &["search_issues"]);
     assert_eq!(
         agg.state
-            .connector_tools(None)
+            .at(None)
+            .connector_tools()
             .tools
             .iter()
             .map(|t| t.name.as_str())
@@ -7845,9 +7836,11 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
             "mcp.sentry".to_string(),
             None,
             Outcome::Connector {
+                server: None,
                 prefix: Some("sentry".to_string()),
                 tools: vec![RemoteTool {
                     name: "search_issues".to_string(),
+                    title: None,
                     description: "search".to_string(),
                     input: Some(serde_json::json!({
                         "type": "object",
@@ -7908,7 +7901,9 @@ fn tool_search_picks_which_engine_tools_the_agent_gets() {
     };
     let offered = |search: DeferToolsStrategy| -> Vec<String> {
         let agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(agent(search)));
-        super::super::state::SessionState::connector_tools(&agg.state, None)
+        agg.state
+            .at(None)
+            .connector_tools()
             .tools
             .into_iter()
             .map(|t| t.name)
@@ -8144,6 +8139,7 @@ fn a_deferred_connector_tool_carries_its_output_contract() {
             "mcp.sentry".to_string(),
             None,
             Outcome::Connector {
+                server: None,
                 prefix: Some("sentry".to_string()),
                 tools: vec![RemoteTool {
                     output: Some(schema.clone()),
@@ -8156,7 +8152,8 @@ fn a_deferred_connector_tool_carries_its_output_contract() {
     );
     let tool = agg
         .state
-        .connector_tools(None)
+        .at(None)
+        .connector_tools()
         .tools
         .into_iter()
         .find(|t| t.name == "sentry__search_issues")
@@ -8448,7 +8445,7 @@ fn a_declared_tool_keeps_its_name_and_its_handler_against_a_connector() {
         ToolHandler::Worker,
         "the config claims the name, so the connector never takes it"
     );
-    let merged = agg.state.connector_tools(agg.state.head_id.as_deref());
+    let merged = agg.state.at_head().connector_tools();
     assert!(merged.tools.is_empty());
     assert_eq!(
         merged.collisions,
@@ -8460,13 +8457,7 @@ fn a_declared_tool_keeps_its_name_and_its_handler_against_a_connector() {
 #[test]
 fn a_filter_change_re_derives_without_another_fetch() {
     let mut agg = session_with_connectors(&["sentry"], &["search_issues", "create_issue"]);
-    assert_eq!(
-        agg.state
-            .connector_tools(agg.state.head_id.as_deref())
-            .tools
-            .len(),
-        2
-    );
+    assert_eq!(agg.state.at_head().connector_tools().tools.len(), 2);
 
     let narrowed = AgentConfig {
         mcp: vec![McpServer {
@@ -8493,7 +8484,8 @@ fn a_filter_change_re_derives_without_another_fetch() {
     );
     let names: Vec<String> = agg
         .state
-        .connector_tools(agg.state.head_id.as_deref())
+        .at_head()
+        .connector_tools()
         .tools
         .into_iter()
         .map(|t| t.name)
@@ -8539,7 +8531,7 @@ fn changed_agent_config_anchors_at_head_and_dedups() {
         "the config anchors to the last appended node"
     );
     assert_eq!(
-        agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
+        agg.state.at_head().resolve_agent_for(),
         Some(agent_config("m1"))
     );
 
@@ -8583,7 +8575,7 @@ fn omitted_agent_keeps_the_current_config() {
     );
     assert!(agent_updates(&events).is_empty());
     assert_eq!(
-        agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
+        agg.state.at_head().resolve_agent_for(),
         Some(agent_config("m1"))
     );
 }
@@ -8707,7 +8699,7 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
         "the queued client decision is promoted; got {events:?}"
     );
     assert_eq!(
-        agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
+        agg.state.at_head().resolve_agent_for(),
         Some(agent_config("m1"))
     );
 }
@@ -8839,7 +8831,7 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
         "the queued client decision is promoted; got {events:?}"
     );
     assert_eq!(
-        agg.state.resolve_agent_for(agg.state.head_id.as_deref()),
+        agg.state.at_head().resolve_agent_for(),
         Some(agent_config("m1"))
     );
 }
@@ -9011,10 +9003,7 @@ fn fork_anchors_new_state_and_resolves_as_of_the_prefix_without_one() {
         ],
         Some(json!({"v": 2})),
     );
-    assert_eq!(
-        agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
-        json!({"v": 2})
-    );
+    assert_eq!(agg.state.at_head().resolve_state_for().0, json!({"v": 2}));
 
     let d3 = open_decision(&mut agg, "redo");
     let events = submit_state(
@@ -9029,10 +9018,7 @@ fn fork_anchors_new_state_and_resolves_as_of_the_prefix_without_one() {
     let updates = state_updates(&events);
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].anchor.as_deref(), Some("x1"));
-    assert_eq!(
-        agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
-        json!({"v": 3})
-    );
+    assert_eq!(agg.state.at_head().resolve_state_for().0, json!({"v": 3}));
 
     // Fork with no state opinion resolves as-of the fork point.
     let d4 = open_decision(&mut agg, "retry");
@@ -9048,7 +9034,7 @@ fn fork_anchors_new_state_and_resolves_as_of_the_prefix_without_one() {
     assert!(state_updates(&events).is_empty());
     assert_eq!(agg.state.head_id.as_deref(), Some("y1"));
     assert_eq!(
-        agg.state.resolve_state_for(agg.state.head_id.as_deref()).0,
+        agg.state.at_head().resolve_state_for().0,
         json!({"v": 1}),
         "the fork is uncontaminated by the abandoned branches"
     );
@@ -11014,7 +11000,7 @@ fn a_declared_tool_named_skill_shadows_the_engines_and_is_a_collision() {
         defer: None,
     });
     let agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(cfg));
-    let merged = agg.state.connector_tools(None);
+    let merged = agg.state.at(None).connector_tools();
     assert!(
         merged.collisions.contains(&"skill".to_string()),
         "reported, so the warning has something to say: {:?}",

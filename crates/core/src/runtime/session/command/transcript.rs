@@ -281,7 +281,7 @@ impl SessionState {
 
         // Gate where the view lands: a view escaping the parked head
         // dispatches; answers to pending work still queue.
-        if completions.is_empty() && self.active_interrupt_for(landing.as_deref()).is_some() {
+        if completions.is_empty() && self.at(landing.as_deref()).active_interrupt_for().is_some() {
             return Err(SessionError::SessionInterrupted);
         }
 

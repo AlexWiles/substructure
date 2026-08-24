@@ -140,6 +140,16 @@ different agents.
 
 Docs: [Slack](./docs/130-slack.md)
 
+### Talk to them in your terminal
+
+`subs chat` holds one session open, streams the reply as it is written, and
+turns an approval prompt into a picker. The session is the same kind a Slack
+thread is.
+
+Docs: [Chat](./docs/135-chat.md)
+
+Examples: [no-code-chat](./examples/no-code-chat)
+
 ### Write only the logic you care about
 
 At each step the engine tells your code what it plans to do next. Accept the

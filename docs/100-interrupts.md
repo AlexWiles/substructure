@@ -125,5 +125,6 @@ handled in worker state.
 
 - [Connectors](./40-connectors.md#approve-a-call): stop before a destructive MCP call.
 - [Slack](./130-slack.md#interrupt-prompts): approval buttons in a thread.
+- [Chat](./135-chat.md#interrupt-prompts): the same options, as a picker in your terminal.
 - [Async tools](./110-async-tools.md): wait on one call instead of the session.
 - [Durability](./200-durability.md): the engine saves the pause.

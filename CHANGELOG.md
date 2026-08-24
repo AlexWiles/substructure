@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Add CLI chat.
+
 ### Changed
 
 - Manifest format updates

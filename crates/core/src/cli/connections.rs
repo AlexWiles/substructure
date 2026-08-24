@@ -146,11 +146,7 @@ pub struct Row {
 /// creates it the same way, so a login before the first run is not special.
 fn open_db(cfg: &ProjectConfig) -> Result<SqliteDb> {
     let path = cfg.db_path();
-    if let Some(parent) = Path::new(&path).parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
+    project_config::ensure_parent(&path)?;
     Ok(SqliteDb::open(&path, Duration::from_secs(5))?)
 }
 

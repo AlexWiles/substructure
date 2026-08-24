@@ -215,6 +215,8 @@ pub struct ConnectorSyncCompleted {
     pub path: ConnectionPath,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     pub tools: Vec<RemoteTool>,
     /// What the server said it is for at the handshake.
     #[serde(default, skip_serializing_if = "Option::is_none")]

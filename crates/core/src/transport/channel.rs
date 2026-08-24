@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+
+pub use crate::protocol::ChannelKind;
 use axum::Router;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -100,7 +102,7 @@ impl ChannelContext {
 pub trait Channel: Send + Sync {
     /// URL-safe name; the channel's routes are served under
     /// `/api/channels/{kind}`.
-    fn kind(&self) -> &'static str;
+    fn kind(&self) -> ChannelKind;
 
     /// Routes relative to the channel's mount point.
     fn router(&self, ctx: ChannelContext) -> Option<Router> {

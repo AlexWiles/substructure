@@ -24,7 +24,7 @@ use crate::runtime::session::interrupts::auth::Authorize;
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
-use crate::transport::channel::ChannelContext;
+use crate::transport::channel::{ChannelContext, ChannelKind};
 use crate::transport::consent::{CliConsent, Consent, WayIn};
 use crate::{Caller, HandleClientInput, RuntimeError};
 
@@ -1100,8 +1100,7 @@ impl SlackBot {
         let Ok(session) = ctx.get_session(&ws.tenant_id, session_id).await else {
             return;
         };
-        let head = session.state.head_id.clone();
-        let Some(open) = session.state.active_interrupt_for(head.as_deref()) else {
+        let Some(open) = session.state.at_head().active_interrupt_for() else {
             return;
         };
         let Some(text) = Self::still_waiting(&open.payload) else {
@@ -1575,7 +1574,7 @@ impl SlackBot {
         event: &SessionEvent,
         c: &crate::session::events::ChannelsUpdated,
     ) -> Result<(), Error> {
-        let Some(slack) = c.channels.get("slack") else {
+        let Some(slack) = c.channels.get(ChannelKind::SLACK.as_str()) else {
             return Ok(());
         };
         if let Some(status) = slack["status"].as_str() {
@@ -2298,7 +2297,10 @@ impl SlackBot {
             EventPayload::ChannelsUpdated(c)
                 if e.meta.turn_id.as_deref() == Some(&row.turn_id) && !c.finishes_turn =>
             {
-                c.channels.get("slack")?.get("view").and_then(View::parse)
+                c.channels
+                    .get(ChannelKind::SLACK.as_str())?
+                    .get("view")
+                    .and_then(View::parse)
             }
             _ => None,
         });

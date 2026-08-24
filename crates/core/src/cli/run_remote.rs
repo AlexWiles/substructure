@@ -1,4 +1,4 @@
-//! `subs run` against the deployment the file names.
+//! Driving one turn on the deployment the file names.
 //!
 //! One request submits the input and streams the turn. A client that submits
 //! first and subscribes second loses the start of its turn.
@@ -11,49 +11,34 @@ use crate::session::SessionEvent;
 use crate::transport::ag_ui::events::AgUiEvent;
 
 use super::cloud::context::Context;
-use super::cloud::{CloudGlobals, ProjectScope};
 use super::env::OutputFormat;
-use super::pretty::{self, write_json, Renderer};
+use super::output::Renderer;
+use super::output::{unfinished, TurnEnd, TurnRender};
 
-pub struct Run {
-    pub globals: CloudGlobals,
-    pub session_id: Option<String>,
-    pub input: ClientInput,
-    pub output: OutputFormat,
-    /// The message or `--input` this run sent, elided from the resume hint.
-    pub payload: Option<String>,
-}
-
-fn format_for(output: OutputFormat) -> RunFormat {
+pub(crate) fn format_for(output: OutputFormat) -> RunFormat {
     match output {
         OutputFormat::Jsonl => RunFormat::Events,
         _ => RunFormat::AgUi,
     }
 }
 
-pub async fn run(cmd: Run) -> Result<()> {
-    let scope = ProjectScope {
-        org: None,
-        project: None,
-        globals: cmd.globals,
-    };
-    let (ctx, project) = Context::from_project(&scope).await?;
-
-    let format = format_for(cmd.output);
-
+/// Submit one input to the deployment and render the turn it opens, to its end.
+pub(crate) async fn drive(
+    ctx: &Context,
+    project: &str,
+    session_id: &str,
+    input: ClientInput,
+    renderer: &mut Renderer,
+    format: RunFormat,
+) -> Result<TurnEnd> {
     let body = RunRequest {
-        session_id: cmd.session_id.clone(),
-        input: cmd.input,
+        session_id: Some(session_id.to_string()),
+        input,
     };
 
-    let mut stdout = std::io::stdout();
-    let mut renderer = Renderer::new(cmd.output, pretty::color());
-    let mut session_id = cmd.session_id;
     let mut failed: Option<anyhow::Error> = None;
-    // A stream that stops early is not a turn that finished. Each format ends
-    // with an event that says so: AG-UI with `RUN_FINISHED`, the engine's own
-    // events with `RUN_DONE_EVENT`.
-    let mut finished = false;
+    let mut done_event = false;
+    let mut render = TurnRender::new(renderer);
 
     ctx.client
         .post_sse(
@@ -64,7 +49,7 @@ pub async fn run(cmd: Run) -> Result<()> {
             &body,
             |line| {
                 if line.trim_end() == format!("event: {RUN_DONE_EVENT}") {
-                    finished = true;
+                    done_event = true;
                     return;
                 }
                 let Some(data) = line.strip_prefix("data:") else {
@@ -75,14 +60,8 @@ pub async fn run(cmd: Run) -> Result<()> {
                     return;
                 }
                 let rendered = match format {
-                    RunFormat::Events => raw(&mut stdout, data, &mut session_id),
-                    RunFormat::AgUi => translated(
-                        &mut stdout,
-                        &mut renderer,
-                        data,
-                        &mut session_id,
-                        &mut finished,
-                    ),
+                    RunFormat::Events => raw(&mut render, data),
+                    RunFormat::AgUi => translated(&mut render, data),
                 };
                 if let Err(e) = rendered {
                     failed = Some(e);
@@ -94,43 +73,31 @@ pub async fn run(cmd: Run) -> Result<()> {
     if let Some(e) = failed {
         return Err(e);
     }
-    if !finished {
-        anyhow::bail!("event stream ended before the run finished");
+    if !ended(format, done_event, &render) {
+        return Err(unfinished());
     }
-
-    if let Some(session_id) = session_id {
-        super::run::print_resume_hint(&session_id, cmd.payload.as_deref());
-    }
-    Ok(())
+    Ok(render.into_end())
 }
 
-fn raw(stdout: &mut std::io::Stdout, data: &str, session_id: &mut Option<String>) -> Result<()> {
+/// `format=events` carries no AG-UI events, so the route marks its end.
+/// `format=ag-ui` ends on the AG-UI terminal event.
+fn ended(format: RunFormat, done_event: bool, render: &TurnRender<'_>) -> bool {
+    match format {
+        RunFormat::Events => done_event,
+        RunFormat::AgUi => render.terminated(),
+    }
+}
+
+fn raw(render: &mut TurnRender<'_>, data: &str) -> Result<()> {
     let event: SessionEvent =
         serde_json::from_str(data).context("the deployment sent an event this CLI cannot read")?;
-    if session_id.is_none() {
-        *session_id = Some(event.session_id.clone());
-    }
-    write_json(stdout, &event)
+    render.raw(&event)
 }
 
-fn translated(
-    stdout: &mut std::io::Stdout,
-    renderer: &mut Renderer,
-    data: &str,
-    session_id: &mut Option<String>,
-    finished: &mut bool,
-) -> Result<()> {
+fn translated(render: &mut TurnRender<'_>, data: &str) -> Result<()> {
     let event: AgUiEvent = serde_json::from_str(data)
         .context("the deployment sent an AG-UI event this CLI cannot read")?;
-    if let (None, AgUiEvent::RunStarted { thread_id, .. }) = (&session_id, &event) {
-        *session_id = Some(thread_id.clone());
-    }
-    // AG-UI's own terminal events, which the protocol defines as the end.
-    *finished |= matches!(
-        event,
-        AgUiEvent::RunFinished { .. } | AgUiEvent::RunError { .. }
-    );
-    renderer.emit(stdout, vec![event])
+    render.accept(vec![event])
 }
 
 #[cfg(test)]
@@ -164,41 +131,21 @@ mod tests {
         assert_eq!(format_for(OutputFormat::AgUi), RunFormat::AgUi);
     }
 
-    #[test]
-    fn a_new_session_is_learned_from_the_first_event() {
-        let mut session_id = None;
-        let mut stdout = std::io::stdout();
+    fn saw(event: &AgUiEvent) -> bool {
+        let json = serde_json::to_string(event).unwrap();
         let mut renderer = Renderer::new(OutputFormat::AgUi, false);
-        let mut finished = false;
-        let started = serde_json::to_string(&AgUiEvent::RunStarted {
-            thread_id: "sess-1".into(),
-            run_id: "turn-1".into(),
-        })
-        .unwrap();
-
-        translated(
-            &mut stdout,
-            &mut renderer,
-            &started,
-            &mut session_id,
-            &mut finished,
-        )
-        .unwrap();
-        assert_eq!(session_id.as_deref(), Some("sess-1"));
+        let mut render = TurnRender::new(&mut renderer);
+        translated(&mut render, &json).unwrap();
+        render.terminated()
     }
 
-    fn saw(event: &AgUiEvent) -> bool {
-        let mut finished = false;
-        let json = serde_json::to_string(event).unwrap();
-        translated(
-            &mut std::io::stdout(),
-            &mut Renderer::new(OutputFormat::AgUi, false),
-            &json,
-            &mut None,
-            &mut finished,
-        )
-        .unwrap();
-        finished
+    #[test]
+    fn a_format_ends_where_that_format_ends() {
+        let mut renderer = Renderer::new(OutputFormat::AgUi, false);
+        let render = TurnRender::new(&mut renderer);
+        assert!(ended(RunFormat::Events, true, &render));
+        assert!(!ended(RunFormat::Events, false, &render));
+        assert!(!ended(RunFormat::AgUi, true, &render));
     }
 
     #[test]
@@ -212,6 +159,7 @@ mod tests {
             run_id: "r".into(),
             result: None,
             outcome: None,
+            metadata: None,
         }));
         // An error is an ending too: the reader has been told what happened.
         assert!(saw(&AgUiEvent::RunError {

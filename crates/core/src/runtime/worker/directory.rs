@@ -1,18 +1,13 @@
-//! What an app declares about its agents: their config, and where each one's
-//! decisions go.
-//!
-//! One lookup answers both questions a decision asks — what this agent *is*
-//! (the config seeded onto `session.start`) and who decides for it (a worker
-//! URL, or the engine itself). Routing has exactly one rule, so a `worker` URL
-//! set on an agent is the whole switch and there is nothing to register later.
-//!
-//! The declared `[llm.*]` blocks travel with the agents because they are read
-//! together: an agent names a block, and the block settles where its calls run.
-
 use std::collections::BTreeMap;
 
 use crate::protocol::AgentConfig;
 use crate::runtime::llm::LlmBlocks;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hosting {
+    Engine,
+    Http(WorkerEndpoint),
+}
 
 /// One agent as declared: the config the app seeds, plus the hosting that never
 /// crosses the wire.
@@ -21,12 +16,10 @@ use crate::runtime::llm::LlmBlocks;
 /// the declaration says the agent exists and where its decisions go, and the
 /// worker authors the identity on `session.start`. An engine-hosted agent
 /// always has one; nothing else could supply it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct AgentEntry {
     pub config: Option<AgentConfig>,
-    /// Where decisions are POSTed. Unset ⇒ the engine decides for this agent by
-    /// accepting its own proposals.
-    pub worker: Option<WorkerEndpoint>,
+    pub hosting: Hosting,
 }
 
 /// A worker attached to one agent. `signing_secret` is what the named
@@ -161,14 +154,14 @@ mod tests {
                     "assistant".to_string(),
                     AgentEntry {
                         config: Some(config("claude")),
-                        worker: None,
+                        hosting: Hosting::Engine,
                     },
                 ),
                 (
                     "triage".to_string(),
                     AgentEntry {
                         config: None,
-                        worker: Some(WorkerEndpoint {
+                        hosting: Hosting::Http(WorkerEndpoint {
                             url: "https://triage.internal/agent".to_string(),
                             signing_secret: None,
                         }),
@@ -187,15 +180,15 @@ mod tests {
             engine_hosted.config.and_then(|c| c.llm).as_deref(),
             Some("claude")
         );
-        assert!(engine_hosted.worker.is_none(), "the engine decides for it");
+        assert_eq!(engine_hosted.hosting, Hosting::Engine);
 
         // A worker-hosted agent may seed nothing: its worker authors the config.
         let pushed = d.agent("default", "triage").expect("declared");
         assert!(pushed.config.is_none());
-        assert_eq!(
-            pushed.worker.map(|w| w.url).as_deref(),
-            Some("https://triage.internal/agent")
-        );
+        let Hosting::Http(endpoint) = pushed.hosting else {
+            panic!("a declared worker is hosted over http");
+        };
+        assert_eq!(endpoint.url, "https://triage.internal/agent");
     }
 
     #[test]

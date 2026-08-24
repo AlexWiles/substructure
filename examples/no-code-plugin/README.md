@@ -36,11 +36,13 @@ subs run "the database is down, what do I do?"
 ```
 
 ```text
-→ skill {"name":"runbooks:respond"}
-← skill  Skill runbooks:respond — Respond to an on-call incident…
-→ files__list_dir {}
-→ files__read_file {"path":"database-down.md"}
-→ skill {"name":"runbooks:respond","file":"references/escalation.md"}
+● skill {"name":"runbooks:respond"}
+  Skill runbooks:respond — Respond to an on-call incident…
+● files__list_dir {}
+  database-down.md
+● files__read_file {"path":"database-down.md"}
+  …
+● skill {"name":"runbooks:respond","file":"references/escalation.md"}
   1. Check the connection pool first …
   2. Restart the replica, never the primary: `db-ctl restart replica-1`
   …

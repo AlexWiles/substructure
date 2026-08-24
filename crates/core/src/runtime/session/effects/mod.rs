@@ -70,6 +70,7 @@ pub enum Outcome {
     SubAgentStarted,
     Connector {
         prefix: Option<String>,
+        server: Option<String>,
         tools: Vec<RemoteTool>,
         instructions: Option<String>,
     },

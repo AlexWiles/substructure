@@ -5,18 +5,17 @@
 
 use serde_json::Value;
 
+use crate::transport::channel::ChannelKind;
+
 use super::activity::TurnActivity;
 use super::render;
 use super::{clip, display_of, with_footer, ButtonValue};
-use crate::connectors::registry::ConnectionPath;
-use crate::connectors::{AuthNeed, Requester};
 use crate::protocol::{
     Content, DecisionAction, DecisionResponse, DecisionTrigger, InterruptResolution,
     InterruptResponder, Message, ResumeStatus, Role,
 };
-use crate::runtime::session::interrupts::{self, auth};
 use crate::runtime::session::state::SessionState;
-use crate::runtime::worker::ChannelProposer;
+use crate::runtime::worker::{ChannelProposer, Proposal};
 use crate::session::events::EventPayload;
 use crate::session::SessionEvent;
 
@@ -29,52 +28,22 @@ impl SlackProposer {
     }
 }
 
-/// Whether Slack owns this session: its owner records a Slack channel.
-fn slack_owned(state: &SessionState) -> bool {
-    state
-        .owner
-        .as_ref()
-        .is_some_and(|o| o.metadata.contains_key("slack_channel"))
-}
-
 impl ChannelProposer for SlackProposer {
-    fn propose(
-        &self,
-        _session_id: &str,
-        trigger: &DecisionTrigger,
-        state: &SessionState,
-        events: &[SessionEvent],
-        transcript: &[Message],
-        proposed: DecisionResponse,
-    ) -> DecisionResponse {
-        if !slack_owned(state) {
-            return proposed;
-        }
-        // A click that answers one of our prompts comes first. It is what
-        // unparks the session, not work against tools: asking about a second
-        // connection here would answer nothing, and the engine drops that
-        // prompt anyway because the head is already parked.
-        let click = match trigger {
+    fn channel(&self) -> ChannelKind {
+        ChannelKind::SLACK
+    }
+
+    fn translate(&self, cx: &Proposal<'_>) -> Option<DecisionResponse> {
+        match cx.trigger {
             DecisionTrigger::ClientAction {
                 args: Some(args), ..
-            } => click_proposal(state, args),
+            } => click_proposal(cx.state, args),
             _ => None,
-        };
-        if let Some(click) = click {
-            return click;
         }
-        // The proposal below would run against tools the agent has lost. Only
-        // the work is replaced. What the decision records stays, or the resumed
-        // turn reads a transcript missing the message that started it.
-        if let Some(actions) = self.authorize_prompt(state) {
-            return DecisionResponse {
-                actions,
-                // The prompt owns the message, so it carries no view.
-                channels: Default::default(),
-                ..proposed
-            };
-        }
-        match trigger {
+    }
+
+    fn render(&self, cx: &Proposal<'_>, proposed: &DecisionResponse) -> Option<Value> {
+        match cx.trigger {
             DecisionTrigger::LlmFinished { .. }
             | DecisionTrigger::ToolFinished { .. }
             | DecisionTrigger::SubAgentFinished { .. }
@@ -84,75 +53,21 @@ impl ChannelProposer for SlackProposer {
                     .actions
                     .iter()
                     .any(|a| matches!(a, DecisionAction::Interrupt { .. }));
-                if authors_interrupt {
-                    return proposed;
+                match authors_interrupt {
+                    true => None,
+                    false => streaming_view(cx.events, &title_of(cx.transcript)).map(view),
                 }
-                let view = streaming_view(events, &title_of(transcript));
-                with_view(proposed, view)
             }
             DecisionTrigger::TurnFinished { data, .. } => {
-                let view = final_view(events, data, &title_of(transcript));
-                with_view(proposed, Some(view))
+                Some(view(final_view(cx.events, data, &title_of(cx.transcript))))
             }
-            _ => proposed,
+            _ => None,
         }
     }
 }
 
-impl SlackProposer {
-    /// The work for the first connection that needs a person. It replaces the
-    /// proposed work, because the session stops here.
-    ///
-    /// It writes why, and the facts a way in is built from. How to authorize
-    /// is the delivering channel's to add, so no link is written here.
-    fn authorize_prompt(&self, state: &SessionState) -> Option<Vec<DecisionAction>> {
-        let (connection, need) = auth::needing(state)?;
-        let authorize = auth::Authorize {
-            requester: Requester::of_owner(state.owner.as_ref()),
-            connection: connection.clone(),
-        };
-
-        Some(vec![DecisionAction::Interrupt {
-            interrupt_id: Some(auth::interrupt_id(&connection)),
-            reason: format!("connection `{connection}` needs authorizing"),
-            payload: serde_json::json!({
-                "message": ask(&connection, need),
-                "authorize": authorize,
-                "metadata": { "options": [{
-                    "label": "Retry",
-                    "value": { "connection": connection },
-                }] },
-            }),
-        }])
-    }
-}
-
-/// Why the session stopped. A rejected token names its fix here, because no
-/// consent flow can replace a static token.
-fn ask(connection: &ConnectionPath, need: AuthNeed) -> String {
-    match need {
-        AuthNeed::NeverAuthorized => {
-            format!("*{connection}* is not authorized yet, so I cannot use it.")
-        }
-        AuthNeed::Reauthorize => {
-            format!("*{connection}* needs to be authorized again. Its access expired.")
-        }
-        AuthNeed::TokenRejected => format!(
-            "*{connection}* rejected its token. An operator must set a new one \
-             with `subs auth {connection}`."
-        ),
-    }
-}
-
-fn with_view(mut proposed: DecisionResponse, view: Option<Value>) -> DecisionResponse {
-    if let Some(view) = view {
-        let slack = proposed
-            .channels
-            .entry("slack".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        slack["view"] = view;
-    }
-    proposed
+fn view(view: Value) -> Value {
+    serde_json::json!({ "view": view })
 }
 
 /// The card's title: what the turn was asked to do.
@@ -289,20 +204,17 @@ fn click_proposal(state: &SessionState, args: &Value) -> Option<DecisionResponse
         status: ResumeStatus::Resolved,
         payload: option.value,
         responder: Some(InterruptResponder {
-            channel: "slack".to_string(),
+            channel: ChannelKind::SLACK.to_string(),
             user: Some(click.user.to_string()),
             label: Some(option.label),
             style: option.style,
         }),
     };
-    let followups = interrupts::resolve_followups(&interrupt_id);
     Some(DecisionResponse {
-        actions: std::iter::once(DecisionAction::ResolveInterrupt {
+        actions: vec![DecisionAction::ResolveInterrupt {
             interrupt_id,
             payload: serde_json::to_value(resolution).unwrap_or_default(),
-        })
-        .chain(followups)
-        .collect(),
+        }],
         ..Default::default()
     })
 }
@@ -314,7 +226,7 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
     let blocks = render::settled_prompt_blocks(&click.message_blocks, click.message_text, note);
     DecisionResponse {
         channels: [(
-            "slack".to_string(),
+            ChannelKind::SLACK.to_string(),
             serde_json::json!({
                 "update": {
                     "channel": click.channel,
@@ -332,25 +244,41 @@ fn stale_prompt(click: &ClickArgs<'_>) -> DecisionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{AgentConfig, AuthFailure, InterruptOrigin, McpServer, RetryPolicy};
-    use crate::protocol::{Content, DraftMessage, Role, StoredResult};
+    use crate::protocol::{Content, Role, StoredResult};
+    use crate::protocol::{InterruptOrigin, Requester, RetryPolicy};
     use crate::protocol::{Issuer, Subject};
     use crate::runtime::session::state::OpenInterrupt;
-    use crate::session::events::{AgentConfigUpdated, ConnectorAuthFailed, ConnectorSyncRequested};
     use crate::session::events::{ToolCallCompleted, ToolCallRequested, TurnStarted};
-    use crate::session::state::ApplyContext;
     use crate::session::state::EventMeta;
 
     const SESSION: &str = "slack:C1:1.0";
 
-    fn propose(
-        session_id: &str,
+    fn cx<'a>(
+        trigger: &'a DecisionTrigger,
+        state: &'a SessionState,
+        events: &'a [SessionEvent],
+    ) -> Proposal<'a> {
+        Proposal {
+            trigger,
+            state,
+            events,
+            transcript: &[],
+        }
+    }
+
+    fn translated(trigger: &DecisionTrigger, state: &SessionState) -> Option<DecisionResponse> {
+        SlackProposer::new().translate(&cx(trigger, state, &[]))
+    }
+
+    fn rendered(
         trigger: &DecisionTrigger,
         state: &SessionState,
         events: &[SessionEvent],
-        proposed: DecisionResponse,
-    ) -> DecisionResponse {
-        SlackProposer::new().propose(session_id, trigger, state, events, &[], proposed)
+        proposed: &DecisionResponse,
+    ) -> Option<Value> {
+        SlackProposer::new()
+            .render(&cx(trigger, state, events), proposed)
+            .map(|v| v["view"].clone())
     }
 
     fn action(value: &str) -> DecisionTrigger {
@@ -379,127 +307,6 @@ mod tests {
                 ("slack_thread_ts".to_string(), "1.0".to_string()),
             ]),
         });
-        s
-    }
-
-    fn ctx() -> ApplyContext {
-        ApplyContext {
-            occurred_at: chrono::Utc::now(),
-            sequence: 1,
-        }
-    }
-
-    /// Two connections need a person, and the first has already been asked.
-    fn state_needing_auth_twice() -> SessionState {
-        let mut s = state();
-        let server = |id: &str| McpServer {
-            path: ConnectionPath::Mcp(id.to_string()),
-            tools: None,
-            auth_failure: AuthFailure::Interrupt,
-            approve: Default::default(),
-        };
-        s.apply(
-            &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
-                config: AgentConfig {
-                    mcp: vec![server("gmail"), server("drive")],
-                    ..blank_config()
-                },
-                anchor: None,
-            }),
-            &ctx(),
-        );
-        for id in ["gmail", "drive"] {
-            s.apply(
-                &EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
-                    path: ConnectionPath::Mcp(id.to_string()),
-                    attempt: 0,
-                    retry: RetryPolicy::no_retry(),
-                }),
-                &ctx(),
-            );
-            s.apply(
-                &EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
-                    path: ConnectionPath::Mcp(id.to_string()),
-                    auth: AuthNeed::NeverAuthorized,
-                }),
-                &ctx(),
-            );
-        }
-        s.open_interrupts.push(OpenInterrupt {
-            interrupt_id: "mcp-auth:mcp.gmail".to_string(),
-            origin: InterruptOrigin::Frontend,
-            reason: "hold".to_string(),
-            payload: serde_json::json!({
-                "message": "*gmail* is not authorized yet, so I cannot use it.",
-                "metadata": { "options": [
-                    { "label": "Retry", "value": { "connection": "gmail" } },
-                ]},
-            }),
-            anchor: None,
-        });
-        s
-    }
-
-    fn blank_config() -> AgentConfig {
-        AgentConfig {
-            llm: None,
-            model: "m1".to_string(),
-            system: None,
-            retry: None,
-            tools: vec![],
-            sub_agents: vec![],
-            mcp: vec![],
-            defer_tools: None,
-            announce_mcp: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
-        }
-    }
-
-    fn state_needing_auth(need: AuthNeed, policy: AuthFailure) -> SessionState {
-        let mut s = state();
-        s.apply(
-            &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
-                config: AgentConfig {
-                    mcp: vec![McpServer {
-                        path: ConnectionPath::Mcp("sentry".into()),
-                        tools: None,
-                        auth_failure: policy,
-                        approve: Default::default(),
-                    }],
-                    ..AgentConfig {
-                        llm: None,
-                        model: "m1".to_string(),
-                        system: None,
-                        retry: None,
-                        tools: vec![],
-                        sub_agents: vec![],
-                        mcp: vec![],
-                        defer_tools: None,
-                        announce_mcp: Default::default(),
-                        plugins: Vec::new(),
-                        effort: None,
-                    }
-                },
-                anchor: None,
-            }),
-            &ctx(),
-        );
-        s.apply(
-            &EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
-                path: ConnectionPath::Mcp("sentry".into()),
-                attempt: 0,
-                retry: RetryPolicy::no_retry(),
-            }),
-            &ctx(),
-        );
-        s.apply(
-            &EventPayload::ConnectorAuthFailed(ConnectorAuthFailed {
-                path: ConnectionPath::Mcp("sentry".into()),
-                auth: need,
-            }),
-            &ctx(),
-        );
         s
     }
 
@@ -584,222 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_that_needs_authorizing_proposes_a_prompt_instead_of_the_turn() {
-        let p = propose(
-            SESSION,
-            &DecisionTrigger::ToolFinished {
-                id: "tc1".to_string(),
-                ok: false,
-                name: "sentry__search_issues".to_string(),
-                result: None,
-                error: None,
-            },
-            &state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt),
-            &[],
-            DecisionResponse {
-                actions: vec![DecisionAction::CallLlm {
-                    id: None,
-                    llm: None,
-                    model: None,
-                    messages: None,
-                    tools: None,
-                    temperature: None,
-                    max_completion_tokens: None,
-                    reasoning: None,
-                    stream: None,
-                    retry: None,
-                }],
-                ..Default::default()
-            },
-        );
-        match &p.actions[..] {
-            [DecisionAction::Interrupt {
-                interrupt_id,
-                payload,
-                ..
-            }] => {
-                assert_eq!(interrupt_id.as_deref(), Some("mcp-auth:mcp.sentry"));
-                let message = payload["message"].as_str().unwrap();
-                assert!(message.contains("authorized again"), "got {message}");
-                // Why, and the facts a way in is built from. The link itself
-                // is minted by whoever delivers this.
-                assert!(!message.contains("http"), "got {message}");
-                let authorize: auth::Authorize =
-                    serde_json::from_value(payload["authorize"].clone()).unwrap();
-                assert_eq!(authorize.connection.to_string(), "mcp.sentry");
-                assert_eq!(
-                    authorize.requester,
-                    Requester::new(Subject::new(Issuer::slack(), "T1:U1"), Default::default())
-                );
-            }
-            other => panic!("expected one interrupt; got {other:?}"),
-        }
-    }
-
-    fn message(role: Role, text: &str) -> DraftMessage {
-        DraftMessage {
-            id: Some("m1".to_string()),
-            role,
-            content: Some(Content::Text(text.to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-            reasoning: None,
-        }
-    }
-
-    fn texts(p: &DecisionResponse) -> Vec<String> {
-        p.messages
-            .iter()
-            .map(|m| {
-                m.content
-                    .as_ref()
-                    .map(Content::text_owned)
-                    .unwrap_or_default()
-            })
-            .collect()
-    }
-
-    /// The turn stops, but what it recorded is still recorded. Dropping it left
-    /// the resumed turn with no question to answer, and the model invented one.
-    #[test]
-    fn the_authorization_prompt_keeps_what_the_decision_recorded() {
-        let asked = message(Role::User, "any important emails?");
-        let p = propose(
-            SESSION,
-            &DecisionTrigger::ClientTranscript {
-                messages: vec![asked.clone()],
-                client: Default::default(),
-                new_from: 0,
-            },
-            &state_needing_auth(AuthNeed::NeverAuthorized, AuthFailure::Interrupt),
-            &[],
-            DecisionResponse {
-                messages: vec![asked.clone()],
-                ..Default::default()
-            },
-        );
-        assert!(
-            matches!(&p.actions[..], [DecisionAction::Interrupt { .. }]),
-            "the prompt replaces the work; got {:?}",
-            p.actions
-        );
-        assert_eq!(texts(&p), ["any important emails?"], "the question stays");
-    }
-
-    /// A tool call with no result is a transcript a model provider refuses.
-    #[test]
-    fn the_authorization_prompt_keeps_a_settled_tool_result() {
-        let result = DraftMessage {
-            tool_call_id: Some("tc1".to_string()),
-            name: Some("gmail__search_threads".to_string()),
-            ..message(Role::Tool, "error: unauthorized")
-        };
-        let p = propose(
-            SESSION,
-            &DecisionTrigger::ToolFinished {
-                id: "tc1".to_string(),
-                ok: false,
-                name: "gmail__search_threads".to_string(),
-                result: None,
-                error: None,
-            },
-            &state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt),
-            &[],
-            DecisionResponse {
-                messages: vec![result.clone()],
-                ..Default::default()
-            },
-        );
-        assert_eq!(texts(&p), ["error: unauthorized"], "the result stays");
-        assert_eq!(
-            p.messages[0].tool_call_id.as_deref(),
-            Some("tc1"),
-            "it still answers its call"
-        );
-    }
-
-    #[test]
-    fn a_connection_already_asked_about_is_not_asked_about_again() {
-        let mut state = state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt);
-        state.open_interrupts.push(OpenInterrupt {
-            interrupt_id: "mcp-auth:mcp.sentry".to_string(),
-            origin: InterruptOrigin::Frontend,
-            reason: "hold".to_string(),
-            payload: Value::Null,
-            anchor: None,
-        });
-        let p = propose(
-            SESSION,
-            &DecisionTrigger::TurnFinished {
-                turn_id: "turn-1".to_string(),
-                data: serde_json::json!("done"),
-                cost: Default::default(),
-                usage: Default::default(),
-            },
-            &state,
-            &[],
-            DecisionResponse::default(),
-        );
-        assert!(
-            !p.actions
-                .iter()
-                .any(|a| matches!(a, DecisionAction::Interrupt { .. })),
-            "got {:?}",
-            p.actions
-        );
-    }
-
-    #[test]
-    fn a_connection_configured_to_degrade_never_stops_the_session() {
-        let p = propose(
-            SESSION,
-            &DecisionTrigger::TurnFinished {
-                turn_id: "turn-1".to_string(),
-                data: serde_json::json!("done"),
-                cost: Default::default(),
-                usage: Default::default(),
-            },
-            &state_needing_auth(AuthNeed::Reauthorize, AuthFailure::Degrade),
-            &[],
-            DecisionResponse::default(),
-        );
-        assert!(
-            !p.actions
-                .iter()
-                .any(|a| matches!(a, DecisionAction::Interrupt { .. })),
-            "got {:?}",
-            p.actions
-        );
-    }
-
-    #[test]
-    fn a_rejected_token_names_the_command_an_operator_runs() {
-        let p = propose(
-            SESSION,
-            &DecisionTrigger::TurnFinished {
-                turn_id: "turn-1".to_string(),
-                data: Value::Null,
-                cost: Default::default(),
-                usage: Default::default(),
-            },
-            &state_needing_auth(AuthNeed::TokenRejected, AuthFailure::Interrupt),
-            &[],
-            DecisionResponse::default(),
-        );
-        let DecisionAction::Interrupt { payload, .. } = &p.actions[0] else {
-            panic!("expected an interrupt; got {:?}", p.actions);
-        };
-        let message = payload["message"].as_str().unwrap();
-        assert!(message.contains("subs auth mcp.sentry"), "got {message}");
-        assert!(
-            !message.contains("authorize"),
-            "no link to click; got {message}"
-        );
-    }
-
-    #[test]
-    fn clicking_an_authorization_prompt_also_asks_for_the_tools_again() {
+    fn clicking_an_authorization_prompt_only_clears_it() {
         let mut state = state();
         state.open_interrupts.push(OpenInterrupt {
             interrupt_id: "mcp-auth:mcp.sentry".to_string(),
@@ -813,59 +405,28 @@ mod tests {
             }),
             anchor: None,
         });
-        let p = propose(
-            SESSION,
+        let p = translated(
             &action(
                 r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:mcp.sentry","option":0}"#,
             ),
             &state,
-            &[],
-            DecisionResponse::default(),
-        );
+        )
+        .expect("a click it recognises");
         match &p.actions[..] {
-            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { path }] =>
-            {
+            [DecisionAction::ResolveInterrupt { interrupt_id, .. }] => {
                 assert_eq!(interrupt_id, "mcp-auth:mcp.sentry");
-                assert_eq!(path.to_string(), "mcp.sentry");
             }
-            other => panic!("expected resolve then sync; got {other:?}"),
-        }
-    }
-
-    /// A second connection that also needs a person must not pre-empt the click
-    /// that answers the first. The engine drops the second prompt (the head is
-    /// already parked), so the click would answer nothing and the session would
-    /// hold there for every click after it.
-    #[test]
-    fn a_click_is_answered_even_when_another_connection_also_needs_authorizing() {
-        let p = propose(
-            SESSION,
-            &action(
-                r#"{"type":"interrupt.option","interrupt_id":"mcp-auth:mcp.gmail","option":0}"#,
-            ),
-            &state_needing_auth_twice(),
-            &[],
-            DecisionResponse::default(),
-        );
-        match &p.actions[..] {
-            [DecisionAction::ResolveInterrupt { interrupt_id, .. }, DecisionAction::SyncConnector { path }] =>
-            {
-                assert_eq!(interrupt_id, "mcp-auth:mcp.gmail");
-                assert_eq!(path.to_string(), "mcp.gmail");
-            }
-            other => panic!("expected the click to be answered; got {other:?}"),
+            other => panic!("expected the resolve and nothing else; got {other:?}"),
         }
     }
 
     #[test]
     fn clicking_an_ordinary_prompt_asks_for_no_fetch() {
-        let p = propose(
-            SESSION,
+        let p = translated(
             &action(r#"{"type":"interrupt.option","interrupt_id":"int-1","option":1}"#),
             &state_with_prompt(),
-            &[],
-            DecisionResponse::default(),
-        );
+        )
+        .expect("a click it recognises");
         assert_eq!(p.actions.len(), 1, "got {:?}", p.actions);
     }
 
@@ -877,14 +438,13 @@ mod tests {
             cost: Default::default(),
             usage: Default::default(),
         };
-        let p = propose(
-            SESSION,
+        let view = &rendered(
             &trigger,
             &state(),
             &turn_events(),
-            DecisionResponse::default(),
-        );
-        let view = &p.channels["slack"]["view"];
+            &DecisionResponse::default(),
+        )
+        .expect("a view");
         assert_eq!(view["text"], "the answer\n\n_2.0s_");
         let blocks = view["blocks"].as_array().unwrap();
         assert_eq!(blocks[0]["type"], "task_card", "the settled card leads");
@@ -965,8 +525,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let p = propose(SESSION, &trigger, &state(), &turn_events(), proposed);
-        let blocks = p.channels["slack"]["view"]["blocks"].as_array().unwrap();
+        let view = rendered(&trigger, &state(), &turn_events(), &proposed).expect("a view");
+        let blocks = view["blocks"].as_array().unwrap();
         assert_eq!(blocks.len(), 1, "one card carries the turn");
         assert_eq!(blocks[0]["task_id"], "turn-1");
         assert_eq!(blocks[0]["status"], "in_progress");
@@ -981,7 +541,6 @@ mod tests {
             blocks[0]["details"]["elements"][0]["elements"][0]["text"], "• search_web `{}`",
             "the events write the log; the proposal does not"
         );
-        assert!(!p.actions.is_empty(), "the core continuation is kept");
     }
 
     #[test]
@@ -1004,22 +563,20 @@ mod tests {
             }],
             ..Default::default()
         };
-        let p = propose(SESSION, &trigger, &state(), &turn_events(), proposed);
+        let view = rendered(&trigger, &state(), &turn_events(), &proposed);
         assert!(
-            p.channels.is_empty(),
+            view.is_none(),
             "the prompt owns the message; no view rides along"
         );
     }
 
     #[test]
     fn a_prompt_click_proposes_resolving_with_the_recorded_value() {
-        let p = propose(
-            SESSION,
+        let p = translated(
             &action(r#"{"type":"interrupt.option","interrupt_id":"int-1","option":1}"#),
             &state_with_prompt(),
-            &[],
-            DecisionResponse::default(),
-        );
+        )
+        .expect("a click it recognises");
         match &p.actions[..] {
             [DecisionAction::ResolveInterrupt {
                 interrupt_id,
@@ -1037,13 +594,11 @@ mod tests {
 
     #[test]
     fn a_click_on_a_settled_prompt_proposes_clearing_it() {
-        let p = propose(
-            SESSION,
+        let p = translated(
             &action(r#"{"type":"interrupt.option","interrupt_id":"gone","option":0}"#),
             &state(),
-            &[],
-            DecisionResponse::default(),
-        );
+        )
+        .expect("a click it recognises");
         assert!(p.actions.is_empty());
         let slack = &p.channels["slack"];
         assert_eq!(slack["update"]["ts"], "8.0");
@@ -1055,28 +610,12 @@ mod tests {
 
     #[test]
     fn a_workers_own_button_passes_through_untouched() {
-        let p = propose(
-            SESSION,
-            &action("summarize-thread"),
-            &state_with_prompt(),
-            &[],
-            DecisionResponse::default(),
-        );
-        assert!(p.authors_nothing(), "no proposal for a worker's button");
+        let p = translated(&action("summarize-thread"), &state_with_prompt());
+        assert!(p.is_none(), "a worker's button is not Slack's to answer");
     }
 
     #[test]
-    fn sessions_slack_does_not_own_are_left_alone() {
-        // No `slack_channel` on the owner.
-        let mut foreign = SessionState::new("web:abc".to_string());
-        foreign.open_interrupts = state_with_prompt().open_interrupts;
-        let p = propose(
-            "web:abc",
-            &action(r#"{"type":"interrupt.option","interrupt_id":"int-1","option":0}"#),
-            &foreign,
-            &[],
-            DecisionResponse::default(),
-        );
-        assert!(p.authors_nothing());
+    fn it_declares_the_one_channel_it_answers_for() {
+        assert_eq!(SlackProposer::new().channel(), ChannelKind::SLACK);
     }
 }

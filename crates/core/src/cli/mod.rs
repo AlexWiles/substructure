@@ -1,15 +1,18 @@
 pub mod auth;
 pub mod authorize;
+pub mod chat;
 pub mod cloud;
 pub mod connections;
 pub mod doctor;
 pub mod env;
 pub mod local;
-mod pretty;
+mod output;
+mod resume_hint;
 pub mod run;
-pub mod run_remote;
+mod run_remote;
 pub mod sessions;
 pub mod target;
+mod turns;
 
 use clap::Subcommand;
 
@@ -45,16 +48,17 @@ impl Command {
     pub fn config_path(&self) -> Option<&std::path::Path> {
         match self {
             Command::Run(a) => a.config_path(),
+            Command::Chat(a) => a.config_path(),
             Command::Serve(a) => a.config_path(),
             _ => None,
         }
     }
 
-    /// The log filter to use when `$RUST_LOG` is unset: `run` streams a turn to
-    /// stdout, so only errors belong on stderr beside it.
+    /// The log filter to use when `$RUST_LOG` is unset: `run` and `chat` stream
+    /// a turn to stdout, so only errors belong on stderr beside it.
     pub fn default_log(&self) -> &'static str {
         match self {
-            Command::Run(_) => "error",
+            Command::Run(_) | Command::Chat(_) => "error",
             _ => "info",
         }
     }
@@ -67,6 +71,9 @@ pub enum Command {
     /// Run a single turn against a worker in-process and stream events, then exit.
     /// For local development and testing example agents.
     Run(run::RunArgs),
+    /// Chat with an agent in the terminal, holding one session open across
+    /// turns. Answers the interrupts a turn parks on as they arrive.
+    Chat(chat::ChatArgs),
     /// Authenticate via the OAuth device flow and persist the token locally.
     /// Targets the server the environment file names, so `subs login -c
     /// subs.prod.toml` logs in to a self-hosted deployment.
@@ -173,6 +180,7 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
     match command {
         Command::Serve(args) => local::serve(args).await,
         Command::Run(args) => run::run(args).await,
+        Command::Chat(args) => chat::chat(args).await,
         Command::Login {
             no_browser,
             globals,
@@ -215,6 +223,7 @@ fn command_path(cmd: &Command) -> &'static str {
     match cmd {
         Command::Serve(_) => "serve",
         Command::Run(_) => "run",
+        Command::Chat(_) => "chat",
         Command::Login { .. } => "login",
         Command::Logout { .. } => "logout",
         Command::Whoami { .. } => "whoami",

@@ -175,14 +175,29 @@ impl ToolResult {
         structured_content: Option<Value>,
         is_error: bool,
     ) -> Result<Self, &'static str> {
-        let content = match (result, content) {
+        let value = match (result, content) {
             (Some(_), Some(_)) => return Err("a tool result names both `result` and `content`"),
-            (Some(value), None) => Self::from_value(value).content,
-            (None, Some(content)) => content,
-            (None, None) => Vec::new(),
+            (Some(value), None) => value,
+            (None, content) => {
+                return Ok(Self {
+                    content: content.unwrap_or_default(),
+                    structured_content,
+                    is_error,
+                })
+            }
         };
+
+        if let Ok(lifted) = serde_json::from_value::<Self>(value.clone()) {
+            if !lifted.content.is_empty() || lifted.structured_content.is_some() {
+                return Ok(Self {
+                    content: lifted.content,
+                    structured_content: structured_content.or(lifted.structured_content),
+                    is_error: is_error || lifted.is_error,
+                });
+            }
+        }
         Ok(Self {
-            content,
+            content: Self::from_value(value).content,
             structured_content,
             is_error,
         })
@@ -799,6 +814,32 @@ impl Requester {
             subject: Some(subject),
             visibility,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChannelKind(&'static str);
+
+impl ChannelKind {
+    pub const SLACK: Self = Self("slack");
+    pub const AG_UI: Self = Self("ag-ui");
+    pub const CLI: Self = Self("cli");
+
+    pub const fn as_str(&self) -> &'static str {
+        self.0
+    }
+
+    pub fn owning(owner: &SessionOwner) -> Option<Self> {
+        let issuer = owner.requester.subject.as_ref()?.issuer.as_str();
+        [Self::SLACK, Self::AG_UI, Self::CLI]
+            .into_iter()
+            .find(|kind| kind.as_str() == issuer)
+    }
+}
+
+impl std::fmt::Display for ChannelKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
     }
 }
 
@@ -2352,4 +2393,127 @@ pub struct DecisionRequest<'a> {
     pub attempts: u32,
     pub deadline: &'a Option<DateTime<Utc>>,
     pub turn_id: &'a Option<String>,
+}
+
+#[cfg(test)]
+mod channel_kind_tests {
+    use super::*;
+
+    fn owned_by(issuer: Issuer) -> SessionOwner {
+        SessionOwner {
+            tenant_id: "t1".into(),
+            requester: Requester::new(Subject::new(issuer, "u1"), Visibility::Private),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_session_belongs_to_the_channel_that_opened_it() {
+        assert_eq!(
+            ChannelKind::owning(&owned_by(Issuer::slack())),
+            Some(ChannelKind::SLACK)
+        );
+        assert_eq!(
+            ChannelKind::owning(&owned_by(Issuer::cli())),
+            Some(ChannelKind::CLI)
+        );
+    }
+
+    #[test]
+    fn a_browser_frontend_names_no_channel() {
+        assert_eq!(ChannelKind::owning(&owned_by(Issuer::app())), None);
+        assert_ne!(Issuer::app().as_str(), ChannelKind::AG_UI.as_str());
+    }
+
+    #[test]
+    fn a_session_no_channel_opened_belongs_to_none() {
+        assert_eq!(ChannelKind::owning(&owned_by(Issuer::operator())), None);
+        assert_eq!(ChannelKind::owning(&owned_by(Issuer::app())), None);
+
+        let anonymous = SessionOwner {
+            tenant_id: "t1".into(),
+            requester: Requester::machine(),
+            metadata: Default::default(),
+        };
+        assert_eq!(ChannelKind::owning(&anonymous), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn from_result(value: Value) -> ToolResult {
+        ToolResult::from_action(Some(value), None, None, false).expect("a readable result")
+    }
+
+    /// `result` is documented as a whole `ToolResult`, and every worker example
+    /// writes one. Reading it as a value quoted its JSON into a text block.
+    #[test]
+    fn a_result_written_as_a_tool_result_is_read_as_one() {
+        let result = from_result(serde_json::json!({
+            "content": [{ "type": "text", "text": "sent" }]
+        }));
+        assert_eq!(result.as_text(), "sent");
+        assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn a_lifted_result_keeps_what_it_says_about_itself() {
+        let result = from_result(serde_json::json!({
+            "content": [{ "type": "text", "text": "nope" }],
+            "isError": true,
+        }));
+        assert!(result.is_error);
+
+        let structured = from_result(serde_json::json!({
+            "structuredContent": { "temp": 62 },
+        }));
+        assert_eq!(
+            structured.structured_content,
+            Some(serde_json::json!({ "temp": 62 }))
+        );
+    }
+
+    /// The outer flag still wins: an action that says the call failed says so
+    /// whatever the result it carries claims.
+    #[test]
+    fn the_actions_own_error_flag_is_kept() {
+        let result = ToolResult::from_action(
+            Some(serde_json::json!({ "content": [{ "type": "text", "text": "x" }] })),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(result.is_error);
+    }
+
+    /// `deny_unknown_fields` is what tells a result apart from data that only
+    /// looks like one, so a worker's own answer still reads as its own answer.
+    #[test]
+    fn data_that_is_not_a_tool_result_is_left_alone() {
+        assert_eq!(from_result(serde_json::json!("Lisbon")).as_text(), "Lisbon");
+        assert_eq!(
+            from_result(serde_json::json!({ "temp": 62 })).as_text(),
+            r#"{"temp":62}"#
+        );
+        // `content` of the wrong shape is data, not a result.
+        assert_eq!(
+            from_result(serde_json::json!({ "content": 3 })).as_text(),
+            r#"{"content":3}"#
+        );
+        assert_eq!(from_result(serde_json::json!(null)).as_text(), "");
+    }
+
+    #[test]
+    fn content_and_result_together_are_refused() {
+        let both = ToolResult::from_action(
+            Some(serde_json::json!("a")),
+            Some(vec![ToolContent::Text { text: "b".into() }]),
+            None,
+            false,
+        );
+        assert!(both.is_err());
+    }
 }

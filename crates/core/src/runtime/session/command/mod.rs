@@ -299,9 +299,9 @@ struct Completion {
 }
 
 impl SessionState {
-    /// Whether the decision's effect is anchored off the path to `leaf`.
-    fn stale_decision(&self, leaf: Option<&str>, trigger: &Trigger) -> bool {
-        !self.anchor_on_path(leaf, self.trigger_anchor(trigger))
+    /// Whether the decision's effect is anchored off the path to `node`.
+    fn stale_decision(&self, node: Option<&str>, trigger: &Trigger) -> bool {
+        !self.at(node).anchor_on_path(self.trigger_anchor(trigger))
     }
 
     /// Void events for every effect matching `stranded`. Fetches and decisions
@@ -330,19 +330,20 @@ impl SessionState {
     }
 
     /// Void work and drop undelivered decisions anchored off the retained path.
-    fn void_stranded_work(&self, leaf: Option<&str>) -> Vec<EventPayload> {
+    fn void_stranded_work(&self, node: Option<&str>) -> Vec<EventPayload> {
+        let at = self.at(node);
         let mut events = self.void_effects(|tracking, anchor| {
             matches!(
                 tracking.status(),
                 EffectStatus::Queued | EffectStatus::Pending | EffectStatus::RetryScheduled
-            ) && !self.anchor_on_path(leaf, anchor)
+            ) && !at.anchor_on_path(anchor)
         });
         for e in self.effects_of(EffectKind::Decision) {
             let Some(wd) = e.decision() else { continue };
             if matches!(
                 e.tracking.status(),
                 EffectStatus::Queued | EffectStatus::RetryScheduled
-            ) && self.stale_decision(leaf, &wd.trigger)
+            ) && self.stale_decision(node, &wd.trigger)
             {
                 events.push(EventPayload::DecisionDropped(DecisionDropped {
                     id: e.id.clone(),
@@ -383,7 +384,7 @@ impl SessionState {
         let Some(state) = state else {
             return Vec::new();
         };
-        if state == self.resolve_state_for(self.head_id.as_deref()) {
+        if state == self.at_head().resolve_state_for() {
             return Vec::new();
         }
         vec![EventPayload::WorkerStateUpdated(WorkerStateUpdated {
@@ -399,7 +400,7 @@ impl SessionState {
         let Some(config) = config else {
             return Vec::new();
         };
-        if Some(&config) == self.resolve_agent_for(self.head_id.as_deref()).as_ref() {
+        if Some(&config) == self.at_head().resolve_agent_for().as_ref() {
             return Vec::new();
         }
         let mut events = effects::connector::sync(self, &config);
@@ -749,10 +750,11 @@ impl Working {
         Ok(())
     }
 
-    /// Void queued and pending LLM calls on the path to `leaf`. Tools and
+    /// Void queued and pending LLM calls on the path to `node`. Tools and
     /// sub-agents are spared: their async settles may still arrive and are
     /// worth keeping.
-    fn void_llm_calls_for_interrupt(&mut self, leaf: Option<String>) {
+    fn void_llm_calls_for_interrupt(&mut self, node: Option<String>) {
+        let at = self.at(node.as_deref());
         let ids: Vec<String> = self
             .effects_of(EffectKind::LlmCall)
             .filter(|e| {
@@ -761,7 +763,7 @@ impl Working {
                     EffectStatus::Queued | EffectStatus::Pending
                 )
             })
-            .filter(|e| self.anchor_on_path(leaf.as_deref(), e.anchor.as_deref()))
+            .filter(|e| at.anchor_on_path(e.anchor.as_deref()))
             .map(|e| e.id.clone())
             .collect();
         for id in ids {
@@ -835,7 +837,8 @@ impl Working {
                 // A fetch in flight is already the answer this asks for.
                 Action::SyncConnector { path: id } => {
                     let named = self
-                        .resolve_agent_for(self.head_id.as_deref())
+                        .at_head()
+                        .resolve_agent_for()
                         .is_some_and(|c| c.mcp.iter().any(|m| m.path == id));
                     let settled = self
                         .tracking(EffectKind::ConnectorSync, &id.to_string())
@@ -1070,8 +1073,7 @@ impl Working {
                 {
                     return Err(SessionError::SessionAccessDenied);
                 }
-                let parked_head =
-                    self.anchor_on_path(self.head_id.as_deref(), open.anchor.as_deref());
+                let parked_head = self.at_head().anchor_on_path(open.anchor.as_deref());
                 self.emit(EventPayload::InterruptResumed(InterruptResumed {
                     interrupt_id: interrupt_id.clone(),
                     payload: payload.clone(),

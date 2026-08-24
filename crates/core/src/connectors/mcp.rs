@@ -63,6 +63,14 @@ impl McpClient {
             .and_then(|info| info.instructions.clone())
     }
 
+    pub async fn server_title(&self) -> Option<String> {
+        let service = self.service.lock().await;
+        service
+            .as_ref()
+            .and_then(|s| s.peer_info())
+            .and_then(|info| info.server_info.as_ref()?.title.clone())
+    }
+
     pub async fn list_tools(&self) -> Result<Vec<RemoteTool>, ConnectorError> {
         let service = self.connect().await?;
         match service.list_all_tools().await {
@@ -428,6 +436,7 @@ fn status_of(message: &str) -> Option<u16> {
 fn remote_tool(tool: Tool) -> RemoteTool {
     RemoteTool {
         name: tool.name.into_owned(),
+        title: tool.title,
         description: tool.description.map(|d| d.into_owned()).unwrap_or_default(),
         input: Some(Value::Object((*tool.input_schema).clone())),
         output: tool

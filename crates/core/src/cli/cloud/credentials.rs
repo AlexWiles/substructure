@@ -59,12 +59,25 @@ pub fn resolve_api_url(flag: Option<&str>) -> String {
     DEFAULT_API_URL.to_string()
 }
 
-pub fn default_path() -> Result<PathBuf> {
+/// Where this CLI keeps what it remembers between runs.
+pub fn config_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
         .context("could not determine config dir (HOME/XDG_CONFIG_HOME unset)")?;
-    Ok(base.join("substructure").join("credentials.toml"))
+    Ok(base.join("substructure"))
+}
+
+/// The config dir, made if it is not there. Private: it holds the tokens and
+/// the default database.
+pub fn ensure_config_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    Ok(())
+}
+
+pub fn default_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("credentials.toml"))
 }
 
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -86,8 +99,7 @@ pub fn load(path: &Path) -> Result<Credentials> {
 
 pub fn save(path: &Path, creds: &Credentials) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        ensure_config_dir(parent)?;
     }
 
     let serialized = toml::to_string_pretty(creds).context("serializing credentials")?;

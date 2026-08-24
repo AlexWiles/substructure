@@ -1,42 +1,11 @@
-//! Proposed decisions: the engine's derivation of a trigger's obvious continuation.
-//!
-//! For triggers whose next decision is mechanical, the engine derives the
-//! decision an SDK agent loop would author and sends it on the decision request
-//! as `proposed`. A worker accepts by echoing it back, amended or verbatim, as
-//! its decision. `llm.finished` records the assistant message and dispatches its
-//! tool calls or finishes; `tool.finished` and `sub_agent.finished` record the
-//! result as a tool message, then wait for in-flight siblings or re-issue the
-//! parent LLM request; a terminal `llm.finished` failure (or truncation)
-//! interrupts the session — pausing is recoverable in both directions, unlike
-//! `done`; a `tool.execute` that fails its contract — an undeclared name, or
-//! arguments the declared `input` schema rejects — answers with a
-//! `tool.error`, so the failure flows back to a model that can repair the call.
-//! `turn.finished` proposes a bare `done`, so an echoing worker transparently
-//! settles the turn's deferred `SessionDone`.
-//!
-//! The engine does not dispatch a call that a connection gates. The proposal
-//! interrupts instead, one question for each call. The answer runs the call or
-//! records a refusal.
-//!
-//! A proposal is advice, not authority: the engine never applies one, so the
-//! worker remains the sole author of every decision. `tool.execute` for a
-//! declared tool with valid arguments — the computation itself — needs worker
-//! knowledge and carries no proposal. `client.messages` needs the agent's
-//! identity: with a config the engine prompts the model per it; without one it
-//! proposes an interrupt (`agent.unconfigured`), so a worker that echoes
-//! blindly pauses the session loudly instead of settling the turn as a silent
-//! no-op.
-//!
-//! Like [`to_wire_trigger`](super::wire::to_wire_trigger), derivation is a pure
-//! function of state frozen while the decision is pending, so redeliveries carry
-//! the same proposal.
+//! Proposed decisions: the engine implements a basic tool-loop.
 
 use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use super::interrupts::{self, approval};
-use super::state::EffectState;
+use super::interrupts::{self, approval, auth};
+use super::state::{EffectState, SessionStateAtNode};
 use super::tool_contract::{declared_tool, DeclaredTool};
 use crate::protocol::StoredContent;
 use crate::protocol::{
@@ -45,28 +14,53 @@ use crate::protocol::{
 };
 
 pub struct Proposing<'a> {
-    /// The recorded path to the head.
-    pub transcript: &'a [Message],
-    /// The model calls of that path, keyed by the message each one produced.
-    pub llm_calls: &'a HashMap<String, EffectState>,
+    pub state: SessionStateAtNode<'a, 'a>,
     pub pending_calls: usize,
-    /// [`SessionState::dispatched_calls`](super::state::SessionState::dispatched_calls).
-    pub dispatched: &'a [String],
-    pub config: Option<&'a AgentConfig>,
-    pub connector_tools: &'a [ConnectorTool],
     pub decision_id: &'a str,
 }
 
 pub fn propose(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionResponse> {
-    let &Proposing {
-        transcript,
-        llm_calls,
-        pending_calls,
-        config,
-        connector_tools,
-        decision_id,
-        dispatched: _,
-    } = p;
+    let proposed = derive(trigger, p)?;
+    if proposed
+        .actions
+        .iter()
+        .any(|a| matches!(a, DecisionAction::Interrupt { .. }))
+    {
+        return Some(proposed);
+    }
+    Some(match stopped_for_auth(trigger, p) {
+        Some(prompt) => DecisionResponse {
+            actions: vec![prompt],
+            ..proposed
+        },
+        None => proposed,
+    })
+}
+
+fn stopped_for_auth(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionAction> {
+    let continues = match trigger {
+        DecisionTrigger::ClientTranscript { .. }
+        | DecisionTrigger::LlmFinished { .. }
+        | DecisionTrigger::ToolFinished { .. }
+        | DecisionTrigger::SubAgentFinished { .. } => true,
+        DecisionTrigger::InterruptResumed { resumption } => {
+            !resumption.interrupt_id.starts_with(auth::PREFIX)
+        }
+        _ => false,
+    };
+    continues.then(|| auth::prompt(p.state)).flatten()
+}
+
+fn derive(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionResponse> {
+    let transcript = p.state.transcript();
+    let transcript = transcript.as_slice();
+    let llm_calls = &p.state.open_llm_calls();
+    let config = p.state.resolve_agent_for();
+    let config = config.as_ref();
+    let connector_tools = p.state.connector_tools().tools;
+    let connector_tools = connector_tools.as_slice();
+    let pending_calls = p.pending_calls;
+    let decision_id = p.decision_id;
     match trigger {
         // The engine can now author the agent's identity: record the client's
         // view and prompt the model per the config. No config ⇒ interrupt.
@@ -158,9 +152,13 @@ pub fn propose(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionR
         // current transcript. Without this, nothing would author the next call
         // after an interrupt.
         DecisionTrigger::InterruptResumed { resumption } => {
-            interrupts::kind_for(&resumption.interrupt_id)
+            let followups = interrupts::resolve_followups(&resumption.interrupt_id);
+            let answered = interrupts::kind_for(&resumption.interrupt_id)
                 .and_then(|(kind, tail)| kind.resumed(tail, &resumption.payload, p))
-                .or_else(|| config.map(|c| resumed(transcript, c)))
+                .or_else(|| config.map(|c| resumed(transcript, c)));
+            let mut response = answered.unwrap_or_default();
+            response.actions.splice(0..0, followups);
+            (!response.authors_nothing()).then_some(response)
         }
         // The config a worker declares here is the app's, not the session's, so
         // the engine cannot derive it from state: the directory seeds it at
@@ -622,27 +620,66 @@ mod tests {
 
     use super::approval::PREFIX as APPROVAL;
     use super::*;
+    use crate::connectors::registry::ConnectionPath;
+    use crate::connectors::{AuthNeed, RemoteTool, ToolAnnotations};
     use crate::protocol::ErrorCode;
     use crate::protocol::{
-        AgentTool, ConnectorToolKind, Handler, LlmRequest, RetryPolicy, SubAgent, ToolCallFunction,
-        ToolInput,
+        AgentTool, Approve, Handler, LlmRequest, McpServer, NewMessage, RetryPolicy, SubAgent,
+        ToolCallFunction, ToolInput,
     };
     use crate::runtime::session::decision::LlmHandler;
-    use crate::runtime::session::state::{EffectTracking, LlmCallSpec};
+    use crate::runtime::session::state::{
+        AgentVersion, ConnectorSyncState, EffectPayload, EffectTracking, LlmCallSpec, Logged,
+        SessionState, ToolCallState,
+    };
 
-    fn inputs<'a>(
-        transcript: &'a [Message],
-        llm_calls: &'a HashMap<String, EffectState>,
-    ) -> Proposing<'a> {
-        Proposing {
-            transcript,
-            llm_calls,
-            pending_calls: 0,
-            dispatched: &[],
-            config: None,
-            connector_tools: &[],
-            decision_id: "d0",
+    fn state_of(
+        transcript: &[Message],
+        llm_calls: &HashMap<String, EffectState>,
+        config: Option<&AgentConfig>,
+    ) -> SessionState {
+        let mut s = SessionState::new("sess-1".to_string());
+        let mut parent: Option<String> = None;
+        for m in transcript {
+            s.nodes.push(Logged {
+                seq: 0,
+                entry: NewMessage {
+                    message: m.clone(),
+                    parent_id: parent.take(),
+                },
+            });
+            parent = Some(m.id.clone());
         }
+        s.head_id = parent;
+        if let Some(config) = config {
+            s.agent_versions.push(Logged {
+                seq: 0,
+                entry: AgentVersion {
+                    value: config.clone(),
+                    anchor: None,
+                },
+            });
+        }
+        for effect in llm_calls.values() {
+            s.put_effect(effect.clone());
+        }
+        s
+    }
+
+    fn propose_on(
+        trigger: &DecisionTrigger,
+        state: &SessionState,
+        pending_calls: usize,
+        decision_id: &str,
+    ) -> Option<DecisionResponse> {
+        super::propose(
+            trigger,
+            &Proposing {
+                state: state.at_head(),
+                pending_calls,
+                decision_id,
+            },
+        )
     }
 
     fn propose(
@@ -653,14 +690,97 @@ mod tests {
         config: Option<&AgentConfig>,
         decision_id: &str,
     ) -> Option<DecisionResponse> {
-        super::propose(
-            trigger,
-            &Proposing {
-                pending_calls,
-                config,
-                decision_id,
-                ..inputs(transcript, llm_calls)
+        let state = state_of(transcript, llm_calls, config);
+        propose_on(trigger, &state, pending_calls, decision_id)
+    }
+
+    fn minimal_cfg() -> AgentConfig {
+        AgentConfig {
+            llm: None,
+            model: "m".to_string(),
+            system: None,
+            retry: None,
+            tools: Vec::new(),
+            sub_agents: Vec::new(),
+            mcp: Vec::new(),
+            defer_tools: None,
+            announce_mcp: Default::default(),
+            plugins: Vec::new(),
+            effort: None,
+        }
+    }
+
+    fn with_sentry(base: Option<&AgentConfig>, defer: bool) -> AgentConfig {
+        let mut config = base.cloned().unwrap_or_else(minimal_cfg);
+        config.mcp.push(McpServer {
+            path: ConnectionPath::Mcp("sentry".into()),
+            tools: None,
+            auth_failure: Default::default(),
+            approve: Approve::Destructive,
+        });
+        if defer {
+            config.defer_tools = Some(Default::default());
+        }
+        config
+    }
+
+    fn remote(name: &str, destructive: bool) -> RemoteTool {
+        RemoteTool {
+            name: name.to_string(),
+            title: None,
+            description: String::new(),
+            input: None,
+            output: None,
+            annotations: ToolAnnotations {
+                destructive: Some(destructive),
+                ..Default::default()
             },
+        }
+    }
+
+    fn sentry_sync(sync: ConnectorSyncState) -> EffectState {
+        let mut tracking = EffectTracking::new(RetryPolicy::no_retry(), Utc::now());
+        match sync.auth {
+            Some(_) => tracking.record_error(false, Utc::now()),
+            None => tracking.complete(),
+        }
+        EffectState::new(
+            ConnectionPath::Mcp("sentry".into()).to_string(),
+            tracking,
+            EffectPayload::ConnectorSync(sync),
+        )
+    }
+
+    fn gated_state(
+        transcript: &[Message],
+        llm_calls: &HashMap<String, EffectState>,
+        config: Option<&AgentConfig>,
+        defer: bool,
+    ) -> SessionState {
+        let config = with_sentry(config, defer);
+        let mut s = state_of(transcript, llm_calls, Some(&config));
+        s.put_effect(sentry_sync(ConnectorSyncState {
+            tools: vec![remote("search", false), remote("delete", true)],
+            prefix: Some("sentry".to_string()),
+            instructions: None,
+            error: None,
+            auth: None,
+        }));
+        s
+    }
+
+    fn dispatched_tool(id: &str) -> EffectState {
+        EffectState::new(
+            id,
+            EffectTracking::new(RetryPolicy::no_retry(), Utc::now()),
+            EffectPayload::ToolCall(ToolCallState {
+                name: "sentry__delete".to_string(),
+                handler: Default::default(),
+                target: None,
+                arguments: String::new(),
+                result: None,
+                is_error: false,
+            }),
         )
     }
 
@@ -1496,36 +1616,14 @@ mod tests {
 
     // ── approval ─────────────────────────────────────────────────────────
 
-    fn connector_tool(name: &str, approve: bool) -> ConnectorTool {
-        ConnectorTool {
-            name: name.to_string(),
-            description: String::new(),
-            input: None,
-            output: None,
-            connector: Some(crate::protocol::ConnectionPath::Mcp("sentry".into())),
-            via: Default::default(),
-            remote_name: name.to_string(),
-            kind: ConnectorToolKind::Remote,
-            defer: false,
-            approve,
-        }
-    }
-
-    fn gated() -> Vec<ConnectorTool> {
-        vec![
-            connector_tool("sentry__search", false),
-            connector_tool("sentry__delete", true),
-        ]
-    }
-
-    fn calling(calls: &[(&str, &str)], tools: &[ConnectorTool]) -> Option<DecisionResponse> {
+    fn calling(calls: &[(&str, &str)], defer: bool) -> Option<DecisionResponse> {
         let assistant = DraftMessage::from(assistant_with_calls("call-1", calls));
-        super::propose(
+        let state = gated_state(&[msg("u1", Role::User, "hi")], &HashMap::new(), None, defer);
+        propose_on(
             &llm_finished_trigger(assistant, true, false),
-            &Proposing {
-                connector_tools: tools,
-                ..inputs(&[msg("u1", Role::User, "hi")], &HashMap::new())
-            },
+            &state,
+            0,
+            "d0",
         )
     }
 
@@ -1534,25 +1632,19 @@ mod tests {
         payload: serde_json::Value,
         transcript: &[Message],
         llm_calls: &HashMap<String, EffectState>,
-        tools: &[ConnectorTool],
-        dispatched: &[String],
+        dispatched: &[&str],
     ) -> DecisionResponse {
+        let mut state = gated_state(transcript, llm_calls, None, false);
+        for id in dispatched {
+            state.put_effect(dispatched_tool(id));
+        }
         let trigger = DecisionTrigger::InterruptResumed {
             resumption: crate::protocol::InterruptResumption {
                 interrupt_id: format!("{APPROVAL}{tool_call_id}"),
                 payload,
             },
         };
-        super::propose(
-            &trigger,
-            &Proposing {
-                connector_tools: tools,
-                dispatched,
-                decision_id: "d1",
-                ..inputs(transcript, llm_calls)
-            },
-        )
-        .expect("the resume is answered")
+        propose_on(&trigger, &state, 0, "d1").expect("the resume is answered")
     }
 
     fn answer(
@@ -1560,18 +1652,16 @@ mod tests {
         payload: serde_json::Value,
         transcript: &[Message],
         llm_calls: &HashMap<String, EffectState>,
-        tools: &[ConnectorTool],
     ) -> DecisionResponse {
-        answer_with(tool_call_id, payload, transcript, llm_calls, tools, &[])
+        answer_with(tool_call_id, payload, transcript, llm_calls, &[])
     }
 
     fn resume(
         payload: serde_json::Value,
         transcript: &[Message],
         llm_calls: &HashMap<String, EffectState>,
-        tools: &[ConnectorTool],
     ) -> DecisionResponse {
-        answer("tc-1", payload, transcript, llm_calls, tools)
+        answer("tc-1", payload, transcript, llm_calls)
     }
 
     fn result_of(tool_call_id: &str, name: &str) -> Message {
@@ -1609,7 +1699,7 @@ mod tests {
 
     #[test]
     fn a_call_the_connection_asks_about_stops_before_it_runs() {
-        let p = calling(&[("tc-1", "sentry__delete")], &gated()).expect("proposes");
+        let p = calling(&[("tc-1", "sentry__delete")], false).expect("proposes");
         assert_eq!(
             p.messages.len(),
             2,
@@ -1627,7 +1717,7 @@ mod tests {
                     "the id carries the call, so an answer is bound to what was asked"
                 );
                 assert!(reason.contains("sentry__delete"), "got {reason:?}");
-                assert_eq!(payload["tool_call_id"], serde_json::json!("tc-1"));
+                assert_eq!(payload["toolCallId"], serde_json::json!("tc-1"));
                 assert_eq!(
                     payload["metadata"]["options"][0]["value"]["approved"],
                     serde_json::json!(true),
@@ -1644,7 +1734,7 @@ mod tests {
 
     #[test]
     fn a_call_nobody_asks_about_is_dispatched_as_before() {
-        let p = calling(&[("tc-1", "sentry__search")], &gated()).expect("proposes");
+        let p = calling(&[("tc-1", "sentry__search")], false).expect("proposes");
         assert!(
             matches!(&p.actions[..], [DecisionAction::CallTool { .. }]),
             "got {:?}",
@@ -1656,7 +1746,7 @@ mod tests {
     fn a_question_holds_the_calls_nobody_asks_about_too() {
         let p = calling(
             &[("tc-1", "sentry__search"), ("tc-2", "sentry__delete")],
-            &gated(),
+            false,
         )
         .expect("proposes");
         assert!(
@@ -1673,7 +1763,6 @@ mod tests {
             serde_json::json!({ "approved": true }),
             &transcript,
             &llm_calls,
-            &gated(),
         );
         match &p.actions[..] {
             [DecisionAction::CallTool { id, name, .. }] => {
@@ -1704,7 +1793,7 @@ mod tests {
     fn each_held_call_is_asked_about_on_its_own() {
         let p = calling(
             &[("tc-1", "sentry__delete"), ("tc-2", "sentry__delete")],
-            &gated(),
+            false,
         )
         .expect("proposes");
         let [action] = &p.actions[..] else {
@@ -1735,12 +1824,12 @@ mod tests {
         let mut assistant = assistant_with_calls("call-1", &[("tc-1", "sentry__delete")]);
         assistant.tool_calls[0].function.arguments =
             serde_json::json!({ "issue": "PROJ-42" }).to_string();
-        let p = super::propose(
+        let state = gated_state(&[msg("u1", Role::User, "hi")], &HashMap::new(), None, false);
+        let p = propose_on(
             &llm_finished_trigger(DraftMessage::from(assistant), true, false),
-            &Proposing {
-                connector_tools: &gated(),
-                ..inputs(&[msg("u1", Role::User, "hi")], &HashMap::new())
-            },
+            &state,
+            0,
+            "d0",
         )
         .expect("proposes");
         let (_, payload) = interrupt(&p.actions[0]);
@@ -1762,23 +1851,18 @@ mod tests {
 
     #[test]
     fn a_deferred_question_carries_the_inner_arguments() {
-        let mut tools = gated();
-        tools.push(ConnectorTool {
-            kind: ConnectorToolKind::Call,
-            ..connector_tool(crate::connectors::filter::CALL_TOOL, false)
-        });
         let mut assistant = assistant_with_calls("call-1", &[("tc-1", "call_tool")]);
         assistant.tool_calls[0].function.arguments = serde_json::json!({
             "name": "sentry__delete",
             "arguments": { "issue": "PROJ-42" },
         })
         .to_string();
-        let p = super::propose(
+        let state = gated_state(&[msg("u1", Role::User, "hi")], &HashMap::new(), None, true);
+        let p = propose_on(
             &llm_finished_trigger(DraftMessage::from(assistant), true, false),
-            &Proposing {
-                connector_tools: &tools,
-                ..inputs(&[msg("u1", Role::User, "hi")], &HashMap::new())
-            },
+            &state,
+            0,
+            "d0",
         )
         .expect("proposes");
         let (_, payload) = interrupt(&p.actions[0]);
@@ -1791,7 +1875,7 @@ mod tests {
 
     #[test]
     fn a_question_about_a_call_with_no_arguments_shows_none() {
-        let p = calling(&[("tc-1", "sentry__delete")], &gated()).expect("proposes");
+        let p = calling(&[("tc-1", "sentry__delete")], false).expect("proposes");
         let (_, payload) = interrupt(&p.actions[0]);
         assert_eq!(payload["metadata"]["arguments"], serde_json::json!({}));
         assert_eq!(
@@ -1809,7 +1893,6 @@ mod tests {
             serde_json::json!({ "approved": true }),
             &transcript,
             &llm_calls,
-            &gated(),
         );
         match &first.actions[..] {
             [DecisionAction::CallTool { id, .. }, next] => {
@@ -1831,7 +1914,6 @@ mod tests {
             serde_json::json!({ "approved": false }),
             &settled,
             &llm_calls,
-            &gated(),
         );
         assert!(
             !second
@@ -1866,8 +1948,7 @@ mod tests {
             serde_json::json!({ "approved": false }),
             &transcript,
             &llm_calls,
-            &gated(),
-            &["tc-1".to_string()],
+            &["tc-1"],
         );
         assert!(
             !p.actions
@@ -1901,7 +1982,6 @@ mod tests {
             serde_json::json!({ "approved": false }),
             &transcript,
             &llm_calls,
-            &gated(),
         );
         let [next] = &first.actions[..] else {
             panic!("expected the next question alone; got {:?}", first.actions)
@@ -1925,7 +2005,6 @@ mod tests {
             serde_json::json!({ "approved": true }),
             &refused,
             &llm_calls,
-            &gated(),
         );
         match &second.actions[..] {
             [DecisionAction::CallTool { id, .. }] => assert_eq!(id.as_deref(), Some("tc-2")),
@@ -1937,13 +2016,12 @@ mod tests {
     #[test]
     fn a_settled_call_waits_for_the_one_still_being_asked_about() {
         let (transcript, llm_calls) = two_held();
-        let p = super::propose(
+        let state = gated_state(&transcript, &llm_calls, None, false);
+        let p = propose_on(
             &tool_finished_trigger("tc-1", "sentry__delete", Ok("done")),
-            &Proposing {
-                connector_tools: &gated(),
-                decision_id: "d1",
-                ..inputs(&transcript, &llm_calls)
-            },
+            &state,
+            0,
+            "d1",
         )
         .expect("proposes");
         assert!(
@@ -1962,13 +2040,12 @@ mod tests {
 
         let mut answered = transcript.clone();
         answered.push(result_of("tc-2", "sentry__delete"));
-        let p = super::propose(
+        let state = gated_state(&answered, &llm_calls, None, false);
+        let p = propose_on(
             &tool_finished_trigger("tc-1", "sentry__delete", Ok("done")),
-            &Proposing {
-                connector_tools: &gated(),
-                decision_id: "d1",
-                ..inputs(&answered, &llm_calls)
-            },
+            &state,
+            0,
+            "d1",
         )
         .expect("proposes");
         assert!(
@@ -1990,16 +2067,8 @@ mod tests {
                 payload: serde_json::json!({ "approved": true }),
             },
         };
-        let p = super::propose(
-            &trigger,
-            &Proposing {
-                config: Some(&cfg),
-                connector_tools: &gated(),
-                decision_id: "d2",
-                ..inputs(&settled, &llm_calls)
-            },
-        )
-        .expect("proposes");
+        let state = gated_state(&settled, &llm_calls, Some(&cfg), false);
+        let p = propose_on(&trigger, &state, 0, "d2").expect("proposes");
         assert!(
             !p.actions
                 .iter()
@@ -2016,7 +2085,6 @@ mod tests {
             serde_json::json!({ "status": "resolved", "payload": { "approved": true } }),
             &transcript,
             &llm_calls,
-            &gated(),
         );
         assert!(
             matches!(&p.actions[..], [DecisionAction::CallTool { .. }]),
@@ -2032,7 +2100,6 @@ mod tests {
             serde_json::json!({ "approved": false }),
             &transcript,
             &llm_calls,
-            &gated(),
         );
         assert!(
             !p.actions
@@ -2070,7 +2137,6 @@ mod tests {
             serde_json::json!({ "approved": false }),
             &transcript,
             &llm_calls,
-            &gated(),
         );
         match &p.actions[..] {
             [DecisionAction::CallTool { id, .. }] => {
@@ -2097,7 +2163,7 @@ mod tests {
             serde_json::json!({ "status": "cancelled", "payload": { "approved": true } }),
             serde_json::json!({ "approved": "yes" }),
         ] {
-            let p = resume(payload.clone(), &transcript, &llm_calls, &gated());
+            let p = resume(payload.clone(), &transcript, &llm_calls);
             assert!(
                 !p.actions
                     .iter()
@@ -2110,21 +2176,16 @@ mod tests {
 
     #[test]
     fn a_deferred_call_asks_about_the_tool_its_arguments_name() {
-        let mut tools = gated();
-        tools.push(ConnectorTool {
-            kind: ConnectorToolKind::Call,
-            ..connector_tool(crate::connectors::filter::CALL_TOOL, false)
-        });
         let wrapped = |name: &str| {
             let mut assistant = assistant_with_calls("call-1", &[("tc-1", "call_tool")]);
             assistant.tool_calls[0].function.arguments =
                 serde_json::json!({ "name": name }).to_string();
-            super::propose(
+            let state = gated_state(&[msg("u1", Role::User, "hi")], &HashMap::new(), None, true);
+            propose_on(
                 &llm_finished_trigger(DraftMessage::from(assistant), true, false),
-                &Proposing {
-                    connector_tools: &tools,
-                    ..inputs(&[msg("u1", Role::User, "hi")], &HashMap::new())
-                },
+                &state,
+                0,
+                "d0",
             )
             .expect("proposes")
         };
@@ -2159,16 +2220,8 @@ mod tests {
             },
         };
         let (transcript, llm_calls) = held();
-        let p = super::propose(
-            &trigger,
-            &Proposing {
-                config: Some(&cfg),
-                connector_tools: &gated(),
-                decision_id: "d1",
-                ..inputs(&transcript, &llm_calls)
-            },
-        )
-        .expect("proposes");
+        let state = gated_state(&transcript, &llm_calls, Some(&cfg), false);
+        let p = propose_on(&trigger, &state, 0, "d1").expect("proposes");
         match &p.actions[..] {
             [DecisionAction::CallLlm { model, .. }] => {
                 assert_eq!(model.as_deref(), Some("cfg-model"))
@@ -2179,5 +2232,177 @@ mod tests {
             p.messages.iter().all(|m| m.role != Role::Tool),
             "no call was held, so nothing is refused"
         );
+    }
+
+    fn needing_auth_state(transcript: &[Message], config: Option<&AgentConfig>) -> SessionState {
+        let config = with_sentry(config, false);
+        let mut s = state_of(transcript, &HashMap::new(), Some(&config));
+        s.put_effect(sentry_sync(ConnectorSyncState {
+            tools: Vec::new(),
+            prefix: None,
+            instructions: None,
+            error: Some("401".to_string()),
+            auth: Some(AuthNeed::Reauthorize),
+        }));
+        s
+    }
+
+    fn propose_needing_auth(
+        trigger: &DecisionTrigger,
+        transcript: &[Message],
+        config: Option<&AgentConfig>,
+    ) -> Option<DecisionResponse> {
+        let state = needing_auth_state(transcript, config);
+        propose_on(trigger, &state, 0, "d0")
+    }
+
+    fn is_auth_interrupt(action: &DecisionAction) -> bool {
+        matches!(
+            action,
+            DecisionAction::Interrupt { interrupt_id: Some(id), .. } if id.starts_with(auth::PREFIX)
+        )
+    }
+
+    #[test]
+    fn a_connection_that_needs_a_person_replaces_the_work_but_keeps_the_record() {
+        let config = agent_cfg();
+        let asked = DecisionTrigger::ClientTranscript {
+            messages: vec![DraftMessage::from(msg("u1", Role::User, "search sentry"))],
+            new_from: 0,
+            client: ClientContext::default(),
+        };
+
+        let ran =
+            propose(&asked, &[], &HashMap::new(), 0, Some(&config), "d0").expect("a proposal");
+        assert!(
+            ran.actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::CallLlm { .. })),
+            "without the prompt it calls the model; got {:?}",
+            ran.actions
+        );
+
+        let p = propose_needing_auth(&asked, &[], Some(&config)).expect("a proposal");
+        assert!(is_auth_interrupt(&p.actions[0]), "got {:?}", p.actions);
+        assert_eq!(p.actions.len(), 1, "and nothing that calls the model");
+        assert_eq!(
+            p.messages.len(),
+            ran.messages.len(),
+            "the resumed turn still reads what started it"
+        );
+        assert!(!p.messages.is_empty());
+    }
+
+    #[test]
+    fn a_click_is_answered_rather_than_replaced() {
+        let p = propose_needing_auth(
+            &DecisionTrigger::ClientAction {
+                name: "prompt_option".to_string(),
+                args: None,
+            },
+            &[],
+            None,
+        );
+        assert!(p.is_none(), "a click carries no engine continuation");
+    }
+
+    #[test]
+    fn resuming_the_auth_prompt_is_not_answered_with_the_same_prompt() {
+        let transcript = [msg("u1", Role::User, "hi")];
+        let config = agent_cfg();
+        let p = propose_needing_auth(
+            &DecisionTrigger::InterruptResumed {
+                resumption: crate::protocol::InterruptResumption {
+                    interrupt_id: format!("{}mcp.sentry", auth::PREFIX),
+                    payload: serde_json::Value::Null,
+                },
+            },
+            &transcript,
+            Some(&config),
+        )
+        .expect("a proposal");
+        assert!(
+            !p.actions.iter().any(is_auth_interrupt),
+            "got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn answering_the_auth_prompt_asks_for_the_tools_again() {
+        let config = agent_cfg();
+        let transcript = [msg("u1", Role::User, "hi")];
+        let p = propose(
+            &DecisionTrigger::InterruptResumed {
+                resumption: crate::protocol::InterruptResumption {
+                    interrupt_id: format!("{}mcp.sentry", auth::PREFIX),
+                    payload: serde_json::Value::Null,
+                },
+            },
+            &transcript,
+            &HashMap::new(),
+            0,
+            Some(&config),
+            "d0",
+        )
+        .expect("a proposal");
+
+        assert!(
+            matches!(
+                p.actions.first(),
+                Some(DecisionAction::SyncConnector { path }) if path.to_string() == "mcp.sentry"
+            ),
+            "the fetch comes first; got {:?}",
+            p.actions
+        );
+        assert!(
+            p.actions
+                .iter()
+                .any(|a| matches!(a, DecisionAction::CallLlm { .. })),
+            "and the turn picks back up; got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn a_turn_that_finishes_is_not_stopped_for_auth() {
+        let p = propose_needing_auth(
+            &turn_finished_trigger("turn-1", serde_json::Value::Null),
+            &[],
+            None,
+        )
+        .expect("a proposal");
+        assert!(
+            p.actions
+                .iter()
+                .all(|a| !matches!(a, DecisionAction::Interrupt { .. })),
+            "replacing `done` would hold the turn open; got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn a_pause_is_never_replaced_by_the_auth_prompt() {
+        let transcript = [msg("u1", Role::User, "hi")];
+        let reply = DraftMessage::from(msg("a1", Role::Assistant, "half an ans"));
+        for (label, trigger) in [
+            ("truncated", llm_finished_trigger(reply.clone(), true, true)),
+            ("failed", llm_finished_trigger(reply.clone(), false, false)),
+        ] {
+            let p = propose_needing_auth(&trigger, &transcript, None).expect("a proposal");
+            let interrupt = p
+                .actions
+                .iter()
+                .find_map(|a| match a {
+                    DecisionAction::Interrupt { interrupt_id, .. } => interrupt_id.as_deref(),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            assert!(
+                !interrupt.starts_with(auth::PREFIX),
+                "{label}: the model's own pause survives; got {:?}",
+                p.actions
+            );
+        }
     }
 }

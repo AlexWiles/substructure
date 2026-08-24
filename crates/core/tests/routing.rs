@@ -16,8 +16,9 @@ use substructure_core::llm::{
     LlmProviderRegistry, LlmProviderTrait, LlmTask,
 };
 use substructure_core::protocol::{
-    AgentConfig, ClientInput, Content, DraftMessage, ErrorCode, LlmResponse, PromptContent,
-    PromptRequest, Role, SessionOwner, SubAgent, ToolCall, ToolCallFunction,
+    AgentConfig, ChannelKind, ClientInput, Content, DecisionResponse, DraftMessage, ErrorCode,
+    LlmResponse, PromptContent, PromptRequest, Role, SessionOwner, SubAgent, ToolCall,
+    ToolCallFunction,
 };
 use substructure_core::protocol::{Issuer, Requester, Subject};
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
@@ -30,11 +31,17 @@ use substructure_core::session::events::{DecisionErrored, EventPayload};
 use substructure_core::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use substructure_core::span::SpanContext;
 use substructure_core::sub_agent::SubAgentTask;
+use substructure_core::transport::ag_ui::events::AgUiEvent;
+use substructure_core::transport::ag_ui::run as ag_ui_run;
+use substructure_core::transport::ag_ui::translator::run_ag_ui_translation;
+use substructure_core::transport::channel::ChannelContext;
 use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
 use substructure_core::worker::push::TransportRegistry;
-use substructure_core::worker::{AgentEntry, StaticAgentDirectory, WorkerEndpoint};
+use substructure_core::worker::ChannelProposer;
+use substructure_core::worker::{AgentEntry, Hosting, StaticAgentDirectory, WorkerEndpoint};
 use substructure_core::{Caller, HandleClientInput, Runtime, RuntimeConfig, RuntimeDeps};
+use tokio_util::sync::CancellationToken;
 
 const TENANT: &str = "default";
 
@@ -135,14 +142,14 @@ fn config(llm: &str) -> AgentConfig {
 fn engine_hosted(llm: &str) -> AgentEntry {
     AgentEntry {
         config: Some(config(llm)),
-        worker: None,
+        hosting: Hosting::Engine,
     }
 }
 
 fn worker_hosted(llm: &str, url: &str) -> AgentEntry {
     AgentEntry {
         config: Some(config(llm)),
-        worker: Some(WorkerEndpoint {
+        hosting: Hosting::Http(WorkerEndpoint {
             url: url.to_string(),
             signing_secret: None,
         }),
@@ -153,7 +160,7 @@ fn worker_hosted(llm: &str, url: &str) -> AgentEntry {
 fn delegating(url: &str) -> AgentEntry {
     AgentEntry {
         config: None,
-        worker: Some(WorkerEndpoint {
+        hosting: Hosting::Http(WorkerEndpoint {
             url: url.to_string(),
             signing_secret: None,
         }),
@@ -163,12 +170,44 @@ fn delegating(url: &str) -> AgentEntry {
 struct Harness {
     runtime: Arc<Runtime>,
     model: Arc<StubModel>,
+    issuer: Issuer,
     // Held for the test's life: dropping it aborts the decision loops.
     _adapter: Arc<PushAdapter>,
 }
 
 /// A real engine over a temp database, routing per `agents`.
 async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
+    start_with(agents, Vec::new(), Issuer::app()).await
+}
+
+struct Recorder {
+    channel: ChannelKind,
+    rendered: Arc<Mutex<Vec<String>>>,
+}
+
+impl ChannelProposer for Recorder {
+    fn channel(&self) -> ChannelKind {
+        self.channel
+    }
+
+    fn render(
+        &self,
+        cx: &substructure_core::worker::Proposal<'_>,
+        _proposed: &DecisionResponse,
+    ) -> Option<serde_json::Value> {
+        self.rendered
+            .lock()
+            .unwrap()
+            .push(cx.trigger.kind().to_string());
+        Some(serde_json::json!({ "seen": cx.trigger.kind() }))
+    }
+}
+
+async fn start_with(
+    agents: BTreeMap<String, AgentEntry>,
+    proposers: Vec<Arc<dyn ChannelProposer>>,
+    issuer: Issuer,
+) -> Harness {
     let db = SqliteDb::open(
         tmpdir().join("substructure.db").to_str().unwrap(),
         std::time::Duration::from_secs(5),
@@ -212,7 +251,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
                 config.connector_executor_workers as u32,
             )) as Arc<dyn TaskQueue<ConnectorTask>>,
             worker_queue: Arc::new(SqliteWorkerQueue::new(db.clone()).unwrap()),
-            channel_proposers: Vec::new(),
+            channel_proposers: proposers,
             session_index_store: Arc::new(SqliteSessionIndexStore::new(db.clone()).unwrap()),
             cursor_store: Arc::new(SqliteCursorStore::new(db.clone()).unwrap()),
             wake_store: Arc::new(SqliteWakeStore::new(db).unwrap()),
@@ -232,6 +271,7 @@ async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
     Harness {
         runtime,
         model,
+        issuer,
         _adapter: adapter,
     }
 }
@@ -283,7 +323,7 @@ async fn drain(
             owner: SessionOwner {
                 tenant_id: TENANT.to_string(),
                 requester: Requester::new(
-                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Subject::new(h.issuer.clone(), "user-1".to_string()),
                     Default::default(),
                 ),
                 metadata: Default::default(),
@@ -788,7 +828,7 @@ async fn a_delegation_opens_its_child_with_the_message() {
             "boss".to_string(),
             AgentEntry {
                 config: Some(boss),
-                worker: None,
+                hosting: Hosting::Engine,
             },
         ),
         ("helper".to_string(), engine_hosted("claude")),
@@ -822,5 +862,157 @@ async fn a_delegation_opens_its_child_with_the_message() {
                 .as_deref()
                 == Some("do it"))),
         "the child is prompted with the delegating message"
+    );
+}
+
+// ── Starting a turn ──────────────────────────────────────────────────────
+
+fn client_message(agent_id: &str, text: &str) -> ClientInput {
+    ClientInput::Message {
+        agent_id: agent_id.to_string(),
+        turn_id: None,
+        message: DraftMessage {
+            id: None,
+            role: Role::User,
+            content: Some(Content::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+        },
+        stream: true,
+        queue: false,
+    }
+}
+
+async fn started(h: &Harness, translated: bool) -> (ChannelContext, String, ag_ui_run::Turn) {
+    let ctx = ChannelContext::new(h.runtime.clone(), CancellationToken::new());
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let turn = ag_ui_run::start(
+        &ctx,
+        &Caller::System {
+            tenant_id: TENANT.to_string(),
+        },
+        &SessionOwner {
+            tenant_id: TENANT.to_string(),
+            requester: Requester::private(Subject::new(Issuer::cli(), "local".to_string())),
+            metadata: Default::default(),
+        },
+        &session_id,
+        client_message("assistant", "hi"),
+        "test_start",
+        translated,
+    )
+    .await
+    .expect("the turn starts");
+    (ctx, session_id, turn)
+}
+
+/// `subs run`, `subs chat`, and the `/api/v1/projects/{p}/run` route all open a
+/// turn through this one function, so what it admits is what all three read.
+///
+/// The stream is scoped to the turn, which is what closes it: nothing here
+/// asks it to stop.
+#[tokio::test]
+async fn a_started_turn_ends_its_own_stream() {
+    let h = start(BTreeMap::from([(
+        "assistant".to_string(),
+        engine_hosted("claude"),
+    )]))
+    .await;
+    let (_ctx, _session_id, turn) = started(&h, false).await;
+    assert!(
+        turn.deltas.is_none(),
+        "a reader of engine events subscribes to no token deltas"
+    );
+
+    let mut events = turn.events;
+    let mut seen = Vec::new();
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = events.recv().await {
+            seen.push(event.payload);
+        }
+    })
+    .await;
+
+    assert!(drained.is_ok(), "the stream did not close: {seen:#?}");
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completed on the stream: {seen:#?}"
+    );
+}
+
+/// The same start, read the translated way. A run that reaches its end emits
+/// `RunFinished`, so a CLI that never sees one reports an unfinished run.
+#[tokio::test]
+async fn a_started_turn_translates_to_a_finished_run() {
+    let h = start(BTreeMap::from([(
+        "assistant".to_string(),
+        engine_hosted("claude"),
+    )]))
+    .await;
+    let (ctx, session_id, turn) = started(&h, true).await;
+    let deltas = turn
+        .deltas
+        .expect("a translated reader subscribes to deltas");
+
+    let mut out = run_ag_ui_translation(
+        turn.events,
+        deltas,
+        session_id,
+        turn.turn_id,
+        ctx.shutdown.clone(),
+    );
+    let mut seen: Vec<AgUiEvent> = Vec::new();
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = out.recv().await {
+            seen.push(event);
+        }
+    })
+    .await;
+
+    assert!(drained.is_ok(), "the stream did not close: {seen:#?}");
+    assert!(
+        matches!(seen.first(), Some(AgUiEvent::RunStarted { .. })),
+        "a run opens with RunStarted: {seen:#?}"
+    );
+    assert!(
+        matches!(seen.last(), Some(AgUiEvent::RunFinished { .. })),
+        "and ends with RunFinished: {seen:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_proposer_sees_only_the_sessions_its_own_channel_owns() {
+    let mine = Arc::new(Mutex::new(Vec::new()));
+    let theirs = Arc::new(Mutex::new(Vec::new()));
+    let proposers: Vec<Arc<dyn ChannelProposer>> = vec![
+        Arc::new(Recorder {
+            channel: ChannelKind::CLI,
+            rendered: mine.clone(),
+        }),
+        Arc::new(Recorder {
+            channel: ChannelKind::SLACK,
+            rendered: theirs.clone(),
+        }),
+    ];
+    let h = start_with(
+        BTreeMap::from([("assistant".to_string(), engine_hosted("claude"))]),
+        proposers,
+        Issuer::cli(),
+    )
+    .await;
+
+    turn(&h, "assistant", "hi").await;
+
+    assert!(
+        !mine.lock().unwrap().is_empty(),
+        "the owning channel renders the decision"
+    );
+    assert!(
+        theirs.lock().unwrap().is_empty(),
+        "another channel never sees it: {:?}",
+        theirs.lock().unwrap()
     );
 }

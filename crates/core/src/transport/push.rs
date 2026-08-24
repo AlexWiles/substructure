@@ -1,17 +1,3 @@
-//! Where a decision goes.
-//!
-//! One rule, read from the agent directory: an agent with a `worker` URL has
-//! its decisions POSTed there; an agent without one is decided here, by
-//! accepting the engine's own proposal; an agent nobody declared fails
-//! immediately, saying so. There is no registration step and no tenant-wide
-//! default, so a routing question always has exactly one answer and the file is
-//! the whole of it.
-//!
-//! The engine-hosted path is deliberately the worker path minus the HTTP: the
-//! same proposal, the same `resolve_response`, the same `submit_decision`. It
-//! therefore inherits the queue's durability, restart recovery, the retry
-//! ladder, and single-live-decision ordering rather than reimplementing them.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -21,15 +7,15 @@ use tokio::task::JoinHandle;
 use crate::protocol::{DecisionResponse, ErrorCode};
 use crate::session::wire::resolve_response;
 use crate::worker::directory::declared;
-use crate::worker::push::{PushError, PushTransport, TransportRegistry};
+use crate::worker::push::{Decider, PushError, TransportRegistry};
 use crate::worker::{
-    AgentDirectory, DequeueFilter, FailDecision, SubmitDecision, WorkerDecisionRequest,
+    AgentDirectory, DequeueFilter, FailDecision, Hosting, SubmitDecision, WorkerDecisionRequest,
 };
 use crate::{Caller, Runtime};
 
 /// Who decides for one agent.
 enum Route {
-    Push(Arc<dyn PushTransport>),
+    Push(Arc<dyn Decider>),
     Engine,
 }
 
@@ -119,7 +105,7 @@ struct Router {
     /// One transport per `(tenant, agent)` with a worker, built on first use: a
     /// transport holds a connection pool, so rebuilding it per decision would
     /// throw away every keep-alive.
-    built: Mutex<HashMap<(String, String), Arc<dyn PushTransport>>>,
+    built: Mutex<HashMap<(String, String), Arc<dyn Decider>>>,
 }
 
 impl Router {
@@ -130,8 +116,9 @@ impl Router {
                 declared(&self.agents.agent_ids(tenant_id))
             ));
         };
-        let Some(worker) = entry.worker else {
-            return Ok(Route::Engine);
+        let worker = match entry.hosting {
+            Hosting::Engine => return Ok(Route::Engine),
+            Hosting::Http(endpoint) => endpoint,
         };
 
         let key = (tenant_id.to_string(), agent_id.to_string());
