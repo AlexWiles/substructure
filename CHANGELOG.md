@@ -9,6 +9,8 @@ together at the same version.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-24
+
 ### Added
 
 - Add CLI chat.
@@ -127,7 +129,8 @@ together at the same version.
 - The changelog starts again at this release. For the changes before it, refer
   to the git history.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/substructureai/substructure/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/substructureai/substructure/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/substructureai/substructure/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/substructureai/substructure/compare/v0.6.0...v0.7.0
