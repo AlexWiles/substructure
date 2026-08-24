@@ -266,15 +266,6 @@ export interface DecisionRequest {
  */
 export interface AgentConfig {
     /**
-     * Where the engine tells the model that an MCP server is available, and
-     * what that server says it is for.
-     *
-     * Separate from `defer_tools`: a server exists whether or not its tools
-     * are deferred, and where a notice lands is a fact about this agent's
-     * prompt rather than about any server.
-     */
-    announce_mcp?: Announce;
-    /**
      * Defer every tool this agent offers, from any source, unless the tool or
      * the connection says otherwise. Absent ⇒ the agent defers nothing of its
      * own; a connection may still defer on its own account.
@@ -299,6 +290,15 @@ export interface AgentConfig {
      * MCP servers
      */
     mcp?: MCPServer[];
+    /**
+     * Where the engine tells the model that an MCP server is available, and
+     * what that server says it is for.
+     *
+     * Separate from `defer_tools`: a server exists whether or not its tools
+     * are deferred, and where a notice lands is a fact about this agent's
+     * prompt rather than about any server.
+     */
+    mcp_announce?: MCPAnnounce;
     model: string;
     /**
      * Plugins this agent uses.
@@ -321,24 +321,6 @@ export interface AgentConfig {
      */
     tools?: AgentTool[];
 }
-
-/**
- * Where the engine tells the model that an MCP server is available, and
- * what that server says it is for.
- *
- * Separate from `defer_tools`: a server exists whether or not its tools
- * are deferred, and where a notice lands is a fact about this agent's
- * prompt rather than about any server.
- *
- * Where an MCP announcement lands.
- *
- * The system prompt while no call has dispatched; then a block on the
- * last user message; then a message of its own. The engine takes the
- * first place it can use, so the order is not a setting.
- *
- * Nowhere. For a server whose own words help nobody.
- */
-export type Announce = "auto" | "never";
 
 /**
  * How an agent's deferred tools reach the model.
@@ -385,8 +367,9 @@ export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | 
  */
 export interface MCPServer {
     approve?: Approve;
-    auth_failure?: AuthFailure;
+    auth_failure?: MCPAuthFailure;
     path: string;
+    tool_sync_failure?: MCPToolSyncFailure;
     /**
      * Narrows what the model sees. Absent ⇒ every tool the connection grants.
      */
@@ -409,7 +392,19 @@ export type Approve = "never" | "always" | "destructive";
  *
  * Go on without this connection's tools.
  */
-export type AuthFailure = "interrupt" | "degrade";
+export type MCPAuthFailure = "interrupt" | "degrade";
+
+/**
+ * What a session does when a connection's tool fetch fails for the last time.
+ * The turn goes ahead without those tools either way, because only the agent
+ * knows whether it can work without them. This chooses whether the model is
+ * told, or is left to read their absence as nothing being there.
+ *
+ * Name the connection wherever its tools would have been.
+ *
+ * Say nothing. For a connection the agent does not need.
+ */
+export type MCPToolSyncFailure = "warn" | "silent";
 
 /**
  * What the model sees of one connection, for one agent: which tools, and how
@@ -439,12 +434,30 @@ export interface MCPTools {
 }
 
 /**
+ * Where the engine tells the model that an MCP server is available, and
+ * what that server says it is for.
+ *
+ * Separate from `defer_tools`: a server exists whether or not its tools
+ * are deferred, and where a notice lands is a fact about this agent's
+ * prompt rather than about any server.
+ *
+ * Where an MCP announcement lands.
+ *
+ * The system prompt while no call has dispatched; then a block on the
+ * last user message; then a message of its own. The engine takes the
+ * first place it can use, so the order is not a setting.
+ *
+ * Nowhere. For a server whose own words help nobody.
+ */
+export type MCPAnnounce = "auto" | "never";
+
+/**
  * A plugin an agent uses. The skills and servers are stamped from the bundle
  * when the config loads. To enable a plugin, write it into the config.
  */
 export interface AgentPlugin {
     approve?: Approve;
-    auth_failure?: AuthFailure;
+    auth_failure?: MCPAuthFailure;
     description?: string;
     id: string;
     /**
@@ -452,6 +465,7 @@ export interface AgentPlugin {
      */
     servers?: string[];
     skills?: SkillMeta[];
+    tool_sync_failure?: MCPToolSyncFailure;
     /**
      * Applied to each of the plugin's servers.
      */
@@ -483,13 +497,8 @@ export interface RetryConfig {
 }
 
 /**
- * A partial retry policy: only the fields it names change, and the rest are
- * inherited. Every override is a layer over the engine's default for the effect
- * kind, so tuning one knob does not mean restating the other four — and leaving
- * a timeout out keeps the default bound rather than removing it.
- *
- * An override cannot set a timeout back to unbounded. Waiting effectively
- * forever is a large number, which is also the honest way to say it.
+ * Only the fields it names change; the rest are inherited. An override cannot
+ * set a timeout back to unbounded.
  */
 export interface RetryOverride {
     backoff_base_secs?: number | null;

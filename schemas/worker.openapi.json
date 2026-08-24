@@ -5,10 +5,6 @@
         "additionalProperties": false,
         "description": "A declared agent identity — the same shape whether it is written in an\n`[agent.<id>]` section or returned by a worker.\n\n`llm` names the `[llm.*]` block every proposed call runs on, and so decides\nboth the venue (the engine with a vendor key, or the agent's own worker) and\nthe wire shape of a worker-run call. It is effectively required: a config\nthat names none fails when the engine resolves a call against it.",
         "properties": {
-          "announce_mcp": {
-            "$ref": "#/components/schemas/Announce",
-            "description": "Where the engine tells the model that an MCP server is available, and\nwhat that server says it is for.\n\nSeparate from `defer_tools`: a server exists whether or not its tools\nare deferred, and where a notice lands is a fact about this agent's\nprompt rather than about any server."
-          },
           "defer_tools": {
             "anyOf": [
               {
@@ -44,6 +40,10 @@
               "$ref": "#/components/schemas/McpServer"
             },
             "type": "array"
+          },
+          "mcp_announce": {
+            "$ref": "#/components/schemas/McpAnnounce",
+            "description": "Where the engine tells the model that an MCP server is available, and\nwhat that server says it is for.\n\nSeparate from `defer_tools`: a server exists whether or not its tools\nare deferred, and where a notice lands is a fact about this agent's\nprompt rather than about any server."
           },
           "model": {
             "type": "string"
@@ -101,7 +101,7 @@
             "$ref": "#/components/schemas/Approve"
           },
           "auth_failure": {
-            "$ref": "#/components/schemas/AuthFailure"
+            "$ref": "#/components/schemas/McpAuthFailure"
           },
           "description": {
             "type": "string"
@@ -121,6 +121,9 @@
               "$ref": "#/components/schemas/SkillMeta"
             },
             "type": "array"
+          },
+          "tool_sync_failure": {
+            "$ref": "#/components/schemas/McpToolSyncFailure"
           },
           "tools": {
             "anyOf": [
@@ -176,22 +179,6 @@
         "title": "AgentTool",
         "type": "object"
       },
-      "Announce": {
-        "description": "Where an MCP announcement lands.",
-        "oneOf": [
-          {
-            "const": "auto",
-            "description": "The system prompt while no call has dispatched; then a block on the\nlast user message; then a message of its own. The engine takes the\nfirst place it can use, so the order is not a setting.",
-            "type": "string"
-          },
-          {
-            "const": "never",
-            "description": "Nowhere. For a server whose own words help nobody.",
-            "type": "string"
-          }
-        ],
-        "title": "Announce"
-      },
       "Approve": {
         "description": "Which of a connection's calls stop for a person.",
         "oneOf": [
@@ -209,22 +196,6 @@
           }
         ],
         "title": "Approve"
-      },
-      "AuthFailure": {
-        "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
-        "oneOf": [
-          {
-            "const": "interrupt",
-            "description": "Stop and ask. A channel that cannot show the question degrades instead.",
-            "type": "string"
-          },
-          {
-            "const": "degrade",
-            "description": "Go on without this connection's tools.",
-            "type": "string"
-          }
-        ],
-        "title": "AuthFailure"
       },
       "ClientContext": {
         "additionalProperties": false,
@@ -1577,6 +1548,38 @@
         "title": "LlmTool",
         "type": "object"
       },
+      "McpAnnounce": {
+        "description": "Where an MCP announcement lands.",
+        "oneOf": [
+          {
+            "const": "auto",
+            "description": "The system prompt while no call has dispatched; then a block on the\nlast user message; then a message of its own. The engine takes the\nfirst place it can use, so the order is not a setting.",
+            "type": "string"
+          },
+          {
+            "const": "never",
+            "description": "Nowhere. For a server whose own words help nobody.",
+            "type": "string"
+          }
+        ],
+        "title": "McpAnnounce"
+      },
+      "McpAuthFailure": {
+        "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
+        "oneOf": [
+          {
+            "const": "interrupt",
+            "description": "Stop and ask. A channel that cannot show the question degrades instead.",
+            "type": "string"
+          },
+          {
+            "const": "degrade",
+            "description": "Go on without this connection's tools.",
+            "type": "string"
+          }
+        ],
+        "title": "McpAuthFailure"
+      },
       "McpServer": {
         "additionalProperties": false,
         "description": "An MCP server the agent draws tools from. `path` resolves against the\nengine's connection registry — locally from `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
@@ -1585,10 +1588,13 @@
             "$ref": "#/components/schemas/Approve"
           },
           "auth_failure": {
-            "$ref": "#/components/schemas/AuthFailure"
+            "$ref": "#/components/schemas/McpAuthFailure"
           },
           "path": {
             "$ref": "#/components/schemas/ConnectionPath"
+          },
+          "tool_sync_failure": {
+            "$ref": "#/components/schemas/McpToolSyncFailure"
           },
           "tools": {
             "anyOf": [
@@ -1607,6 +1613,22 @@
         ],
         "title": "McpServer",
         "type": "object"
+      },
+      "McpToolSyncFailure": {
+        "description": "What a session does when a connection's tool fetch fails for the last time.\nThe turn goes ahead without those tools either way, because only the agent\nknows whether it can work without them. This chooses whether the model is\ntold, or is left to read their absence as nothing being there.",
+        "oneOf": [
+          {
+            "const": "warn",
+            "description": "Name the connection wherever its tools would have been.",
+            "type": "string"
+          },
+          {
+            "const": "silent",
+            "description": "Say nothing. For a connection the agent does not need.",
+            "type": "string"
+          }
+        ],
+        "title": "McpToolSyncFailure"
       },
       "McpTools": {
         "additionalProperties": false,

@@ -407,7 +407,7 @@ type AgentConfig = {
         strategy?: "search"     //   presence is the switch. omitted: no opinion
         max_matches?: number    //   matches per search, >= 1. omitted: 5
     }
-    announce_mcp?: "auto" | "never"  // tell the model a connection exists. omitted: "auto"
+    mcp_announce?: "auto" | "never"  // tell the model a connection exists. omitted: "auto"
 }
 
 type AgentTool = {
@@ -429,6 +429,7 @@ type McpServer = {
     id: string                  // a connection the engine holds. never a URL
     tools?: McpTools            // omitted: every tool the connection offers
     auth_failure?: "interrupt" | "degrade"          // one that needs authorizing. omitted: "interrupt"
+    tool_sync_failure?: "warn" | "silent"           // one the engine cannot fetch. omitted: "warn"
     approve?: "never" | "destructive" | "always"    // calls that wait for a person. omitted: "never"
 }
 
@@ -449,6 +450,7 @@ type AgentPlugin = {
     tools?: McpTools            // applied to each of the plugin's servers
     approve?: "never" | "destructive" | "always"
     auth_failure?: "interrupt" | "degrade"
+    tool_sync_failure?: "warn" | "silent"
 }
 ```
 

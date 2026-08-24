@@ -31,6 +31,7 @@ fn find(at: SessionStateAtNode, arguments: &str) -> StoredResult {
             .map(|c| c.defer_settings())
             .unwrap_or_default()
             .max_matches,
+        &at.unavailable_connector_ids(),
     ))
 }
 
@@ -38,7 +39,7 @@ fn find(at: SessionStateAtNode, arguments: &str) -> StoredResult {
 fn call(at: SessionStateAtNode, arguments: &str) -> StoredResult {
     StoredResult::error(
         at.call_tool_fault(arguments)
-            .unwrap_or_else(|| "the call could not be routed".to_string()),
+            .unwrap_or_else(|| crate::copy::CALL_NOT_ROUTED.to_string()),
     )
 }
 
@@ -182,10 +183,11 @@ mod tests {
                         servers: vec![],
                         tools: None,
                         auth_failure: Default::default(),
+                        tool_sync_failure: Default::default(),
                         approve: Default::default(),
                     }],
                     defer_tools: None,
-                    announce_mcp: Default::default(),
+                    mcp_announce: Default::default(),
                 },
                 anchor: None,
             }),

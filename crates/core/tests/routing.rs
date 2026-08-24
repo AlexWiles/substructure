@@ -133,7 +133,7 @@ fn config(llm: &str) -> AgentConfig {
         sub_agents: Vec::new(),
         mcp: Vec::new(),
         defer_tools: None,
-        announce_mcp: Default::default(),
+        mcp_announce: Default::default(),
         plugins: Vec::new(),
         effort: None,
     }

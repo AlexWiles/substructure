@@ -4,7 +4,7 @@
 use super::InterruptKind;
 use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{AuthNeed, Requester};
-use crate::protocol::{AuthFailure, DecisionAction};
+use crate::protocol::{DecisionAction, McpAuthFailure};
 use crate::runtime::session::state::SessionStateAtNode;
 
 pub const PREFIX: &str = "mcp-auth:";
@@ -42,7 +42,7 @@ fn needing(at: SessionStateAtNode) -> Option<(ConnectionPath, AuthNeed)> {
     let state = at.state();
     let config = at.resolve_agent_for()?;
     state.servers_for(&config).into_iter().find_map(|server| {
-        if server.auth_failure == AuthFailure::Degrade {
+        if server.auth_failure == McpAuthFailure::Degrade {
             return None;
         }
         let need = state.connector_sync(&server.path)?.auth?;
@@ -76,18 +76,7 @@ pub fn prompt(at: SessionStateAtNode) -> Option<DecisionAction> {
 }
 
 fn ask(connection: &ConnectionPath, need: AuthNeed) -> String {
-    match need {
-        AuthNeed::NeverAuthorized => {
-            format!("`{connection}` is not authorized yet, so I cannot use it.")
-        }
-        AuthNeed::Reauthorize => {
-            format!("`{connection}` needs to be authorized again. Its access expired.")
-        }
-        AuthNeed::TokenRejected => format!(
-            "`{connection}` rejected its token. An operator must set a new one \
-             with `subs auth {connection}`."
-        ),
-    }
+    crate::copy::needs_authorization(&connection.to_string(), need)
 }
 
 #[cfg(test)]
@@ -95,7 +84,7 @@ mod tests {
     use super::*;
     use crate::protocol::InterruptOrigin;
     use crate::protocol::{
-        AgentConfig, AuthFailure, DecisionAction, Issuer, McpServer, RetryPolicy, SessionOwner,
+        AgentConfig, DecisionAction, Issuer, McpAuthFailure, McpServer, RetryPolicy, SessionOwner,
         Subject,
     };
     use crate::runtime::session::events::{
@@ -110,7 +99,7 @@ mod tests {
         }
     }
 
-    fn config(policy: AuthFailure) -> AgentConfig {
+    fn config(policy: McpAuthFailure) -> AgentConfig {
         AgentConfig {
             llm: None,
             model: "m1".to_string(),
@@ -122,16 +111,17 @@ mod tests {
                 path: ConnectionPath::Mcp("sentry".into()),
                 tools: None,
                 auth_failure: policy,
+                tool_sync_failure: Default::default(),
                 approve: Default::default(),
             }],
             defer_tools: None,
-            announce_mcp: Default::default(),
+            mcp_announce: Default::default(),
             plugins: Vec::new(),
             effort: None,
         }
     }
 
-    fn needing_auth(need: AuthNeed, policy: AuthFailure) -> SessionState {
+    fn needing_auth(need: AuthNeed, policy: McpAuthFailure) -> SessionState {
         let mut s = SessionState::new("s1".to_string());
         s.owner = Some(SessionOwner {
             tenant_id: "t".to_string(),
@@ -168,8 +158,9 @@ mod tests {
 
     #[test]
     fn a_connection_that_needs_a_person_is_asked_about_by_name() {
-        let action = prompt(needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt).at_head())
-            .expect("it asks");
+        let action =
+            prompt(needing_auth(AuthNeed::Reauthorize, McpAuthFailure::Interrupt).at_head())
+                .expect("it asks");
         let DecisionAction::Interrupt {
             interrupt_id,
             payload,
@@ -188,7 +179,7 @@ mod tests {
     #[test]
     fn a_rejected_token_names_the_command_an_operator_runs() {
         let action =
-            prompt(needing_auth(AuthNeed::TokenRejected, AuthFailure::Interrupt).at_head())
+            prompt(needing_auth(AuthNeed::TokenRejected, McpAuthFailure::Interrupt).at_head())
                 .expect("it asks");
         let DecisionAction::Interrupt { payload, .. } = action else {
             panic!("expected an interrupt");
@@ -200,13 +191,14 @@ mod tests {
     #[test]
     fn a_connection_configured_to_degrade_is_never_asked_about() {
         assert!(
-            prompt(needing_auth(AuthNeed::Reauthorize, AuthFailure::Degrade).at_head()).is_none()
+            prompt(needing_auth(AuthNeed::Reauthorize, McpAuthFailure::Degrade).at_head())
+                .is_none()
         );
     }
 
     #[test]
     fn a_connection_already_asked_about_is_not_asked_about_again() {
-        let mut state = needing_auth(AuthNeed::Reauthorize, AuthFailure::Interrupt);
+        let mut state = needing_auth(AuthNeed::Reauthorize, McpAuthFailure::Interrupt);
         state.open_interrupts.push(OpenInterrupt {
             interrupt_id: interrupt_id(&ConnectionPath::Mcp("sentry".into())),
             origin: InterruptOrigin::Frontend,

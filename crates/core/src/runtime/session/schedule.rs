@@ -544,10 +544,11 @@ mod tests {
                 path: ConnectionPath::Mcp(connection.to_string()),
                 tools: None,
                 auth_failure: Default::default(),
+                tool_sync_failure: Default::default(),
                 approve: Default::default(),
             }],
             defer_tools: None,
-            announce_mcp: Default::default(),
+            mcp_announce: Default::default(),
             plugins: Vec::new(),
             effort: None,
         }

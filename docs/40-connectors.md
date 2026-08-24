@@ -216,13 +216,13 @@ The engine takes the first place it can use:
 | The last user message | After that. An earlier system prompt must not change, because a change to it drops the cache. |
 | A message of its own | When the turn ends on anything but a user message. |
 
-The order is fixed, so it is not a setting. `announce_mcp` on the agent chooses
+The order is fixed, so it is not a setting. `mcp_announce` on the agent chooses
 whether the engine announces at all.
 
 ```toml title="substructure.toml"
 [agent.support]
 mcp = ["mcp.sentry"]
-announce_mcp = "never"
+mcp_announce = "never"
 ```
 
 | Value | The engine |
@@ -236,6 +236,50 @@ The engine announces a connection after someone authorizes it, and never
 before. A request waits for each connection that it names to answer, so a notice
 cannot announce a server that the engine has not reached. The engine does not
 announce a connection that fails, and announces it later if it recovers.
+
+## When a connection does not answer
+
+A fetch that fails for the last time does not stop the turn. The engine goes on
+without that connection's tools, because only the agent knows whether it can
+work without them.
+
+The model is told, in the prompt and in each place the absence would otherwise
+read as nothing being there:
+
+```json
+{ "mcp_server": "sentry", "unavailable": true, "reason": "unreachable" }
+```
+
+`reason` is `unreachable`, or `needs_authorization` when the connection refused
+the credential. The remote's own error is never in the notice; it goes to the
+log, where an operator reads it.
+
+`tool_search` names the connection too, because a search that answered nothing
+would say there is nothing to find. `call_tool` names it beside a tool it cannot
+place. The engine does not say the tool belongs to that connection: a fetch that
+failed left no tool names behind.
+
+`tool_sync_failure` on the connection, or `mcp_tool_sync_failure` on the agent,
+chooses whether the engine says anything.
+
+```toml title="substructure.toml"
+[agent.support]
+mcp_tool_sync_failure = "warn"
+mcp = ["mcp.sentry", { id = "mcp.linear", tool_sync_failure = "silent" }]
+```
+
+| Value | The engine |
+| --- | --- |
+| `warn` (the default) | Names the connection wherever its tools are missing |
+| `silent` | Says nothing |
+
+Use `silent` for a connection the agent does not need. The agent's value is the
+default for each of its connections, including each plugin's; a connection or a
+plugin overrides it with its own.
+
+A credential that a call rejects is a different case. That connection answered,
+so it keeps its tools and the engine does not name it here. The model reads it
+from the call that failed.
 
 Each branch announces separately. A fork that never held a connection announces
 that connection when it gets one.

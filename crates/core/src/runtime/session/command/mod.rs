@@ -839,7 +839,7 @@ impl Working {
                     let named = self
                         .at_head()
                         .resolve_agent_for()
-                        .is_some_and(|c| c.mcp.iter().any(|m| m.path == id));
+                        .is_some_and(|c| self.state.servers_for(&c).iter().any(|m| m.path == id));
                     let settled = self
                         .tracking(EffectKind::ConnectorSync, &id.to_string())
                         .is_some_and(|t| !t.is_in_flight());

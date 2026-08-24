@@ -171,7 +171,7 @@ mod tests {
             sub_agents,
             mcp: Vec::new(),
             defer_tools: None,
-            announce_mcp: Default::default(),
+            mcp_announce: Default::default(),
             plugins: Vec::new(),
             effort: None,
         }

@@ -9,10 +9,23 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- The engine now tells the model when it cannot reach a connection. Set
+  `tool_sync_failure` to `silent` to keep quiet.
+- Set `mcp_auth_failure` and `mcp_tool_sync_failure` on an agent to give every
+  one of its connections a default.
+- Set `mcp_announce` in the manifest.
+
 ### Changed
 
 - Retry policy improvementss
 - Better concurrent tool execution within a turn.
+- `announce_mcp` is now `mcp_announce`.
+
+### Fixed
+
+- A plugin server now re-fetches its tools when a person authorizes it.
 
 ## [0.8.0] - 2026-08-24
 

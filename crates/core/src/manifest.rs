@@ -22,8 +22,9 @@ use crate::connectors::registry::{
 use crate::plugins::{BundleServer, PluginBundle};
 use crate::protocol::ReasoningEffort;
 use crate::protocol::{
-    AgentConfig, AgentPlugin, AgentTool, Approve, AuthFailure, ConnectorProtocol, DeferTools,
-    Handler, LlmFormat, McpServer, McpTools, RetryConfig, SubAgent,
+    AgentConfig, AgentPlugin, AgentTool, Approve, ConnectorProtocol, DeferTools, Handler,
+    LlmFormat, McpAnnounce, McpAuthFailure, McpServer, McpToolSyncFailure, McpTools, RetryConfig,
+    SubAgent,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, Hosting, WorkerEndpoint};
@@ -399,6 +400,12 @@ pub struct AgentSection {
     )]
     pub defer_tools: Option<DeferTools>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_announce: Option<McpAnnounce>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_auth_failure: Option<McpAuthFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_tool_sync_failure: Option<McpToolSyncFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
     /// Environment variable holding the secret an engine here signs this
     /// agent's decision requests with. Named, never written. Unset means the
@@ -436,11 +443,26 @@ impl AgentSection {
             retry: self.retry.clone().map(Box::new),
             tools: self.tools.clone(),
             sub_agents: self.to_sub_agents(manifest),
-            mcp: self.mcp.iter().filter_map(McpRef::to_server).collect(),
+            mcp: self
+                .mcp
+                .iter()
+                .filter_map(|m| m.to_server(self.mcp_defaults()))
+                .collect(),
             defer_tools: self.defer_tools,
-            announce_mcp: Default::default(),
-            plugins: self.plugins.iter().map(|p| p.to_wire(manifest)).collect(),
+            mcp_announce: self.mcp_announce.unwrap_or_default(),
+            plugins: self
+                .plugins
+                .iter()
+                .map(|p| p.to_wire(manifest, self.mcp_defaults()))
+                .collect(),
         })
+    }
+
+    fn mcp_defaults(&self) -> McpDefaults {
+        McpDefaults {
+            auth_failure: self.mcp_auth_failure.unwrap_or_default(),
+            tool_sync_failure: self.mcp_tool_sync_failure.unwrap_or_default(),
+        }
     }
 
     /// The named agents as the wire carries them, each description read from
@@ -636,9 +658,17 @@ pub struct McpEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpToolsEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_failure: Option<AuthFailure>,
+    pub auth_failure: Option<McpAuthFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_sync_failure: Option<McpToolSyncFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approve: Option<Approve>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct McpDefaults {
+    pub auth_failure: McpAuthFailure,
+    pub tool_sync_failure: McpToolSyncFailure,
 }
 
 /// The file's spelling of [`McpTools`], mirrored for the one reason
@@ -682,18 +712,22 @@ impl McpRef {
         }
     }
 
-    fn to_server(&self) -> Option<McpServer> {
+    fn to_server(&self, defaults: McpDefaults) -> Option<McpServer> {
         Some(match self {
             Self::All(written) => McpServer {
                 path: ConnectionPath::parse(written)?,
                 tools: None,
-                auth_failure: AuthFailure::default(),
+                auth_failure: defaults.auth_failure,
+                tool_sync_failure: defaults.tool_sync_failure,
                 approve: Approve::default(),
             },
             Self::Filtered(entry) => McpServer {
                 path: ConnectionPath::parse(&entry.id)?,
                 tools: entry.tools.as_ref().map(McpToolsEntry::to_wire),
-                auth_failure: entry.auth_failure.unwrap_or_default(),
+                auth_failure: entry.auth_failure.unwrap_or(defaults.auth_failure),
+                tool_sync_failure: entry
+                    .tool_sync_failure
+                    .unwrap_or(defaults.tool_sync_failure),
                 approve: entry.approve.unwrap_or_default(),
             },
         })
@@ -717,7 +751,9 @@ pub struct PluginEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpToolsEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_failure: Option<AuthFailure>,
+    pub auth_failure: Option<McpAuthFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_sync_failure: Option<McpToolSyncFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approve: Option<Approve>,
 }
@@ -731,7 +767,7 @@ impl PluginRef {
     }
 
     /// The wire form, stamped from the bundle the manifest holds.
-    fn to_wire(&self, manifest: &Manifest) -> AgentPlugin {
+    fn to_wire(&self, manifest: &Manifest, defaults: McpDefaults) -> AgentPlugin {
         let id = self.id();
         let bundle = manifest.plugin.get(id).and_then(|s| s.bundle.as_ref());
         let (description, skills, servers) = match bundle {
@@ -760,7 +796,12 @@ impl PluginRef {
             tools: entry
                 .and_then(|e| e.tools.as_ref())
                 .map(McpToolsEntry::to_wire),
-            auth_failure: entry.and_then(|e| e.auth_failure).unwrap_or_default(),
+            auth_failure: entry
+                .and_then(|e| e.auth_failure)
+                .unwrap_or(defaults.auth_failure),
+            tool_sync_failure: entry
+                .and_then(|e| e.tool_sync_failure)
+                .unwrap_or(defaults.tool_sync_failure),
             approve: entry.and_then(|e| e.approve).unwrap_or_default(),
         }
     }
@@ -1549,6 +1590,109 @@ mod tests {
             .to_string();
         assert!(err.contains("tool"), "{err}");
         assert!(err.contains("unknown field"), "names the field: {err}");
+    }
+
+    #[test]
+    fn a_connection_takes_the_agents_mcp_policy_and_may_override_it() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[mcp.sentry]
+url = "https://sentry.example/mcp"
+[mcp.linear]
+url = "https://linear.example/mcp"
+[agent.support]
+llm = "claude"
+model = "m"
+mcp_auth_failure = "degrade"
+mcp_tool_sync_failure = "silent"
+mcp = ["mcp.sentry", { id = "mcp.linear", tool_sync_failure = "warn" }]
+"#,
+        )
+        .unwrap();
+        m.validate().unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        let sentry = config
+            .mcp
+            .iter()
+            .find(|s| s.path.to_string() == "mcp.sentry")
+            .expect("sentry");
+        assert_eq!(sentry.auth_failure, McpAuthFailure::Degrade);
+        assert_eq!(sentry.tool_sync_failure, McpToolSyncFailure::Silent);
+        let linear = config
+            .mcp
+            .iter()
+            .find(|s| s.path.to_string() == "mcp.linear")
+            .expect("linear");
+        assert_eq!(linear.auth_failure, McpAuthFailure::Degrade);
+        assert_eq!(
+            linear.tool_sync_failure,
+            McpToolSyncFailure::Warn,
+            "the connection overrides the agent"
+        );
+    }
+
+    #[test]
+    fn a_plugin_takes_the_agents_mcp_policy_and_may_override_it() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[plugin.pdf]
+path = "./pdf"
+[plugin.ocr]
+path = "./ocr"
+[agent.support]
+llm = "claude"
+model = "m"
+mcp_tool_sync_failure = "silent"
+plugins = ["pdf", { id = "ocr", tool_sync_failure = "warn" }]
+"#,
+        )
+        .unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        let pdf = config.plugins.iter().find(|p| p.id == "pdf").expect("pdf");
+        assert_eq!(pdf.tool_sync_failure, McpToolSyncFailure::Silent);
+        let ocr = config.plugins.iter().find(|p| p.id == "ocr").expect("ocr");
+        assert_eq!(
+            ocr.tool_sync_failure,
+            McpToolSyncFailure::Warn,
+            "the plugin overrides the agent"
+        );
+        assert_eq!(
+            pdf.server(&ConnectionPath::PluginServer {
+                plugin: "pdf".into(),
+                server: "renderer".into(),
+            })
+            .tool_sync_failure,
+            McpToolSyncFailure::Silent,
+            "and each of its servers is stamped with it"
+        );
+    }
+
+    #[test]
+    fn an_agent_that_names_no_mcp_policy_warns() {
+        let m: Manifest = toml::from_str(
+            r#"
+name = "p"
+[llm.claude]
+type = "anthropic"
+[mcp.sentry]
+url = "https://sentry.example/mcp"
+[agent.support]
+llm = "claude"
+model = "m"
+mcp = ["mcp.sentry"]
+"#,
+        )
+        .unwrap();
+        m.validate().unwrap();
+        let config = m.agents()["support"].config.clone().expect("seeded");
+        assert_eq!(config.mcp[0].tool_sync_failure, McpToolSyncFailure::Warn);
+        assert_eq!(config.mcp[0].auth_failure, McpAuthFailure::Interrupt);
     }
 
     #[test]

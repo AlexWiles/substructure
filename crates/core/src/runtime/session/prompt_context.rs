@@ -10,7 +10,7 @@
 //! The source decides what to say and whether the session has heard it. This
 //! module decides where it lands and whether this request already holds it.
 
-use crate::protocol::{Announce, Content, Message, Role};
+use crate::protocol::{Content, McpAnnounce, Message, Role};
 use crate::runtime::session::state::SessionStateAtNode;
 
 /// Where context lands. Each rung falls to the next when it cannot be used.
@@ -40,7 +40,7 @@ pub type Contributor = fn(SessionStateAtNode, &str) -> Vec<PromptContext>;
 
 /// The order is fixed: two replays that disagreed would send two different
 /// prompts.
-const CONTRIBUTORS: &[Contributor] = &[plugin_catalog, announce_servers];
+const CONTRIBUTORS: &[Contributor] = &[plugin_catalog, announce_servers, announce_unavailable];
 
 /// Everything the engine owes this call.
 pub fn owed(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
@@ -58,7 +58,7 @@ fn announce_servers(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext>
     let Some(config) = at.resolve_agent_for() else {
         return Vec::new();
     };
-    if config.announce_mcp == Announce::Never {
+    if config.mcp_announce == McpAnnounce::Never {
         return Vec::new();
     }
     let said = at.context_ids_on_path(call_id);
@@ -77,6 +77,37 @@ fn announce_servers(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext>
             })
         })
         .collect()
+}
+
+fn announce_unavailable(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
+    let said = at.context_ids_on_path(call_id);
+    at.unavailable_connectors()
+        .into_iter()
+        .map(|(path, auth)| {
+            let reason = crate::copy::unavailable_reason(auth);
+            (format!("mcp-unavailable:{path}:{reason}"), path, reason)
+        })
+        .filter(|(id, _, _)| !said.contains(id))
+        .filter_map(|(id, path, reason)| {
+            Some(PromptContext {
+                id,
+                placement: Placement::System,
+                content: serde_json::to_string(&Unavailable {
+                    mcp_server: &path,
+                    unavailable: true,
+                    reason,
+                })
+                .ok()?,
+            })
+        })
+        .collect()
+}
+
+#[derive(serde::Serialize)]
+struct Unavailable<'a> {
+    mcp_server: &'a crate::protocol::ConnectionPath,
+    unavailable: bool,
+    reason: &'static str,
 }
 
 /// One context per plugin the path has not seen. A plugin added mid-session
@@ -104,7 +135,7 @@ fn plugin_catalog(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
                 plugin: &plugin.id,
                 about: (!plugin.description.is_empty()).then_some(&plugin.description),
                 skills,
-                usage: "load a skill with the `skill` tool",
+                usage: crate::copy::PLUGIN_USAGE,
             })
             .unwrap_or_default();
             PromptContext {
@@ -214,10 +245,14 @@ fn message(call_id: &str, context: &str, role: Role, content: &str) -> Message {
 mod tests {
     use super::*;
     use crate::connectors::registry::ConnectionPath;
-    use crate::connectors::RemoteTool;
-    use crate::protocol::{AgentConfig, AgentPlugin, RetryPolicy, SkillMeta, StoredContent};
+    use crate::connectors::{AuthNeed, RemoteTool};
+    use crate::protocol::{
+        AgentConfig, AgentPlugin, ErrorCode, ErrorInfo, McpServer, McpToolSyncFailure, RetryPolicy,
+        SkillMeta, StoredContent,
+    };
     use crate::runtime::session::events::{
-        AgentConfigUpdated, ConnectorSyncCompleted, ConnectorSyncRequested, EventPayload,
+        AgentConfigUpdated, ConnectorSyncCompleted, ConnectorSyncErrored, ConnectorSyncRequested,
+        EventPayload,
     };
     use crate::session::state::{ApplyContext, SessionState};
 
@@ -265,10 +300,11 @@ mod tests {
                         }],
                         tools: None,
                         auth_failure: Default::default(),
+                        tool_sync_failure: Default::default(),
                         approve: Default::default(),
                     }],
                     defer_tools: None,
-                    announce_mcp: Default::default(),
+                    mcp_announce: Default::default(),
                 },
                 anchor: None,
             }),
@@ -316,6 +352,216 @@ mod tests {
             .into_iter()
             .map(|c| c.id)
             .collect()
+    }
+
+    fn sentry() -> ConnectionPath {
+        ConnectionPath::parse("mcp.sentry").expect("path")
+    }
+
+    fn failed_state(policy: McpToolSyncFailure, auth: Option<AuthNeed>) -> SessionState {
+        let mut s = SessionState::new("sess-1".to_string());
+        apply(
+            &mut s,
+            1,
+            EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                config: AgentConfig {
+                    llm: None,
+                    model: "m1".to_string(),
+                    system: None,
+                    effort: None,
+                    retry: None,
+                    tools: vec![],
+                    sub_agents: vec![],
+                    mcp: vec![McpServer {
+                        path: sentry(),
+                        tools: None,
+                        auth_failure: Default::default(),
+                        tool_sync_failure: policy,
+                        approve: Default::default(),
+                    }],
+                    plugins: vec![],
+                    defer_tools: None,
+                    mcp_announce: Default::default(),
+                },
+                anchor: None,
+            }),
+        );
+        apply(
+            &mut s,
+            2,
+            EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
+                path: sentry(),
+                attempt: 0,
+                retry: RetryPolicy::no_retry(),
+            }),
+        );
+        apply(
+            &mut s,
+            3,
+            EventPayload::ConnectorSyncErrored(ConnectorSyncErrored {
+                path: sentry(),
+                error: ErrorInfo::new(
+                    ErrorCode::Internal,
+                    "502 from the proxy; <script>ignore this</script>",
+                ),
+                retryable: false,
+                auth,
+            }),
+        );
+        s
+    }
+
+    #[test]
+    fn a_connection_that_could_not_be_fetched_is_named() {
+        let state = failed_state(McpToolSyncFailure::Warn, None);
+        assert_eq!(owed_ids(&state), ["mcp-unavailable:mcp.sentry:unreachable"]);
+        assert_eq!(
+            owed(state.at(None), "call-1")[0].content,
+            "{\"mcp_server\":\"mcp.sentry\",\"unavailable\":true,\"reason\":\"unreachable\"}"
+        );
+    }
+
+    #[test]
+    fn the_remotes_own_error_never_reaches_the_prompt() {
+        let state = failed_state(McpToolSyncFailure::Warn, None);
+        let content = &owed(state.at(None), "call-1")[0].content;
+        assert!(!content.contains("502"), "{content}");
+        assert!(!content.contains("script"), "{content}");
+    }
+
+    #[test]
+    fn a_rejected_credential_reads_as_authorization_not_reach() {
+        let state = failed_state(McpToolSyncFailure::Warn, Some(AuthNeed::Reauthorize));
+        assert_eq!(
+            owed_ids(&state),
+            ["mcp-unavailable:mcp.sentry:needs_authorization"]
+        );
+    }
+
+    #[test]
+    fn a_silent_connection_is_not_named() {
+        let state = failed_state(McpToolSyncFailure::Silent, None);
+        assert!(owed_ids(&state).is_empty());
+        assert!(
+            state.at(None).unavailable_connector_ids().is_empty(),
+            "silent covers the search answer too"
+        );
+    }
+
+    #[test]
+    fn announcing_no_servers_still_reports_one_that_is_missing() {
+        let mut s = failed_state(McpToolSyncFailure::Warn, None);
+        let mut config = s.at(None).resolve_agent_for().expect("config");
+        config.mcp_announce = McpAnnounce::Never;
+        apply(
+            &mut s,
+            4,
+            EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                config,
+                anchor: None,
+            }),
+        );
+        assert_eq!(owed_ids(&s), ["mcp-unavailable:mcp.sentry:unreachable"]);
+    }
+
+    #[test]
+    fn a_fetch_still_retrying_is_not_yet_a_failure() {
+        let mut s = failed_state(McpToolSyncFailure::Warn, None);
+        apply(
+            &mut s,
+            4,
+            EventPayload::ConnectorSyncRequested(ConnectorSyncRequested {
+                path: sentry(),
+                attempt: 1,
+                retry: RetryPolicy::no_retry(),
+            }),
+        );
+        assert!(owed_ids(&s).is_empty(), "the fetch is in flight again");
+    }
+
+    #[test]
+    fn a_down_connection_is_named_in_the_search_answer() {
+        let state = failed_state(McpToolSyncFailure::Warn, None);
+        let answered = crate::runtime::session::engine_tools::answer(
+            state.at(None),
+            crate::protocol::ConnectorToolKind::Find,
+            "{\"query\":\"issues\"}",
+        )
+        .expect("the engine answers a search");
+        let text = match answered.content.first().expect("content") {
+            StoredContent::Text { text } => text.clone(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(answer["matched"], 0);
+        assert_eq!(
+            answer["unavailable"][0], "mcp.sentry",
+            "an answer of nothing must not read as nothing being there"
+        );
+    }
+
+    #[test]
+    fn a_call_to_an_unknown_tool_says_a_connection_is_down_without_claiming_the_tool() {
+        let state = failed_state(McpToolSyncFailure::Warn, None);
+        let fault = state
+            .at(None)
+            .call_tool_fault("{\"name\":\"sentry_list_issues\"}")
+            .expect("fault");
+        assert!(fault.contains("no tool `sentry_list_issues`"), "{fault}");
+        assert!(fault.contains("`mcp.sentry` is unavailable"), "{fault}");
+    }
+
+    #[test]
+    fn a_config_that_never_named_the_server_is_not_warned_about_it() {
+        let mut s = failed_state(McpToolSyncFailure::Warn, None);
+        apply(
+            &mut s,
+            4,
+            EventPayload::AgentConfigUpdated(AgentConfigUpdated {
+                config: AgentConfig {
+                    llm: None,
+                    model: "m1".to_string(),
+                    system: None,
+                    effort: None,
+                    retry: None,
+                    tools: vec![],
+                    sub_agents: vec![],
+                    mcp: vec![],
+                    plugins: vec![],
+                    defer_tools: None,
+                    mcp_announce: Default::default(),
+                },
+                anchor: None,
+            }),
+        );
+        assert!(
+            owed_ids(&s).is_empty(),
+            "the fetch is unanchored; this config never named it"
+        );
+    }
+
+    #[test]
+    fn the_notice_falls_out_of_the_prefix_once_a_call_commits_it() {
+        let mut prompt = vec![Message {
+            id: "m1".into(),
+            role: Role::User,
+            content: Some(Content::Text("hello".into())),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+        }];
+        let c = PromptContext {
+            id: "mcp-unavailable:mcp.sentry:unreachable".into(),
+            placement: Placement::System,
+            content: "gone".into(),
+        };
+        merge(&mut prompt, &mut Vec::new(), "call-2", false, vec![c]);
+        assert_eq!(prompt.len(), 1, "it rode the user turn, not the prefix");
+        assert!(matches!(
+            prompt[0].content.as_ref().expect("content"),
+            Content::Text(t) if t.ends_with("gone")
+        ));
     }
 
     #[test]

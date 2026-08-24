@@ -704,7 +704,7 @@ mod tests {
             sub_agents: Vec::new(),
             mcp: Vec::new(),
             defer_tools: None,
-            announce_mcp: Default::default(),
+            mcp_announce: Default::default(),
             plugins: Vec::new(),
             effort: None,
         }
@@ -716,6 +716,7 @@ mod tests {
             path: ConnectionPath::Mcp("sentry".into()),
             tools: None,
             auth_failure: Default::default(),
+            tool_sync_failure: Default::default(),
             approve: Approve::Destructive,
         });
         if defer {
@@ -1354,7 +1355,7 @@ mod tests {
             }],
             mcp: Vec::new(),
             defer_tools: None,
-            announce_mcp: Default::default(),
+            mcp_announce: Default::default(),
             plugins: Vec::new(),
             effort: None,
         }

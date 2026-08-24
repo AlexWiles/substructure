@@ -923,15 +923,15 @@ pub struct AgentConfig {
     /// Separate from `defer_tools`: a server exists whether or not its tools
     /// are deferred, and where a notice lands is a fact about this agent's
     /// prompt rather than about any server.
-    #[serde(default, skip_serializing_if = "Announce::is_default")]
-    pub announce_mcp: Announce,
+    #[serde(default, skip_serializing_if = "McpAnnounce::is_default")]
+    pub mcp_announce: McpAnnounce,
 }
 
 /// Where an MCP announcement lands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(title = "Announce")]
-pub enum Announce {
+#[schemars(title = "McpAnnounce")]
+pub enum McpAnnounce {
     /// The system prompt while no call has dispatched; then a block on the
     /// last user message; then a message of its own. The engine takes the
     /// first place it can use, so the order is not a setting.
@@ -941,7 +941,7 @@ pub enum Announce {
     Never,
 }
 
-impl Announce {
+impl McpAnnounce {
     fn is_default(&self) -> bool {
         *self == Self::Auto
     }
@@ -1143,8 +1143,10 @@ pub struct McpServer {
     /// Narrows what the model sees. Absent ⇒ every tool the connection grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
-    #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
-    pub auth_failure: AuthFailure,
+    #[serde(default, skip_serializing_if = "McpAuthFailure::is_default")]
+    pub auth_failure: McpAuthFailure,
+    #[serde(default, skip_serializing_if = "McpToolSyncFailure::is_default")]
+    pub tool_sync_failure: McpToolSyncFailure,
     #[serde(default, skip_serializing_if = "Approve::is_default")]
     pub approve: Approve,
 }
@@ -1172,8 +1174,8 @@ impl Approve {
 /// an agent that has nobody to ask.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-#[schemars(title = "AuthFailure")]
-pub enum AuthFailure {
+#[schemars(title = "McpAuthFailure")]
+pub enum McpAuthFailure {
     /// Stop and ask. A channel that cannot show the question degrades instead.
     #[default]
     Interrupt,
@@ -1181,9 +1183,34 @@ pub enum AuthFailure {
     Degrade,
 }
 
-impl AuthFailure {
+impl McpAuthFailure {
     fn is_default(&self) -> bool {
         *self == Self::Interrupt
+    }
+}
+
+/// What a session does when a connection's tool fetch fails for the last time.
+/// The turn goes ahead without those tools either way, because only the agent
+/// knows whether it can work without them. This chooses whether the model is
+/// told, or is left to read their absence as nothing being there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "McpToolSyncFailure")]
+pub enum McpToolSyncFailure {
+    /// Name the connection wherever its tools would have been.
+    #[default]
+    Warn,
+    /// Say nothing. For a connection the agent does not need.
+    Silent,
+}
+
+impl McpToolSyncFailure {
+    fn is_default(&self) -> bool {
+        *self == Self::Warn
+    }
+
+    pub fn warns(&self) -> bool {
+        *self == Self::Warn
     }
 }
 
@@ -1234,8 +1261,10 @@ pub struct AgentPlugin {
     /// Applied to each of the plugin's servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
-    #[serde(default, skip_serializing_if = "AuthFailure::is_default")]
-    pub auth_failure: AuthFailure,
+    #[serde(default, skip_serializing_if = "McpAuthFailure::is_default")]
+    pub auth_failure: McpAuthFailure,
+    #[serde(default, skip_serializing_if = "McpToolSyncFailure::is_default")]
+    pub tool_sync_failure: McpToolSyncFailure,
     #[serde(default, skip_serializing_if = "Approve::is_default")]
     pub approve: Approve,
 }
@@ -1247,6 +1276,7 @@ impl AgentPlugin {
             path: path.clone(),
             tools: self.tools.clone(),
             auth_failure: self.auth_failure,
+            tool_sync_failure: self.tool_sync_failure,
             approve: self.approve,
         }
     }

@@ -3,7 +3,7 @@ use crate::protocol::StoredResult;
 use std::collections::HashMap;
 
 use crate::protocol::{
-    Announce, ClientAppend, ClientMessage, ClientMessages, DeferTools, NewMessage,
+    ClientAppend, ClientMessage, ClientMessages, DeferTools, McpAnnounce, NewMessage,
 };
 use crate::runtime::session::reconcile::plan_reconcile;
 use chrono::Utc;
@@ -6430,7 +6430,7 @@ fn agent_config(model: &str) -> AgentConfig {
         sub_agents: Vec::new(),
         mcp: Vec::new(),
         defer_tools: None,
-        announce_mcp: Default::default(),
+        mcp_announce: Default::default(),
         plugins: Vec::new(),
         effort: None,
     }
@@ -6466,6 +6466,7 @@ fn connector_config(ids: &[&str]) -> AgentConfig {
                 path: ConnectionPath::Mcp(id.to_string()),
                 tools: None,
                 auth_failure: Default::default(),
+                tool_sync_failure: Default::default(),
                 approve: Default::default(),
             })
             .collect(),
@@ -7168,6 +7169,7 @@ fn searching_connector_config(ids: &[&str]) -> AgentConfig {
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
+                tool_sync_failure: Default::default(),
                 approve: Default::default(),
             })
             .collect(),
@@ -7327,7 +7329,7 @@ fn announce_never_says_nothing() {
         "tenant-a",
         "user-1",
         Some(AgentConfig {
-            announce_mcp: Announce::Never,
+            mcp_announce: McpAnnounce::Never,
             ..searching_connector_config(&["sentry"])
         }),
     );
@@ -7491,6 +7493,7 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
+                tool_sync_failure: Default::default(),
                 approve: Default::default(),
             }],
             ..agent_config("m1")
@@ -7618,6 +7621,7 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
                     path: ConnectionPath::Mcp("sentry".into()),
                     tools: None,
                     auth_failure: Default::default(),
+                    tool_sync_failure: Default::default(),
                     approve: Default::default(),
                 },
                 McpServer {
@@ -7627,6 +7631,7 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
                         ..Default::default()
                     }),
                     auth_failure: Default::default(),
+                    tool_sync_failure: Default::default(),
                     approve: Default::default(),
                 },
             ],
@@ -7703,6 +7708,7 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
+                tool_sync_failure: Default::default(),
                 approve: Default::default(),
             }],
             ..agent_config("m1")
@@ -7744,7 +7750,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
         "user-1",
         Some(AgentConfig {
             defer_tools: Some(DeferTools::default()),
-            announce_mcp: Default::default(),
+            mcp_announce: Default::default(),
             plugins: Vec::new(),
             mcp: vec![],
             ..agent_config("m1")
@@ -7767,12 +7773,13 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
             state: None,
             agent: Some(AgentConfig {
                 defer_tools: Some(DeferTools::default()),
-                announce_mcp: Default::default(),
+                mcp_announce: Default::default(),
                 plugins: Vec::new(),
                 mcp: vec![McpServer {
                     path: ConnectionPath::Mcp("sentry".into()),
                     tools: None,
                     auth_failure: Default::default(),
+                    tool_sync_failure: Default::default(),
                     approve: Default::default(),
                 }],
                 ..agent_config("m1")
@@ -7798,7 +7805,7 @@ fn a_connection_overrides_the_agents_default() {
         "user-1",
         Some(AgentConfig {
             defer_tools: Some(DeferTools::default()),
-            announce_mcp: Default::default(),
+            mcp_announce: Default::default(),
             plugins: Vec::new(),
             mcp: vec![McpServer {
                 path: ConnectionPath::Mcp("sentry".into()),
@@ -7807,6 +7814,7 @@ fn a_connection_overrides_the_agents_default() {
                     ..Default::default()
                 }),
                 auth_failure: Default::default(),
+                tool_sync_failure: Default::default(),
                 approve: Default::default(),
             }],
             ..agent_config("m1")
@@ -8472,6 +8480,7 @@ fn a_filter_change_re_derives_without_another_fetch() {
                 ..Default::default()
             }),
             auth_failure: Default::default(),
+            tool_sync_failure: Default::default(),
             approve: Default::default(),
         }],
         ..agent_config("m1")
@@ -10886,10 +10895,59 @@ fn plugin_config() -> AgentConfig {
             }],
             tools: None,
             auth_failure: Default::default(),
+            tool_sync_failure: Default::default(),
             approve: Default::default(),
         }],
         ..agent_config("m1")
     }
+}
+
+#[test]
+fn a_plugins_server_re_fetches_when_a_person_authorizes_it() {
+    let path = ConnectionPath::PluginServer {
+        plugin: "pdf".into(),
+        server: "renderer".into(),
+    };
+    let mut agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(plugin_config()));
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::ConnectorSync,
+            path.to_string(),
+            None,
+            SettleError::new(ErrorInfo::internal("401".to_string()), false)
+                .auth(Some(AuthNeed::Reauthorize)),
+        ),
+        &system(),
+    );
+    assert_eq!(
+        agg.state
+            .tracking(EffectKind::ConnectorSync, &path.to_string())
+            .map(|t| t.status()),
+        Some(EffectStatus::Failed),
+    );
+
+    let d = open_decision(&mut agg, "hi");
+    dispatch(
+        &mut agg,
+        CommandPayload::SubmitWorkerDecision {
+            decision_id: d,
+            transcript: vec![],
+            actions: vec![Action::SyncConnector { path: path.clone() }],
+            state: None,
+            agent: None,
+            channels: Default::default(),
+        },
+        &machine(),
+    );
+
+    assert_eq!(
+        agg.state
+            .tracking(EffectKind::ConnectorSync, &path.to_string())
+            .map(|t| t.status()),
+        Some(EffectStatus::Pending),
+        "a plugin's server is one the agent reaches, so `connector.sync` must take it"
+    );
 }
 
 fn plugin_session() -> SessionAggregate {

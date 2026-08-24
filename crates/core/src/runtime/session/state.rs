@@ -2175,6 +2175,33 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         .ok()
     }
 
+    pub fn unavailable_connectors(&self) -> Vec<(ConnectionPath, Option<AuthNeed>)> {
+        let Some(config) = self.resolve_agent_for() else {
+            return Vec::new();
+        };
+        self.state
+            .servers_for(&config)
+            .into_iter()
+            .filter(|c| c.tool_sync_failure.warns())
+            .filter_map(|c| {
+                let effect = self
+                    .state
+                    .effect(EffectKind::ConnectorSync, &c.path.to_string())?;
+                if effect.tracking.status() != EffectStatus::Failed {
+                    return None;
+                }
+                Some((c.path.clone(), effect.connector().and_then(|s| s.auth)))
+            })
+            .collect()
+    }
+
+    pub fn unavailable_connector_ids(&self) -> Vec<String> {
+        self.unavailable_connectors()
+            .into_iter()
+            .map(|(path, _)| path.to_string())
+            .collect()
+    }
+
     /// Context ids that an earlier call of this path already carried.
     ///
     /// Read from the effects on the path, so a fork that never held a call does
@@ -2251,20 +2278,16 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
                 .take(cap)
                 .map(|t| t.name.as_str())
                 .collect();
-            return Some(if near.is_empty() {
-                format!(
-                    "no tool `{named}` for this agent. Call `{}` with an empty query for every \
-                     tool.",
-                    filter::TOOL_SEARCH
-                )
+            let mut fault = if near.is_empty() {
+                crate::copy::no_such_tool(&named)
             } else {
-                format!(
-                    "no tool `{named}` for this agent. The closest are: {}. Call `{}` for the \
-                     schema of one.",
-                    near.join(", "),
-                    filter::TOOL_SEARCH
-                )
-            });
+                crate::copy::no_such_tool_near(&named, &near)
+            };
+            for path in self.unavailable_connector_ids() {
+                fault.push(' ');
+                fault.push_str(&crate::copy::unavailable_note(&path));
+            }
+            return Some(fault);
         };
         // The provider never received this tool's schema, so it checked
         // nothing. The engine holds one, so the engine checks it — and hands it
@@ -2272,10 +2295,7 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         let input = target.input();
         classify_arguments(&inner_arguments(&raw), input.as_ref())
             .error()
-            .map(|e| match &input {
-                Some(schema) => format!("`{named}`: {e}. Its input schema is: {schema}"),
-                None => format!("`{named}`: {e}"),
-            })
+            .map(|e| crate::copy::bad_arguments(&named, e, input.as_ref()))
     }
 
     /// Connections the config in force at the node names but has never fetched.
@@ -2652,7 +2672,7 @@ mod agent_version_tests {
             sub_agents: Vec::new(),
             mcp: Vec::new(),
             defer_tools: None,
-            announce_mcp: Default::default(),
+            mcp_announce: Default::default(),
             plugins: Vec::new(),
             effort: None,
         }
@@ -2707,6 +2727,7 @@ mod agent_version_tests {
                         path: ConnectionPath::Mcp("sentry".into()),
                         tools: None,
                         auth_failure: Default::default(),
+                        tool_sync_failure: Default::default(),
                         approve: Default::default(),
                     }],
                     ..config(model)

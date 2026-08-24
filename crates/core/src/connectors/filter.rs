@@ -339,7 +339,12 @@ fn frequency(doc: &[String], term: &str) -> f64 {
 ///
 /// A match of nothing says so, and sends the model back to the search with an
 /// empty query, which is the one thing that always answers.
-pub fn find_answer(tools: &[LlmTool], query: &str, max_matches: NonZeroUsize) -> String {
+pub fn find_answer(
+    tools: &[LlmTool],
+    query: &str,
+    max_matches: NonZeroUsize,
+    unavailable: &[String],
+) -> String {
     let matched = find(tools, query);
     let shown: Vec<serde_json::Value> = matched
         .iter()
@@ -362,15 +367,13 @@ pub fn find_answer(tools: &[LlmTool], query: &str, max_matches: NonZeroUsize) ->
         "call_with": CALL_TOOL,
     });
     if matched.is_empty() {
-        answer["note"] =
-            serde_json::json!("Nothing matched. Search again with an empty query for every tool.");
+        answer["note"] = serde_json::json!(crate::copy::NOTHING_MATCHED);
     } else if matched.len() > shown.len() {
-        answer["note"] = serde_json::json!(format!(
-            "{} of {} matches shown. Narrow the query to see the rest: a connector's name is a \
-             word in every one of its tools, so adding it keeps the search to that connection.",
-            shown.len(),
-            matched.len()
-        ));
+        answer["note"] =
+            serde_json::json!(crate::copy::matches_truncated(shown.len(), matched.len()));
+    }
+    if !unavailable.is_empty() {
+        answer["unavailable"] = serde_json::json!(unavailable);
     }
     answer.to_string()
 }
@@ -575,6 +578,7 @@ mod tests {
             path: ConnectionPath::Mcp(id.to_string()),
             tools,
             auth_failure: Default::default(),
+            tool_sync_failure: Default::default(),
             approve: Default::default(),
         }
     }
@@ -1166,7 +1170,7 @@ mod tests {
             llm("github__create_pr", "Open a pull request."),
         ];
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&tools, "", cap())).expect("json");
+            serde_json::from_str(&find_answer(&tools, "", cap(), &[])).expect("json");
         assert_eq!(answer["matched"], 2, "no query is not no match");
         assert_eq!(
             answer["tools"][0]["input"]["type"], "object",
@@ -1178,7 +1182,8 @@ mod tests {
     fn a_search_that_matches_nothing_gives_the_next_move() {
         let tools = [llm("search_issues", "")];
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&tools, "kubernetes helm", cap())).expect("json");
+            serde_json::from_str(&find_answer(&tools, "kubernetes helm", cap(), &[]))
+                .expect("json");
         assert_eq!(answer["matched"], 0);
         assert!(
             answer["note"].as_str().unwrap().contains("empty query"),
@@ -1192,7 +1197,7 @@ mod tests {
             .map(|i| llm(&format!("issue_tool_{i}"), ""))
             .collect();
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&tools, "issue", cap())).expect("json");
+            serde_json::from_str(&find_answer(&tools, "issue", cap(), &[])).expect("json");
         assert_eq!(answer["tools"].as_array().unwrap().len(), cap().get());
         assert_eq!(answer["matched"], 15, "the count is of every match");
         assert!(answer["note"].is_string());
@@ -1202,7 +1207,7 @@ mod tests {
     fn a_match_reads_as_a_tool_definition() {
         let tools = [llm("sentry__search_issues", "Search the issues.")];
         let answer: serde_json::Value =
-            serde_json::from_str(&find_answer(&tools, "issues", cap())).expect("json");
+            serde_json::from_str(&find_answer(&tools, "issues", cap(), &[])).expect("json");
         assert_eq!(answer["tools"][0]["name"], "sentry__search_issues");
         assert_eq!(answer["tools"][0]["input"]["type"], "object");
         assert_eq!(answer["call_with"], CALL_TOOL);
