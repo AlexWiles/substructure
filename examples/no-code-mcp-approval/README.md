@@ -93,7 +93,7 @@ buttons.
 subs chat ops
 ```
 
-````console
+````text
 > delete issue 7
 ? Run `issues__delete_issue`?
 
@@ -109,7 +109,7 @@ subs chat ops
 `↑`/`↓` pick and `Enter` answers. `Run it` runs the call and the turn carries
 on in the same chat:
 
-```console
+```text
 ✔ Run `issues__delete_issue`? · Run it
 ● issues__delete_issue {"id":"7"}
   deleted issue #7
@@ -120,7 +120,7 @@ Done. Issue 7 deleted.
 
 `Decline` dials nothing, and the model reads the decline instead of a result:
 
-```console
+```text
 ✔ Run `issues__delete_issue`? · Decline
 The deletion of issue 7 was declined. …
 ```

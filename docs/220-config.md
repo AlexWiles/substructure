@@ -49,7 +49,7 @@ org = "org_01hx…"
 project = "proj_01hx…"
 ```
 
-## Two roles
+## What a file describes
 
 A file has two roles. It can have one or both.
 
@@ -72,10 +72,10 @@ deploys a separate project.
 | `db` | path | `~/.config/subs/subs.db` | The SQLite file holding events, sessions, and connector credentials. A relative path resolves against the file. |
 | `log` | string | `error` for `run`, `info` for `serve` | A `RUST_LOG` filter. `$RUST_LOG` wins over it. |
 
-Unset, `db` is `~/.config/subs/subs.db`, beside
-`credentials.toml`. Every command on the machine reads that one, whichever
-directory it runs in and whether or not a file is there. Set `db` to give a
-project its own — two files that both set it are two engines.
+Unset, `db` is `~/.config/subs/subs.db`, beside `credentials.toml`. Every
+command on the machine reads that one, whichever directory it runs in and
+whether or not a file is there. Set `db` to give a project its own. Two files
+that both set it are two engines.
 
 ## `[llm.<id>]`
 
@@ -102,6 +102,9 @@ format = "anthropic"
 There is no default block and no fallback. An agent names a block, or its calls
 fail. See [LLMs](./70-llms.md).
 
+A `worker` block takes no `api_key_env`, `base_url`, or `cache_ttl`. The call
+never leaves your worker.
+
 `api_key_env` names a variable on your machine. `subs apply` removes it. A
 deployment refuses a document that carries one.
 
@@ -124,29 +127,65 @@ signing_secret_env = "SUPPORT_SIGNING_SECRET"
 tool = { max_attempts = 3 }
 ```
 
-| Key | Type | Meaning |
-| --- | --- | --- |
-| `llm` | string | The `[llm.<id>]` block. Required when the section sets anything. |
-| `model` | string | The model. Required when the section sets anything. |
-| `system` | string | The system prompt. |
-| `effort` | string | How hard the model thinks: `xhigh`, `high`, `medium`, `low`, `minimal`, or `none`. It sits on the agent because it pairs with the model. |
-| `description` | string | What this agent does, shown to a parent that calls it. |
-| `mcp` | list | Connections. An ID, or a table to take fewer tools, to put them behind a search, to stop before a call, or to go on without one that needs authorizing, or to keep quiet when one cannot be reached: `{ id, tools, approve, auth_failure, tool_sync_failure }`. `tools` sets the filter and `defer`; see [Defer a connection](./40-connectors.md#defer-a-connection). `approve` is `never` (the default), `destructive`, or `always`; see [Approve a call](./40-connectors.md#approve-a-call). `auth_failure` is `interrupt` (the default) or `degrade`; see [Connectors](./40-connectors.md#when-a-credential-stops-working). `tool_sync_failure` is `warn` (the default) or `silent`; see [When a connection does not answer](./40-connectors.md#when-a-connection-does-not-answer). |
-| `defer_tools` | bool or table | Absent by default. Keeps every tool of this agent out of the request, whatever its source. `true` takes the defaults; a table sets them, with `strategy` for which tools find the deferred ones (`search`, the only value today) and `max_matches` for how many a search answers with (`5`). A tool or a connection overrides it with its own `defer`. See [Deferred tools](./65-deferred-tools.md). |
-| `mcp_announce` | string | `auto` by default. Where the engine tells the model that a connection is available: `auto` or `never`. See [Announce a connection](./40-connectors.md#announce-a-connection). |
-| `mcp_auth_failure` | string | `interrupt` by default. The default for every connection this agent reaches, including each plugin's. A connection overrides it with its own `auth_failure`. |
-| `mcp_tool_sync_failure` | string | `warn` by default. The default for every connection this agent reaches, including each plugin's. A connection overrides it with its own `tool_sync_failure`. See [When a connection does not answer](./40-connectors.md#when-a-connection-does-not-answer). |
-| `plugins` | list | Plugins this agent uses. An ID, or a table with the same knobs as an `mcp` entry, applied to the plugin's servers: `{ id, tools, approve, auth_failure, tool_sync_failure }`. See [Plugins](./45-plugins.md). |
-| `sub_agents` | list of IDs | Agents this one can call. |
-| `tools` | list | Browser tools. Each needs `handler = "client"`. |
-| `worker` | url | Where decisions go. Leave it off and the engine decides. |
-| `signing_secret_env` | string | The variable holding the signing secret. For an engine you run. |
-| `retry` | table | Timeouts and attempts, per kind. See [Retries](./210-retries.md). |
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `llm` | string | required with config | The `[llm.<id>]` block. |
+| `model` | string | required with config | The model. |
+| `system` | string | none | The system prompt. |
+| `effort` | string | the provider's own | How hard the model thinks: `xhigh`, `high`, `medium`, `low`, `minimal`, or `none`. |
+| `description` | string | none | What this agent does, shown to a parent that calls it. |
+| `mcp` | list | none | Connections this agent draws tools from. See [`mcp` and `plugins` entries](#mcp-and-plugins-entries). |
+| `plugins` | list | none | Plugins this agent uses. See [`mcp` and `plugins` entries](#mcp-and-plugins-entries). |
+| `defer_tools` | bool or table | absent | Keeps every tool of this agent out of the request, whatever its source. See [Defer every tool](#defer-every-tool). |
+| `mcp_announce` | `auto`, `never` | `auto` | Whether the engine tells the model that a connection is available. See [Tell the model a connection exists](./40-connectors.md#tell-the-model-a-connection-exists). |
+| `mcp_auth_failure` | `interrupt`, `degrade` | `interrupt` | The default for every connection this agent reaches, including each plugin's. A connection overrides it with its own `auth_failure`. |
+| `mcp_tool_sync_failure` | `warn`, `silent` | `warn` | The default for every connection this agent reaches, including each plugin's. A connection overrides it with its own `tool_sync_failure`. |
+| `sub_agents` | list of IDs | none | Agents this one can call. |
+| `tools` | list | none | Browser tools. Each needs `handler = "client"`. |
+| `worker` | url | none | Where decisions go. Leave it off and the engine decides. |
+| `signing_secret_env` | string | none | The variable holding the signing secret. For an engine you run. |
+| `retry` | table | engine defaults | Timeouts and attempts, per kind. See [Retries](./210-retries.md). |
 
-An agent that sets nothing needs a `worker`. An agent that sets anything needs
-`llm` and `model`. See [Agents](./30-agents.md).
+An agent that sets no config needs a `worker`. An agent that sets any config
+needs `llm` and `model`. See [Agents](./30-agents.md).
 
 The tools your worker runs are worker code. They do not go in the file.
+
+### `mcp` and `plugins` entries
+
+Each entry is an ID on its own, or a table. `mcp` takes a connection path such
+as `mcp.sentry` or `plugin.pdf.mcp.renderer`. `plugins` takes a plugin ID.
+
+```toml
+[agent.support]
+mcp = [
+  "mcp.sentry",
+  { id = "mcp.linear", tools = { read_only = true }, approve = "destructive" },
+]
+```
+
+| Key | Values | Default | Meaning |
+| --- | --- | --- | --- |
+| `id` | path or plugin ID | required | Which connection or plugin. |
+| `tools` | table | every tool | The filter, and `defer`. See [Filter the tools](./40-connectors.md#filter-the-tools). |
+| `approve` | `never`, `destructive`, `always` | `never` | Which calls stop and ask a person. See [Ask a person before a call runs](./40-connectors.md#ask-a-person-before-a-call-runs). |
+| `auth_failure` | `interrupt`, `degrade` | `interrupt` | What happens when the credential stops working. See [When a credential stops working](./40-connectors.md#when-a-credential-stops-working). |
+| `tool_sync_failure` | `warn`, `silent` | `warn` | Whether the model is told that a connection could not be reached. See [Connection failures](./40-connectors.md#connection-failures). |
+
+On a `plugins` entry these settings apply to each of the plugin's MCP servers.
+
+### Defer every tool
+
+`defer_tools = true` takes the defaults. A table sets them. The presence of the
+key is the switch, so an agent cannot carry a setting that does nothing. A tool
+or a connection overrides it with its own `defer`.
+
+| Key | Values | Default | Meaning |
+| --- | --- | --- | --- |
+| `strategy` | `search` | `search` | Which tools find the deferred ones. `search` is the only value today. |
+| `max_matches` | number, at least 1 | `5` | How many matches one search answers with. |
+
+See [Deferred tools](./65-deferred-tools.md).
 
 ## `[mcp.<id>]`
 
@@ -169,11 +208,11 @@ prefix_tools = false
 | `header` | string | `Authorization` | Header a static token rides in. Only under `auth = "token"`. |
 | `credential` | string | `"shared"` | Whose credential the connection dials with: `"shared"` for one, `"user"` for one per person. |
 | `scopes` | list | ask the server | The access to ask consent for. The server's own list is its maximum, not its recommendation. |
-| `client_id_env` | string | — | Variable holding the OAuth client, for a server that issues none. Named, never written. |
-| `client_secret_env` | string | — | The secret half. Only alongside `client_id_env`. |
+| `client_id_env` | string | none | Variable holding the OAuth client, for a server that issues none. Named, never written. |
+| `client_secret_env` | string | none | The secret half. Only alongside `client_id_env`. |
 | `prefix_tools` | bool | `true` | Show the model `<id>__<tool>` instead of the connection's own names. |
 
-A `token` written in the file is a parse error. Fill a connection with
+A token written in the file is a parse error. Fill a connection with
 `subs auth <path>`. See [Connectors](./40-connectors.md).
 
 ## `[plugin.<id>]`
@@ -194,23 +233,22 @@ auth = "none"
 | `path` | path | required | The plugin directory. A relative path resolves against the file. |
 | `mcp.<server>` | table | the plugin's own | What this deployment says about one of the plugin's servers. See [`[plugin.<id>.mcp.<server>]`](#pluginidmcpserver). |
 
-The CLI resolves the directory to data — at startup for a local engine, at
-`subs apply` for a deployment — so a session never reads plugin files. A
-plugin's servers join the connection registry as `plugin.<id>.mcp.<server>`
-and authorize like any connection. The model sees their tools under
+The CLI resolves the directory to data, at startup for a local engine and at
+`subs apply` for a deployment, so a session never reads plugin files. A plugin's
+servers join the connection registry as `plugin.<id>.mcp.<server>` and authorize
+like any connection. The model sees their tools under
 `<plugin>_<server>__<tool>`. See [Plugins](./45-plugins.md).
-
 
 ### `[plugin.<id>.mcp.<server>]`
 
 What this deployment says about one server the plugin declares, keyed by its
-name in the plugin's `mcp.json`. Every key overrides the plugin's; one left out
+name in the plugin's `mcp.json`. Every key overrides the plugin's. One left out
 keeps what the plugin shipped.
 
 ```toml
-[plugin.reggu.mcp.code]
+[plugin.pdf.mcp.renderer]
 auth = "token"
-url = "https://reggu-code.staging.example.com/mcp"
+url = "https://pdf.staging.example.com/mcp"
 ```
 
 | Key | Type | Default | Meaning |
@@ -219,12 +257,12 @@ url = "https://reggu-code.staging.example.com/mcp"
 | `auth` | string | ask the server | `"oauth"`, `"token"`, or `"none"`. `mcp.json` has no field for it. |
 | `header` | string | `Authorization` | Header carrying a static token. Only under `auth = "token"`. |
 | `credential` | string | `shared` | `shared` or `user`. |
-| `scopes` | list | — | The access to ask consent for. |
-| `client_id_env` | string | — | Variable holding the OAuth client. Named, never written. |
-| `client_secret_env` | string | — | The secret half. |
+| `scopes` | list | none | The access to ask consent for. |
+| `client_id_env` | string | none | Variable holding the OAuth client. Named, never written. |
+| `client_secret_env` | string | none | The secret half. |
 | `prefix_tools` | bool | `true` | Show the model `<id>__<tool>`. |
 
-Authorize it by its path: `subs auth plugin.reggu.mcp.code`.
+Authorize it by its path: `subs auth plugin.pdf.mcp.renderer`.
 
 ## `[slack]`
 
@@ -261,6 +299,7 @@ Defaults for `subs serve`.
 | `host` | string | `127.0.0.1` | The address to bind. |
 | `port` | number | `8080` | The port. |
 | `auth` | bool | `true` | Client and worker authentication. Set `false` only for a server nothing off this machine can reach. |
+| `public_url` | url | none | The HTTPS address a browser reaches this engine at. Setting it lets the engine mint MCP authorize links and host the callback. See [Self-hosting](./180-self-hosting.md#let-people-authorize-mcp-connections-from-a-link). |
 
 ## `[remote]`
 
@@ -298,7 +337,7 @@ The file names secrets. It never holds them.
 
 `subs apply` strips `api_key_env` and `signing_secret_env` before it sends.
 
-## Next
+## Next steps
 
 - [Agents](./30-agents.md): what an agent section declares.
 - [Plugins](./45-plugins.md): what a `[plugin.<id>]` directory holds.

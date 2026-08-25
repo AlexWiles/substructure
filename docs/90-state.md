@@ -39,25 +39,23 @@ The engine sends the current state on every request. To change it, return a new
 Writing the same value again records no new version. A session with no state
 reads as `null`, so check for it.
 
-## Branches
+## State on a branch
 
 The engine attaches state to the message tree. If you edit an earlier message or
-branch
-the conversation, the engine reads the state as it was at that point.
+branch the conversation, the engine reads the state as it was at that point.
 
 `DecisionRequest.state` is always correct for the active path. See
 [Conversations](./120-conversations.md).
 
-## State and config
+## How state differs from config
 
 Both travel with the decision, and the engine versions them the same way. It
 reads them differently.
 
 The agent config is a typed document that the engine reads to propose model
-calls.
-State is memory the engine stores and returns unchanged.
+calls. State is memory that the engine stores and returns unchanged.
 
-## Spec
+## Reference
 
 ```typescript
 // DecisionRequest
@@ -67,7 +65,7 @@ state: unknown          // your state, stored exactly as it is
 state?: unknown         // omitted or null keeps it. {} clears it
 ```
 
-## Next
+## Next steps
 
 - [Workers](./50-workers.md): where you read and write it.
 - [Conversations](./120-conversations.md): the tree state attaches to.

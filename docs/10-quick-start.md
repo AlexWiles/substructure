@@ -3,11 +3,11 @@ title: Quick start (cloud)
 group: Getting started
 ---
 
-Put an agent in Slack, on the hosted cloud. One file, five commands, no server
-of your own.
+Put an agent in Slack, hosted on substructure.ai. You write one config file and
+run five commands. You do not run a server.
 
-To run the engine on your machine instead, with no account and no deployment,
-start with the [local quick start](./15-quick-start-local.md).
+To run the engine on your own machine, with no account and no deployment, start
+with the [local quick start](./15-quick-start-local.md).
 
 ## Install the CLI
 
@@ -16,16 +16,16 @@ curl -fsSL https://subs.dev/cli.sh | bash
 subs login
 ```
 
-The script verifies the release's checksum and installs to `~/.local/bin`. Set
-`SUBS_INSTALL_DIR` to put it elsewhere, `SUBS_VERSION` to pin a release. With
-npm instead: `npm install -g @substructure.ai/cli`.
+The script verifies the release checksum and installs to `~/.local/bin`. Set
+`SUBS_INSTALL_DIR` to install elsewhere and `SUBS_VERSION` to pin a release. To
+install from npm instead: `npm install -g @substructure.ai/cli`.
 
-`subs login` authenticates in your browser. It stores a token under
+`subs login` authenticates in your browser and stores a token under
 `~/.config/subs`.
 
-## Describe the agent
+## Write the config file
 
-Write `subs.toml` in your project root.
+Create `subs.toml` in your project root.
 
 ```toml title="subs.toml"
 name = "oncall-bot"
@@ -46,8 +46,8 @@ mentions = "oncall"
 url = "https://api.substructure.ai"
 ```
 
-`[llm.openrouter]` says which provider to call. `[agent.oncall]` says who calls
-it. `[slack]` says where the agent answers. `[remote]` says the file describes a
+`[llm.openrouter]` sets which provider to call. `[agent.oncall]` sets who calls
+it. `[slack]` sets where the agent answers. `[remote]` makes the file describe a
 deployment, so every command on this page acts on the cloud. The file holds no
 keys.
 
@@ -60,13 +60,13 @@ subs apply
 Apply creates the project and writes its ID back into the file. Run it again
 after every change to the file.
 
-## Add your LLM key
+## Upload your LLM key
 
 ```sh
 subs auth llm.openrouter
 ```
 
-The command reads the key from stdin. Calls run on your key.
+The command reads the key from stdin. Model calls run on your key.
 
 ## Connect Slack
 
@@ -76,22 +76,23 @@ subs slack connect
 
 This opens Slack's consent page. The token goes to the deployment.
 
-## Talk to it
+## Talk to the agent
 
 Mention the bot in a channel and it answers in the thread. Send it a DM and it
 answers every message.
 
 The thread is the session. Later mentions continue the conversation.
 
-## What you have
+## Check what is left to do
 
-An agent that answers in Slack, hosted. The engine calls the model, saves every
-step, and streams the reply into the thread. Your machine runs nothing. You
-wrote one file and no code.
+```sh
+subs doctor
+```
 
-Run `subs doctor` at any time to see what the project still needs.
+Doctor lists every setup step that nobody has finished, and the command that
+finishes it.
 
-## Next
+## Next steps
 
 Add one thing at a time.
 
@@ -100,4 +101,4 @@ Add one thing at a time.
 - [Workers](./50-workers.md): run your own code at every step of the loop.
 - [Quick start (local)](./15-quick-start-local.md): run the same file on your
   machine.
-- [How it works](./20-how-it-works.md): the words the rest of the docs use.
+- [How it works](./20-how-it-works.md): the terms the rest of the docs use.

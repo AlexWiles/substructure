@@ -49,12 +49,11 @@ the tree by ID. A reconnect records nothing new.
 
 ## Storage
 
-The engine saves to a store that you can replace. The CLI uses SQLite in
-`~/.config/subs/subs.db`, or wherever `db` says.
+The CLI saves to SQLite, in `~/.config/subs/subs.db` or wherever `db` says.
 
 Stop the engine, come back later, and the session continues.
 
-## Next
+## Next steps
 
 - [Retries](./210-retries.md): deadlines and redelivery.
 - [Events](./240-events.md): what the log holds.

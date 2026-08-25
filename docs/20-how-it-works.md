@@ -3,13 +3,13 @@ title: How it works
 group: Getting started
 ---
 
-The words the rest of the docs use.
+This page defines the terms the rest of the docs use.
 
-## The three parts
+## Engine, worker, and client
 
 | Part | What it is |
 | --- | --- |
-| Engine | Runs the agent loop. It calls the model, runs tools, saves every step, and streams events. It is the cloud, or the `subs` binary. |
+| Engine | Runs the agent loop. It calls the model, runs tools, saves every step, and streams events. It is the hosted cloud, or the `subs` binary. |
 | Worker | Your code. It is an HTTP endpoint that answers a decision request. It is optional. |
 | Client | Anything that sends messages and reads events. Slack, a browser, your backend, or the CLI. |
 
@@ -24,10 +24,10 @@ model = "anthropic/claude-sonnet-4-5"
 system = "You are the on-call assistant."
 ```
 
-The section says what the agent is: its model, its prompt, its tools, and the
-other agents it can call. See [Agents](./30-agents.md).
+The section sets the agent's model, its prompt, its tools, and the other agents
+it can call. See [Agents](./30-agents.md).
 
-The `worker` key selects who decides. Set it and the engine sends every decision
+The `worker` key sets who decides. Set it and the engine sends every decision
 for that agent to your code. Leave it off and the engine decides. One project
 can hold both kinds.
 
@@ -41,7 +41,7 @@ responding. A session runs one turn at a time.
 
 ## Decisions
 
-The engine asks what happens next at every step of a turn. That question is a
+At every step of a turn the engine asks what happens next. That question is a
 decision request.
 
 ```jsonc
@@ -108,7 +108,7 @@ The actions in a decision tell the engine what to do.
 | `connector.sync` | Fetch a connection's tools again. |
 | `done` | End the turn. |
 
-## Where things run
+## Where each call runs
 
 | Call | Default | Alternative |
 | --- | --- | --- |
@@ -122,7 +122,7 @@ The engine saves every trigger, decision, and call before it acts. If the engine
 or your worker stops, the run continues from the last saved step. See
 [Durability](./200-durability.md).
 
-## Next
+## Next steps
 
 - [Agents](./30-agents.md): what you can declare.
 - [Workers](./50-workers.md): decide with your own code.

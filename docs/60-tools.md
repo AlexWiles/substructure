@@ -78,28 +78,28 @@ type AgentTool = {
 }
 ```
 
-## Many tools
+## Keep a large tool set out of the request
 
 A model chooses worse as the tool list grows, and worst between tools that look
 alike. Each definition also sits at the front of the request, where the provider
 keeps its cache.
 
 Set `defer` on the tools an agent seldom needs. The request leaves them out, and
-the agent gets `tool_search` and `call_tool` in their place. The
-model searches for a tool and names it to `call_tool`. Your worker receives an
-ordinary `tool.execute`, under the tool's own name.
+the agent gets `tool_search` and `call_tool` in their place. The model searches
+for a tool and names it to `call_tool`. Your worker receives an ordinary
+`tool.execute`, under the tool's own name.
 
 See [Deferred tools](./65-deferred-tools.md).
 
 ## Schemas
 
-The engine checks a tool's schemas in both directions. It only validates. A
-value that passes is exactly the value that came in. The engine converts no
-types and adds no defaults.
+The engine checks a tool's schemas in both directions. It only validates. It
+converts no types and adds no defaults, so the value your worker receives is
+the value that came in.
 
 The engine does not check a tool with no schema.
 
-### input
+### Input validation
 
 Before `tool.execute` reaches your worker, the engine checks the raw `arguments`
 against `input`. It reports the result in `trigger.input`.
@@ -116,7 +116,7 @@ whether to run the tool, correct the arguments, or refuse.
 For `invalid` and `malformed`, the engine puts a `tool.error` in `proposed`. You
 can return it unchanged.
 
-### output
+### Output validation
 
 When a call ends with a result, the engine checks the result against `output`. A
 result that does not match never reaches the model. The call ends with a
@@ -125,7 +125,7 @@ result that does not match never reaches the model. The call ends with a
 The engine reads the result as JSON if it parses, and as a string if it does
 not.
 
-## The two triggers
+## Tool triggers
 
 Your worker answers `tool.execute`. It usually accepts the proposal for
 `tool.finished`.
@@ -168,7 +168,7 @@ other calls are still in flight, `proposed` waits. Return it to continue.
 }
 ```
 
-## The three actions
+## Tool actions
 
 ### `tool.call`
 
@@ -198,7 +198,17 @@ case:
 { "type": "tool.result", "result": { "content": [{ "type": "text", "text": "sunny" }] } }
 ```
 
-A tool that answers with an image or a file sends the bytes inline; the engine
+You can also put the blocks straight on the action as `content`, instead of
+inside `result`. Naming both is an error.
+
+```json
+{ "type": "tool.result", "content": [{ "type": "text", "text": "sunny" }] }
+```
+
+A `result` that is not a `ToolResult` becomes one text block. A string becomes
+its own text, and any other JSON value is stringified.
+
+A tool that answers with an image or a file sends the bytes inline. The engine
 stores them and records a reference, so nothing large enters the log.
 
 ```typescript
@@ -237,7 +247,6 @@ type StoredResult = {
 }
 ```
 
-
 ### `tool.error`
 
 End a call with a failure.
@@ -267,7 +276,7 @@ The model reads `error` as the tool's result. Write it for the model to read.
 | A connector | The engine | `mcp` on the agent |
 | The browser | The client | `tools`, with `handler = "client"` |
 
-## Next
+## Next steps
 
 - [Deferred tools](./65-deferred-tools.md): keep a large tool set out of the request.
 - [Client-side tools](./150-client-tools.md): tools that run in the browser.

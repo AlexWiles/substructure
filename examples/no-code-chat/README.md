@@ -23,7 +23,7 @@ export OPENROUTER_API_KEY=sk-or-...
 subs chat assistant
 ```
 
-```console
+```text
 substructure · assistant · 01a02417-7d46-7441-8090-23b20d0f980f
 
 > what is the capital of Portugal?
@@ -43,7 +43,7 @@ still has the first.
 
 `Ctrl-D` ends the chat and prints the session it held:
 
-```console
+```text
 continue this session with:
   subs chat assistant --session 01a02417-7d46-7441-8090-23b20d0f980f
 ```
@@ -51,7 +51,7 @@ continue this session with:
 The session is in the database, not in the process, so the answer survives the
 exit:
 
-```console
+```text
 > which two cities have we been discussing?
 The two cities we have been discussing are **Lisbon** … and **Madrid** …
 ```

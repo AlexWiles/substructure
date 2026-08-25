@@ -6,7 +6,7 @@ group: Frontends
 AG-UI is a standard event protocol for agent chat UIs. The engine speaks it, so
 frontends like CopilotKit and assistant-ui connect to an agent directly.
 
-## Endpoint
+## Endpoints
 
 Each agent has a run endpoint.
 
@@ -19,7 +19,7 @@ It takes a `RunAgentInput` and returns the AG-UI event stream over SSE.
 A second endpoint, `.../connect`, sends the conversation as one snapshot for a
 client that needs to catch up.
 
-## Input
+## Run input
 
 `RunAgentInput` carries the turn.
 
@@ -78,8 +78,9 @@ ${url}/api/channels/ag-ui/agents/${agentId}/run
 
 Each declares a worker tool and a browser tool, to show both in one UI.
 
-## Next
+## Next steps
 
 - [Client-side tools](./150-client-tools.md): the browser tools AG-UI carries.
 - [Conversations](./120-conversations.md): the thread and tree behind a run.
 - [Interrupts](./100-interrupts.md): how a run resumes one.
+- [REST API](./250-api.md): the request and response shapes.

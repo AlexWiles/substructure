@@ -11,7 +11,7 @@ prompt, swap the model, or pause for a person.
 
 There is no SDK. The engine POSTs JSON and reads JSON back.
 
-## The smallest worker
+## A minimal worker
 
 The engine proposes each step. Return the proposal to accept it.
 
@@ -36,7 +36,7 @@ server.listen(4444);
 
 That is a complete agent. It behaves the same as an agent with no worker.
 
-## Point an agent at it
+## Point an agent at the worker
 
 ```toml title="subs.toml"
 [agent.oncall]
@@ -45,8 +45,8 @@ model = "anthropic/claude-sonnet-4-5"
 worker = "http://localhost:4444"
 ```
 
-`worker` selects who decides. Only the agents that name a worker use one. The
-rest stay with the engine, in the same project and the same file.
+`worker` sets who decides. Only the agents that name a worker use one. The rest
+stay with the engine, in the same project and the same file.
 
 Run the worker in one terminal and a turn in another.
 
@@ -57,7 +57,7 @@ subs run oncall "hi"
 
 See [Local development](./160-local-development.md) for the local loop.
 
-## Change one trigger at a time
+## Handle one trigger at a time
 
 Start from `return proposed` and handle the triggers you care about.
 
@@ -131,9 +131,10 @@ if (!verify(body, req.headers["x-substructure-signature"])) {
 The cloud creates a signing secret for each agent that has a worker. Read it
 with `subs agents secret <id>`. See [Authentication](./190-auth.md).
 
-## Recipes
+## Common patterns
 
-Each of these is a branch inside `decide`.
+Each of these is a branch inside `decide`. `trigger`, `proposed`, `agent`, and
+`state` all come from the decision request.
 
 **Refuse a tool call.**
 
@@ -187,7 +188,7 @@ if (trigger.type === "tool.execute") {
 }
 ```
 
-## One worker, several agents
+## Serve several agents from one worker
 
 Every request carries `agent_id`. Route on it.
 
@@ -195,7 +196,7 @@ Every request carries `agent_id`. Route on it.
 const decide = (req) => (req.agent_id === "poet" ? poet(req) : assistant(req));
 ```
 
-## Next
+## Next steps
 
 - [Tool calls](./60-tools.md): schemas, errors, and where a tool runs.
 - [Agent state](./90-state.md): memory that travels with the session.

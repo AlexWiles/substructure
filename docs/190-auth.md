@@ -44,15 +44,16 @@ Authorization: Bearer <SUBSTRUCTURE_API_KEY>
 ```
 
 `identity.id` is required. It names the person the session runs for, under the
-`app` issuer — the one your application vouches for. You choose the ID and the
+`app` issuer, the one your application vouches for. You choose the ID and the
 engine signs it, so a browser holding the token cannot rename itself.
 
-`identity.visibility` says whether anyone but that person can read the session,
-and it decides whether their own credentials may answer there. Only you know
-what surface the token is for: a chat window is `private`, an agent embedded in
-a shared team inbox is not. It defaults to `shared`, which reaches no personal
-credential, so a mistake is a refusal rather than one user's mailbox answering
-in front of their colleagues.
+`identity.visibility` says whether anyone but that person can read the session.
+It also decides whether their own connector credentials may answer there. Only
+you know what surface the token is for: a chat window is `private`, an agent
+embedded in a shared team inbox is not.
+
+It defaults to `shared`, which reaches no personal credential. A mistake is then
+a refusal, not one user's mailbox answering in front of their colleagues.
 
 The response holds the token and its expiry in Unix seconds.
 
@@ -82,7 +83,7 @@ type Subject = {
     id: string
 }
 type WorkerIdentity = {
-    /** Absent ⇒ nobody is behind this session: a schedule, a key, the engine. */
+    /** Absent when nobody is behind this session: a schedule, a key, the engine. */
     subject?: Subject
     /** Whether anyone else can read the conversation. */
     visibility: "shared" | "private"
@@ -93,9 +94,8 @@ type WorkerIdentity = {
 The engine sets this once and vouches for it. Read it without verifying it. It
 is who the session is for, not the caller of this request.
 
-The issuer is half the name. An ID is only unique within the source that minted
-it, so your application's `bob` and a workspace's `bob` are two people, and
-comparing IDs alone would conflate them.
+Always read the issuer with the ID. An ID is only unique within the source that
+minted it, so your application's `bob` and a workspace's `bob` are two people.
 
 ## Patterns
 
@@ -158,7 +158,7 @@ opened.
 - To resume an interrupt, a caller needs at least the privilege of the caller
   that raised it.
 
-## Next
+## Next steps
 
 - [Cloud](./170-cloud.md): API keys and signing secrets for a hosted project.
 - [Self-hosting](./180-self-hosting.md): setting these up yourself.

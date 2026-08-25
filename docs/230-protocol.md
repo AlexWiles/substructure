@@ -16,9 +16,9 @@ The machine-readable source is
 ## Field naming
 
 Fields that the engine defines are `snake_case`. A payload borrowed whole from
-another spec keeps that spec's spelling — MCP's content blocks stay
-`mimeType`, and AG-UI's interrupt payload stays `expiresAt` — so a worker can
-forward one without renaming its fields.
+another spec keeps that spec's spelling, so a worker can forward one without
+renaming its fields. MCP's content blocks stay `mimeType`, and AG-UI's interrupt
+payload stays `expiresAt`.
 
 ## A decision request
 
@@ -310,7 +310,10 @@ type Action =
           type: "tool.result"
           id?: string             // id and attempt default to those of the
           attempt?: number        // tool.execute you answer
-          result: ToolResult
+          result?: unknown        // a ToolResult, or any value, which becomes one
+          content?: ToolContent[] // the blocks, instead of result. never both
+          structured_content?: unknown
+          is_error?: boolean
       }
     | {
           type: "tool.error"
@@ -352,7 +355,7 @@ type Action =
           payload?: unknown
       }
     | { type: "interrupt.resolve"; interrupt_id: string; payload?: unknown }
-    | { type: "connector.sync"; id: string }
+    | { type: "connector.sync"; path: string }   // "mcp.<id>" or "plugin.<id>.mcp.<server>"
     | { type: "done"; data?: unknown }
 ```
 
@@ -362,11 +365,10 @@ over the current conversation.
 `llm.call` takes an `llm` to send one call to another block. The config stays as
 it is. See [LLMs](./70-llms.md).
 
-`connector.sync` names a connection that the config in force already names. Use
-it after a person corrects a credential: the fetch runs again with a full retry
-budget, and the tools that it returns replace the ones that the session held.
-The engine delivers a decision that waits on the connection after the fetch
-settles. See
+`connector.sync` names a connection that the current config already names. Use
+it after a person corrects a credential. The fetch runs again with a full retry
+budget, and the tools that it returns replace the ones the session held. The
+engine then delivers the decision that was waiting on that connection. See
 [Connectors](./40-connectors.md#when-a-credential-stops-working).
 
 ## Errors
@@ -426,7 +428,8 @@ type SubAgent = {
 }
 
 type McpServer = {
-    id: string                  // a connection the engine holds. never a URL
+    path: string                // where the connection is declared: "mcp.<id>" or
+                                //   "plugin.<id>.mcp.<server>". never a URL
     tools?: McpTools            // omitted: every tool the connection offers
     auth_failure?: "interrupt" | "degrade"          // one that needs authorizing. omitted: "interrupt"
     tool_sync_failure?: "warn" | "silent"           // one the engine cannot fetch. omitted: "warn"
@@ -443,10 +446,10 @@ type McpTools = {
 }
 
 type AgentPlugin = {
-    id: string                  // a plugin the engine holds. never a path
+    id: string                  // a plugin the engine holds. never a directory path
     description?: string
-    servers?: string[]          // connection ids of this plugin's servers
-    skills?: unknown[]          // the skills the entry lists to the model
+    servers?: string[]          // connection paths of this plugin's servers
+    skills?: { name: string; description?: string }[]   // listed to the model
     tools?: McpTools            // applied to each of the plugin's servers
     approve?: "never" | "destructive" | "always"
     auth_failure?: "interrupt" | "degrade"
@@ -569,9 +572,8 @@ type LlmResponse = {
     images?: { url: string }[]
 }
 
-// What one call read and wrote. Every provider means these the same way: the
-// adapter normalizes the vendor's own counts, so the totals of a session that
-// changes model, and of a tree whose agents name different blocks, add up.
+// What one call read and wrote. Each adapter normalizes the vendor's own
+// counts into these fields, so totals add up across models and providers.
 type Usage = {
     input: number           // every input token, cached or not
     output: number
@@ -703,7 +705,7 @@ type StreamDelta = {
 }
 ```
 
-## Next
+## Next steps
 
 - [Workers](./50-workers.md): the code that answers these.
 - [Config](./220-config.md): the same types, declared in the file.

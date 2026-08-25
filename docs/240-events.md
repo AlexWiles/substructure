@@ -146,7 +146,7 @@ Engine bookkeeping. Useful for monitoring.
 The AG-UI endpoints send AG-UI protocol events instead of these. See
 [AG-UI](./140-ag-ui.md).
 
-## Next
+## Next steps
 
 - [REST API](./250-api.md): the endpoints that serve these streams.
 - [Durability](./200-durability.md): why the log is the source of truth.

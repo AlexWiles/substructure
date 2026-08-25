@@ -14,10 +14,9 @@ The block's `type` says who makes the call.
 | `openrouter` | The engine, against OpenRouter. | yes |
 | `worker` | Your worker. | no |
 
-The file is the only place that declares this. Nothing on the wire can change
-it.
+The file is the only place that sets this. Nothing on the wire can change it.
 
-## Bring your own key
+## Let the engine call the provider
 
 The engine calls the vendor for you.
 
@@ -31,9 +30,9 @@ model = "claude-sonnet-4-5"
 ```
 
 There is no default block and no fallback. An agent names a block, or its calls
-fail with an error that lists the blocks that the file declares.
+fail with an error that lists the blocks the file declares.
 
-## Call the model yourself
+## Call the model from your worker
 
 Set `type = "worker"` and the engine holds no key. Your worker answers an
 `llm.execute` trigger.
@@ -85,7 +84,7 @@ serve({ fetch: app.fetch, port: 4444 });
 An agent that uses a `worker` block must have a `worker` URL. The file fails to
 parse without one.
 
-## Wire format
+## Set the wire format
 
 `format` sets the shape of the `llm.execute` your worker answers. It applies
 only to `type = "worker"`.
@@ -101,7 +100,7 @@ provider's own response.
 
 A call that the engine makes always uses the engine's own shapes.
 
-## Streaming
+## Stream a worker call
 
 When `trigger.stream` is set, answer with `text/event-stream`. Send one
 `llm.token.delta` per chunk, then one `decision.result` frame holding the
@@ -109,9 +108,9 @@ When `trigger.stream` is set, answer with `text/event-stream`. Send one
 
 Each delta is a `StreamDelta`, or a provider stream event when `format` is set.
 
-The request does not carry the stream flag. Read `trigger.stream`.
+The request body does not carry the stream flag. Read `trigger.stream`.
 
-## One call on another block
+## Send one call to another block
 
 Name a block on the `llm.call` action. The config stays as it is.
 
@@ -119,7 +118,7 @@ Name a block on the `llm.call` action. The config stays as it is.
 { type: "llm.call", llm: "cheap" }   // this call only
 ```
 
-## The loop
+## Finish a call
 
 `llm.execute` runs one call.
 
@@ -127,7 +126,7 @@ When any call ends, on the worker or on the engine, the engine sends
 `llm.finished`. Its `proposed` records the assistant message, then starts the
 tool calls or ends the turn. Return `proposed`.
 
-## Where the key lives
+## Where the key is stored
 
 The block's `type` decides who holds the key.
 
@@ -158,7 +157,20 @@ one.
 **A `worker` block needs no key on either side.** Your worker calls the provider
 with a key from its own environment.
 
-## Spec
+## Turn on prompt caching
+
+Every engine-run call asks the vendor to cache the prompt: the tools, the system
+prompt, and the transcript as it grows. A turn that hits the cache pays a
+fraction of the input price, and the engine keeps the front of the prompt
+unchanged so the cache keeps hitting.
+
+A cached prefix lives about five minutes by default, and each hit resets the
+clock. A session that turns faster than that never needs `cache_ttl`. Set it
+when a session waits on a person or a slow job between turns and the vendor
+would otherwise read the prompt again in full. The longer life costs more to
+write, and pays for itself from about the third turn that reads it.
+
+## Reference
 
 ```toml
 [llm.<id>]
@@ -170,18 +182,8 @@ cache_ttl = "5m" | "1h"            # `anthropic`, `openrouter`
 cache_ttl = "in_memory" | "24h"    # `openai`
 ```
 
-## Prompt caching
-
-Every engine-run call asks the vendor to cache the prompt: the tools, the system
-prompt, and the transcript as it grows. A turn that hits the cache pays a
-fraction of the input price, and the engine keeps the front of the prompt
-unchanged so the cache keeps hitting.
-
-A cached prefix lives about five minutes by default, and each hit resets the
-clock. A session that turns faster than that never needs `cache_ttl`. Set it
-when a session waits on a person or a slow job between turns, and the vendor
-would otherwise read the prompt again in full: the longer life costs more to
-write, and pays for itself from about the third turn that reads it.
+A `worker` block takes no `api_key_env`, `base_url`, or `cache_ttl`. The call
+never leaves your worker, so there is nothing for the engine to set.
 
 ```typescript
 type LlmExecute = {
@@ -201,7 +203,7 @@ type LlmError = { type: "llm.error"; id?: string; attempt?: number; error: strin
 For `LlmRequest`, `LlmResponse`, and `StreamDelta`, see
 [Protocol](./230-protocol.md).
 
-## Next
+## Next steps
 
 - [Tool calls](./60-tools.md): the same trigger and answer loop.
 - [Retries](./210-retries.md): the `retry` policy and `llm.error`.

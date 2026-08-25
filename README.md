@@ -1,188 +1,230 @@
 # substructure.ai
 [substructure.ai](https://substructure.ai)
 
-> Pre-1.0: APIs and the wire protocol might change between releases.
+> Pre-1.0: APIs and the wire protocol can change between releases.
 
-Subs is an agent harness for the cloud.
+`subs` is an agent harness for the cloud.
 
-It runs an unprivileged agent loop with no system access. It uses MCP servers for tools. It can run locally or as a client and server.
+It runs an unprivileged agent loop with no system access. It uses MCP servers
+for tools. It runs locally or as a client and a server.
 
-Declare your agents in a config file. If you need full customization, point
-the agent at an HTTP endpoint and implement a webhook that drives the agent loop.
+Declare your agents in a config file. To customize the loop, point an agent at
+an HTTP endpoint and answer a webhook.
 
-Subs handles durability, retries, timeouts, MCP connection management, session state, session branching, AG-UI, Slack connections, LLM calls, Sub agents, interrupts and more.
+`subs` handles durability, retries, timeouts, MCP connection management, session state, session branching, AG-UI, Slack connection, LLM calls, sub-agents, interrupts and more.
 
-Need a quick way to turn a sanbox into and MCP server? Check out [mcpd](https://github.com/substructureai/mcpd).
+
+To turn a sandbox into an MCP server, see
+[mcpd](https://github.com/substructureai/mcpd).
 
 # Get started
 
-## Intall the engine
+## Install the CLI
 
 ```sh
 curl -fsSL https://subs.dev/cli.sh | bash
 ```
 
-## Run a local agent
+The CLI is also the engine.
 
-Create a `subs.toml`
+## Run an agent on your machine
 
-```toml
+Create a `subs.toml`.
+
+```toml title="subs.toml"
 name = "example"
 
 [llm.openrouter]
 type = "openrouter"
 
-[agent.buddy]
+[agent.teammate]
 llm = "openrouter"
 model = "deepseek/deepseek-v4-flash-0731"
-system = "You are the a helpful buddy."
+system = "You are a helpful teammate."
 ```
+
+Set your provider key and talk to the agent.
 
 ```sh
-subs chat buddy -c subs.toml
+export OPENROUTER_API_KEY=sk-or-...
+subs chat teammate -c subs.toml
 ```
 
-## Use server/client mode
+## Run the engine as a server
 
-Add this to `subs.toml`
+Add a `[serve]` section and a `[remote]` that points at it.
 
-```toml
-# server config
+```toml title="subs.toml"
 [serve]
 port = 9999
 auth = false
 
-# remote client config
 [remote]
 url = "http://localhost:9999"
 ```
 
-Start the server
+Start the server.
 
 ```sh
 subs serve -c subs.toml
 ```
 
-In another terminal:
+In another terminal, the same chat command now talks to it.
 
 ```sh
-subs chat buddy -c subs.toml
+subs chat teammate -c subs.toml
 ```
 
-## Put an agent in Slack using hosted substructure
+## Run the agent on substructure.ai
 
-```toml
-name = "example"
+Point `[remote]` at the hosted engine instead of your own.
 
-[llm.openrouter]
-type = "openrouter"
-
-[agent.buddy]
-llm = "openrouter"
-model = "deepseek/deepseek-v4-flash-0731"
-system = "You are the a helpful buddy."
-
-[slack]
-dm = "buddy"
-
+```toml title="subs.toml"
 [remote]
 url = "https://api.substructure.ai"
 ```
 
+Create the project from the file, then upload your LLM key.
+
 ```sh
 subs apply
 subs auth llm.openrouter
+```
+
+The same chat command now runs the turn on the hosted engine.
+
+```sh
+subs chat teammate -c subs.toml
+```
+
+## Put the agent in Slack
+
+Say which agent takes a DM and which one answers a mention.
+
+```toml title="subs.toml"
+[slack]
+dm = "teammate"
+mentions = "teammate"
+```
+
+Apply the file again, then connect your workspace.
+
+```sh
+subs apply
 subs slack connect
 ```
 
-Mention the bot in a channel and it answers in the thread. You wrote one file
-and no code.
+Mention the bot in a channel and it answers in the thread.
 
-Full walkthrough in the [quick start](./docs/10-quick-start.md).
+## Connect the agent to an MCP server
 
-## Control the loop with your own code
+Declare the server and give it to an agent. Every user of the agent shares one
+credential.
 
-Add a `worker` to any agent. The engine then asks your endpoint before each step
-of a turn.
+```toml title="subs.toml"
+[mcp.sentry]
+url = "https://mcp.sentry.dev/mcp"
 
-```toml
-[agent.oncall]
+[agent.teammate]
 llm = "openrouter"
-model = "anthropic/claude-sonnet-4-5"
-worker = "http://localhost:4444"
+model = "deepseek/deepseek-v4-flash-0731"
+system = "You are a helpful teammate."
+mcp = ["mcp.sentry"]
 ```
 
-The engine proposes each step. Return the proposal to accept it. Change the ones
-you care about.
+Authorize the connection.
 
-```javascript
-// A complete worker, on Node's built-in http server. No dependencies.
-import { createServer } from "node:http";
+```sh
+subs auth mcp.sentry
+```
 
-function decide({ trigger, proposed }) {
-    // Run the tool when the model calls it.
-    if (trigger.type === "tool.execute" && trigger.name === "get_time") {
+## Give each user their own MCP connection
+
+Set `credential = "user"` and each user connects their own account. A
+user-scoped connection works only in a one-on-one chat between the agent and
+that user.
+
+```toml title="subs.toml"
+[mcp.linear]
+url = "https://mcp.linear.app/mcp"
+credential = "user"
+
+[agent.personal]
+llm = "openrouter"
+model = "deepseek/deepseek-v4-flash-0731"
+system = "Help me with my Linear issues."
+mcp = ["mcp.linear"]
+
+[slack]
+dm = "personal"
+mentions = "teammate"
+```
+
+## Control the agent loop with a webhook
+
+Point an agent at a URL and the engine sends every decision for that agent to
+your code. This gives you full control of the loop, including how the agent
+behaves in Slack.
+
+```toml title="subs.toml"
+[agent.teammate]
+llm = "openrouter"
+model = "deepseek/deepseek-v4-flash-0731"
+system = "You are a helpful teammate."
+mcp = ["mcp.sentry"]
+worker = "https://example.com/agent"
+```
+
+Your endpoint reads the engine's proposal and returns it, changing only the
+steps you care about. There is no SDK to install.
+
+```typescript title="server.ts"
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+import type { DecisionRequest, DecisionResponse } from "./protocol.ts";
+
+function decide({ trigger, proposed }: DecisionRequest): DecisionResponse {
+    if (trigger.type === "session.start") {
+        return {
+            agent: {
+                ...proposed.agent,
+                tools: [{ name: "current_time", description: "Get the current time" }]
+            }
+        };
+    }
+
+    // Run our tool when the model calls it.
+    if (trigger.type === "tool.execute" && trigger.name === "current_time") {
         return { actions: [{ type: "tool.result", result: new Date().toISOString() }] };
     }
 
+    // Accept the engine's proposal for everything else.
     return proposed;
 }
 
-const server = createServer((req, res) => {
-    let body = "";
-    req.on("data", (chunk) => (body += chunk));
-    req.on("end", () => {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(decide(JSON.parse(body))));
-    });
-});
+const app = new Hono();
+app.post("/", async (c) => c.json(decide(await c.req.json())));
 
-server.listen(4444);
+serve({ fetch: app.fetch, port: 4444 });
 ```
 
 Only the agents that name a worker use one. The rest stay with the engine, in
 the same project and the same file.
 
-Docs: [Workers](./docs/50-workers.md)
-
-## Develop locally
-
-Run the engine on your machine and iterate before you deploy. A file with no
-`[remote]` runs the turn here, on your own key.
-
-```sh
-export OPENROUTER_API_KEY=sk-or-...
-subs run oncall "what is broken?"
-```
-
-The reply streams to your terminal. `subs serve` runs the same engine as an HTTP
-server, with the AG-UI and REST endpoints a frontend needs.
-
-Slack, MCP connections, and workers all work locally.
-
-Docs: [Local development](./docs/160-local-development.md)
-
-## Why use it
-
-- **In an existing codebase.** Your agent is an HTTP endpoint. Tools are
-  functions you already have, with your database and your permissions.
-- **In a new project.** The engine handles sessions, history, streaming, and the
-  client API. You write the agent and its tools.
-- **Long-running work.** A tool can be a background job. A request for approval
-  can wait for days.
-- **Durability.** Every step is saved before it runs. A deploy, a crash, or a
-  reconnect loses nothing.
+Full walkthrough in the [quick start](./docs/10-quick-start.md). Docs:
+[Workers](./docs/50-workers.md), [Connectors](./docs/40-connectors.md),
+[Slack](./docs/130-slack.md), [Local development](./docs/160-local-development.md)
 
 ## Features
 
-### Talk to your agents in Slack
+### Slack
 
 Mention the bot or DM it. The thread is the session. Route different channels to
 different agents.
 
 Docs: [Slack](./docs/130-slack.md)
 
-### Talk to them in your terminal
+### Terminal chat
 
 `subs chat` holds one session open, streams the reply as it is written, and
 turns an approval prompt into a picker. The session is the same kind a Slack
@@ -192,7 +234,7 @@ Docs: [Chat](./docs/135-chat.md)
 
 Examples: [no-code-chat](./examples/no-code-chat)
 
-### Write only the logic you care about
+### Custom decisions
 
 At each step the engine tells your code what it plans to do next. Accept the
 plan or do something else. A working agent is a few lines.
@@ -258,7 +300,7 @@ own schedule, and report the result later.
 
 Docs: [Async tools](./docs/110-async-tools.md)
 
-### Full chat support
+### Chat history, editing, and branching
 
 History, editing, regeneration, and branching belong to the engine. A user can
 edit an earlier message and go a new direction. The original branch stays.
@@ -267,7 +309,7 @@ Docs: [Conversations](./docs/120-conversations.md)
 
 Examples: [Node](./examples/node-hono-plan-mode), [Python](./examples/python-fast-api-plan-mode)
 
-### Works with existing chat UIs
+### Existing chat UIs
 
 The engine streams AG-UI events, so assistant-ui and CopilotKit connect to it
 directly.
@@ -318,13 +360,13 @@ applying it after a restart.
 
 Docs: [Retries and timeouts](./docs/210-retries.md)
 
-### Host it yourself
+### Self-hosting
 
 Run the engine on your own servers and hold every credential.
 
 Docs: [Self-hosting](./docs/180-self-hosting.md)
 
-## The parts
+## Parts of the system
 
 - **Engine.** Runs the agent loop, in Rust. It calls the model, runs tools,
   saves each step, retries failures, streams events, and supervises sub-agents.
@@ -343,8 +385,9 @@ Docs: [Self-hosting](./docs/180-self-hosting.md)
 curl -fsSL https://subs.dev/cli.sh | bash
 ```
 
-Verifies the release checksum and installs to `~/.local/bin`
-(`SUBS_INSTALL_DIR` to move it, `SUBS_VERSION` to pin a tag). Or from npm:
+The script verifies the release checksum and installs to `~/.local/bin`. Set
+`SUBS_INSTALL_DIR` to install elsewhere and `SUBS_VERSION` to pin a release. Or
+install from npm:
 
 ```sh
 npm i -g @substructure.ai/cli

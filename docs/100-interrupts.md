@@ -28,8 +28,8 @@ function decide({ trigger, proposed }) {
 }
 ```
 
-The engine raises one itself when a connection says to: see
-[Approve a call](./40-connectors.md#approve-a-call).
+The engine raises an interrupt itself when a connection says to. See
+[Ask a person before a call runs](./40-connectors.md#ask-a-person-before-a-call-runs).
 
 A person resumes it by ID.
 
@@ -43,7 +43,7 @@ In Slack, an interrupt with a `message` in its payload posts buttons. See
 ## Pause a branch
 
 Return an `interrupt` action. `reason` is required. `payload` carries whatever
-the person needs to see. If you omit an `interrupt_id`, the engine creates one.
+the person needs to see. If you omit `interrupt_id`, the engine creates one.
 
 An interrupt attaches to the conversation head where the worker raised it. It
 pauses that branch. Several interrupts can be open at once, on the same branch
@@ -64,7 +64,7 @@ If that interrupt paused the active branch, the worker receives an
 `interrupt.resumed` trigger with the resume payload. Clearing an interrupt on a
 branch nobody uses sends nothing. An old or repeated ID does nothing.
 
-## While paused
+## What happens while paused
 
 The engine refuses new messages on the paused branch. It still records work that
 ends an open call, and holds the next decision until the resume.
@@ -83,9 +83,9 @@ open on the branch that the client left.
 
 ## Answer a prompt
 
-A payload with `metadata.options` renders as a choice — Slack buttons, for
-example. A channel answers on the person's behalf, and the resume that it sends
-says which option the person picked.
+A payload with `metadata.options` renders as a choice, such as Slack buttons. A
+channel answers on the person's behalf, and the resume that it sends says which
+option the person picked.
 
 ```json
 { "status": "resolved",
@@ -94,18 +94,18 @@ says which option the person picked.
 ```
 
 The inner `payload` is the chosen option's `value`, read from the recorded
-interrupt — so a click cannot send a value that the interrupt did not offer. The
-channel stamps the `responder`, and the requester never does: it names who
-answered, and carries the option's `label` and `style`, which are gone after
-the interrupt resolves.
+interrupt, so a click cannot send a value that the interrupt did not offer. The
+channel stamps the `responder`, and the requester never does. It names who
+answered, and carries the option's `label` and `style`, which the engine drops
+once the interrupt resolves.
 
-Answering is a decision like any other. The engine proposes the resolution
-shown here, so a worker that returns `proposed` needs no code for it; one that
-wants its own rules — who may answer, or a refusal — answers the decision
+Answering is a decision like any other. The engine proposes the resolution shown
+here, so a worker that returns `proposed` needs no code for it. A worker that
+wants its own rules, such as who may answer or a refusal, answers the decision
 itself. A channel can deliver the same click twice, so record the ones you have
 handled in worker state.
 
-## Spec
+## Reference
 
 ```typescript
 // action
@@ -121,9 +121,9 @@ handled in worker state.
 { type: "interrupt.resume", interrupt_id: string, payload?: unknown }
 ```
 
-## Next
+## Next steps
 
-- [Connectors](./40-connectors.md#approve-a-call): stop before a destructive MCP call.
+- [Connectors](./40-connectors.md#ask-a-person-before-a-call-runs): stop before a destructive MCP call.
 - [Slack](./130-slack.md#interrupt-prompts): approval buttons in a thread.
 - [Chat](./135-chat.md#interrupt-prompts): the same options, as a picker in your terminal.
 - [Async tools](./110-async-tools.md): wait on one call instead of the session.

@@ -24,13 +24,13 @@ It stops when the attempts run out or when a failure cannot be retried.
 A worker tool has timeouts, and the engine never repeats it. The engine cannot
 know whether your tool is safe to run twice. You decide when to retry.
 
-A client tool has no limit, because an async call can wait for a person. See
+A client tool has no limit, because a call can wait for a person. See
 [Async tools](./110-async-tools.md).
 
 The engine does retry a sub-agent start. A second attempt cannot create a second
 child.
 
-## Three timeouts
+## The three timeouts
 
 ```typescript
 type RetryPolicy = {
@@ -47,24 +47,17 @@ An attempt waits for an executor, and then it runs. Those are separate spans and
 each has its own bound.
 
 `queue_timeout_secs` limits the wait. Work the engine runs itself is queued per
-session, so calls the model asked for in one response start together and share
-the executor. A call that waits longer than this is dropped rather than started,
-because it is stale by the time an executor reaches it.
+session, so the calls the model asked for in one response start together and
+share the executor. A call that waits longer than this is dropped rather than
+started, because it is stale by the time an executor reaches it.
+
+A queue bound of `none` means the kind has no engine queue, so there is no wait
+to bound. A worker or client tool is handed straight to its owner.
 
 `run_timeout_secs` limits the work, measured from the moment an executor starts
 it. When it lapses the work is cancelled. The engine sends it on the
 `tool.execute` and `llm.execute` triggers as `deadline`. It restarts with each
 attempt.
-
-A queue bound of `none` means the kind has no engine queue, so there is no wait
-to bound. A worker or client tool is handed to its owner, and a decision rides
-the worker queue under its own gates.
-
-A model can ask for more calls at once than an executor runs at once. The
-surplus waits, and it waits behind calls that may each take the whole run. So
-for the kinds that arrive in batches the queue bound is never less than the run
-bound, and the tail of a wide batch waits out a full wave instead of expiring
-behind it.
 
 `total_timeout_secs` limits the whole effect, from the first attempt. It covers
 every attempt and every wait between them. A retry does not restart this clock.
@@ -75,8 +68,8 @@ timeout ends a parent whose child stopped answering.
 
 ## Overrides
 
-Set an override per kind on the agent config. Write it in `subs.toml`,
-or in the `agent` your worker returns.
+Set an override per kind on the agent config. Write it in `subs.toml`, or in the
+`agent` your worker returns.
 
 ```toml
 [agent.assistant.retry]
@@ -95,6 +88,9 @@ default = { max_attempts = 3, backoff_max_secs = 30 }
 tool    = { max_attempts = 1 }
 connector = { run_timeout_secs = 10 }
 ```
+
+`tool` covers every tool call: worker, client, and connector. `connector` covers
+the fetch that reads a connection's tool list, not the calls to those tools.
 
 One action can carry its own `retry`. The engine applies it last.
 
@@ -146,14 +142,14 @@ timeout is not.
 
 `code` describes a failure. `retryable` decides whether the engine tries again.
 The engine sets `deadline_exceeded` on every timeout, and the message says which
-bound lapsed: `deadline exceeded while queued` never ran, `deadline exceeded
+bound lapsed. `deadline exceeded while queued` never ran. `deadline exceeded
 while running` ran too long.
 
 ```typescript
 type ErrorCode = "provider_error" | "rate_limited" | "refused" | "budget_exceeded" | "deadline_exceeded"
 ```
 
-## Next
+## Next steps
 
 - [Tool calls](./60-tools.md): the `tool.error` a retry acts on.
 - [Async tools](./110-async-tools.md): put a limit on a long wait.

@@ -9,7 +9,7 @@ a chat backend.
 To edit, regenerate, or branch, a client sends its view of the conversation
 again. The engine merges that view into the tree.
 
-## The tree
+## The message tree
 
 Each message is a node with a parent. The head is the active leaf. The path from
 the head to the root is the conversation that the model sees.
@@ -19,16 +19,17 @@ A decision request holds that path as `messages` and the whole tree as
 
 ## Submit input
 
-A client sends input in two ways.
+A client sends input in one of three ways.
 
 | Input | Effect |
 | --- | --- |
-| `client.message` | Adds one message to the active path. |
+| `client.message` | Adds one message at the head. |
+| `client.append` | Adds several messages at the head. It never branches. Use it to sync an outside conversation. |
 | `client.messages` | Sends the full conversation view. The engine merges edits and branches into the tree. |
 
-The engine matches the view against the tree by message `id`. Known IDs at the
-start match existing nodes. The first message that is new or has no ID starts a
-branch. `new_from` on the trigger gives its index.
+The engine matches a `client.messages` view against the tree by message `id`.
+Known IDs at the start match existing nodes. The first message that is new or
+has no ID starts a branch. `new_from` on the trigger gives its index.
 
 ## Edit and branch
 
@@ -50,7 +51,7 @@ node and emits `head.moved`. The next reply branches there, and the engine
 cancels work in flight on the branch that you left. This is how a client changes
 branches.
 
-## Example
+## Example: edit an earlier message
 
 An active path of `u1 → a1 → u2`. The client edits back to the first question.
 
@@ -76,11 +77,12 @@ refused with `409` and names the turn.
 Send `queue: true` to wait instead. The engine holds the message and starts it
 when the running turn completes. A queued message sees the reply it waited for,
 so it reads as a follow-up question. Queued turns run in the order they arrived.
+Only `client.message` and `client.append` take the flag.
 
 To redirect an agent that is working, [interrupt](./100-interrupts.md) it first,
 then submit.
 
-## Next
+## Next steps
 
 - [Agent state](./90-state.md): the engine reads state along the active path.
 - [AG-UI](./140-ag-ui.md): do this from a browser chat UI.

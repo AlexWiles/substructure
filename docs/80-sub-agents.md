@@ -10,7 +10,7 @@ goes back to the parent as the tool's result.
 
 ## Example
 
-Two agents are two sections. The parent names the child. The child can use a
+Each agent is its own section. The parent names the child. The child can use a
 cheaper model.
 
 ```toml title="subs.toml"
@@ -52,20 +52,19 @@ const decide = (req) => (req.agent_id === "poet" ? poet(req) : assistant(req));
 
 ## Declare a sub-agent
 
-`sub_agents` lists by ID the agents this agent can call. The model sees each
-one as a tool with that ID as its name. The tool takes one `message` argument.
+`sub_agents` lists by ID the agents this agent can call. The model sees each one
+as a tool with that ID as its name. The tool takes one `message` argument.
 
-IDs and tool names share one namespace. An ID must not match a tool name.
+Agent IDs and tool names share one namespace. An ID must not match a tool name.
 
-The tool's description comes from the `description` on the section that it
-names. Two
-parents that call the same child describe it the same way.
+The tool's description comes from the `description` on the section it names, so
+two parents that call the same child describe it the same way.
 
 An agent that exists only to be called can carry only a `description` and a
 `worker`.
 
 A worker can also write the description. The expanded `sub_agents` arrive in the
-`session.start` proposal. So `description` is required only for an agent with no
+`session.start` proposal, so `description` is required only for an agent with no
 worker.
 
 ## Call a sub-agent
@@ -76,14 +75,14 @@ the child's first message, taken from the `message` argument.
 The child runs as a normal session with its own `agent_id`, transcript, and
 cost. Its decision requests carry an `ancestry` list of the sessions above it.
 
-## Complete a call
+## When the child finishes
 
 When the child's turn ends, the parent receives a `sub_agent.finished` trigger.
 
 `proposed` records the result as the tool's result and prompts the parent again.
 The engine adds the child's cost and token use to the parent's turn.
 
-## Spec
+## Reference
 
 ```typescript
 type SubAgent = { id: string; description?: string }
@@ -98,7 +97,7 @@ type SubAgent = { id: string; description?: string }
 
 On `sub_agent.finished`, `id` is the tool call and `session_id` is the child.
 
-## Next
+## Next steps
 
 - [Tool calls](./60-tools.md): the child's result comes back as a tool result.
 - [Agents](./30-agents.md): the section a child agent declares.

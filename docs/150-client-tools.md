@@ -86,10 +86,9 @@ Each of these tools gets `handler: "client"`.
 
 The engine only adds tools. It ignores a name that a worker tool or a sub-agent
 already uses. Use this for browser features that the worker does not know about.
-See
-[AG-UI](./140-ag-ui.md).
+See [AG-UI](./140-ag-ui.md).
 
-## Next
+## Next steps
 
 - [Tool calls](./60-tools.md): worker tools, schemas, and errors.
 - [AG-UI](./140-ag-ui.md): the browser protocol that carries these.

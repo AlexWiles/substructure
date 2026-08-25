@@ -8,7 +8,7 @@ every message.
 
 The thread is the session. Later mentions continue the conversation.
 
-## Set it up
+## Set up the bot
 
 Setting up takes two steps: say who answers, then connect the workspace.
 
@@ -36,7 +36,7 @@ the token.
 An engine you run needs a Slack app you own. See
 [Self-hosting](./180-self-hosting.md#slack).
 
-## Where the bot answers
+## Route channels to agents
 
 ```toml title="subs.toml"
 [slack]
@@ -127,18 +127,17 @@ Put the routing hint in the interrupt's `reason`: `tool_call`,
 ### What a click does
 
 A click answers the question. The prompt then loses its buttons and says who
-answered and how: a `danger` button reads as declined and shows ❌, and any
-other button reads as approved and shows ✅.
-Work after that goes into a new message.
+answered and which option they picked. A `danger` button records a decline. Any
+other button records an approval. Work after that goes into a new message.
 
 A click cannot send anything that the prompt did not offer, and a second click
 changes nothing.
 
-The worker side — what a click resumes with, and how to answer one yourself —
-is in [Interrupts](./100-interrupts.md#answer-a-prompt), with a worker in the
+For the worker side, what a click resumes with and how to answer one yourself,
+see [Interrupts](./100-interrupts.md#answer-a-prompt) and the
 [`node-hono-tool-approval`](../examples/node-hono-tool-approval) example.
 
-### A message while a prompt is open
+### Send a message while a prompt is open
 
 The engine refuses a message while the session is paused, because the prompt
 needs an answer first. The bot posts the open question again instead of staying
@@ -151,7 +150,7 @@ It names the connection, says what happened to its credential, and links to the
 page where a person authorizes it. See
 [Connectors](./40-connectors.md#when-a-credential-stops-working).
 
-The link is there when the file has a `[remote]` pinned to a project on the
+The link appears when the file has a `[remote]` pinned to a project on the
 hosted cloud, which is the only deployment whose dashboard address follows from
 its API address. Anywhere else the prompt names `subs auth <path>`, which is
 what an operator runs on the machine where the engine runs.
@@ -191,8 +190,8 @@ your value wins.
 On every decision the engine proposes the default `view`. A worker that
 customizes the view changes the proposed view instead of building a new one.
 
-A view streams while the turn runs. The `turn.finished` view is the finished
-message: the reply that ends the turn posts it.
+A view streams while the turn runs. The `turn.finished` view becomes the final
+message, posted by the reply that ends the turn.
 
 Blocks with buttons pass through unchanged. Give each button an `action_id` and
 a `value`, and the click comes back as a `client.action` decision with both.
@@ -214,19 +213,24 @@ appends the new message alone, with a note that context might be missing.
 
 ## Attachments
 
-A file uploaded with a message reaches the agent. The bot downloads it with
-the bot token, stores it in the database, and the prompt carries a
-reference; the bytes go to the model at the call. This needs `files:read`.
+A file uploaded with a message reaches the agent. The bot downloads it with the
+bot token and stores it in the database. The prompt carries a reference, and the
+bytes go to the model at the call. This needs `files:read`.
 
-What the model receives depends on the type. Images (PNG, JPEG, GIF, WebP, to
-5 MB) go as images. PDFs (to 10 MB) go as documents. Text files — CSV, JSON,
-Markdown, code, logs (to 1 MB) — inline into the message. Any other type
-becomes a note naming the file, so the agent can say what it cannot read.
+What the model receives depends on the type.
 
-An image the agent produces goes back the other way. The bot uploads it to
-Slack once per workspace and the reply embeds it. This needs `files:write`.
-An image that Slack refuses becomes a note in the reply; the text always
-arrives.
+| Type | Size limit | The model receives |
+| --- | --- | --- |
+| PNG, JPEG, GIF, WebP | 5 MB | An image |
+| PDF | 10 MB | A document |
+| Text: CSV, JSON, Markdown, code, logs | 1 MB | Inline text in the message |
+| Audio | 10 MB | Audio |
+| Video | 20 MB | Video |
+| Anything else | none | A note naming the file |
+
+An image the agent produces goes back the other way. The bot uploads it to Slack
+once per workspace and the reply embeds it. This needs `files:write`. An image
+that Slack refuses becomes a note in the reply. The text always arrives.
 
 ## Point a session at a thread
 
@@ -239,7 +243,7 @@ turns then go into the thread like any other.
 A click on a reply goes back to the session that posted it. Each reply carries
 its session ID.
 
-## Next
+## Next steps
 
 - [Interrupts](./100-interrupts.md): the pause behind a prompt.
 - [Conversations](./120-conversations.md): the session behind a thread.

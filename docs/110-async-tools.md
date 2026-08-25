@@ -51,16 +51,16 @@ Send it to the engine's machine API, which takes an API key rather than a
 client token. See
 [REST API](./250-api.md#post-apimachinesessionssession_idcallssettle).
 
-## Go async
+## Leave a call open
 
 Answer a `tool.execute` with no `tool.result` and no `tool.error` and the call
 stays open.
 
 A client-side tool is in the same state while the browser works. An async tool
-is the worker's version of that. Declare it as an ordinary tool and
-run it on your own schedule.
+is the worker's version of that. Declare it as an ordinary tool and run it on
+your own schedule.
 
-## The wait
+## While the call is open
 
 The turn stays open while a call is in flight. Other tool calls that finish
 first record their results.
@@ -86,17 +86,24 @@ retry replaced.
 The engine records the result. When no calls are in flight, it prompts the model
 again.
 
-## Timeouts
+## Set the deadline
 
-A client-handled call waits forever by default. It is the one effect with no
-limit, because a person might be answering it.
+An open call is still under the tool's retry policy. A worker tool defaults to a
+120-second attempt timeout and a 600-second total timeout, so a call left open
+past those bounds fails with `deadline_exceeded`.
 
-To limit the wait, give the `tool.call` a `retry` policy with a
-`run_timeout_secs` or a `total_timeout_secs`. When either expires, the call
-fails. The engine then retries it or ends it, under the policy. See
-[Retries](./210-retries.md).
+Raise the bounds for a tool that takes longer. Set a `retry` override on the
+agent, or on the `tool.call` action.
 
-## Next
+```toml title="subs.toml"
+[agent.assistant.retry]
+tool = { run_timeout_secs = 86400, total_timeout_secs = 86400 }
+```
+
+A client-handled tool is the exception. It has no bounds by default, because a
+person might be answering it. See [Retries](./210-retries.md).
+
+## Next steps
 
 - [Tool calls](./60-tools.md): the rules these follow.
 - [Client-side tools](./150-client-tools.md): the same wait, run by the browser.

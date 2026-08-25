@@ -24,15 +24,15 @@ auth = "token"
 prefix_tools = false
 ```
 
-The file holds names and references. A `token` written in the file is a parse
+The file holds names and references. A token written in the file is a parse
 error.
 
 Most connections need nothing but a URL. The engine asks the server how it
-authenticates: a server that issues a challenge points at its OAuth metadata,
-and a server that wants no credential answers without a challenge.
+authenticates. A server that issues a challenge points at its OAuth metadata. A
+server that wants no credential answers without a challenge.
 
-Write `auth` for the one thing that asking cannot answer — a static token — or
-to override a server whose discovery is broken.
+Set `auth` for the one case that asking cannot answer, a static token, or to
+override a server whose discovery is broken.
 
 | `auth` | Means | What `subs auth` does |
 | --- | --- | --- |
@@ -41,7 +41,7 @@ to override a server whose discovery is broken.
 | `"oauth"` | Use OAuth, whatever the server advertises. | Opens a browser for consent. |
 | `"none"` | Send nothing, whatever the server says. | Says there is nothing to do. |
 
-## Authorize it
+## Authorize a connection
 
 ```sh
 subs auth mcp.sentry
@@ -49,21 +49,21 @@ subs auth mcp.github
 subs list
 ```
 
-One verb for every kind. `subs auth` reads what the connection declares and does
-what that needs — consent in a browser, or a token you type at a prompt, pipe
-in, or name a variable for. A token never appears in the command line.
+One command covers every kind. `subs auth` reads what the connection declares
+and does what that needs: consent in a browser, or a token you type at a prompt,
+pipe in, or name a variable for. A token never appears in the command line.
 
 ```sh
 subs auth mcp.github --env GITHUB_TOKEN
 gh auth token | subs auth mcp.github
 ```
 
-`subs revoke <path>` empties a connection's credentials — every holder's —
-but keeps the declaration. If you delete the `[mcp.<id>]` section instead, the
-engine disconnects the connection for good, and its credentials go with it.
+`subs revoke <path>` empties a connection's credentials, every holder's, but
+keeps the declaration. Deleting the `[mcp.<id>]` section instead removes the
+connection and its credentials permanently.
 
 The credential belongs to the path. Declare one server twice to connect two
-accounts. Authorize each path on its own.
+accounts, then authorize each path on its own.
 
 ```toml title="subs.toml"
 [mcp.sentry]
@@ -75,12 +75,12 @@ url = "https://mcp.sentry.dev/mcp"       # subs auth mcp.sentry2
 
 An agent names them by path, and sees `sentry__` and `sentry2__` tools.
 
-## What it asks for
+## Scopes
 
 `scopes` is the access that the engine asks consent for. If you declare no
-scopes, a connection asks for everything the server advertises — that server's
-maximum, not its recommendation. Sentry advertises writing to projects, teams,
-and events, although reading issues needs none of that access.
+scopes, the connection asks for everything the server advertises. That list is
+the server's maximum, not its recommendation. Sentry advertises writing to
+projects, teams, and events, although reading issues needs none of that access.
 
 ```toml title="subs.toml"
 [mcp.sentry]
@@ -88,16 +88,16 @@ url = "https://mcp.sentry.dev/mcp"
 scopes = ["org:read"]
 ```
 
-## Servers that issue no client
+## Register an OAuth client by hand
 
 Most servers hand out a client identity when asked, either from a metadata
-document or by dynamic registration. A few do neither — Google and GitHub among
-them — and need you to register a client by hand.
+document or by dynamic registration. A few do neither, Google and GitHub among
+them, and need you to register a client yourself.
 
 Register the client with that server, then name the variables that hold its ID
-and its secret. The file names variables and never holds a secret, and `subs
-apply` strips both variables before the document reaches a deployment: a client
-belongs to whoever registered it against their own redirect URI.
+and its secret. The file names the variables and never holds the secret. `subs
+apply` strips both variables before the document reaches a deployment, because a
+client belongs to whoever registered it against their own redirect URI.
 
 ```toml title="subs.toml"
 [mcp.gmail]
@@ -108,13 +108,13 @@ client_id_env = "GMAIL_CLIENT_ID"
 client_secret_env = "GMAIL_CLIENT_SECRET"
 ```
 
-The redirect URI that you register differs by what runs the flow. An engine uses
+The redirect URI you register depends on what runs the flow. An engine uses
 `<base_url>/mcp/callback`, one address that every connection shares. The CLI
 binds a fresh loopback port on every run, so register the CLI as a native or
 desktop client, which does not match on the port. If a server issues no client
 and the file names none, `subs auth` prints the URI that it bound.
 
-## Where the credential lives
+## Where the credential is stored
 
 The file decides.
 
@@ -125,18 +125,17 @@ The file decides.
 
 **A local database holds credentials. Add `*.db*` to `.gitignore`.**
 
-With a `[remote]`, authorizing takes two steps.
+With a `[remote]`, setting up a connection takes two steps.
 
 - **Declaring** records the ID and the URL. `subs apply` declares every
   `[mcp.<id>]` in the file.
-- **Authorizing** is the consent.
+- **Authorizing** is the consent. `subs auth` does this.
 
-`subs auth` and `subs auth` each do both. A declared connection
-reaches nothing until it holds a credential.
+A declared connection reaches nothing until it holds a credential.
 
 If you change `auth` on a connection that already holds a credential, the engine
-empties it: a credential that the engine obtained the other way is not what the
-file now says to send. Authorize the connection again.
+empties it. A credential the engine obtained the other way is not what the file
+now says to send. Authorize the connection again.
 
 A server that wants a header other than `Authorization: Bearer` names it, and
 only under `auth = "token"`.
@@ -150,11 +149,11 @@ header = "sentry-bearer"
 
 Some deployments allow only the URLs in their own catalog. The error lists them.
 
-## Give it to an agent
+## Give a connection to an agent
 
-An agent names a connection by its path — where the connection is declared. A
-path on its own gives the agent every tool that the connection offers. To take
-fewer, use the table form.
+An agent names a connection by its path, which is where the connection is
+declared. A path on its own gives the agent every tool that the connection
+offers. To take fewer, use the table form.
 
 ```toml title="subs.toml"
 [agent.support]
@@ -172,20 +171,22 @@ without the rest of the bundle.
 
 ```toml title="subs.toml"
 [agent.searcher]
-mcp = ["plugin.reggu.mcp.code"]
+mcp = ["plugin.docs.mcp.code"]
 ```
 
-Name it once: a server granted this way and through `plugins = ["reggu"]` would
-carry two policies, and that is an error rather than a winner.
+Name a server once. Granting the same server through `mcp` and through
+`plugins = ["docs"]` gives it two policies, and the engine reports that as an
+error instead of picking one.
 
-A worker declares the same thing in the config it returns.
+A worker declares the same thing in the config it returns. On the wire the key
+is `path` and it holds the full connection path.
 
 ```javascript
 if (trigger.type === "session.start") {
     return {
         agent: {
             model: "claude-haiku-4-5",
-            mcp: [{ id: "sentry", tools: { read_only: true } }]
+            mcp: [{ path: "mcp.sentry", tools: { read_only: true } }]
         }
     };
 }
@@ -195,20 +196,20 @@ The model now sees `sentry__search_issues` beside your own tools. When it calls
 one, the engine runs it. Your worker still sees the call: `tool.finished`
 arrives with the result.
 
-## Announce a connection
+## Tell the model a connection exists
 
-The model cannot see a connection. It sees tools, and it cannot even see a
-deferred tool. So the engine tells the model that the connection exists: once
-per connection, on the first request that can carry the notice.
+The model cannot see a connection. It sees tools, and it cannot see a deferred
+tool at all. So the engine tells the model that the connection exists, once per
+connection, on the first request that can carry the notice.
 
 ```json
-{ "mcp_server": "sentry", "tools": 12, "about": "…" }
+{ "mcp_server": "mcp.sentry", "tools": 12, "about": "…" }
 ```
 
-`about` is what the server said it is for. The engine announces a server that
-says nothing without it.
+`about` is what the server said it is for. A server that says nothing is
+announced without it.
 
-The engine takes the first place it can use:
+The engine puts the notice in the first place it can use.
 
 | Place | When |
 | --- | --- |
@@ -216,7 +217,7 @@ The engine takes the first place it can use:
 | The last user message | After that. An earlier system prompt must not change, because a change to it drops the cache. |
 | A message of its own | When the turn ends on anything but a user message. |
 
-The order is fixed, so it is not a setting. `mcp_announce` on the agent chooses
+The order is fixed and is not a setting. `mcp_announce` on the agent sets
 whether the engine announces at all.
 
 ```toml title="subs.toml"
@@ -232,35 +233,35 @@ mcp_announce = "never"
 
 Use `never` for a server whose own description does not help the model.
 
-The engine announces a connection after someone authorizes it, and never
-before. A request waits for each connection that it names to answer, so a notice
-cannot announce a server that the engine has not reached. The engine does not
-announce a connection that fails, and announces it later if it recovers.
+The engine announces a connection after someone authorizes it, and never before.
+A request waits for each connection that it names to answer, so a notice cannot
+announce a server that the engine has not reached. The engine does not announce
+a connection that fails, and announces it later if it recovers.
 
-## When a connection does not answer
+## Connection failures
 
 A fetch that fails for the last time does not stop the turn. The engine goes on
 without that connection's tools, because only the agent knows whether it can
 work without them.
 
-The model is told, in the prompt and in each place the absence would otherwise
-read as nothing being there:
+The engine tells the model, in the prompt and in each place where the absence
+would otherwise read as nothing being there.
 
 ```json
-{ "mcp_server": "sentry", "unavailable": true, "reason": "unreachable" }
+{ "mcp_server": "mcp.sentry", "unavailable": true, "reason": "unreachable" }
 ```
 
 `reason` is `unreachable`, or `needs_authorization` when the connection refused
-the credential. The remote's own error is never in the notice; it goes to the
+the credential. The remote's own error is never in the notice. It goes to the
 log, where an operator reads it.
 
 `tool_search` names the connection too, because a search that answered nothing
 would say there is nothing to find. `call_tool` names it beside a tool it cannot
-place. The engine does not say the tool belongs to that connection: a fetch that
-failed left no tool names behind.
+place. The engine does not say the tool belongs to that connection, because a
+fetch that failed left no tool names behind.
 
 `tool_sync_failure` on the connection, or `mcp_tool_sync_failure` on the agent,
-chooses whether the engine says anything.
+sets whether the engine says anything.
 
 ```toml title="subs.toml"
 [agent.support]
@@ -274,12 +275,12 @@ mcp = ["mcp.sentry", { id = "mcp.linear", tool_sync_failure = "silent" }]
 | `silent` | Says nothing |
 
 Use `silent` for a connection the agent does not need. The agent's value is the
-default for each of its connections, including each plugin's; a connection or a
+default for each of its connections, including each plugin's. A connection or a
 plugin overrides it with its own.
 
 A credential that a call rejects is a different case. That connection answered,
-so it keeps its tools and the engine does not name it here. The model reads it
-from the call that failed.
+so it keeps its tools and the engine does not name it here. The model reads the
+problem from the call that failed.
 
 Each branch announces separately. A fork that never held a connection announces
 that connection when it gets one.
@@ -300,8 +301,8 @@ type McpTools = {
 }
 ```
 
-The first five keys say which tools the agent may reach. `defer` says how those
-tools reach the model, and the next section covers it.
+The first five keys set which tools the agent can reach. `defer` sets how those
+tools reach the model, and [Defer a connection](#defer-a-connection) covers it.
 
 The engine applies the capability keys, then `include`, then `exclude`. Each one
 can only remove tools.
@@ -313,9 +314,9 @@ The capability keys read the connection's MCP annotations. A tool with no
 annotation does not pass them. Annotations are hints from the server. Use them
 to take fewer tools, not as a security boundary.
 
-## Approve a call
+## Ask a person before a call runs
 
-A filter says which tools an agent may reach. `approve` says which of them stop
+A filter sets which tools an agent can reach. `approve` sets which of them stop
 and ask a person first.
 
 ```toml title="subs.toml"
@@ -329,18 +330,16 @@ mcp = [{ id = "mcp.sentry", approve = "destructive" }]
 | `destructive` | Each tool the connection marks `destructiveHint`. |
 | `always` | Every call on the connection. |
 
-The setting belongs to the agent and the connection together, like
-`auth_failure`. One connection can serve both an agent that a person watches and
-an agent that runs on a schedule, and only the first has a person to ask.
+The setting belongs to the agent and the connection together. One connection can
+serve both an agent that a person watches and an agent that runs on a schedule,
+and only the first has a person to ask.
 
 `destructive` asks about the tools that a connection marks as destructive, and
-about no others. A tool that the connection says nothing about is not one of
-them. Silence is not a claim either way, and a setting that treated silence as a
-claim would ask about every tool of a server that publishes no annotations.
+about no others. A tool that carries no annotation is not one of them.
 
-So `destructive` is only as good as what a server says about itself, and a
-server owes you no annotations at all. If the annotations are absent, wrong, or
-not yours to trust, `always` asks about every call and depends on no
+So `destructive` is only as good as the annotations a server publishes, and a
+server does not have to publish any. If the annotations are absent, wrong, or
+not yours to trust, use `always`. It asks about every call and reads no
 annotation.
 
 A model that asks for a destructive call gets no tool result until a person
@@ -352,7 +351,7 @@ answers. The engine records the message, runs nothing, and
   "reason": "`sentry__delete_issue` needs approval before it runs",
   "payload": {
     "message": "Run `sentry__delete_issue`?\n\n```\n{\n  \"issue\": \"PROJ-42\"\n}\n```",
-    "tool_call_id": "call_a1",
+    "toolCallId": "call_a1",
     "metadata": {
       "type": "tool.approval",
       "tool": "sentry__delete_issue",
@@ -367,9 +366,9 @@ answers. The engine records the message, runs nothing, and
 }
 ```
 
-The arguments are there because the tool's name says what would happen, and only
-the arguments say what it would happen to. For a deferred tool, they are the
-tool's own — not the `call_tool` wrapper's.
+The payload carries the arguments because the tool's name says what would
+happen, and only the arguments say what it would happen to. For a deferred tool,
+these are the tool's own arguments, not the `call_tool` wrapper's.
 
 In Slack the two options are buttons in the thread. Anywhere else, resume the
 interrupt yourself.
@@ -378,18 +377,18 @@ interrupt yourself.
 { "type": "interrupt.resume", "interrupt_id": "mcp-approve:<tool call id>", "payload": { "approved": true } }
 ```
 
-`true` runs the call. Anything else declines it: the model reads that a person
-declined, and answers from that instead of retrying. A payload that the engine
-does not recognize also declines, because a held call is exactly the call that
-nobody wants run by accident.
+`true` runs the call. Anything else declines it. The model reads that a person
+declined and answers from that instead of retrying. A payload that the engine
+does not recognize also declines, so a malformed answer never runs a held
+call.
 
-## One question per call
+### Approve several calls
 
 A model can ask for several calls at once. The engine asks about each call that
 needs approval on its own, so a person can run one and decline the next.
 
-The questions come in turn — the answer to one raises the next — because a
-branch holds one open question at a time. `metadata.remaining` counts the calls
+The questions come one at a time, because a branch holds one open question at a
+time. Answering one raises the next. `metadata.remaining` counts the calls
 behind this one.
 
 The engine runs nothing from that message until a person answers every question,
@@ -404,7 +403,7 @@ answer, so the model reads what ran and what did not together.
 The [`no-code-mcp-approval`](../examples/no-code-mcp-approval) example is this
 in one file, with an MCP server to point it at.
 
-An agent whose worker writes its own decisions decides this itself: the approval
+An agent whose worker writes its own decisions decides this itself. The approval
 is a proposal, like every other, and a worker that writes its own answer to
 `llm.finished` never sees it. See [Tool calls](./60-tools.md).
 
@@ -456,15 +455,14 @@ removed, and `call_tool` refuses to run one.
 Use search when a connection has more tools than an agent needs at one time.
 Keep the default when the agent uses most of the tools each session.
 
-Deferral is a property of a tool, and not of MCP: a tool that your worker
-declares sets `defer` on its own definition, and the same two tools find it and
-run it.
+Deferral is a property of a tool, not of MCP. A tool that your worker declares
+sets `defer` on its own definition, and the same two tools find it and run it.
 See [Deferred tools](./65-deferred-tools.md).
 
 A third answer is [Sub-agents](./80-sub-agents.md): give the connection to a
 child agent, and the parent pays one tool.
 
-## Names
+## Tool names
 
 The engine prefixes a connection's tools with its ID, such as `sentry__search`.
 Set `prefix_tools = false` to use their own names.
@@ -508,8 +506,9 @@ The session then stops and asks. In Slack the bot posts the question in the
 thread with a link, and a `Retry` button that fetches the tools again after a
 person has authorized it. See [Slack](./130-slack.md#authorize-a-connection).
 
-Stopping is the default because the alternative is worse: an agent that answers
-without the tools it no longer has reads exactly like an agent that used them.
+Stopping is the default because an agent that answers without its tools looks
+the same as an agent that used them. Nobody can tell that the answer is
+incomplete.
 
 An agent with nobody to ask says so instead. Set `auth_failure` on the entry
 that names the connection.
@@ -527,13 +526,14 @@ watching. The turn continues, the engine offers none of the connection's tools,
 and the tool error tells the model that the connection needs authorizing, so the
 model reports the gap instead of answering without it.
 
-A session that has no channel to show a question in degrades whatever this
-setting says. A question that nobody can see is a session that stops for good.
+A session that has no channel to show a question degrades whatever this setting
+says, because nobody would ever see the question and the session would never
+resume.
 
 A worker can request the fetch itself with the `connector.sync` action, which is
 what the `Retry` button proposes. See [Protocol](./230-protocol.md#actions).
 
-## Next
+## Next steps
 
 - [Interrupts](./100-interrupts.md): the pause that an approval creates.
 - [Tool calls](./60-tools.md): tools your worker runs.

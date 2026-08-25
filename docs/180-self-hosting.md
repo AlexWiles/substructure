@@ -3,11 +3,10 @@ title: Self-hosting
 group: Running it
 ---
 
-The engine's source is on GitHub. Run it yourself and you hold every
-credential.
+The engine's source is on GitHub. Run it yourself and you hold every credential.
 
-A self-hosted engine serves the same APIs as the cloud. The same
-`subs.toml` describes both.
+A self-hosted engine serves the same APIs as the cloud. The same `subs.toml`
+describes both.
 
 ## Run the server
 
@@ -27,7 +26,7 @@ auth = true
 At startup the engine logs each declared agent and whether the engine or a
 worker decides for it.
 
-## What you hold
+## Where each credential goes
 
 | Credential | Where it goes |
 | --- | --- |
@@ -39,9 +38,7 @@ worker decides for it.
 
 ## Storage
 
-The engine writes to a store that you can replace. The CLI uses SQLite at the
-path
-`db` names.
+`db` names the SQLite file the engine writes to.
 
 ```toml title="subs.toml"
 db = "/var/lib/substructure/engine.db"
@@ -75,6 +72,22 @@ signing_secret_env = "TRIAGE_SIGNING_SECRET"
 
 An agent that names no variable gets unsigned requests. Set the same secret
 where the worker runs. See [Workers](./50-workers.md#verify-the-signature).
+
+## Let people authorize MCP connections from a link
+
+Set `public_url` to the HTTPS address a browser reaches this engine at. The
+engine then mints authorize URLs and hosts the OAuth callback, so a prompt that
+asks someone to connect a service carries a link they can click.
+
+```toml title="subs.toml"
+[serve]
+host = "0.0.0.0"
+port = 8080
+public_url = "https://engine.example.com"
+```
+
+Without it, an operator has to run `subs auth <path>` on the machine where the
+engine runs. See [Connectors](./40-connectors.md).
 
 ## Slack
 
@@ -166,24 +179,9 @@ deployment and the hosted cloud at once.
 ## Embed the engine
 
 A Rust crate can embed the engine and drive it directly. A worker then becomes a
-callback instead of an HTTP endpoint.
+callback instead of an HTTP endpoint. See the crate docs in the repository.
 
-The Slack bot's behavior lives in `SlackBot`, resolved for each workspace.
-Socket Mode is a thin transport over it. To run the same bot over the Events API
-instead, do three things.
-
-1. Implement `WorkspaceResolver`. It maps a team to a bot token, a tenant, and
-   an agent. Use one tenant per install, because `slack:{channel}:{ts}` IDs are
-   unique only within a workspace.
-2. Mount `webhook_router`. It verifies signatures on `/events` and
-   `/interactions`, and answers `url_verification`.
-3. Call `SlackBot::start`.
-
-Both transports parse their deliveries into the same payloads. Run one
-`SlackBot` per process, because the outbound processor keeps one named
-checkpoint.
-
-## Next
+## Next steps
 
 - [Config](./220-config.md): every key the file holds.
 - [Authentication](./190-auth.md): callers, tokens, and identity.

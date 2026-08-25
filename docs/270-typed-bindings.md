@@ -49,7 +49,7 @@ datamodel-codegen \
 
 For OpenAPI tools, generate from `worker.openapi.json` instead.
 
-## Next
+## Next steps
 
 - [Protocol](./230-protocol.md): the types these schemas describe.
 - [Workers](./50-workers.md): the code that uses them.
