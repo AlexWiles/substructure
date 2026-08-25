@@ -42,7 +42,7 @@ system = "You are the a helpful buddy."
 subs chat buddy -c subs.toml
 ```
 
-## Serve the agent and connect with a client.
+## Use server/client mode
 
 Add this to `subs.toml`
 
