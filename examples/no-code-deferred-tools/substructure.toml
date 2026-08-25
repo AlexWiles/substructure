@@ -13,9 +13,5 @@ defer_tools = true
 [mcp.deepwiki]
 url = "https://mcp.deepwiki.com/mcp"
 
-[run]
-agent = "docs"
-output = "pretty"
-
 [remote]
 url = "https://api.substructure.ai"

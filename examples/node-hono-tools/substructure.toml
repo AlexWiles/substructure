@@ -5,7 +5,3 @@ type = "anthropic"
 llm = "claude"
 model = "claude-sonnet-5"
 worker = "http://localhost:4444"
-
-[run]
-agent = "my-agent"
-output = "pretty"

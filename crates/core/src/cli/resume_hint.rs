@@ -18,11 +18,18 @@ fn resume_command(argv: &[String], session: &str, payload: Option<&str>) -> Stri
         .map(|p| file_name(p))
         .unwrap_or_else(|| "subs".into())];
 
+    let mut rest = argv.iter().skip(1);
+    if let Some(subcommand) = rest.next() {
+        out.push(quote(subcommand));
+    }
+
     let mut moved_input = false;
     let mut elided = false;
+    // Bare arguments seen so far. The first one is the agent, not the message.
+    let mut bare = 0;
     // The flag the previous argument was, when it takes a value.
     let mut pending: Option<&str> = None;
-    for arg in argv.iter().skip(1) {
+    for arg in rest {
         let flag = pending.take();
         if flag == Some("--session") {
             continue;
@@ -36,7 +43,11 @@ fn resume_command(argv: &[String], session: &str, payload: Option<&str>) -> Stri
         }
         let is_payload = match flag {
             Some(f) => f == "--input",
-            None => !arg.starts_with('-') && payload == Some(arg.as_str()),
+            None if arg.starts_with('-') => false,
+            None => {
+                bare += 1;
+                bare > 1 && payload == Some(arg.as_str())
+            }
         };
         if is_payload && !elided {
             elided = true;
@@ -67,7 +78,7 @@ fn resume_command(argv: &[String], session: &str, payload: Option<&str>) -> Stri
 fn takes_value(arg: &str) -> bool {
     matches!(
         arg,
-        "--agent" | "--input" | "--config" | "-c" | "--url" | "--db" | "--output" | "-o"
+        "--input" | "--config" | "-c" | "--url" | "--db" | "--output" | "-o"
     )
 }
 
@@ -109,7 +120,6 @@ mod tests {
                 "subs.toml",
                 "--output",
                 "pretty",
-                "--agent",
                 "coder",
                 "update the readme",
             ]),
@@ -118,53 +128,65 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            "subs run -c subs.toml --output pretty --agent coder --session sess-1 '...'"
+            "subs run -c subs.toml --output pretty coder --session sess-1 '...'"
         );
     }
 
     #[test]
     fn resume_command_replaces_an_earlier_session() {
         let cmd = resume_command(
-            &argv(&["subs", "run", "--session", "old", "hi"]),
+            &argv(&["subs", "run", "coder", "--session", "old", "hi"]),
             "new",
             Some("hi"),
         );
-        assert_eq!(cmd, "subs run --session new '...'");
+        assert_eq!(cmd, "subs run coder --session new '...'");
 
         let joined = resume_command(
-            &argv(&["subs", "run", "--session=old", "hi"]),
+            &argv(&["subs", "run", "coder", "--session=old", "hi"]),
             "new",
             Some("hi"),
         );
-        assert_eq!(joined, "subs run --session new '...'");
+        assert_eq!(joined, "subs run coder --session new '...'");
     }
 
     /// `subs chat` prompts for the next message, so its hint ends at the
     /// session it resumes.
     #[test]
     fn a_command_that_sends_no_payload_gets_no_placeholder() {
-        let cmd = resume_command(&argv(&["subs", "chat", "--agent", "coder"]), "sess-1", None);
-        assert_eq!(cmd, "subs chat --agent coder --session sess-1");
+        let cmd = resume_command(&argv(&["subs", "chat", "coder"]), "sess-1", None);
+        assert_eq!(cmd, "subs chat coder --session sess-1");
     }
 
     #[test]
     fn resume_command_quotes_what_a_shell_would_split() {
         let cmd = resume_command(
-            &argv(&["subs", "run", "--db", "my db.db", "hi there"]),
+            &argv(&["subs", "run", "--db", "my db.db", "coder", "hi there"]),
             "s",
             Some("hi there"),
         );
-        assert_eq!(cmd, "subs run --db 'my db.db' --session s '...'");
+        assert_eq!(cmd, "subs run --db 'my db.db' coder --session s '...'");
     }
 
     #[test]
     fn resume_command_does_not_read_a_flags_value_as_the_message() {
         let cmd = resume_command(
-            &argv(&["subs", "run", "--agent", "coder", "coder"]),
+            &argv(&["subs", "run", "-o", "pretty", "coder", "pretty"]),
+            "s",
+            Some("pretty"),
+        );
+        assert_eq!(cmd, "subs run -o pretty coder --session s '...'");
+    }
+
+    /// The agent is a positional too, so a message that repeats its id must not
+    /// take its place.
+    #[test]
+    fn resume_command_does_not_read_the_agent_as_the_message() {
+        let cmd = resume_command(
+            &argv(&["subs", "run", "coder", "coder"]),
             "s",
             Some("coder"),
         );
-        assert_eq!(cmd, "subs run --agent coder --session s '...'");
+        assert_eq!(cmd, "subs run coder --session s '...'");
     }
 
     #[test]
@@ -173,6 +195,7 @@ mod tests {
             &argv(&[
                 "subs",
                 "run",
+                "coder",
                 "--input",
                 r#"{"type":"client.message"}"#,
                 "-o",
@@ -181,6 +204,6 @@ mod tests {
             "s",
             Some(r#"{"type":"client.message"}"#),
         );
-        assert_eq!(cmd, "subs run -o pretty --session s --input '...'");
+        assert_eq!(cmd, "subs run coder -o pretty --session s --input '...'");
     }
 }

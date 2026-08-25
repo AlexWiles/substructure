@@ -6,7 +6,3 @@ format = "openai"
 llm = "byo"
 model = "gpt-5-nano"
 worker = "http://localhost:4444"
-
-[run]
-agent = "my-agent"
-output = "pretty"

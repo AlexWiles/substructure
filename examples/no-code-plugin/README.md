@@ -32,7 +32,7 @@ export OPENROUTER_API_KEY=sk-or-...
 ```
 
 ```sh
-subs run "the database is down, what do I do?"
+subs run oncall "the database is down, what do I do?"
 ```
 
 ```text

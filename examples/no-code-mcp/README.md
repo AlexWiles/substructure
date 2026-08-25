@@ -26,7 +26,7 @@ subs auth llm.openrouter
 ```
 
 ```sh
-subs run "how does routing work in honojs/hono?"
+subs run docs "how does routing work in honojs/hono?"
 ```
 
 The model calls `deepwiki__ask_question`. The connection id is in front of the
@@ -39,7 +39,7 @@ own key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs run -c substructure.toml --agent docs "how does routing work in honojs/hono?"
+subs run -c substructure.toml docs "how does routing work in honojs/hono?"
 ```
 
 ## Fewer tools

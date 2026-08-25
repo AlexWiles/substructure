@@ -27,15 +27,10 @@ type = "openrouter"
 llm = "openrouter"
 model = "anthropic/claude-sonnet-4-5"
 system = "You are the on-call assistant."
-
-[run]
-agent = "oncall"
-output = "pretty"
 ```
 
 `[llm.openrouter]` says which provider to call. `[agent.oncall]` says who calls
-it. The file names no `[remote]`, so every command acts here. `[run]` gives
-`subs run` its defaults so you stop repeating flags.
+it. The file names no `[remote]`, so every command acts here.
 
 ## Give it a key
 
@@ -49,11 +44,11 @@ names variables at most, with `api_key_env`.
 ## Talk to it
 
 ```sh
-subs run "what is broken?"
+subs run oncall "what is broken?"
 ```
 
-The reply streams to your terminal. `output = "pretty"` shows the turn as text;
-the default, `ag-ui`, streams protocol events.
+The reply streams to your terminal as text. Piped into another program it
+streams AG-UI protocol events instead; `-o` says which, whatever the venue.
 
 ## Continue the session
 
@@ -62,11 +57,11 @@ with the session pinned and the message replaced by a placeholder at the end.
 
 ```
 continue this session with:
-  subs run --session <session-id> '...'
+  subs run oncall --session <session-id> '...'
 ```
 
 ```sh
-subs run --session <session-id> "what did I just ask?"
+subs run oncall --session <session-id> "what did I just ask?"
 ```
 
 The agent remembers. The engine saves the whole session in

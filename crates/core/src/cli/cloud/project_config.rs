@@ -3,11 +3,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
-use crate::cli::env::{OutputFormat, ProviderBinding, ProviderKind};
+use crate::cli::env::{ProviderBinding, ProviderKind};
 use crate::connectors::registry::{ConnectionDecl, ConnectionPath, ConnectionSpec};
 use crate::manifest::{
     AgentSection, Manifest, PluginSpec, ProviderSpec, ResolvedPlugins, SlackConfig,
@@ -80,8 +80,6 @@ pub struct ProjectConfig {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub agent: BTreeMap<String, AgentSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub run: Option<RunConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub serve: Option<ServeConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slack: Option<SlackConfig>,
@@ -112,16 +110,6 @@ pub struct Remote {
     pub org: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
-}
-
-/// Defaults for `subs run`.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RunConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<OutputFormat>,
 }
 
 /// `subs serve` only.
@@ -257,7 +245,6 @@ impl ProjectConfig {
     pub(crate) fn parse(s: &str, path: &Path) -> Result<Self> {
         let at = path.display();
         let value: toml::Value = toml::from_str(s).map_err(|e| anyhow!("parsing {at}: {e}"))?;
-        moved_keys(&value, &at)?;
         let mut config: ProjectConfig =
             value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
         // A committed bundle would shadow the directory it came from.
@@ -301,82 +288,6 @@ fn user_db_path() -> String {
         Ok(dir) => dir.join(DEFAULT_DB).display().to_string(),
         Err(_) => DEFAULT_DB.to_string(),
     }
-}
-
-/// The keys and sections that moved, reported where they went rather than as
-/// `deny_unknown_fields`' "unknown field", which says nothing about the file
-/// this one is.
-fn moved_keys(value: &toml::Value, at: &impl std::fmt::Display) -> Result<()> {
-    // Both sections were named for a server, which left the file with two of
-    // them and no way to tell which one a line was about.
-    if value.get("deployment").is_some() {
-        bail!("{at}: `[deployment]` is now `[remote]`.");
-    }
-    if value.get("server").is_some() {
-        bail!("{at}: `[server]` is now `[serve]`, beside `[run]`.");
-    }
-    // The unit is a project now, so `app` anywhere is named rather than left to
-    // `deny_unknown_fields`, which would only say the field is unknown.
-    if value.get("remote").and_then(|d| d.get("app")).is_some() {
-        bail!(
-            "{at}: `[remote].app` is now `[remote].project`. One file is one project; \
-             a second environment is a second file (`subs apply -c substructure.staging.toml`)."
-        );
-    }
-    let pins: Vec<&str> = ["url", "org", "project", "app"]
-        .into_iter()
-        .filter(|k| value.get(k).is_some())
-        .map(|k| match k {
-            "app" => "project",
-            k => k,
-        })
-        .collect();
-    if value.get("target").is_some() {
-        let and_pins = match pins.is_empty() {
-            true => String::new(),
-            false => format!(", and move `{}` under `[remote]`", pins.join("`, `")),
-        };
-        bail!(
-            "{at}: `target` is no longer a setting. Delete it{and_pins} — a file describes an \
-             engine you run (`db`, `[run]`, `[serve]`), a remote you administer \
-             (`[remote]`), or both."
-        );
-    }
-    if !pins.is_empty() {
-        bail!(
-            "{at}: `{}` belongs under `[remote]`, with the server's `url`.",
-            pins.join("`, `")
-        );
-    }
-    // `[slack].agent` meant "DMs, and any channel not named" — one key for two
-    // decisions with very different blast radii, so it became two.
-    if value.get("slack").and_then(|s| s.get("agent")).is_some() {
-        bail!(
-            "{at}: `[slack].agent` is now two settings, because it answered two questions: \
-             `dm` for direct messages, and `mentions` for being mentioned in a channel no \
-             `[slack.channel.<id>]` names. Set whichever you meant — setting neither serves \
-             only the channels you name."
-        );
-    }
-    if value.get("worker").is_some() {
-        bail!(
-            "{at}: `[worker]` is no longer a setting: a worker belongs to one agent, not to \
-             the project. Write `worker = \"<url>\"` under the `[agent.<id>]` it decides for, and \
-             leave it off the agents the engine decides for."
-        );
-    }
-    // `[llm] provider = "anthropic"` versus `[llm.claude] type = "anthropic"`:
-    // the old form's values are scalars where the new form's are tables.
-    if let Some(llm) = value.get("llm").and_then(toml::Value::as_table) {
-        if llm.values().any(|v| !v.is_table()) {
-            bail!(
-                "{at}: `[llm]` now declares named blocks, so that a second one can be added \
-                 and an agent can say which it uses. Write `[llm.<name>]` with a `type`, e.g. \
-                 `[llm.claude]` / `type = \"anthropic\"`, and name it from `[agent.<id>]`."
-            );
-        }
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -632,10 +543,6 @@ mod tests {
             worker = "http://localhost:4444"
             signing_secret_env = "SUBS_SIGNING_SECRET"
 
-            [run]
-            agent = "support"
-            output = "pretty"
-
             [serve]
             port = 9000
             auth = false
@@ -647,53 +554,11 @@ mod tests {
             Some("http://localhost:4444")
         );
         assert_eq!(cfg.llm["claude"].kind, ProviderKind::Anthropic);
-        assert_eq!(cfg.run.as_ref().unwrap().agent.as_deref(), Some("support"));
-        assert_eq!(cfg.run.clone().unwrap().output, Some(OutputFormat::Pretty));
         assert!(!cfg.serve_auth());
         let serve = cfg.serve.unwrap();
         assert_eq!(serve.port, Some(9000));
         // Absent is absent, not a default the flag would then have to beat.
         assert_eq!(serve.host, None);
-    }
-
-    /// Both sections were named for a server, so a line about "the server" said
-    /// nothing about which one. Renamed, and reported by name rather than as an
-    /// unknown field.
-    #[test]
-    fn the_two_server_sections_say_where_they_went() {
-        let err = parse("[deployment]\norg = \"acme\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("`[deployment]` is now `[remote]`"),
-            "got {err}"
-        );
-
-        let err = parse("[server]\nport = 9000\n").unwrap_err().to_string();
-        assert!(err.contains("`[server]` is now `[serve]`"), "got {err}");
-    }
-
-    #[test]
-    fn target_says_where_it_went() {
-        let err = parse("target = \"local\"\ndb = \"dev.db\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("`target` is no longer"), "got {err}");
-        assert!(err.contains("[remote]"), "got {err}");
-
-        // The pins moved with it, so one message covers the whole edit — and a
-        // top-level `app` is reported under the name it now has.
-        let err = parse("target = \"remote\"\nurl = \"https://x\"\norg = \"o\"\napp = \"a\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("`url`, `org`, `project`"), "got {err}");
-
-        // And on their own, without a target to hang the message on.
-        let err = parse("org = \"acme\"\n").unwrap_err().to_string();
-        assert!(
-            err.contains("`org`") && err.contains("[remote]"),
-            "got {err}"
-        );
     }
 
     #[test]
@@ -891,23 +756,6 @@ mod tests {
         assert!(err.contains("no `worker`"), "got {err}");
     }
 
-    /// The two sections that moved say where they went, rather than reading as
-    /// "unknown field".
-    #[test]
-    fn the_old_worker_and_llm_forms_say_what_replaced_them() {
-        let err = parse("[worker]\nurl = \"http://localhost:4444\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("belongs to one agent"), "got {err}");
-        assert!(err.contains("[agent.<id>]"), "got {err}");
-
-        let err = parse("[llm]\nprovider = \"anthropic\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("named blocks"), "got {err}");
-        assert!(err.contains("[llm.<name>]"), "got {err}");
-    }
-
     /// What the engine reads off the file: the venue per block, and one binding
     /// per block it runs itself.
     #[test]
@@ -979,15 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn an_output_mode_that_does_not_exist_is_a_parse_error() {
-        // It used to fall back to `ag-ui`, so a typo silently changed the mode.
-        let err = parse("[run]\noutput = \"pretyy\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("pretyy"), "got {err}");
-    }
-
-    #[test]
     fn everything_set_survives_a_round_trip() {
         let cfg = ok(r#"
             name = "support-bot"
@@ -1017,10 +856,6 @@ mod tests {
             description = "Finds sources"
             llm = "cheap"
             model = "gpt-5-mini"
-
-            [run]
-            agent = "support"
-            output = "jsonl"
 
             [serve]
             host = "0.0.0.0"

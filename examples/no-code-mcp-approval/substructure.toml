@@ -16,7 +16,3 @@ auth = "none"
 [slack]
 dm = "ops"
 mentions = "ops"
-
-[run]
-agent = "ops"
-output = "pretty"

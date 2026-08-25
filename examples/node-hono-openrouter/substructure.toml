@@ -6,7 +6,3 @@ format = "openai"
 llm = "byo"
 model = "anthropic/claude-haiku-4.5"
 worker = "http://localhost:4444"
-
-[run]
-agent = "my-agent"
-output = "pretty"

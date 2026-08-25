@@ -15,7 +15,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 subs list                    # mail … not connected
 subs auth mcp.mail              # browser consent; the mock auto-approves
-subs run "Whose mail account is connected?"
+subs run assistant "Whose mail account is connected?"
 ```
 
 The credential lands in the `local` person's slot — `connector_credentials`

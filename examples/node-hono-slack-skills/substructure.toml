@@ -15,7 +15,3 @@ mentions = "oncall"
 [serve]
 auth = false
 port = 8765
-
-[run]
-agent = "oncall"
-output = "pretty"

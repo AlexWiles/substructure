@@ -54,21 +54,11 @@ pub(crate) fn message_input(message: String, agent_id: String) -> ClientInput {
     }
 }
 
-/// Which agent a command drives. `--agent`, else `[run].agent` when the file
-/// pins one; nothing is inferred from what happens to be declared, because an
-/// engine that picks for you picks differently the day a second agent is added.
-pub(crate) fn select_agent(
-    flag: Option<String>,
-    pinned: Option<String>,
-    declared: &[String],
-) -> Result<String> {
-    let Some(agent_id) = flag.or(pinned) else {
-        anyhow::bail!(
-            "no agent given. Pass `--agent <id>` or set `[run].agent`. Declared: {}",
-            crate::worker::directory::declared(declared)
-        );
-    };
-    // A typo here would otherwise surface as a failed decision one turn later.
+/// Which agent a command drives: the one it names, and nothing else. A file
+/// that picks for you picks differently the day a second agent is declared.
+///
+/// A typo here would otherwise surface as a failed decision one turn later.
+pub(crate) fn declared_agent(agent_id: String, declared: &[String]) -> Result<String> {
     if !declared.contains(&agent_id) {
         anyhow::bail!(
             "no [agent.{agent_id}] in substructure.toml. Declared: {}",
@@ -304,36 +294,16 @@ mod tests {
     }
 
     #[test]
-    fn the_flag_wins_over_the_pinned_agent() {
-        let agent = select_agent(
-            Some("researcher".to_string()),
-            Some("assistant".to_string()),
-            &declared(),
-        )
-        .unwrap();
+    fn the_named_agent_is_the_one_that_runs() {
+        let agent = declared_agent("researcher".to_string(), &declared()).unwrap();
         assert_eq!(agent, "researcher");
-        assert_eq!(
-            select_agent(None, Some("assistant".to_string()), &declared()).unwrap(),
-            "assistant"
-        );
-    }
-
-    /// Nothing is inferred from what happens to be declared: an engine that
-    /// picks for you picks differently the day a second agent is added.
-    #[test]
-    fn no_agent_anywhere_is_an_error_listing_the_declared_ones() {
-        let err = select_agent(None, None, &declared())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no agent given"), "got {err}");
-        assert!(err.contains("assistant, researcher"), "got {err}");
     }
 
     /// The preflight is what makes a typo cost nothing: without it the run
     /// creates a session and fails one decision later.
     #[test]
     fn an_undeclared_agent_fails_before_the_session_exists() {
-        let err = select_agent(Some("assistnat".to_string()), None, &declared())
+        let err = declared_agent("assistnat".to_string(), &declared())
             .unwrap_err()
             .to_string();
         assert!(err.contains("no [agent.assistnat]"), "got {err}");

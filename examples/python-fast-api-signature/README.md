@@ -26,7 +26,7 @@ python3 main.py
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
 export SUBS_SIGNING_SECRET=dev-secret-not-for-production
-subs run -c substructure.toml --agent my-agent "hi"
+subs run -c substructure.toml my-agent "hi"
 ```
 
 Unset `SUBS_SIGNING_SECRET` and the worker answers `401 invalid signature`.

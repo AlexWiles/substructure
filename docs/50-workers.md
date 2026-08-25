@@ -52,7 +52,7 @@ Run the worker in one terminal and a turn in another.
 
 ```sh
 node server.mjs
-subs run --agent oncall -o pretty "hi"
+subs run oncall "hi"
 ```
 
 See [Local development](./160-local-development.md) for the local loop.
@@ -95,7 +95,7 @@ function decide({ trigger, proposed }) {
 ```
 
 ```sh
-subs run --agent oncall -o pretty "what time is it?"
+subs run oncall "what time is it?"
 ```
 
 The model calls the tool. Your worker runs it. The engine records the result and

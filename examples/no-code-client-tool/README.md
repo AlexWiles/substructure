@@ -26,7 +26,7 @@ Ask something that depends on where you are. The model calls `get_location`, and
 the turn yields with the call pending:
 
 ```sh
-subs run "recommend a coffee shop near me"
+subs run assistant "recommend a coffee shop near me"
 ```
 
 Pretty output prints the pending call with its id, and the command to continue
@@ -44,5 +44,5 @@ Delete `[remote]` and the turn runs on this machine, on your own key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs run -c substructure.toml --agent assistant "recommend a coffee shop near me"
+subs run -c substructure.toml assistant "recommend a coffee shop near me"
 ```

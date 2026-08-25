@@ -28,7 +28,7 @@ use super::env::OutputFormat;
 use super::output::Status;
 use super::output::{self, Renderer};
 use super::resume_hint::print_resume_hint;
-use super::turns::{self, message_input, select_agent, Open, Turns};
+use super::turns::{self, declared_agent, message_input, Open, Turns};
 
 mod editor;
 use editor::ChatEditor;
@@ -37,10 +37,9 @@ const PROMPT: &str = "> ";
 
 #[derive(Args)]
 pub struct ChatArgs {
-    /// Agent id to chat with, naming an `[agent.<id>]` section. Falls back to
-    /// `[run].agent`.
-    #[arg(long)]
-    agent: Option<String>,
+    /// Agent id to chat with, naming an `[agent.<id>]` section.
+    #[arg(value_name = "AGENT")]
+    agent: String,
     /// Resume an existing session. Omit to start a new one (its id is
     /// printed).
     #[arg(long)]
@@ -67,8 +66,7 @@ impl ChatArgs {
 
 pub async fn chat(args: ChatArgs) -> Result<()> {
     let cfg = project_config::load(args.config.as_deref())?;
-    let run = cfg.run.clone().unwrap_or_default();
-    let agent_id = select_agent(args.agent, run.agent, &cfg.agent_ids())?;
+    let agent_id = declared_agent(args.agent, &cfg.agent_ids())?;
 
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("chat needs a terminal. Send one message with `subs run` instead.");

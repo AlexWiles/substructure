@@ -21,9 +21,5 @@ llm = "openrouter"
 model = "anthropic/claude-haiku-4.5"
 system = "List what the draft gets wrong, one line each. Do not rewrite it."
 
-[run]
-agent = "assistant"
-output = "pretty"
-
 [remote]
 url = "https://api.substructure.ai"

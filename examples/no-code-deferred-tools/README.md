@@ -30,7 +30,7 @@ subs auth llm.openrouter
 ```
 
 ```sh
-subs run "how does routing work in honojs/hono?"
+subs run docs "how does routing work in honojs/hono?"
 ```
 
 The model calls `tool_search` with a query, reads the schema it gets back, then
@@ -51,7 +51,7 @@ Delete `[remote]` and the turn runs on this machine, on your own key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs run -c substructure.toml --agent docs "how does routing work in honojs/hono?"
+subs run -c substructure.toml docs "how does routing work in honojs/hono?"
 ```
 
 ## Why

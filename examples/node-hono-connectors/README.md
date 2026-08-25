@@ -41,7 +41,7 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml --agent my-agent "which issues are open?"
+subs run -c substructure.toml my-agent "which issues are open?"
 ```
 
 `substructure.toml` describes the environment — the worker URL, the agent, the

@@ -35,7 +35,7 @@ subs auth llm.openrouter
 ```
 
 ```sh
-subs run "two sentences for the homepage of a bicycle repair shop that comes to you"
+subs run assistant "two sentences for the homepage of a bicycle repair shop that comes to you"
 ```
 
 Pretty output shows each delegation as it runs.
@@ -46,6 +46,6 @@ Delete `[remote]` and the turn runs on this machine, on your own key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs run -c substructure.toml --agent assistant \
+subs run -c substructure.toml assistant \
     "two sentences for the homepage of a bicycle repair shop that comes to you"
 ```

@@ -5,7 +5,3 @@ type = "anthropic"
 llm = "claude"
 model = "claude-haiku-4-5-20251001"
 worker = "http://localhost:4444"
-
-[run]
-agent = "planner"
-output = "pretty"

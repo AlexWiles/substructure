@@ -15,6 +15,7 @@ together at the same version.
 
 ### Changed
 
+- `subs run` and `subs chat` take agent id as a positional argument
 - Retry policy improvementss
 - Better concurrent tool execution within a turn.
 

@@ -8,7 +8,7 @@ group: Frontends
 event stream becomes text.
 
 ```sh
-subs chat
+subs chat assistant
 ```
 
 ```console
@@ -38,24 +38,14 @@ session lands in this machine's database. A file that names one describes a
 deployment, so chat streams the turn from there.
 
 ```sh
-subs chat                          # the file decides
-subs chat --url http://localhost:8080   # a deployment, for this chat
+subs chat assistant                                # the file decides
+subs chat assistant --url http://localhost:8080    # a deployment, for this chat
 ```
 
 `--url` also points at a `subs serve` you are running, which is how to chat
 with the engine that answers your Slack workspace.
 
 See [CLI](./260-cli.md#where-a-command-acts).
-
-## Which agent
-
-Chat drives the agent `[run].agent` names — the same question `subs run`
-answers, so one file serves both. `--agent <id>` picks another for one chat.
-
-```toml
-[run]
-agent = "assistant"
-```
 
 ## The session
 
@@ -64,7 +54,7 @@ the chat and prints how to pick it back up.
 
 ```console
 continue this session with:
-  subs chat --session 01a02417-7d46-7441-8090-23b20d0f980f
+  subs chat assistant --session 01a02417-7d46-7441-8090-23b20d0f980f
 ```
 
 The session is durable, so it outlives the process: `subs sessions list` shows
@@ -204,7 +194,7 @@ stops rather than offering an input it cannot send:
 ⧗ get_weather is waiting on a client-side result, which this chat cannot settle.
 ```
 
-Use `subs run --input '{"type":"tool.result",…}'` for those. See
+Use `subs run <agent> --input '{"type":"tool.result",…}'` for those. See
 [Client tools](./150-client-tools.md).
 
 ## Related

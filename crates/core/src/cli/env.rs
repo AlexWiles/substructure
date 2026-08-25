@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
@@ -68,8 +70,7 @@ impl ProviderKind {
     }
 }
 
-/// How `subs run` renders a turn. The file spells these the way `--output`
-/// does, so one type is both the flag's values and the manifest's.
+/// How `subs run` renders a turn.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputFormat {
@@ -79,6 +80,17 @@ pub enum OutputFormat {
     Jsonl,
     /// Human-readable text: streamed replies, tool calls, and results.
     Pretty,
+}
+
+impl OutputFormat {
+    /// What `--output` unset means: text for a person reading it, protocol
+    /// events for whatever a pipe feeds.
+    pub fn for_stdout() -> Self {
+        match std::io::stdout().is_terminal() {
+            true => Self::Pretty,
+            false => Self::AgUi,
+        }
+    }
 }
 
 /// One engine-run llm block, bound: the block's name, what it calls, and the

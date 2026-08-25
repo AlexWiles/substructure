@@ -38,7 +38,7 @@ node server.ts
 **2. Send a message with the CLI** (no `[llm]` section, the worker owns the LLM):
 
 ```sh
-subs run -c substructure.toml --agent my-agent "hi"
+subs run -c substructure.toml my-agent "hi"
 ```
 
 ## Regenerate types

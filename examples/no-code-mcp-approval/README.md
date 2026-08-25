@@ -38,7 +38,7 @@ export OPENROUTER_API_KEY=sk-or-...
 A read runs as it always has:
 
 ```sh
-subs run "which issues mention the login page?"
+subs run ops "which issues mention the login page?"
 ```
 
 ```text
@@ -49,7 +49,7 @@ subs run "which issues mention the login page?"
 A delete stops:
 
 ```sh
-subs run "delete issue 7"
+subs run ops "delete issue 7"
 ```
 
 ````text
@@ -70,7 +70,7 @@ says what would happen and only they say what it would happen to.
 Resume the interrupt by id, with the session the run printed.
 
 ```sh
-subs run --session <session> --input '{"type":"interrupt.resume","interrupt_id":"mcp-approve:<tool call id>","payload":{"approved":true}}'
+subs run ops --session <session> --input '{"type":"interrupt.resume","interrupt_id":"mcp-approve:<tool call id>","payload":{"approved":true}}'
 ```
 
 `true` runs the call. Anything else declines it, and the model reads that a
@@ -90,7 +90,7 @@ no id is typed here either. The options are the same ones Slack draws as
 buttons.
 
 ```sh
-subs chat
+subs chat ops
 ```
 
 ````console
@@ -126,7 +126,7 @@ The deletion of issue 7 was declined. …
 ```
 
 `Ctrl-C` at the question leaves it parked in the session, and
-`subs chat --session <id>` asks it again.
+`subs chat ops --session <id>` asks it again.
 
 See [Chat](../../docs/135-chat.md).
 
@@ -135,7 +135,7 @@ See [Chat](../../docs/135-chat.md).
 Ask for both and the model sends two calls in one message.
 
 ```sh
-subs run "delete issues 7 and 9"
+subs run ops "delete issues 7 and 9"
 ```
 
 Each is asked about on its own, so one can run and the next be declined. The

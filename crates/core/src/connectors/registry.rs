@@ -145,13 +145,6 @@ impl<'de> Deserialize<'de> for AuthKind {
                     ))
                 })
             }
-
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, _: A) -> Result<AuthKind, A::Error> {
-                Err(serde::de::Error::custom(
-                    "`auth` is a string now: write `auth = \"token\"` and set the credential \
-                     with `subs auth <path>`",
-                ))
-            }
         }
 
         d.deserialize_any(Kind)
@@ -811,21 +804,6 @@ mod tests {
         assert!(
             err.to_string().contains("token"),
             "the file must not be able to hold a secret; got {err}"
-        );
-    }
-
-    #[test]
-    fn the_old_auth_table_answers_with_the_migration() {
-        let err = toml::from_str::<ConnectionDecl>(
-            r#"
-            url = "https://example.test/mcp"
-            auth = { token_env = "GITHUB_TOKEN" }
-        "#,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("subs auth <path>"),
-            "a file written against the old shape is told what to write instead; got {err}"
         );
     }
 

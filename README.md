@@ -155,7 +155,7 @@ Run the engine on your machine and iterate before you deploy. A file with no
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs run --agent oncall -o pretty "what is broken?"
+subs run oncall "what is broken?"
 ```
 
 The reply streams to your terminal. `subs serve` runs the same engine as an HTTP

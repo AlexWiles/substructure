@@ -11,7 +11,3 @@ plugins = ["runbooks"]
 
 [plugin.runbooks]
 path = "./plugins/runbooks"
-
-[run]
-agent = "oncall"
-output = "pretty"

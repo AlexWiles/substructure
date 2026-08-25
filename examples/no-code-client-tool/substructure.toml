@@ -13,9 +13,5 @@ name = "get_location"
 description = "The city the user is in"
 handler = "client"
 
-[run]
-agent = "assistant"
-output = "pretty"
-
 [remote]
 url = "https://api.substructure.ai"

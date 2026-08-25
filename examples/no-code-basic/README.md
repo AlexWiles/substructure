@@ -25,7 +25,7 @@ The agent now runs on the deployment `[remote]` names, on the key you uploaded.
 The file never holds a key. It only names one.
 
 ```sh
-subs run "hi"
+subs run assistant "hi"
 ```
 
 ## Run it here instead
@@ -34,7 +34,7 @@ Delete `[remote]` and the turn runs on this machine, on your own key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs run -c substructure.toml --agent assistant "hi"
+subs run -c substructure.toml assistant "hi"
 ```
 
 ## Outgrow the file

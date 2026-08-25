@@ -39,10 +39,6 @@ url = "https://mcp.sentry.dev/mcp"
 dm = "support"
 mentions = "support"
 
-[run]
-agent = "support"
-output = "pretty"
-
 [serve]
 host = "127.0.0.1"
 port = 8080
@@ -59,7 +55,7 @@ A file has two roles. It can have one or both.
 
 | Role | Keys | Commands |
 | --- | --- | --- |
-| An engine you run | `db`, `log`, `[run]`, `[serve]` | `subs run`, `subs serve` |
+| An engine you run | `db`, `log`, `[serve]` | `subs run`, `subs serve` |
 | A deployment you administer | `[remote]` | `subs apply`, `subs keys`, `subs sessions` |
 
 The project itself stays the same for both roles: `name`, `[llm.<id>]`,
@@ -255,15 +251,6 @@ off = true
 
 Name a channel by ID, never by name. A `#name` is a parse error. See
 [Slack](./130-slack.md).
-
-## `[run]`
-
-Defaults for `subs run`.
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `agent` | agent ID | none | Which agent a bare `subs run` uses. |
-| `output` | `ag-ui`, `jsonl`, `pretty` | `ag-ui` | How to print the turn. |
 
 ## `[serve]`
 

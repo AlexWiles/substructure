@@ -130,7 +130,7 @@ For a browser, mint a short-lived client token instead. See
 ## Run a turn against it
 
 ```sh
-subs run "hi"
+subs run support "hi"
 ```
 
 With a `[remote]`, `subs run` sends the turn to the deployment and streams it

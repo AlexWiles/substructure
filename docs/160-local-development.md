@@ -36,23 +36,11 @@ deployment. See [Config](./220-config.md) for every section.
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs run --agent oncall -o pretty "hi"
+subs run oncall "hi"
 ```
 
-The reply streams to your terminal. `-o pretty` shows the turn as text. The
-default, `ag-ui`, streams protocol events.
-
-Put the flags in the file so you stop repeating them.
-
-```toml title="substructure.toml"
-[run]
-agent = "oncall"
-output = "pretty"
-```
-
-```sh
-subs run "hi"
-```
+The reply streams to your terminal as text. Piped into another program it
+streams AG-UI protocol events instead; `-o` says which, whatever the venue.
 
 ## Continue a session
 
@@ -61,11 +49,11 @@ with the session pinned and the message replaced by a placeholder at the end.
 
 ```
 continue this session with:
-  subs run --session <session-id> '...'
+  subs run oncall --session <session-id> '...'
 ```
 
 ```sh
-subs run --session <session-id> "what was my first question?"
+subs run oncall --session <session-id> "what was my first question?"
 ```
 
 The agent remembers. The engine saves the whole session in
@@ -120,7 +108,7 @@ worker = "http://localhost:4444"
 
 ```sh
 node server.mjs
-subs run "hi"
+subs run oncall "hi"
 ```
 
 Every decision now POSTs to your code. See [Workers](./50-workers.md).
@@ -155,7 +143,7 @@ environment's `db`.
 A second environment is a second file.
 
 ```sh
-subs run -c substructure.dev.toml "hi"
+subs run -c substructure.dev.toml oncall "hi"
 subs serve -c substructure.dev.toml
 ```
 

@@ -23,6 +23,6 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml --agent my-agent "hi"
+subs run -c substructure.toml my-agent "hi"
 ```
 

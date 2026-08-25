@@ -20,7 +20,7 @@ key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs chat
+subs chat assistant
 ```
 
 ```console
@@ -45,7 +45,7 @@ still has the first.
 
 ```console
 continue this session with:
-  subs chat --session 01a02417-7d46-7441-8090-23b20d0f980f
+  subs chat assistant --session 01a02417-7d46-7441-8090-23b20d0f980f
 ```
 
 The session is in the database, not in the process, so the answer survives the
@@ -57,11 +57,6 @@ The two cities we have been discussing are **Lisbon** … and **Madrid** …
 ```
 
 `↑` walks what you typed before, across chats as well as within one.
-
-## Which agent
-
-`subs chat` drives the agent `[run].agent` names, so one file answers for both
-commands. `--agent <id>` picks another for one chat.
 
 ## Against a deployment
 
@@ -77,7 +72,7 @@ url = "https://api.substructure.ai"
 subs login
 subs apply
 subs llm set-key openrouter
-subs chat
+subs chat assistant
 ```
 
 The session lives on the deployment now, so `subs sessions list` shows it and

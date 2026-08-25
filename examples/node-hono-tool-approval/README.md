@@ -30,7 +30,7 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml --agent my-agent "email bob@example.com a hello"
+subs run -c substructure.toml my-agent "email bob@example.com a hello"
 ```
 
 The run parks on the prompt and prints the interrupt id:
@@ -43,7 +43,7 @@ Resolve it — the AG-UI resume shape, with the inner `payload` a chosen
 option's value, verbatim:
 
 ```sh
-subs run -c substructure.toml \
+subs run my-agent -c substructure.toml \
     --session approval-demo \
     --input '{"type":"interrupt.resume","interrupt_id":"approve:tc_...","payload":{"status":"resolved","payload":{"decision":"approve"}}}'
 ```
