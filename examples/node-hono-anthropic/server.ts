@@ -12,7 +12,7 @@ const app = new Hono();
 app.post("/", async (c) => {
     const { trigger, proposed }: DecisionRequest = await c.req.json();
 
-    // Refine the declared agent. `llm = "byo"` in substructure.toml is a
+    // Refine the declared agent. `llm = "byo"` in subs.toml is a
     // `type = "worker"` block, so the calls come back here as `llm.execute`,
     // shaped by that block's `format`.
     if (trigger.type === "session.start") {

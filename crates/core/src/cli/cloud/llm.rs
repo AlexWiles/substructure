@@ -1,6 +1,6 @@
 //! `subs llm`: the keys behind the `[llm.*]` blocks the file declares.
 //!
-//! A block is declared in `substructure.toml`; the key for it is uploaded here.
+//! A block is declared in `subs.toml`; the key for it is uploaded here.
 //! Pasting a key is configuration rather than money or consent, so it belongs
 //! on this side of the write partition — and it never appears in argv, where a
 //! shell history would keep it.
@@ -112,7 +112,7 @@ fn declared(name: &str, config: &ProjectConfig) -> Option<Row> {
 fn key_is_a_variable(block: &str, config: &ProjectConfig, verb: &str) -> Result<()> {
     let Some(spec) = config.llm.get(block) else {
         bail!(
-            "no [llm.{block}] in substructure.toml. Declared: {}",
+            "no [llm.{block}] in subs.toml. Declared: {}",
             crate::worker::directory::declared(&config.llm.keys().cloned().collect::<Vec<_>>())
         );
     };

@@ -45,15 +45,15 @@ pub struct ChatArgs {
     #[arg(long)]
     session: Option<String>,
     /// Environment file (default: walks up from cwd looking for
-    /// `substructure.toml`).
+    /// `subs.toml`).
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
     /// Chat with the deployment at this URL. Point it at a `subs serve` to use
     /// the engine that runs there.
     #[arg(long)]
     url: Option<String>,
-    /// SQLite dev database path. [default: `db` in `substructure.toml`, else
-    /// `~/.config/substructure/substructure.db`]
+    /// SQLite dev database path. [default: `db` in `subs.toml`, else
+    /// `~/.config/subs/subs.db`]
     #[arg(long)]
     db: Option<String>,
 }

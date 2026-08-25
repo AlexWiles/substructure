@@ -15,6 +15,7 @@ together at the same version.
 
 ### Changed
 
+- The default config file is now `subs.toml`, the default database is now `subs.db`, and the default config directory is now `~/.config/subs`.
 - `subs run` and `subs chat` take agent id as a positional argument
 - Retry policy improvementss
 - Better concurrent tool execution within a turn.

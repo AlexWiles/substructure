@@ -28,7 +28,7 @@ use std::path::PathBuf;
 pub const GLOBAL_FLAGS_HELP: &str = "\
 Global Options:
       --url <URL>          Override the cloud API URL.
-  -c, --config <PATH>      Environment file override (substructure.toml).
+  -c, --config <PATH>      Environment file override (subs.toml).
       --credentials <PATH> User-level credentials file override.
       --json               Emit machine-readable JSON.
   -n, --no-interaction     Never prompt; fail if input is required.";
@@ -40,12 +40,12 @@ pub struct CloudGlobals {
     #[arg(long, global = true)]
     pub url: Option<String>,
     /// Environment file (default: walks up from cwd looking for
-    /// `substructure.toml`). Its `[remote]` section names the server and
+    /// `subs.toml`). Its `[remote]` section names the server and
     /// pins which org/project commands target without flags.
     #[arg(short = 'c', long, global = true)]
     pub config: Option<PathBuf>,
     /// User-level credentials file holding the bearer token
-    /// (default: ~/.config/substructure/credentials.toml).
+    /// (default: ~/.config/subs/credentials.toml).
     #[arg(long, global = true)]
     pub credentials: Option<PathBuf>,
     /// Emit machine-readable JSON instead of the human-readable table/text.

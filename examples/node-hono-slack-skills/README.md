@@ -45,7 +45,7 @@ node server.mjs
 
 ```sh
 export SLACK_APP_TOKEN=xapp-... SLACK_BOT_TOKEN=xoxb-... OPENROUTER_API_KEY=sk-or-...
-subs serve -c substructure.toml
+subs serve -c subs.toml
 ```
 
 DM the bot, or mention it in a channel. It answers in the thread, and the reply

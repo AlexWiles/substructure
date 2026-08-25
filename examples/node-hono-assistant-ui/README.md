@@ -23,7 +23,7 @@ Three things: the engine, the app, the browser.
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs serve -c substructure.toml
+subs serve -c subs.toml
 ```
 
 **2. Build and start the app**:

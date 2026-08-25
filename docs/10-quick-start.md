@@ -21,13 +21,13 @@ The script verifies the release's checksum and installs to `~/.local/bin`. Set
 npm instead: `npm install -g @substructure.ai/cli`.
 
 `subs login` authenticates in your browser. It stores a token under
-`~/.config/substructure`.
+`~/.config/subs`.
 
 ## Describe the agent
 
-Write `substructure.toml` in your project root.
+Write `subs.toml` in your project root.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 name = "oncall-bot"
 
 [llm.openrouter]

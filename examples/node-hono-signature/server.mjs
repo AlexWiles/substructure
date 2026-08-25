@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 
-// The agent is declared in substructure.toml; this worker exists to show the
+// The agent is declared in subs.toml; this worker exists to show the
 // signature check below.
 function decide({ proposed }) {
     return proposed;

@@ -1,4 +1,4 @@
-//! Authorizing the connections `substructure.toml` declares.
+//! Authorizing the connections `subs.toml` declares.
 //!
 //! Consent is always a human in a browser; what differs is where the credential
 //! lands, and the file says which. A file naming a `[remote]` asks that
@@ -100,7 +100,7 @@ fn unregistrable(
 /// problem, not an empty list: nothing here can succeed without one.
 pub(super) fn environment(globals: &CloudGlobals) -> Result<ProjectConfig> {
     let found = project_config::resolve(globals.config.as_deref())?
-        .context("no substructure.toml found; connections are declared under `[mcp.<id>]`")?;
+        .context("no subs.toml found; connections are declared under `[mcp.<id>]`")?;
     Ok(found.config)
 }
 
@@ -109,7 +109,7 @@ pub(super) fn pick(
     path: Option<ConnectionPath>,
 ) -> Result<ConnectionSpec> {
     if connections.is_empty() {
-        bail!("substructure.toml declares no connections");
+        bail!("subs.toml declares no connections");
     }
     let path = match path {
         Some(path) => path,
@@ -118,7 +118,7 @@ pub(super) fn pick(
     };
     connections.get(&path).cloned().with_context(|| {
         format!(
-            "`{path}` is not declared in substructure.toml. Declared: {}",
+            "`{path}` is not declared in subs.toml. Declared: {}",
             list(connections)
         )
     })

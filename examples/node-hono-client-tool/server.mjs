@@ -6,7 +6,7 @@ function decide({ trigger, proposed }) {
     if (trigger.type === "session.start") {
         return {
             // The declared config arrives as the proposal; spread it to keep
-            // the `llm` and `model` substructure.toml names.
+            // the `llm` and `model` subs.toml names.
             agent: {
                 ...proposed.agent,
                 system: "For location-based questions, call get_location instead of guessing.",

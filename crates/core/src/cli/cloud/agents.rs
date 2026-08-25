@@ -1,6 +1,6 @@
 //! `subs agents`: shows each agent the file declares.
 //!
-//! Read-only but for rotation — an agent exists because `substructure.toml`
+//! Read-only but for rotation — an agent exists because `subs.toml`
 //! declares it, so there is nothing to create here. Printing a signing secret
 //! is its own command: no other output carries one, so a secret reaches a
 //! terminal or a pipe only where that was the point.
@@ -107,7 +107,7 @@ fn declared<'a>(id: &'a str, section: &'a AgentSection) -> [String; 5] {
 fn section<'a>(agent_id: &str, config: &'a ProjectConfig) -> Result<&'a AgentSection> {
     config.agent.get(agent_id).ok_or_else(|| {
         anyhow::anyhow!(
-            "no [agent.{agent_id}] in substructure.toml. Declared: {}",
+            "no [agent.{agent_id}] in subs.toml. Declared: {}",
             crate::worker::directory::declared(&config.agent_ids())
         )
     })

@@ -15,7 +15,7 @@ The words the rest of the docs use.
 
 ## Agents
 
-You declare an agent in `substructure.toml`.
+You declare an agent in `subs.toml`.
 
 ```toml
 [agent.oncall]

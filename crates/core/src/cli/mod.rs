@@ -136,7 +136,7 @@ pub enum Command {
         scope: ProjectScope,
     },
     /// Link the current directory to an org (and project) by writing a
-    /// `substructure.toml`, so commands run from this tree pick them up automatically.
+    /// `subs.toml`, so commands run from this tree pick them up automatically.
     Link(cloud::link::LinkCommand),
     /// Push the environment file to the deployment, creating the project it
     /// describes if nothing is pinned yet.

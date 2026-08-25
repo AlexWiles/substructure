@@ -11,7 +11,7 @@ The CLI resolves the directory to data — at startup for a local engine, at
 Declare a plugin at the project level and attach it to agents, the same way
 connections work:
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [plugin.pdf]
 path = "./plugins/pdf-tools"
 

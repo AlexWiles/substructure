@@ -65,7 +65,7 @@ pub fn config_dir() -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
         .context("could not determine config dir (HOME/XDG_CONFIG_HOME unset)")?;
-    Ok(base.join("substructure"))
+    Ok(base.join("subs"))
 }
 
 /// The config dir, made if it is not there. Private: it holds the tokens and

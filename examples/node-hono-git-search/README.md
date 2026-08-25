@@ -39,5 +39,5 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml my-agent "where is the tool.execute trigger handled?"
+subs run -c subs.toml my-agent "where is the tool.execute trigger handled?"
 ```

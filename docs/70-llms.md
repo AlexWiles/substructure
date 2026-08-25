@@ -21,7 +21,7 @@ it.
 
 The engine calls the vendor for you.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [llm.claude]
 type = "anthropic"
 
@@ -38,7 +38,7 @@ fail with an error that lists the blocks that the file declares.
 Set `type = "worker"` and the engine holds no key. Your worker answers an
 `llm.execute` trigger.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [llm.byo]
 type = "worker"        # the agent's worker makes the call
 format = "anthropic"   # trigger.request is a Messages API body
@@ -136,7 +136,7 @@ environment. `api_key_env` names the variable. Without it, the engine uses the
 vendor's default: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
 `OPENROUTER_API_KEY`.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [llm.claude]
 type = "anthropic"
 api_key_env = "MY_ANTHROPIC_KEY"   # local only

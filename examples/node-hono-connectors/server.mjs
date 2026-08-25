@@ -11,7 +11,7 @@ function decide({ trigger, proposed }) {
         return {
             agent: {
                 ...proposed.agent,
-                // "issues" is the server in substructure.toml. read_only keeps
+                // "issues" is the server in subs.toml. read_only keeps
                 // close_issue away from the model.
                 mcp: [{ id: "issues", tools: { read_only: true } }]
             }

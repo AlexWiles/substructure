@@ -12,7 +12,7 @@ The thread is the session. Later mentions continue the conversation.
 
 Setting up takes two steps: say who answers, then connect the workspace.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [slack]
 dm = "support"
 mentions = "support"
@@ -38,7 +38,7 @@ An engine you run needs a Slack app you own. See
 
 ## Where the bot answers
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [slack]
 dm = "support"               # direct messages
 mentions = "support"         # @mentions, in any channel the table omits

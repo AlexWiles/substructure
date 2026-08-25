@@ -3,7 +3,7 @@ title: Config
 group: Reference
 ---
 
-`substructure.toml` declares one project. Every key is here.
+`subs.toml` declares one project. Every key is here.
 
 The CLI reads the file from the working directory, or from the path you pass
 with `-c`. It does not search parent directories.
@@ -12,9 +12,9 @@ An unknown key is a parse error.
 
 ## A full file
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 name = "support-bot"
-db = "substructure.db"
+db = "subs.db"
 log = "info"
 
 [llm.claude]
@@ -61,7 +61,7 @@ A file has two roles. It can have one or both.
 The project itself stays the same for both roles: `name`, `[llm.<id>]`,
 `[agent.<id>]`, `[mcp.<id>]`, `[plugin.<id>]`, and `[slack]`.
 
-A second environment is a second file. `subs apply -c substructure.staging.toml`
+A second environment is a second file. `subs apply -c subs.staging.toml`
 deploys a separate project.
 
 ## Top level
@@ -69,10 +69,10 @@ deploys a separate project.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `name` | string | none | The project's name. `subs apply` creates the project from it and renames it when it changes. |
-| `db` | path | `~/.config/substructure/substructure.db` | The SQLite file holding events, sessions, and connector credentials. A relative path resolves against the file. |
+| `db` | path | `~/.config/subs/subs.db` | The SQLite file holding events, sessions, and connector credentials. A relative path resolves against the file. |
 | `log` | string | `error` for `run`, `info` for `serve` | A `RUST_LOG` filter. `$RUST_LOG` wins over it. |
 
-Unset, `db` is `~/.config/substructure/substructure.db`, beside
+Unset, `db` is `~/.config/subs/subs.db`, beside
 `credentials.toml`. Every command on the machine reads that one, whichever
 directory it runs in and whether or not a file is there. Set `db` to give a
 project its own — two files that both set it are two engines.
@@ -278,7 +278,7 @@ apply changes nothing.
 
 ## Precedence
 
-**flag > environment variable > `substructure.toml` > default**
+**flag > environment variable > `subs.toml` > default**
 
 Setting a value in the file still lets you override it on the command line.
 

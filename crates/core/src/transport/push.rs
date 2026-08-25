@@ -112,7 +112,7 @@ impl Router {
     fn route(&self, tenant_id: &str, agent_id: &str) -> Result<Route, String> {
         let Some(entry) = self.agents.agent(tenant_id, agent_id) else {
             return Err(format!(
-                "no [agent.{agent_id}] in substructure.toml. Declared: {}",
+                "no [agent.{agent_id}] in subs.toml. Declared: {}",
                 declared(&self.agents.agent_ids(tenant_id))
             ));
         };

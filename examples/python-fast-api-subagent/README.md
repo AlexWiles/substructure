@@ -24,5 +24,5 @@ python3 main.py
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml assistant "what is the weather in Paris?"
+subs run -c subs.toml assistant "what is the weather in Paris?"
 ```

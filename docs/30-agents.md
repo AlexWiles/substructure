@@ -6,7 +6,7 @@ group: Building agents
 An agent is a model, a prompt, and a set of tools. You declare one with an
 `[agent.<id>]` section.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [llm.openrouter]
 type = "openrouter"
 
@@ -42,7 +42,7 @@ Every key of the wire `AgentConfig` works here under the same name. See
 
 A second agent is a second section. Each one names its own model.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [llm.claude]
 type = "anthropic"
 
@@ -76,7 +76,7 @@ its own transcript and cost.
 
 Routing is per agent. An engine-hosted parent can call a worker-hosted child.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.triage]
 llm = "claude"
 model = "claude-haiku-4-5"
@@ -88,7 +88,7 @@ worker = "https://triage.internal/agent"
 A section has two jobs. It declares that the agent exists, and it can set the
 config. An agent whose worker builds its own config needs only the first.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.reggu]
 worker = "http://localhost:4000/substructure/agent"
 ```

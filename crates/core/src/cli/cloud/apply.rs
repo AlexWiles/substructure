@@ -87,7 +87,7 @@ struct Created {
 
 pub async fn run(cmd: ApplyCommand) -> Result<()> {
     let found = project_config::resolve(cmd.globals.config.as_deref())?
-        .context("no substructure.toml found. Write one, or pass -c.")?;
+        .context("no subs.toml found. Write one, or pass -c.")?;
     let path = found.path.clone();
     let config = found.config;
     let ctx = Context::with_config(&cmd.globals, Some(config.clone()))?;

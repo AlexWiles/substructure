@@ -61,7 +61,7 @@ pub(crate) fn message_input(message: String, agent_id: String) -> ClientInput {
 pub(crate) fn declared_agent(agent_id: String, declared: &[String]) -> Result<String> {
     if !declared.contains(&agent_id) {
         anyhow::bail!(
-            "no [agent.{agent_id}] in substructure.toml. Declared: {}",
+            "no [agent.{agent_id}] in subs.toml. Declared: {}",
             crate::worker::directory::declared(declared)
         );
     }

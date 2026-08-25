@@ -17,7 +17,7 @@ const app = new Hono();
 app.post("/", async (c) => {
     const { trigger, proposed }: DecisionRequest = await c.req.json();
 
-    // `llm = "byo"` in substructure.toml is a `type = "worker"` block, so the
+    // `llm = "byo"` in subs.toml is a `type = "worker"` block, so the
     // calls come back here as `llm.execute`, shaped by that block's `format`.
     // The request is already a Chat Completions body; raw stream chunks and
     // the final completion go straight back.

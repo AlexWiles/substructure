@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 
 // The whole worker: accept the engine's proposal for every decision. The agent
-// is declared in substructure.toml, and arrives as the `session.start`
+// is declared in subs.toml, and arrives as the `session.start`
 // proposal, so there is nothing to author until you want to override something.
 function decide({ proposed }) {
     return proposed;

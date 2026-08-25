@@ -29,7 +29,7 @@ EXECUTING_TOOLS = [
 ]
 
 # One profile per mode: planning fills the checklist, executing walks it.
-# `llm` and `model` name what substructure.toml declares: a config built
+# `llm` and `model` name what subs.toml declares: a config built
 # outside a decision cannot inherit them from the proposal.
 PROFILES = {
     "planning": {

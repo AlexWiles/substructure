@@ -47,12 +47,12 @@ pub struct ServeArgs {
     /// [default: 8080]
     #[arg(long)]
     port: Option<u16>,
-    /// [default: `db` in `substructure.toml`, else
-    /// `~/.config/substructure/substructure.db`]
+    /// [default: `db` in `subs.toml`, else
+    /// `~/.config/subs/subs.db`]
     #[arg(long)]
     db: Option<String>,
     /// Environment file (default: walks up from cwd looking for
-    /// `substructure.toml`).
+    /// `subs.toml`).
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
     /// Serve without client or worker authentication. For a server nothing off
@@ -241,9 +241,7 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
 /// of the file, so it should be readable without reading the file.
 fn announce_agents(cfg: &ProjectConfig) {
     if cfg.agent.is_empty() {
-        tracing::warn!(
-            "substructure.toml declares no [agent.*]; every decision will fail until one does"
-        );
+        tracing::warn!("subs.toml declares no [agent.*]; every decision will fail until one does");
         return;
     }
     for (id, section) in &cfg.agent {
@@ -360,7 +358,7 @@ pub(crate) async fn start_engine(
     let connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>> = Arc::new(
         ShardedInMemoryQueue::new(config.connector_executor_workers as u32),
     );
-    // Connections come from `substructure.toml`; the file holds only names and
+    // Connections come from `subs.toml`; the file holds only names and
     // env-var references, never a token. What `subs auth` authorized is in this
     // same database, so a login and the engine that uses it cannot drift apart.
     let connections = Some(connectors.clone())
@@ -368,7 +366,7 @@ pub(crate) async fn start_engine(
         .map(|connectors| {
             tracing::info!(
                 connections = connectors.len(),
-                "loaded connections from substructure.toml"
+                "loaded connections from subs.toml"
             );
             Arc::new(Connections::new(
                 Arc::new(LocalRegistry::new(connectors)),
@@ -493,7 +491,7 @@ mod tests {
         ProjectConfig::parse(
             "name = \"t\"\n[llm.o]\ntype = \"openrouter\"\n\
              [agent.assistant]\nllm = \"o\"\nmodel = \"m\"\n",
-            std::path::Path::new("substructure.toml"),
+            std::path::Path::new("subs.toml"),
         )
         .unwrap()
     }

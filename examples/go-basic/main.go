@@ -10,7 +10,7 @@ import (
 
 func decide(req DecisionRequest) DecisionResponse {
 	// The whole worker: accept the engine's proposal for every decision. The
-	// agent is declared in substructure.toml, and arrives as the
+	// agent is declared in subs.toml, and arrives as the
 	// `session.start` proposal, so there is nothing to author here.
 	return req.Proposed
 }

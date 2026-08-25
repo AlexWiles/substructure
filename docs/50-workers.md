@@ -38,7 +38,7 @@ That is a complete agent. It behaves the same as an agent with no worker.
 
 ## Point an agent at it
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.oncall]
 llm = "openrouter"
 model = "anthropic/claude-sonnet-4-5"

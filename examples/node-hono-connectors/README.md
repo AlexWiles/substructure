@@ -41,10 +41,10 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml my-agent "which issues are open?"
+subs run -c subs.toml my-agent "which issues are open?"
 ```
 
-`substructure.toml` describes the environment — the worker URL, the agent, the
+`subs.toml` describes the environment — the worker URL, the agent, the
 provider, and the output mode — so none of it is on the command line. A flag still wins over the file.
 
 The model calls `issues__search_issues`. The tool name has the connection id in
@@ -52,7 +52,7 @@ front of it, because `prefix_tools` is on by default.
 
 ## The connection
 
-`substructure.toml` holds the connections. A URL is usually the whole
+`subs.toml` holds the connections. A URL is usually the whole
 declaration: the engine asks the server what it wants. The example server wants
 nothing, so this is all of it:
 
@@ -91,6 +91,6 @@ gives you no tools under `read_only`, instead of every tool.
 
 ## Use a real service
 
-Declare a connection in `substructure.toml`, authorize it (set the variable it
+Declare a connection in `subs.toml`, authorize it (set the variable it
 names, or `subs auth <path>`), and add the id to `mcp` in `server.mjs`.
 Nothing else changes.

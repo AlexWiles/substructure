@@ -46,6 +46,6 @@ Delete `[remote]` and the turn runs on this machine, on your own key:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-subs run -c substructure.toml assistant \
+subs run -c subs.toml assistant \
     "two sentences for the homepage of a bicycle repair shop that comes to you"
 ```

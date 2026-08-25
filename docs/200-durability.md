@@ -50,7 +50,7 @@ the tree by ID. A reconnect records nothing new.
 ## Storage
 
 The engine saves to a store that you can replace. The CLI uses SQLite in
-`~/.config/substructure/substructure.db`, or wherever `db` says.
+`~/.config/subs/subs.db`, or wherever `db` says.
 
 Stop the engine, come back later, and the session continues.
 

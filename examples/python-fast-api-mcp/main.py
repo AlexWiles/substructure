@@ -34,7 +34,7 @@ async def decide(req):
         # Offer every MCP tool to the model as-is.
         return {
             # The declared config arrives as the proposal; spread it to keep
-            # the `llm` and `model` substructure.toml names.
+            # the `llm` and `model` subs.toml names.
             "agent": {
                 **req["proposed"]["agent"],
                 "tools": [

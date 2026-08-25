@@ -4,7 +4,7 @@ Like [`python-fast-api-basic`](../python-fast-api-basic), but the worker makes
 the Claude call itself and streams the tokens back. The engine never touches
 an LLM provider — it just routes decisions.
 
-`substructure.toml` declares `[llm.byo]` with `type = "worker"`, so the engine
+`subs.toml` declares `[llm.byo]` with `type = "worker"`, so the engine
 sends this agent's model calls back here as `llm.execute` rather than running
 them itself, and `format = "anthropic"`, so the wire speaks the Messages API
 natively: the trigger's `request` is a ready-to-send Messages API body, each
@@ -32,5 +32,5 @@ python3 main.py
 **2. Send a message with the CLI** (no `[llm]` section, the worker owns the LLM):
 
 ```sh
-subs run -c substructure.toml my-agent "hi"
+subs run -c subs.toml my-agent "hi"
 ```

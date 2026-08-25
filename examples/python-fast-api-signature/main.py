@@ -5,7 +5,7 @@ import hmac
 from fastapi import Depends, FastAPI, HTTPException, Request
 
 
-# The agent is declared in substructure.toml; this worker exists to show the
+# The agent is declared in subs.toml; this worker exists to show the
 # signature check below.
 def decide(req):
     return req["proposed"]

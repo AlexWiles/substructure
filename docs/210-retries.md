@@ -75,7 +75,7 @@ timeout ends a parent whose child stopped answering.
 
 ## Overrides
 
-Set an override per kind on the agent config. Write it in `substructure.toml`,
+Set an override per kind on the agent config. Write it in `subs.toml`,
 or in the `agent` your worker returns.
 
 ```toml

@@ -14,7 +14,7 @@ sees a token.
 
 MCP servers go under `[mcp.<id>]`.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [mcp.sentry]
 url = "https://mcp.sentry.dev/mcp"
 
@@ -65,7 +65,7 @@ engine disconnects the connection for good, and its credentials go with it.
 The credential belongs to the path. Declare one server twice to connect two
 accounts. Authorize each path on its own.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [mcp.sentry]
 url = "https://mcp.sentry.dev/mcp"       # subs auth mcp.sentry
 
@@ -82,7 +82,7 @@ scopes, a connection asks for everything the server advertises — that server's
 maximum, not its recommendation. Sentry advertises writing to projects, teams,
 and events, although reading issues needs none of that access.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [mcp.sentry]
 url = "https://mcp.sentry.dev/mcp"
 scopes = ["org:read"]
@@ -99,7 +99,7 @@ and its secret. The file names variables and never holds a secret, and `subs
 apply` strips both variables before the document reaches a deployment: a client
 belongs to whoever registered it against their own redirect URI.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [mcp.gmail]
 url = "https://gmailmcp.googleapis.com/mcp/v1"
 credential = "user"
@@ -141,7 +141,7 @@ file now says to send. Authorize the connection again.
 A server that wants a header other than `Authorization: Bearer` names it, and
 only under `auth = "token"`.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [mcp.sentry]
 url = "https://mcp.sentry.dev/mcp"
 auth = "token"
@@ -156,7 +156,7 @@ An agent names a connection by its path — where the connection is declared. A
 path on its own gives the agent every tool that the connection offers. To take
 fewer, use the table form.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.support]
 mcp = ["mcp.sentry"]
 
@@ -170,7 +170,7 @@ credential, and see different tools.
 A plugin's server has a path like any other, so an agent can take one of them
 without the rest of the bundle.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.searcher]
 mcp = ["plugin.reggu.mcp.code"]
 ```
@@ -219,7 +219,7 @@ The engine takes the first place it can use:
 The order is fixed, so it is not a setting. `mcp_announce` on the agent chooses
 whether the engine announces at all.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.support]
 mcp = ["mcp.sentry"]
 mcp_announce = "never"
@@ -262,7 +262,7 @@ failed left no tool names behind.
 `tool_sync_failure` on the connection, or `mcp_tool_sync_failure` on the agent,
 chooses whether the engine says anything.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.support]
 mcp_tool_sync_failure = "warn"
 mcp = ["mcp.sentry", { id = "mcp.linear", tool_sync_failure = "silent" }]
@@ -318,7 +318,7 @@ to take fewer tools, not as a security boundary.
 A filter says which tools an agent may reach. `approve` says which of them stop
 and ask a person first.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.support]
 mcp = [{ id = "mcp.sentry", approve = "destructive" }]
 ```
@@ -417,14 +417,14 @@ channel to show the question stops until someone resumes it by ID, so use
 A filter is one answer to a large connection. Search is the other. Set `defer`
 and the model searches for a tool instead of reading a list of tools.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.support]
 mcp = [{ id = "mcp.aws", tools = { defer = true } }]
 ```
 
 `defer_tools` defers every tool of an agent. A connection overrides it.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.support]
 defer_tools = true
 mcp = [
@@ -514,7 +514,7 @@ without the tools it no longer has reads exactly like an agent that used them.
 An agent with nobody to ask says so instead. Set `auth_failure` on the entry
 that names the connection.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.support]
 mcp = ["mcp.sentry"]                                       # stops and asks
 

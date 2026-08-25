@@ -30,7 +30,7 @@ node server.mjs
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
-subs run -c substructure.toml my-agent "email bob@example.com a hello"
+subs run -c subs.toml my-agent "email bob@example.com a hello"
 ```
 
 The run parks on the prompt and prints the interrupt id:
@@ -43,7 +43,7 @@ Resolve it — the AG-UI resume shape, with the inner `payload` a chosen
 option's value, verbatim:
 
 ```sh
-subs run my-agent -c substructure.toml \
+subs run my-agent -c subs.toml \
     --session approval-demo \
     --input '{"type":"interrupt.resume","interrupt_id":"approve:tc_...","payload":{"status":"resolved","payload":{"decision":"approve"}}}'
 ```
@@ -59,7 +59,7 @@ enabled for buttons):
 
 ```sh
 export SLACK_APP_TOKEN=xapp-... SLACK_BOT_TOKEN=xoxb-... ANTHROPIC_API_KEY=sk-ant-...
-subs serve -c substructure.toml
+subs serve -c subs.toml
 ```
 
 Ask the bot to send an email: the thread gets the prompt with

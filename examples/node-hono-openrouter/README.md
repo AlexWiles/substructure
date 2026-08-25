@@ -9,7 +9,7 @@ pattern fits any OpenAI-compatible gateway. The protocol types in
 `protocol.ts` are generated from the JSON Schema, and Node runs the `.ts`
 directly (>= 24).
 
-`substructure.toml` declares `[llm.byo]` with `type = "worker"`, so the engine
+`subs.toml` declares `[llm.byo]` with `type = "worker"`, so the engine
 sends this agent's model calls back here as `llm.execute` rather than running
 them itself, and `format = "openai"`, so the wire speaks the Chat Completions
 API natively: the trigger's `request` is a ready-to-send Chat Completions body,
@@ -38,7 +38,7 @@ node server.ts
 **2. Send a message with the CLI** (no `[llm]` section, the worker owns the LLM):
 
 ```sh
-subs run -c substructure.toml my-agent "hi"
+subs run -c subs.toml my-agent "hi"
 ```
 
 ## Regenerate types

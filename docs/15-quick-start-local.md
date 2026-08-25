@@ -15,9 +15,9 @@ The CLI is the engine too. Nothing on this page signs in or leaves this machine.
 
 ## Describe the agent
 
-Write `substructure.toml` in your project root.
+Write `subs.toml` in your project root.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 name = "oncall-bot"
 
 [llm.openrouter]
@@ -65,7 +65,7 @@ subs run oncall --session <session-id> "what did I just ask?"
 ```
 
 The agent remembers. The engine saves the whole session in
-`~/.config/substructure/substructure.db`, so you can stop everything and pick
+`~/.config/subs/subs.db`, so you can stop everything and pick
 the session up tomorrow.
 
 ```sh

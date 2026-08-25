@@ -88,7 +88,7 @@ beside `tool_search` and `call_tool`.
 presence of the key is the switch, so an agent cannot carry a setting that does
 nothing.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.support]
 defer_tools = true
 

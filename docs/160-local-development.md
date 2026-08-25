@@ -12,9 +12,9 @@ engine keeps its state in a SQLite file beside your config.
 
 ## Set up a file
 
-Write `substructure.toml` in your project root.
+Write `subs.toml` in your project root.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 name = "oncall-bot"
 
 [llm.openrouter]
@@ -57,7 +57,7 @@ subs run oncall --session <session-id> "what was my first question?"
 ```
 
 The agent remembers. The engine saves the whole session in
-`~/.config/substructure/substructure.db`. Stop everything, come back tomorrow,
+`~/.config/subs/subs.db`. Stop everything, come back tomorrow,
 and the session continues.
 
 ## Read what happened
@@ -99,7 +99,7 @@ that nothing off this machine can reach.
 
 Run your worker and point an agent at it.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.oncall]
 llm = "openrouter"
 model = "anthropic/claude-sonnet-4-5"
@@ -147,7 +147,7 @@ subs run -c substructure.dev.toml oncall "hi"
 subs serve -c substructure.dev.toml
 ```
 
-Both read `~/.config/substructure/substructure.db` until one names its own.
+Both read `~/.config/subs/subs.db` until one names its own.
 Set `db` in each file to keep their sessions and credentials apart.
 
 ```toml title="substructure.dev.toml"
@@ -174,7 +174,7 @@ apply` strips them.
 
 ## Logs
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 log = "info"
 ```
 

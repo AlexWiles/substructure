@@ -149,7 +149,7 @@ pub async fn list(cmd: ListCommand) -> Result<()> {
     rows.sort_by(|a, b| a.path.cmp(&b.path));
 
     if rows.is_empty() {
-        bail!("substructure.toml declares no connections and no `[llm.*]` blocks");
+        bail!("subs.toml declares no connections and no `[llm.*]` blocks");
     }
     if scope.globals.json {
         return print::json(&rows);

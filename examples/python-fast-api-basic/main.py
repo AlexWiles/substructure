@@ -3,7 +3,7 @@ from fastapi import FastAPI, Request
 
 
 # The whole worker: accept the engine's proposal for every decision. The agent
-# is declared in substructure.toml, and arrives as the `session.start`
+# is declared in subs.toml, and arrives as the `session.start`
 # proposal, so there is nothing to author until you want to override something.
 def decide(req):
     return req["proposed"]

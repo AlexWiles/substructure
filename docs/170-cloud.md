@@ -11,10 +11,10 @@ from the terminal.
 
 ## One file is one project
 
-`substructure.toml` is the whole declaration: that the project exists, its name,
+`subs.toml` is the whole declaration: that the project exists, its name,
 and everything in it. You create a project by applying the file.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 name = "my-bot"
 
 [llm.claude]
@@ -46,7 +46,7 @@ apply changes nothing.
 A second environment is a second file.
 
 ```sh
-subs apply -c substructure.staging.toml
+subs apply -c subs.staging.toml
 ```
 
 Each project has its own wallet, quota, keys, and sessions.

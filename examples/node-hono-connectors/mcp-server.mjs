@@ -2,7 +2,7 @@
 //
 // It uses the official MCP SDK rather than hand-writing the responses: the
 // point of the example is to show the engine talking to a real MCP server.
-// Replace it with Sentry or GitHub by editing substructure.toml — nothing in
+// Replace it with Sentry or GitHub by editing subs.toml — nothing in
 // the worker changes.
 import { randomUUID } from "node:crypto";
 import express from "express";
@@ -20,7 +20,7 @@ const issues = [
 function buildServer() {
     const server = new McpServer({ name: "issues-demo", version: "1.0.0" });
 
-    // readOnlyHint is what `read_only = true` in substructure.toml tests for.
+    // readOnlyHint is what `read_only = true` in subs.toml tests for.
     // A tool with no annotations fails that filter rather than passing silently.
     server.registerTool(
         "search_issues",

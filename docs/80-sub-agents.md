@@ -13,7 +13,7 @@ goes back to the parent as the tool's result.
 Two agents are two sections. The parent names the child. The child can use a
 cheaper model.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [llm.claude]
 type = "anthropic"
 

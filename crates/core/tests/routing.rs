@@ -188,7 +188,7 @@ async fn start_with(
     issuer: Issuer,
 ) -> Harness {
     let db = SqliteDb::open(
-        tmpdir().join("substructure.db").to_str().unwrap(),
+        tmpdir().join("subs.db").to_str().unwrap(),
         std::time::Duration::from_secs(5),
     )
     .unwrap();

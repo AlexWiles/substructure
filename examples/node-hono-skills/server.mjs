@@ -25,7 +25,7 @@ const load_skill = {
 };
 
 // A loaded skill adds its instructions (as the tool result) and unlocks its tools.
-// `llm` and `model` name what substructure.toml declares: a config built
+// `llm` and `model` name what subs.toml declares: a config built
 // outside a decision cannot inherit them from the proposal.
 const agent = (loaded) => ({
     llm: "claude",

@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn a_config_path_that_does_not_resolve_is_an_error() {
         let globals = CloudGlobals {
-            config: Some(tmpdir().join("nowhere/substructure.toml")),
+            config: Some(tmpdir().join("nowhere/subs.toml")),
             ..Default::default()
         };
         assert!(target(&globals).is_err());

@@ -15,11 +15,11 @@ use crate::manifest::{
 use crate::runtime::llm::LlmBlocks;
 use crate::runtime::worker::AgentEntry;
 
-pub const FILENAME: &str = "substructure.toml";
-pub const DEFAULT_DB: &str = "substructure.db";
+pub const FILENAME: &str = "subs.toml";
+pub const DEFAULT_DB: &str = "subs.db";
 
 /// One project, described once. One file is one project: a second environment
-/// is a second file (`subs apply -c substructure.staging.toml`), deployed as a
+/// is a second file (`subs apply -c subs.staging.toml`), deployed as a
 /// second project with its own wallet, quota, and keys.
 ///
 /// A file carries two roles, either or both: **an engine you run** (`db`, `log`,
@@ -60,7 +60,7 @@ pub struct ProjectConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Engine state: events, sessions, and the credentials `subs auth`
-    /// authorized. Unset, it is `~/.config/substructure/substructure.db`,
+    /// authorized. Unset, it is `~/.config/subs/subs.db`,
     /// beside the credentials — one engine per machine, whichever directory a
     /// command is run from. Set it to give this project its own, resolved
     /// against this file.
@@ -281,7 +281,7 @@ pub fn ensure_parent(path: &str) -> Result<()> {
 }
 
 /// The database nothing named: beside the credentials under
-/// `~/.config/substructure`, rather than in whichever directory the command
+/// `~/.config/subs`, rather than in whichever directory the command
 /// was run from.
 fn user_db_path() -> String {
     match super::credentials::config_dir() {
@@ -325,7 +325,7 @@ pub fn find_from(dir: &Path) -> Result<Option<Found>> {
 }
 
 pub fn find() -> Result<Option<Found>> {
-    let cwd = env::current_dir().context("could not determine cwd for substructure.toml lookup")?;
+    let cwd = env::current_dir().context("could not determine cwd for subs.toml lookup")?;
     find_from(&cwd)
 }
 
@@ -342,7 +342,7 @@ pub fn load_explicit(path: &Path) -> Result<Found> {
 /// layout, so the parsed document is edited in place rather than replaced.
 pub fn write(path: &Path, config: &ProjectConfig) -> Result<()> {
     let mut rendered: DocumentMut =
-        toml_edit::ser::to_document(config).context("serializing substructure.toml")?;
+        toml_edit::ser::to_document(config).context("serializing subs.toml")?;
     for (_, item) in rendered.as_table_mut().iter_mut() {
         expand(item, 2);
     }
@@ -428,7 +428,7 @@ mod tests {
     }
 
     fn parse(s: &str) -> Result<ProjectConfig> {
-        ProjectConfig::parse(s, Path::new("substructure.toml"))
+        ProjectConfig::parse(s, Path::new("subs.toml"))
     }
 
     fn ok(s: &str) -> ProjectConfig {
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn the_engine_groups_read_back() {
         let cfg = ok(r#"
-            db = "dev.substructure.db"
+            db = "dev.subs.db"
             log = "substructure_core=debug,warn"
 
             [llm.claude]
@@ -547,7 +547,7 @@ mod tests {
             port = 9000
             auth = false
         "#);
-        assert_eq!(cfg.db_path(), "dev.substructure.db");
+        assert_eq!(cfg.db_path(), "dev.subs.db");
         assert_eq!(cfg.log.as_deref(), Some("substructure_core=debug,warn"));
         assert_eq!(
             cfg.agent["support"].worker.as_deref(),
@@ -1161,7 +1161,7 @@ mod plugin_file_tests {
             [plugin.pdf.bundle]
             name = "pdf-tools"
             "#,
-            Path::new("substructure.toml"),
+            Path::new("subs.toml"),
         )
         .unwrap_err()
         .to_string();

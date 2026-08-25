@@ -462,7 +462,7 @@ Who runs a model call is not on the config. The `[llm.<id>]` block's `type`
 decides it, and that block's `format` sets the wire shape a worker answers in.
 See [LLMs](./70-llms.md).
 
-An `[agent.<id>]` section in `substructure.toml` uses these same names. See
+An `[agent.<id>]` section in `subs.toml` uses these same names. See
 [Config](./220-config.md).
 
 ## Retries

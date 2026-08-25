@@ -7,7 +7,7 @@ The engine's source is on GitHub. Run it yourself and you hold every
 credential.
 
 A self-hosted engine serves the same APIs as the cloud. The same
-`substructure.toml` describes both.
+`subs.toml` describes both.
 
 ## Run the server
 
@@ -17,7 +17,7 @@ subs serve --host 0.0.0.0 --port 8080
 
 Or put it in the file.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [serve]
 host = "0.0.0.0"
 port = 8080
@@ -43,7 +43,7 @@ The engine writes to a store that you can replace. The CLI uses SQLite at the
 path
 `db` names.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 db = "/var/lib/substructure/engine.db"
 ```
 
@@ -65,7 +65,7 @@ reach.
 
 Name the variable holding each agent's signing secret.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [agent.triage]
 llm = "claude"
 model = "claude-sonnet-4-5"
@@ -138,7 +138,7 @@ subs serve --slack-agent my-agent
 `--slack-agent` names the agent that answers DMs and any channel the file does
 not name. Put the routing in the file instead.
 
-```toml title="substructure.toml"
+```toml title="subs.toml"
 [slack]
 dm = "my-agent"
 mentions = "my-agent"

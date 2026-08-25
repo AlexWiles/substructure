@@ -28,7 +28,7 @@ const SLACK_TOKENS: [(&str, &str); 2] = [
 pub async fn run(scope: ProjectScope) -> Result<()> {
     // Read for the local branch's sake; the rule itself is `target`'s.
     let found = project_config::resolve(scope.globals.config.as_deref())?
-        .context("no substructure.toml found. Write one, or pass -c.")?;
+        .context("no subs.toml found. Write one, or pass -c.")?;
 
     let notices = match target(&scope.globals)?.here().is_some() {
         true => here(&found, env_value).await?,
