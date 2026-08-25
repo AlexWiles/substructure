@@ -1,12 +1,3 @@
-//! Anthropic Messages API (`POST /v1/messages`) provider.
-//!
-//! The engine's internal request/response types are OpenAI-Chat-shaped, so this
-//! module translates in both directions: the flat `messages` array with a
-//! `system` role and OpenAI-style `tool_calls`/`tool` messages is mapped onto
-//! Anthropic's top-level `system`, content-block messages, and
-//! `tool_use`/`tool_result` blocks — and the block-structured response and SSE
-//! event stream are mapped back.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,15 +19,10 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u64 = 4096;
 
-// ── Request wire format ──────────────────────────────────────────────────
-
-/// A cache breakpoint. Anthropic caches nothing without one, so a request that
-/// carries none is re-read in full on every turn.
 #[derive(Serialize, Clone, Copy)]
 struct CacheControl {
     #[serde(rename = "type")]
     kind: &'static str,
-    /// Absent is the default life, five minutes.
     #[serde(skip_serializing_if = "Option::is_none")]
     ttl: Option<&'static str>,
 }
@@ -47,8 +33,6 @@ impl CacheControl {
         ttl: None,
     };
 
-    /// One life for every breakpoint in the request: the API reads a longer one
-    /// after a shorter one as an error, and a single value cannot order wrong.
     fn with_ttl(ttl: Option<&str>) -> Self {
         match ttl {
             Some("1h") => Self {
@@ -73,7 +57,6 @@ struct SystemBlock {
 struct AnthropicBody {
     model: String,
     max_tokens: u64,
-    /// Only for the models that still read it: Opus 4.7 and later refuse it.
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,9 +77,6 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
-    /// Never sent: a strategy the engine answers drops each deferred tool
-    /// before this point. The field is what a strategy the provider answers
-    /// serializes as its own flag.
     #[serde(skip)]
     defer: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,9 +89,6 @@ struct AnthropicMessage {
     content: Vec<Block>,
 }
 
-/// One block of a turn: built from the transcript, or held verbatim. Anthropic
-/// signs a thinking block and rejects one that comes back edited, so a thinking
-/// block goes out as the bytes it arrived as.
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Block {
@@ -123,7 +100,6 @@ impl Block {
     fn cache(&mut self, control: CacheControl) {
         match self {
             Block::Built(b) => b.cache(control),
-            // A mark would edit a signed block.
             Block::Raw(_) => {}
         }
     }
@@ -180,7 +156,6 @@ impl RequestBlock {
     }
 }
 
-/// Text stays a string; media sends blocks.
 #[derive(Serialize)]
 #[serde(untagged)]
 enum ToolResultContent {
@@ -208,40 +183,22 @@ struct OutputConfig {
     effort: &'static str,
 }
 
-/// What one model reads of the reasoning surface. Each field is a 400 when it
-/// is wrong: an effort level the model does not know, an adaptive `thinking`
-/// block it predates, an explicit `disabled` it refuses.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Capabilities {
-    /// `temperature` and the other sampling parameters. Newer models refuse
-    /// them outright.
     sampling: bool,
-    /// `output_config.effort`.
     effort: bool,
-    /// `xhigh` among the effort levels.
     xhigh: bool,
-    /// `thinking: {"type": "adaptive"}`. Models before it take a token budget.
     adaptive: bool,
-    /// Thinks when the request omits `thinking`, so not thinking is a request.
     thinks_unasked: bool,
-    /// Always thinks: `disabled` comes back a 400.
     thinks_always: bool,
 }
 
 impl Capabilities {
-    //                      sampling  effort  xhigh  adaptive  unasked  always
-    /// Fable and Mythos, which think whatever the request says.
     const ALWAYS: Self = Self::new(false, true, true, true, true, true);
-    /// Opus 5 and Sonnet 5, which think until told not to.
     const DEFAULT_ON: Self = Self::new(false, true, true, true, true, false);
-    /// The current surface: every reasoning field, and no sampling.
     const CURRENT: Self = Self::new(false, true, true, true, false, false);
-    /// Before `xhigh`, which arrived with Opus 4.7. Sampling went at the same
-    /// time.
     const NO_XHIGH: Self = Self::new(true, true, false, true, false, false);
-    /// Before adaptive thinking, which arrived with Opus 4.6.
     const EFFORT_ONLY: Self = Self::new(true, true, false, false, false, false);
-    /// Before the reasoning fields: a token budget, and nothing else.
     const LEGACY: Self = Self::new(true, false, false, false, false, false);
 
     const fn new(
@@ -263,8 +220,6 @@ impl Capabilities {
     }
 }
 
-/// One generation: every model in `family` at or above `since` reads `caps`
-/// and writes at most `output` tokens.
 struct Generation {
     family: &'static str,
     since: (u32, u32),
@@ -272,9 +227,6 @@ struct Generation {
     caps: Capabilities,
 }
 
-/// What each generation reads and writes. The first row a model matches wins,
-/// so a family's rows run newest first and end at `(0, 0)`, which is everything
-/// older. A name in no family at all is not in the table: see `generation`.
 #[rustfmt::skip]
 const GENERATIONS: &[Generation] = &[
     Generation { family: "fable",  since: (0, 0), output: 128_000, caps: Capabilities::ALWAYS },
@@ -292,28 +244,16 @@ const GENERATIONS: &[Generation] = &[
     Generation { family: "haiku",  since: (0, 0), output:   4_096, caps: Capabilities::LEGACY },
 ];
 
-/// The row a model sits on, or nothing for a name the table does not place: a
-/// new family, an alias, a gateway's own spelling.
 fn generation(model: &str) -> Option<&'static Generation> {
     GENERATIONS
         .iter()
         .find(|g| version(model, g.family).is_some_and(|v| v >= g.since))
 }
 
-/// The reasoning fields a model reads.
-///
-/// An unplaced name reads as the current generation: the fields a newer model
-/// would refuse are the ones it is too new to refuse. `thinks_unasked` stays
-/// off there, because sending `disabled` to a model that rejects the word is a
-/// 400 and an unplaced name gives no way to tell.
 fn capabilities(model: &str) -> Capabilities {
     generation(model).map_or(Capabilities::CURRENT, |g| g.caps)
 }
 
-/// What the request asks to write, held to what the model can. A ceiling the
-/// model would refuse is a 400, and a session that switches model should not
-/// have to carry the smallest one everywhere. An unplaced name has no known
-/// ceiling and keeps what it asked for.
 fn output_tokens(model: &str, asked: u64) -> u64 {
     match generation(model) {
         Some(g) => asked.min(g.output),
@@ -321,10 +261,6 @@ fn output_tokens(model: &str, asked: u64) -> u64 {
     }
 }
 
-/// The `<major>, <minor>` of a `claude-<family>-<major>[-<minor>]` name, or
-/// nothing for another family. A run of more than two digits is a date stamp,
-/// not a minor: `claude-opus-4-20250514` is 4.0, and reading it as 4.20250514
-/// would hand an Opus 4.0 the whole current surface.
 fn version(model: &str, family: &str) -> Option<(u32, u32)> {
     const MAX_MINOR_DIGITS: usize = 2;
 
@@ -342,19 +278,13 @@ fn version(model: &str, family: &str) -> Option<(u32, u32)> {
 fn anthropic_effort(e: ReasoningEffort, xhigh: bool) -> &'static str {
     match e {
         ReasoningEffort::Xhigh if xhigh => "xhigh",
-        // A model that predates `xhigh` reads the level below it.
         ReasoningEffort::Xhigh | ReasoningEffort::High => "high",
         ReasoningEffort::Medium => "medium",
-        // Anthropic has no `minimal`/`none`; `low` is the nearest floor.
         ReasoningEffort::Low | ReasoningEffort::Minimal | ReasoningEffort::None => "low",
     }
 }
 
-/// Legacy thinking asks for a token budget where effort asks for a word. The
-/// budget comes out of `max_tokens` and the answer needs what is left, so a
-/// budget that would starve the answer is no thinking at all.
 fn legacy_budget(e: ReasoningEffort, max_tokens: u64) -> Option<u64> {
-    /// The floor the API accepts, and the room the answer keeps.
     const MIN_BUDGET: u64 = 1024;
 
     let want = match e {
@@ -366,8 +296,6 @@ fn legacy_budget(e: ReasoningEffort, max_tokens: u64) -> Option<u64> {
     (ceiling >= MIN_BUDGET).then(|| want.min(ceiling))
 }
 
-/// The `thinking` and `output_config` a request carries, for what this model
-/// reads.
 fn reasoning_fields(
     model: &str,
     effort: Option<ReasoningEffort>,
@@ -375,8 +303,6 @@ fn reasoning_fields(
 ) -> (Option<Thinking>, Option<OutputConfig>) {
     let caps = capabilities(model);
     let effort = match effort {
-        // Off is the default everywhere but the models that think unasked, and
-        // asking a model that always thinks to stop is a 400.
         None | Some(ReasoningEffort::None) => {
             let thinking = (caps.thinks_unasked && !caps.thinks_always).then_some(Thinking {
                 thinking_type: "disabled",
@@ -404,7 +330,6 @@ fn reasoning_fields(
     (thinking, output_config)
 }
 
-/// Map an OpenAI-style role message's content into Anthropic content blocks.
 fn content_to_blocks(content: Option<&PromptContent>) -> Vec<RequestBlock> {
     match content {
         None => Vec::new(),
@@ -441,8 +366,6 @@ fn part_to_block(part: &ContentPart) -> Option<RequestBlock> {
     }
 }
 
-/// A PDF as a `document` block. Other file payloads have no Messages API
-/// shape and are dropped; text files become text parts before this layer.
 fn document_block(file_data: &str) -> Option<RequestBlock> {
     let rest = file_data.strip_prefix("data:")?;
     let (meta, data) = rest.split_once(',')?;
@@ -480,8 +403,6 @@ fn image_block(url: &str) -> RequestBlock {
     }
 }
 
-/// Append blocks to the last turn if it shares the role, else open a new turn.
-/// Anthropic requires strictly alternating user/assistant turns.
 fn push_turn(turns: &mut Vec<AnthropicMessage>, role: &'static str, blocks: Vec<Block>) {
     if blocks.is_empty() {
         return;
@@ -498,8 +419,6 @@ fn push_turn(turns: &mut Vec<AnthropicMessage>, role: &'static str, blocks: Vec<
     });
 }
 
-/// `stream: None` omits the field so the body is valid input for both the
-/// create and stream calls a worker might make.
 fn build_body(
     request: &PromptRequest,
     default_max_tokens: u64,
@@ -531,8 +450,6 @@ fn build_body(
                 );
             }
             Role::Assistant => {
-                // Thinking leads the turn: the API requires the blocks that
-                // preceded a tool call back with it, ahead of what they led to.
                 let mut blocks: Vec<Block> = msg
                     .reasoning
                     .iter()
@@ -598,8 +515,6 @@ fn build_body(
         }
     }
 
-    // Four breakpoints: the tools and the system prompt, which hold for the
-    // session, and the last two user turns, which follow the transcript.
     let system = (!system_parts.is_empty()).then(|| {
         vec![SystemBlock {
             kind: "text",
@@ -619,17 +534,12 @@ fn build_body(
                 cache_control: None,
             })
             .collect();
-        // The last tool the provider reads for itself. A deferred one cannot
-        // carry a breakpoint, so the mark goes on the last that is not.
         if let Some(last) = ts.iter_mut().rev().find(|t| !t.defer) {
             last.cache_control = Some(cache);
         }
         ts
     });
 
-    // Two marks: this transcript's end, and the previous user turn, where the
-    // last request ended and left an entry. One will not do — a mark reaches
-    // twenty blocks back, and a turn of parallel tool calls adds more.
     let last = turns.len().checked_sub(1);
     let previous = turns[..turns.len().saturating_sub(1)]
         .iter()
@@ -666,8 +576,6 @@ fn build_body(
     }
 }
 
-/// Map an Anthropic `stop_reason` onto the OpenAI-style `finish_reason` vocab
-/// the rest of the engine uses.
 fn map_stop_reason(reason: &str) -> String {
     match reason {
         "tool_use" => "tool_calls",
@@ -678,13 +586,9 @@ fn map_stop_reason(reason: &str) -> String {
     .to_string()
 }
 
-// ── Non-streaming response ───────────────────────────────────────────────
-
 #[derive(Debug, Deserialize)]
 struct MessagesResponse {
     model: String,
-    /// Raw, because a thinking block has to go back exactly as it arrived and
-    /// a typed round-trip would drop whatever the API adds to one next.
     #[serde(default)]
     content: Vec<serde_json::Value>,
     #[serde(default)]
@@ -693,8 +597,6 @@ struct MessagesResponse {
     usage: Option<serde_json::Value>,
 }
 
-/// The counts the API reports, where `input_tokens` is the part of the prompt
-/// it did not read from the cache.
 #[derive(Debug, Default, Deserialize)]
 struct AnthropicUsage {
     #[serde(default)]
@@ -719,14 +621,12 @@ impl AnthropicUsage {
     }
 }
 
-/// The counts of one response, or nothing where the provider reported none.
 fn usage_from_value(raw: Option<serde_json::Value>) -> Option<Usage> {
     let raw = raw?;
     let counts: AnthropicUsage = serde_json::from_value(raw.clone()).unwrap_or_default();
     Some(counts.normalize(raw))
 }
 
-/// Whether a response block is one the API signs and wants back untouched.
 fn is_thinking(kind: &str) -> bool {
     matches!(kind, "thinking" | "redacted_thinking")
 }
@@ -793,9 +693,6 @@ fn str_field(value: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
-// ── Worker-format seam ───────────────────────────────────────────────────
-
-/// The Messages API body for `request`, `stream` omitted.
 pub(crate) fn request_to_wire(
     request: &PromptRequest,
     search: DeferToolsStrategy,
@@ -810,14 +707,11 @@ pub(crate) fn request_to_wire(
     .unwrap_or_default()
 }
 
-/// A raw Messages API response → the neutral `LlmResponse`.
 pub(crate) fn response_from_wire(value: serde_json::Value) -> Result<LlmResponse, String> {
     crate::json::from_value::<MessagesResponse>("anthropic response", value)
         .map(MessagesResponse::into_llm_response)
         .map_err(|e| e.to_string())
 }
-
-// ── Streaming events ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -897,9 +791,6 @@ struct StreamMessageDelta {
     stop_reason: Option<String>,
 }
 
-/// What the stream said about tokens. `message_start` reports the input and
-/// what the cache did with it, `message_delta` the output, so the counts of one
-/// call arrive in two events. The later event wins each field it names.
 #[derive(Default)]
 struct UsageAccum {
     raw: serde_json::Map<String, serde_json::Value>,
@@ -927,16 +818,13 @@ struct StreamError {
     message: String,
 }
 
-/// Per-content-block streaming accumulator.
 enum BlockAccum {
-    /// Text — streamed out, not retained past the delta.
     Passthrough,
     ToolUse {
         id: String,
         name: String,
         arguments: String,
     },
-    /// Reassembled because the turn that follows it has to carry it back.
     Thinking {
         thinking: String,
         signature: String,
@@ -946,9 +834,6 @@ enum BlockAccum {
     },
 }
 
-/// Folds Messages API stream events into `StreamDelta`s and the final
-/// response. Shared by the server-side SSE loop and the worker-format delta
-/// seam (`providers::format`).
 #[derive(Default)]
 pub(crate) struct StreamParser {
     content: String,
@@ -963,8 +848,6 @@ impl StreamParser {
         Self::default()
     }
 
-    /// Fold one raw event payload; unknown or non-streaming events yield nothing.
-    /// Errors are the worker's to surface, so an error event yields nothing too.
     pub(crate) fn parse_data(&mut self, data: &str) -> Vec<StreamDelta> {
         serde_json::from_str(data)
             .ok()
@@ -1088,8 +971,6 @@ impl StreamParser {
         let mut tool_calls = Vec::new();
         let mut thought = String::new();
         let mut thinking_blocks = Vec::new();
-        // In index order, which is the order the API sent them and the order it
-        // wants them back.
         for block in self.blocks {
             match block {
                 BlockAccum::ToolUse {
@@ -1135,8 +1016,6 @@ impl StreamParser {
     }
 }
 
-// ── Config / client ──────────────────────────────────────────────────────
-
 #[derive(Deserialize)]
 pub struct AnthropicConfig {
     pub base_url: String,
@@ -1145,7 +1024,6 @@ pub struct AnthropicConfig {
     pub version: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u64,
-    /// How long a cached prefix lives: `1h`, or the default five minutes.
     #[serde(default)]
     pub cache_ttl: Option<String>,
 }
@@ -1221,8 +1099,6 @@ impl AnthropicClient {
                 LlmCallError::new(
                     ErrorCode::ProviderError,
                     format!("HTTP request failed: {e}"),
-                    // Only an unbuildable request is hopeless; it would be
-                    // built the same way again.
                     !e.is_builder(),
                 )
             })
@@ -1237,9 +1113,6 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
     } else {
         ErrorCode::ProviderError
     };
-    // The provider says why in `error.message`; the rest of the body is a
-    // request id and echoed request, which the log keeps and the reader does
-    // not need.
     let message = match crate::json::error_message(body.as_bytes()) {
         Some(reported) => format!("Anthropic API error {status}: {reported}"),
         None => format!("Anthropic API error {status}"),
@@ -1308,8 +1181,6 @@ impl LlmCallable for AnthropicClient {
                 let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
                 line_buf = line_buf[newline_pos + 1..].to_string();
 
-                // Anthropic sends both `event:` and `data:` lines; the `data:`
-                // JSON carries its own `type`, so we only parse those.
                 let data = match crate::providers::sse_data(&line) {
                     Some(d) => d,
                     None => continue,
@@ -1401,7 +1272,6 @@ mod tests {
                     file_data: "data:application/pdf;base64,AQID".into(),
                 },
             },
-            // Not a Messages API shape: dropped rather than sent broken.
             ContentPart::File {
                 file: crate::protocol::FileData {
                     filename: "deck.pptx".into(),
@@ -1562,7 +1432,6 @@ mod tests {
         );
         let v = serde_json::to_value(&body).unwrap();
 
-        // user(weather?), assistant(2 tool_use), user(2 tool_result) — coalesced
         assert_eq!(v["messages"].as_array().unwrap().len(), 3);
         assert_eq!(v["messages"][1]["role"], "assistant");
         assert_eq!(v["messages"][1]["content"][0]["type"], "tool_use");
@@ -1617,8 +1486,6 @@ mod tests {
         );
     }
 
-    /// One user message of many blocks, as a transcript reaches the engine
-    /// after a run of parallel tool calls.
     fn wide_message(blocks: usize) -> PromptMessage {
         let parts = (0..blocks)
             .map(|i| ContentPart::Text {
@@ -1646,7 +1513,6 @@ mod tests {
             .collect()
     }
 
-    /// The one tool a test needs to spend the fourth breakpoint.
     fn one_tool() -> Vec<LlmTool> {
         vec![LlmTool {
             name: "a".into(),
@@ -1669,19 +1535,14 @@ mod tests {
             ]),
             DeferToolsStrategy::Search,
         );
-        // One block per turn, so the marks land on turns three and five.
         assert_eq!(marked_indexes(&v), vec![2, 4]);
 
-        // A transcript of one turn has only its own end to mark.
         let v = request_to_wire(&wide_turn(8), DeferToolsStrategy::Search);
         assert_eq!(marked_indexes(&v), vec![7]);
     }
 
     #[test]
     fn a_turn_of_any_width_leaves_the_older_mark_where_the_last_request_put_it() {
-        // The request before this one ended at the first user turn, and marked
-        // its last block. However wide the turn between them, this request
-        // marks that same block again, and the provider reads the entry back.
         let mut assistant = msg(Role::Assistant, None);
         assistant.tool_calls = Some(
             (0..10)
@@ -1694,8 +1555,6 @@ mod tests {
             wide_message(10),
         ]);
         let v = request_to_wire(&r, DeferToolsStrategy::Search);
-        // user(1) assistant(10) user(10): 21 blocks, more than the provider
-        // looks back, and the marks still name both ends.
         assert_eq!(marked_indexes(&v), vec![0, 20]);
     }
 
@@ -1736,7 +1595,6 @@ mod tests {
         assert_eq!(v["messages"][0]["content"][0]["cache_control"], hour);
         assert_eq!(v["messages"][2]["content"][0]["cache_control"], hour);
 
-        // Anything else is the default five minutes, which sends no ttl.
         assert_eq!(
             serde_json::to_value(CacheControl::with_ttl(Some("5m"))).unwrap(),
             json!({ "type": "ephemeral" })
@@ -1762,14 +1620,10 @@ mod tests {
         assert_eq!(usage.output, 7);
         assert_eq!(usage.input, 9312, "every input token, cached or not");
         assert_eq!(usage.total, 9319);
-        // The counts the provider sent stay whole, nested fields included.
         let raw = usage.provider.expect("the provider report");
         assert_eq!(raw["cache_read_input_tokens"], 9000);
     }
 
-    /// The counts of two vendors add up only because the adapter states them
-    /// the same way. Anthropic reports the uncached part of the prompt, OpenAI
-    /// reports the whole prompt, and a tree that uses both adds them together.
     #[test]
     fn the_counts_of_two_vendors_add_up() {
         let anthropic = usage_from_value(Some(json!({
@@ -1860,11 +1714,9 @@ mod tests {
         assert_eq!(v["thinking"]["type"], "adaptive");
         assert_eq!(v["output_config"]["effort"], "high");
         assert_eq!(v["stream"], true);
-        // system omitted when absent
         assert!(v.get("system").is_none());
     }
 
-    /// `(thinking, output_config)` as JSON, where an omitted field is null.
     fn reasoning(
         model: &str,
         effort: Option<ReasoningEffort>,
@@ -1886,7 +1738,6 @@ mod tests {
         assert_eq!(thinking["type"], "adaptive");
         assert_eq!(config["effort"], "xhigh");
 
-        // Off stays off: `disabled` would be a 400 on a model that refuses it.
         let (thinking, config) = reasoning("claude-next-ultra", None, 64_000);
         assert!(thinking.is_null());
         assert!(config.is_null());
@@ -1897,8 +1748,6 @@ mod tests {
         for model in ["claude-opus-5", "claude-sonnet-5"] {
             let (thinking, config) = reasoning(model, None, 64_000);
             assert_eq!(thinking["type"], "disabled", "{model}");
-            // No effort with it: `disabled` above `high` is a 400, and an
-            // absent effort leaves the model on its own default.
             assert!(config.is_null(), "{model}");
         }
     }
@@ -1933,29 +1782,24 @@ mod tests {
 
     #[test]
     fn a_model_before_adaptive_thinking_takes_a_budget() {
-        // Sonnet 4.5 reads neither effort nor adaptive.
         let (thinking, config) = reasoning("claude-sonnet-4-5", HIGH, 64_000);
         assert_eq!(thinking["type"], "enabled");
         assert_eq!(thinking["budget_tokens"], 24_000);
         assert!(config.is_null());
 
-        // Opus 4.5 reads effort, and still thinks by budget.
         let (thinking, config) = reasoning("claude-opus-4-5", HIGH, 64_000);
         assert_eq!(thinking["type"], "enabled");
         assert_eq!(config["effort"], "high");
 
-        // Haiku 4.5 is the same generation as Sonnet 4.5, not Opus 4.5.
         let (_, config) = reasoning("claude-haiku-4-5", HIGH, 64_000);
         assert!(config.is_null());
     }
 
     #[test]
     fn a_budget_leaves_the_answer_room() {
-        // The budget comes out of max_tokens.
         let (thinking, _) = reasoning("claude-sonnet-4-5", HIGH, 4096);
         assert_eq!(thinking["budget_tokens"], 3072);
 
-        // Below the floor there is no budget that leaves an answer.
         let (thinking, _) = reasoning("claude-sonnet-4-5", HIGH, 2000);
         assert!(thinking.is_null());
     }
@@ -1976,11 +1820,9 @@ mod tests {
             .unwrap()
         };
 
-        // Opus 4.7 and later refuse it, so it stays off the request.
         for model in ["claude-opus-5", "claude-opus-4-8", "claude-fable-5"] {
             assert!(body(model).get("temperature").is_none(), "{model}");
         }
-        // Older models read it, and a request that set one meant it.
         for model in ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-6"] {
             assert_eq!(body(model)["temperature"], 0.7, "{model}");
         }
@@ -1988,14 +1830,10 @@ mod tests {
 
     #[test]
     fn a_model_writes_no_more_than_it_can() {
-        // Asking a model for more than its ceiling is a 400, so the ask is
-        // held to the ceiling.
         assert_eq!(output_tokens("claude-opus-5", 128_000), 128_000);
         assert_eq!(output_tokens("claude-haiku-4-5", 128_000), 64_000);
         assert_eq!(output_tokens("claude-opus-4-1", 128_000), 32_000);
-        // A smaller ask is the ask.
         assert_eq!(output_tokens("claude-opus-5", 4_096), 4_096);
-        // An unplaced name has no known ceiling to hold it to.
         assert_eq!(output_tokens("claude-next-ultra", 200_000), 200_000);
     }
 
@@ -2019,8 +1857,6 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["max_tokens"], 64_000);
-        // Haiku 4.5 predates adaptive thinking, and its budget has to fit the
-        // held ceiling rather than the ask.
         assert_eq!(v["thinking"]["type"], "enabled");
         assert_eq!(v["thinking"]["budget_tokens"], 24_000);
     }
@@ -2038,8 +1874,6 @@ mod tests {
             "a gateway prefix does not hide the version"
         );
 
-        // Opus 4.0 predates every reasoning field, and a date stamp read as a
-        // minor would have handed it all of them.
         let (thinking, config) = reasoning("claude-opus-4-20250514", HIGH, 64_000);
         assert_eq!(thinking["type"], "enabled");
         assert!(config.is_null());

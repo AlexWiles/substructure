@@ -12,14 +12,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// What a person must do before a connection operates again. The refresh path
-/// corrects everything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthNeed {
     NeverAuthorized,
     Reauthorize,
-    /// No consent flow can replace a static token. An operator sets a new one.
     TokenRejected,
 }
 
@@ -27,8 +24,7 @@ pub const TOOL_SEARCH: &str = "tool_search";
 pub const CALL_TOOL: &str = "call_tool";
 pub const SKILL: &str = "skill";
 
-/// Where a connection is declared, which is what a file, the CLI, and the wire
-/// name it by.
+/// How a file, the CLI, and the wire name a connection.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConnectionPath {
     Mcp(String),
@@ -50,9 +46,7 @@ impl ConnectionPath {
         })
     }
 
-    /// The model-facing prefix. Anything a provider would reject in a tool
-    /// name is flattened to `_`, here rather than where names are built, so
-    /// validation and expansion cannot disagree about a collision.
+    /// The prefix the model sees. Any character a provider rejects becomes `_`.
     pub fn tool_prefix(&self) -> String {
         let raw = match self {
             Self::Mcp(id) => id.clone(),
@@ -105,16 +99,13 @@ impl std::fmt::Display for ConnectionPath {
     }
 }
 
-/// `Decimal` serializes as a string (`rust_decimal` default); pin the schema
-/// to match instead of schemars' string-or-number union.
+/// `Decimal` serializes as a string, so the schema says string.
 fn decimal_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": ["string", "null"],
         "pattern": r"^-?\d+(\.\d+)?$",
     })
 }
-
-// ── Messages ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -141,8 +132,6 @@ pub struct ToolCall {
     pub call_type: String,
     pub function: ToolCallFunction,
 }
-
-// Multimodal content parts (OpenAI/OpenRouter wire format).
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "ImageUrl")]
@@ -415,8 +404,7 @@ pub enum ContentPart {
     },
 }
 
-/// Message content: either a plain string or an array of typed parts.
-/// Serializes as a raw string or array respectively (untagged).
+/// A plain string, or an array of typed parts. Untagged.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(title = "Content")]
@@ -487,9 +475,8 @@ impl PromptRequest {
     }
 }
 
-/// Which provider wrote a [`Reasoning`]'s blocks. They ride back only to it:
-/// another provider reads them as noise, and Anthropic rejects blocks it did
-/// not sign.
+/// Which provider wrote the blocks. They go back only to that provider.
+/// Anthropic rejects blocks it did not sign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "ReasoningProvider")]
@@ -499,9 +486,9 @@ pub enum ReasoningProvider {
     Openrouter,
 }
 
-/// What the model thought before it answered. `text` is for a reader; `blocks`
-/// are the provider's own, held verbatim because Anthropic requires the
-/// thinking that precedes a tool call back unmodified, signature included.
+/// What the model thought before it answered. `text` is for a reader.
+/// `blocks` are the provider's own and stay unchanged. Anthropic requires the
+/// thinking before a tool call back with its signature.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "Reasoning")]
 pub struct Reasoning {
@@ -513,11 +500,8 @@ pub struct Reasoning {
 }
 
 impl Reasoning {
-    /// The reasoning of one response, or nothing where it thought in the open
-    /// and left no blocks to return.
-    /// Boxed: a response carrying one is passed by value through every effect
-    /// and event, and the blocks are dead weight on the paths that never read
-    /// them.
+    /// The reasoning of one response. Absent if it left no blocks.
+    /// Boxed to keep it off the paths that do not read it.
     pub fn new(
         provider: ReasoningProvider,
         text: Option<String>,
@@ -532,7 +516,7 @@ impl Reasoning {
         })
     }
 
-    /// The blocks, for the provider that wrote them and no other.
+    /// The blocks. Only the provider that wrote them can read them.
     pub fn blocks_for(&self, provider: ReasoningProvider) -> &[serde_json::Value] {
         if self.provider == provider {
             &self.blocks
@@ -559,10 +543,8 @@ pub struct Message {
     pub reasoning: Option<Box<Reasoning>>,
 }
 
-/// The wire form of a [`Message`]: `id` is optional because a client-submitted or
-/// worker-authored message is not yet recorded. `record`/`rerecord`
-/// (`runtime::session::wire`) are the seams that lower it to the internal
-/// [`Message`] (id always present) at recording time.
+/// The wire form of a [`Message`]. `id` is absent until the message is
+/// recorded.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "DraftMessage")]
 pub struct DraftMessage {
@@ -581,8 +563,6 @@ pub struct DraftMessage {
     pub reasoning: Option<Box<Reasoning>>,
 }
 
-// ── Message tree ─────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub struct NewMessage {
@@ -591,9 +571,9 @@ pub struct NewMessage {
     pub parent_id: Option<String>,
 }
 
-/// Privilege level of the caller that issued an interrupt. Derived from the
-/// authenticated `Caller`, never from request data; resuming requires a
-/// caller at or above the origin's privilege.
+/// The privilege of the caller that raised an interrupt. Read from the
+/// authenticated caller, never from the request. To resume it, a caller needs
+/// this privilege or more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "InterruptOrigin")]
@@ -612,28 +592,24 @@ pub struct MessageTree {
     pub head_id: Option<String>,
 }
 
-// ── Handlers ─────────────────────────────────────────────────────────────
-
-/// Where a call runs — one wire enum so `handler` has a single type on every
-/// surface. Tool calls accept `worker` (default), `client`, or `server` (set by
-/// the engine for connector tools, never declared by a worker). An LLM call has
-/// no `handler`: where it runs follows from the `[llm.*]` block it names.
+/// Where a call runs. A tool call takes `worker` (the default), `client`, or
+/// `server`. The engine sets `server` for connector tools; a worker cannot.
+/// An LLM call has no handler. It runs where its `[llm.*]` block says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "Handler")]
 pub enum Handler {
-    /// Server-side executor resolves the provider or connection and makes the call.
+    /// The engine makes the call.
     Server,
-    /// Dispatched to the work queue for the worker to execute.
+    /// The worker executes it.
     Worker,
-    /// Executed by the client. Session goes Idle while waiting (tools only).
+    /// The client executes it. The session goes idle until it answers.
+    /// Tools only.
     Client,
 }
 
-/// The wire shape of a worker-run LLM call, declared on a `type = "worker"`
-/// `[llm.*]` block. Absent ⇒ the engine's neutral format. Set ⇒ `llm.execute`
-/// carries the provider's native request body, and `llm.result`/
-/// `llm.token.delta` accept the provider's native response and stream events.
+/// The shape of a worker-run LLM call. Absent gives the engine's own format.
+/// Set gives the provider's own request, response, and stream events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "LlmFormat")]
@@ -644,22 +620,20 @@ pub enum LlmFormat {
     Anthropic,
 }
 
-// ── Retry ────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "RetryPolicy")]
 pub struct RetryPolicy {
     pub queue_timeout_secs: Option<u32>,
     pub run_timeout_secs: Option<u32>,
     pub total_timeout_secs: Option<u32>,
-    /// Cap on total attempts, not on retries: `1` allows one try and no retry.
+    /// Total attempts, not retries. `1` gives one try.
     pub max_attempts: u32,
     pub backoff_base_secs: u32,
     pub backoff_max_secs: u32,
 }
 
-/// Only the fields it names change; the rest are inherited. An override cannot
-/// set a timeout back to unbounded.
+/// Only the fields it names change. An override cannot make a timeout
+/// unbounded.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "RetryOverride")]
 pub struct RetryOverride {
@@ -677,12 +651,8 @@ pub struct RetryOverride {
     pub backoff_max_secs: Option<u32>,
 }
 
-/// An agent's retry overrides, one per effect kind. `default` covers the kinds
-/// that name nothing; a kind is layered on top of it, so the two compose.
-///
-/// Per kind because the kinds are not alike: an LLM call is idempotent and worth
-/// retrying, a tool call may not be, and a connector fetch holds up every
-/// decision behind it.
+/// Retry overrides, one for each effect kind. `default` covers the kinds that
+/// name nothing. A kind layers on top of `default`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "RetryConfig")]
 pub struct RetryConfig {
@@ -698,12 +668,9 @@ pub struct RetryConfig {
     pub connector: Option<RetryOverride>,
 }
 
-// ── Identity ─────────────────────────────────────────────────────────────
-
-/// Where a person's name comes from — `slack`, `app`, `cli`, or whatever a
-/// deployment registers. Stamped by whatever authenticated the request, and
-/// never read out of one: a caller free to name its own issuer could name
-/// another source's people.
+/// Where a person's name comes from: `slack`, `app`, `cli`, or another source
+/// a deployment registers. Set by whatever authenticated the request, never
+/// read from the request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 #[schemars(title = "Issuer")]
@@ -714,7 +681,7 @@ impl Issuer {
         Self(name.into())
     }
 
-    /// The one person at an installation nothing authenticates.
+    /// The one person at an installation with no authentication.
     pub fn cli() -> Self {
         Self("cli".into())
     }
@@ -744,9 +711,8 @@ impl std::fmt::Display for Issuer {
     }
 }
 
-/// One identity, as the source that authenticated it named it: OIDC's
-/// `(iss, sub)`. An id means nothing without its issuer, because it is only
-/// unique within one.
+/// One identity, as the source that authenticated it named it. An id is
+/// unique only within its issuer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "Subject")]
 pub struct Subject {
@@ -769,11 +735,9 @@ impl std::fmt::Display for Subject {
     }
 }
 
-/// Who can read what a session says. The transport sets it once, at the
-/// session's start; everything absent or unknown reads as `shared`, because
-/// `shared` is the value that never selects a personal credential.
-///
-/// Not OAuth's `aud`, which names a resource server rather than a readership.
+/// Who can read what a session says. The transport sets it once, when the
+/// session starts. Absent or unknown reads as `shared`. `shared` never selects
+/// a personal credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "Visibility")]
@@ -785,8 +749,8 @@ pub enum Visibility {
     Private,
 }
 
-/// Who a session runs for. No subject is a schedule, a key, or the engine
-/// itself — nobody whose own credential could apply.
+/// Who a session runs for. No subject means a schedule, a key, or the engine.
+/// None of them has a credential of its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "Requester")]
 pub struct Requester {
@@ -858,8 +822,8 @@ pub struct SessionOwner {
     pub metadata: HashMap<String, String>,
 }
 
-/// The owner as delivered to the worker on `DecisionRequest.identity`, without
-/// the tenant. Read `kind` with `id`: only `frontend` is an end user.
+/// The owner as the worker receives it, without the tenant. Read `kind` with
+/// `id`. Only `frontend` is an end user.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "WorkerIdentity")]
 pub struct WorkerIdentity {
@@ -868,23 +832,18 @@ pub struct WorkerIdentity {
     pub metadata: HashMap<String, String>,
 }
 
-// ── Worker state ─────────────────────────────────────────────────────────
-
 /// Opaque worker state: JSON the engine stores but never interprets.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 #[schemars(title = "WorkerState")]
 pub struct WorkerState(pub Value);
 
-// ── Agent config ─────────────────────────────────────────────────────────
-
-/// A declared agent identity — the same shape whether it is written in an
-/// `[agent.<id>]` section or returned by a worker.
+/// A declared agent. The same shape whether a file writes it or a worker
+/// returns it.
 ///
-/// `llm` names the `[llm.*]` block every proposed call runs on, and so decides
-/// both the venue (the engine with a vendor key, or the agent's own worker) and
-/// the wire shape of a worker-run call. It is effectively required: a config
-/// that names none fails when the engine resolves a call against it.
+/// `llm` names the `[llm.*]` block every call runs on. That block decides where
+/// the call runs and what shape it takes. A config that names no block fails
+/// when the engine resolves a call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "AgentConfig")]
 pub struct AgentConfig {
@@ -894,37 +853,28 @@ pub struct AgentConfig {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
-    /// How hard the model thinks, carried on the agent because it pairs with
-    /// the model. Unset sends no reasoning config and leaves the provider its
-    /// own default.
+    /// How hard the model thinks. Unset leaves the provider's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
-    /// Boxed: five per-kind overrides is a lot of bytes to carry inline
-    /// through every command that holds a config.
+    /// Boxed. Five per-kind overrides are too many bytes to carry inline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<Box<RetryConfig>>,
     /// Worker- or client-executed tools the model can call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
-    /// Sub-agents the model can delegate to. Presented to the model as tools (by
-    /// id) alongside `tools`, but each call spawns a child session rather than
-    /// executing a function.
+    /// Sub-agents the model can delegate to. The model sees them as tools.
+    /// Each call starts a child session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_agents: Vec<SubAgent>,
-    /// MCP servers
+    /// MCP servers this agent draws tools from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
     /// Plugins this agent uses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<AgentPlugin>,
-    /// Defer every tool this agent offers, from any source, unless the tool or
-    /// the connection says otherwise. Absent ⇒ the agent defers nothing of its
-    /// own; a connection may still defer on its own account.
-    ///
-    /// Presence is the switch, so an agent cannot carry settings that do
-    /// nothing. Declared on the agent because an agent can hold this opinion
-    /// before it names a connection: one that sets it gets the search tools
-    /// from its first turn, so a connection added later costs no cache.
+    /// Defer every tool this agent offers, whatever its source. A tool or a
+    /// connection overrides this with its own `defer`. Absent, the agent defers
+    /// nothing; a connection can still defer on its own.
     #[serde(
         default,
         deserialize_with = "de_defer_tools",
@@ -932,12 +882,8 @@ pub struct AgentConfig {
     )]
     #[schemars(with = "Option<DeferToolsWire>")]
     pub defer_tools: Option<DeferTools>,
-    /// Where the engine tells the model that an MCP server is available, and
+    /// Whether the engine tells the model that an MCP server is available, and
     /// what that server says it is for.
-    ///
-    /// Separate from `defer_tools`: a server exists whether or not its tools
-    /// are deferred, and where a notice lands is a fact about this agent's
-    /// prompt rather than about any server.
     #[serde(default, skip_serializing_if = "McpAnnounce::is_default")]
     pub mcp_announce: McpAnnounce,
 }
@@ -947,12 +893,12 @@ pub struct AgentConfig {
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "McpAnnounce")]
 pub enum McpAnnounce {
-    /// The system prompt while no call has dispatched; then a block on the
-    /// last user message; then a message of its own. The engine takes the
-    /// first place it can use, so the order is not a setting.
+    /// The system prompt while no call has run. Then a block on the last user
+    /// message. Then a message of its own. The engine takes the first place it
+    /// can use.
     #[default]
     Auto,
-    /// Nowhere. For a server whose own words help nobody.
+    /// Nowhere. For a server whose own description does not help.
     Never,
 }
 
@@ -963,8 +909,7 @@ impl McpAnnounce {
 }
 
 impl AgentConfig {
-    /// The reasoning this agent's calls carry, or nothing where it named no
-    /// effort and the provider's default stands.
+    /// The reasoning this agent's calls carry. Absent if it named no effort.
     pub fn reasoning(&self) -> Option<ReasoningConfig> {
         self.effort.map(|effort| ReasoningConfig {
             effort: Some(effort),
@@ -972,15 +917,14 @@ impl AgentConfig {
         })
     }
 
-    /// Whether this agent defers its own tools. A connection's own `defer`
-    /// still overrides this either way.
+    /// Whether this agent defers its own tools. A connection's `defer`
+    /// overrides it.
     pub fn defers_tools(&self) -> bool {
         self.defer_tools.is_some()
     }
 
-    /// The settings for the tools this agent defers. An agent that holds no
-    /// opinion still needs them, because a connection can defer on its own
-    /// account.
+    /// The settings for deferred tools. An agent that defers nothing still
+    /// needs them, because a connection can defer on its own.
     pub fn defer_settings(&self) -> DeferTools {
         self.defer_tools.unwrap_or_default()
     }
@@ -993,9 +937,8 @@ impl AgentConfig {
 
 /// How many tools one search answers with, when the agent does not say.
 ///
-/// A match carries a whole definition, so an answer of many is the tool list
-/// the search replaced. The engine reports what it left out, so a model that
-/// wanted more can narrow the query and ask again.
+/// A match carries a whole definition, so a large answer is as big as the tool
+/// list. The engine says what it left out.
 pub const DEFAULT_MAX_MATCHES: usize = 5;
 
 fn default_max_matches() -> NonZeroUsize {
@@ -1053,11 +996,10 @@ where
     })
 }
 
-/// A function tool the agent offers. The model-facing contract is
-/// `name`/`description`/`input`/`output`; `handler` selects where a call runs —
-/// `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
-/// `server` is invalid for tools: engine-executed tools come from a connector,
-/// which a worker declares by id rather than by tool.
+/// A function tool the agent offers. `handler` says where a call runs:
+/// `client` for the client, absent for the worker. `server` is invalid here.
+/// The engine runs only connector tools, and a worker declares those by
+/// connection id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "AgentTool")]
 pub struct AgentTool {
@@ -1076,14 +1018,14 @@ pub struct AgentTool {
     pub defer: Option<bool>,
 }
 
-/// One tool the engine resolved from a connector and will execute itself.
+/// One tool the engine resolved from a connector and runs itself.
 ///
-/// Derived, not stored: the session records what a connection *offered*
-/// (`connector.sync.completed`) and re-derives this by filtering that offer
-/// through the config in force. So replay is deterministic — a connection that
-/// changes its tools underneath a live session cannot rewrite what already
-/// happened — while a filter change costs no round trip.
-/// `name` is what the model sees; `remote_name` is what the executor calls.
+/// Derived, not stored. The session records what a connection offered, then
+/// filters that offer through the config in force. A connection that changes
+/// its tools cannot rewrite what already happened, and a filter change costs no
+/// round trip.
+///
+/// `name` is what the model sees. `remote_name` is what the engine calls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "ConnectorTool")]
 pub struct ConnectorTool {
@@ -1094,12 +1036,10 @@ pub struct ConnectorTool {
     pub input: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
-    /// The connection this tool dials. `None` for the engine's own tools,
-    /// which reach no connection.
+    /// The connection this tool calls. Absent for the engine's own tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector: Option<ConnectionPath>,
-    /// The protocol of the connection, not of this tool: the engine's own tools
-    /// carry `Mcp` whether or not they dial it.
+    /// The protocol of the connection. The engine's own tools carry `Mcp` too.
     pub via: ConnectorProtocol,
     pub remote_name: String,
     #[serde(default, skip_serializing_if = "ConnectorToolKind::is_remote")]
@@ -1135,10 +1075,8 @@ impl ConnectorToolKind {
     }
 }
 
-/// How the engine reaches a connection. Internal: the config says which
-/// protocol by which section a connection is declared under, and an agent names
-/// a connection by id without knowing. Adding A2A is a variant here plus a
-/// section, not a change to either surface.
+/// How the engine reaches a connection. Internal. A connection's section says
+/// which protocol it uses, and an agent names it by id without knowing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "ConnectorProtocol")]
@@ -1147,10 +1085,8 @@ pub enum ConnectorProtocol {
     Mcp,
 }
 
-/// An MCP server the agent draws tools from. `path` resolves against the
-/// engine's connection registry — locally from `substructure.toml`, in the
-/// cloud from the connections an admin granted this app. The worker never names
-/// a URL or a credential.
+/// An MCP server the agent draws tools from. `path` names a connection the
+/// engine holds. A worker never writes a URL or a credential.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "McpServer")]
 pub struct McpServer {
@@ -1184,14 +1120,12 @@ impl Approve {
     }
 }
 
-/// What a session does when a connection needs a person to authorize it. It
-/// belongs to the pair: one credential serves an agent that stops and asks, and
-/// an agent that has nobody to ask.
+/// What a session does when a connection needs a person to authorize it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "McpAuthFailure")]
 pub enum McpAuthFailure {
-    /// Stop and ask. A channel that cannot show the question degrades instead.
+    /// Stop and ask. A channel that cannot show the question degrades.
     #[default]
     Interrupt,
     /// Go on without this connection's tools.
@@ -1204,10 +1138,8 @@ impl McpAuthFailure {
     }
 }
 
-/// What a session does when a connection's tool fetch fails for the last time.
-/// The turn goes ahead without those tools either way, because only the agent
-/// knows whether it can work without them. This chooses whether the model is
-/// told, or is left to read their absence as nothing being there.
+/// Whether the model is told that a connection's tool fetch failed. The turn
+/// goes ahead without those tools either way.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "McpToolSyncFailure")]
@@ -1229,18 +1161,18 @@ impl McpToolSyncFailure {
     }
 }
 
-/// What the model sees of one connection, for one agent: which tools, and how
-/// they reach the model.
+/// Which of a connection's tools the model sees, and how they reach it.
 ///
-/// The filter is applied in order — capability predicates, then `include`, then
-/// `exclude` — and only ever narrowing, so a filter can never widen what the
-/// connection grants. `defer` runs after it and removes nothing.
+/// The filter runs in order: capability predicates, then `include`, then
+/// `exclude`. Each step only removes, so a filter cannot widen what the
+/// connection grants. `defer` runs last and removes nothing.
 ///
-/// `include`/`exclude` are globs matched against the tool's name on the
-/// connection, the name its own documentation uses, not the prefixed name the
-/// model sees. Capability predicates read the MCP annotations; a tool that
-/// carries none fails the predicate, so an unannotated server yields nothing
-/// under `read_only` rather than silently passing everything through.
+/// `include` and `exclude` are globs over the tool's name on the connection,
+/// not the prefixed name the model sees.
+///
+/// Capability predicates read the MCP annotations. A tool with no annotation
+/// fails the predicate, so a server that annotates nothing yields nothing under
+/// `read_only`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "McpTools")]
 pub struct McpTools {
@@ -1260,8 +1192,8 @@ pub struct McpTools {
     pub defer: Option<bool>,
 }
 
-/// A plugin an agent uses. The skills and servers are stamped from the bundle
-/// when the config loads. To enable a plugin, write it into the config.
+/// A plugin an agent uses. The skills and servers come from the bundle when the
+/// config loads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "AgentPlugin")]
 pub struct AgentPlugin {
@@ -1306,9 +1238,8 @@ pub struct SkillMeta {
     pub description: String,
 }
 
-/// A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,
-/// and the tool name the model calls); its model-facing input is the conventional
-/// single-`message` delegation schema.
+/// A sub-agent the model can delegate to. `id` is both the child agent and the
+/// tool name the model calls. Its input is one `message`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "SubAgent")]
 pub struct SubAgent {
@@ -1317,11 +1248,10 @@ pub struct SubAgent {
     pub description: String,
 }
 
-/// Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/
-/// `forwardedProps`), forwarded to the worker on the `client.messages` decision.
-/// `tools` are the browser's frontend tools, normalized to client-handled
-/// [`AgentTool`]s; the engine layers them onto the proposed config by default, and
-/// the worker may override (e.g. whitelist) by returning its own `agent`.
+/// Inputs a client declares on its run, passed to the worker on the
+/// `client.messages` decision. `tools` are the browser's own tools, read as
+/// client-handled [`AgentTool`]s. The engine adds them to the proposed config.
+/// A worker can override that by returning its own `agent`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "ClientContext")]
 pub struct ClientContext {
@@ -1335,33 +1265,28 @@ pub struct ClientContext {
     pub forwarded_props: Option<Value>,
 }
 
-// ── LLM requests and responses ───────────────────────────────────────────
-
-/// A tool's declared contract: flat on the wire. Providers that need
-/// OpenAI-style `{"type": "function", "function": {…}}` nesting re-wrap at
-/// their own boundary.
+/// A tool's declared contract. Flat on the wire. A provider that needs it
+/// nested re-wraps it at its own boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "LlmTool")]
 pub struct LlmTool {
     pub name: String,
     pub description: String,
-    /// JSON Schema for the tool's arguments; omitted declares a no-argument
-    /// tool. The engine validates each call's arguments against it and hands
-    /// providers their native form.
+    /// JSON Schema for the arguments. Absent declares a tool with no
+    /// arguments. The engine checks every call against it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<Value>,
-    /// JSON Schema the settled result must satisfy; never sent to the model.
-    /// A violating result settles as a terminal tool error.
+    /// JSON Schema the result must satisfy. The model never sees it. A result
+    /// that breaks it becomes a terminal tool error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
     /// Keep this definition out of the request.
     ///
     /// The engine still records it, still routes a call to it, and still finds
-    /// it in a search. Only the request omits it, which is what keeps a large
-    /// tool set out of the model's context and out of the cached prefix.
+    /// it in a search. Only the request leaves it out. That keeps a large tool
+    /// set out of the model's context and out of the cached prefix.
     ///
-    /// Any source can set it: a tool the config declares, a connection, or
-    /// whatever comes next. Deferral is a property of a tool, not of where it
+    /// Any source can set it. Deferral belongs to a tool, not to where the tool
     /// came from.
     #[serde(default, skip_serializing_if = "is_false")]
     pub defer: bool,
@@ -1389,8 +1314,8 @@ pub struct LlmRequest {
 impl LlmRequest {
     /// The definitions this request carries under `search`.
     ///
-    /// `None` when the request declares no tool at all, which is not the same
-    /// as one whose tools all defer — that one still offers the search.
+    /// Absent when the request declares no tool at all. That is not the same as
+    /// a request whose tools all defer, which still offers the search.
     pub fn offered_tools(&self, search: DeferToolsStrategy) -> Option<Vec<&LlmTool>> {
         Some(search.offered(self.tools.as_ref()?))
     }
@@ -1398,20 +1323,15 @@ impl LlmRequest {
 
 /// How the tools an agent defers reach the model.
 ///
-/// The engine holds every deferred definition whatever this says, and answers
-/// its own tools whatever this says. This chooses two things: which of those
-/// tools the request advertises, and whether the request carries the deferred
-/// definitions.
-///
-/// Declared on the agent, beside `defer_tools`: which tools an agent gets is
-/// the agent's business, the same way as whether it defers at all.
+/// The engine holds every deferred definition whatever this says. This chooses
+/// which tools the request advertises, and whether the request carries the
+/// deferred definitions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "DeferToolsStrategy")]
 pub enum DeferToolsStrategy {
     /// `tool_search` and `call_tool`. A search answers with the schema, so one
-    /// search is the whole distance to a call, and nothing hands the model a
-    /// name it cannot then reach.
+    /// search is enough to make a call.
     #[default]
     Search,
 }
@@ -1419,10 +1339,9 @@ pub enum DeferToolsStrategy {
 impl DeferToolsStrategy {
     /// The definitions the request carries.
     ///
-    /// A strategy the engine answers leaves each deferred tool out: the engine
-    /// finds it and routes to it from state, and the model never reads it. A
-    /// strategy the provider answers keeps them, and the serializer marks each
-    /// one with the provider's own flag.
+    /// A strategy the engine answers leaves each deferred tool out. The engine
+    /// finds it and routes to it from state. A strategy the provider answers
+    /// keeps them and marks each one with the provider's flag.
     pub fn offered(self, tools: &[LlmTool]) -> Vec<&LlmTool> {
         match self {
             Self::Search => tools.iter().filter(|t| !t.defer).collect(),
@@ -1466,13 +1385,12 @@ pub struct ResponseImage {
     pub url: String,
 }
 
-/// What one call read and wrote, in counts every provider means the same way.
+/// What one call read and wrote. Every provider means these counts the same
+/// way.
 ///
-/// Each vendor names and scopes these differently: Anthropic reports the part
-/// of the prompt it did not read from the cache, OpenAI reports the whole
-/// prompt including that part. A session that changes model, and a tree whose
-/// agents name different blocks, add these counts together, so the adapter
-/// normalizes them rather than the reader.
+/// Vendors report different things. Anthropic gives the part of the prompt it
+/// did not read from the cache. OpenAI gives the whole prompt. Each adapter
+/// converts to this shape, because these counts get added together.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "Usage")]
 pub struct Usage {
@@ -1487,15 +1405,14 @@ pub struct Usage {
     pub cache_write: u64,
     /// `input` and `output` together.
     pub total: u64,
-    /// The counts as the provider reported them, for a reader that wants a
-    /// number this type does not name.
+    /// The counts as the provider reported them, for a number this type does
+    /// not name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Value>,
 }
 
 impl Usage {
-    /// The counts of one call, from the parts a provider reports. `input` and
-    /// `total` follow from the rest, so no caller states them.
+    /// The counts of one call. `input` and `total` follow from the rest.
     pub fn new(uncached_input: u64, cache_read: u64, cache_write: u64, output: u64) -> Self {
         let input = uncached_input + cache_read + cache_write;
         Self {
@@ -1514,8 +1431,8 @@ impl Usage {
         self
     }
 
-    /// Add the counts of another call. The raw report belongs to one call, so
-    /// a sum carries none.
+    /// Add the counts of another call. A raw report belongs to one call, so a
+    /// sum carries none.
     pub fn add(&mut self, other: &Usage) {
         self.input += other.input;
         self.output += other.output;
@@ -1543,8 +1460,8 @@ pub struct LlmResponse {
     pub finish_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// Cost in dollars for this call, if the provider reports it. A decimal
-    /// string on the wire.
+    /// Cost in dollars, if the provider reports it. A decimal string on the
+    /// wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "decimal_string_schema")]
     pub cost: Option<Decimal>,
@@ -1553,18 +1470,15 @@ pub struct LlmResponse {
     pub images: Vec<ResponseImage>,
 }
 
-/// What kind of failure, for a consumer that branches instead of reading the
-/// sentence. A closed set, and required on every [`ErrorInfo`]: an optional
-/// code is one nobody fills in, which leaves every consumer handling a `None`
-/// that should not exist.
+/// What kind of failure, so a consumer can branch on it instead of reading the
+/// sentence. A closed set, required on every [`ErrorInfo`].
 ///
-/// `provider_error`, `rate_limited`, `refused`, `budget_exceeded` and
-/// `deadline_exceeded` describe a call that ran and went wrong.
-/// `invalid_response` — a document did not parse, or parsed into something
-/// unusable. `handler_error` — whoever was asked to do the work (a worker, a
-/// client) reported a failure of its own. `worker_unreachable` — it was never
-/// reached. `unroutable` — nothing could decide. `internal` — the engine's own
-/// fault, and the honest answer when nothing else fits.
+/// `provider_error`, `rate_limited`, `refused`, `budget_exceeded`, and
+/// `deadline_exceeded` mean a call ran and went wrong.
+/// `invalid_response` means a document did not parse, or parsed into something
+/// unusable. `handler_error` means the worker or client reported its own
+/// failure. `worker_unreachable` means it was never reached. `unroutable`
+/// means nothing could decide. `internal` means the engine's own fault.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "ErrorCode")]
@@ -1581,25 +1495,24 @@ pub enum ErrorCode {
     Internal,
 }
 
-/// Why something failed. One shape on every event, on the wire, and in the
-/// internal carriers that produce them — shaped after a Stripe API error.
+/// Why something failed. One shape on every event and on the wire.
 ///
-/// `retryable` is deliberately absent: whether to try again is a decision the
-/// engine makes about one attempt, not a fact about the failure, and it is
-/// meaningless on a terminal like `turn.completed`. It rides on the events
-/// that settle an attempt instead.
+/// There is no `retryable` field. Whether to try again is a decision about one
+/// attempt, not a fact about the failure. The events that settle an attempt
+/// carry it instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "ErrorInfo")]
 pub struct ErrorInfo {
-    /// One engine-authored sentence, safe to show a human. Never a raw
-    /// document — an unbounded body belongs in the log.
+    /// One sentence the engine wrote, safe to show a human. Never a raw
+    /// document. An unbounded body belongs in the log.
     pub message: String,
     pub code: ErrorCode,
-    /// The one input to go and fix, when the failure names one: `agent.llm`,
-    /// `actions[0].type`. Stripe's `param`.
+    /// The one input to fix, when the failure names one. For example
+    /// `agent.llm` or `actions[0].type`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
-    /// Small structured particulars: a status, the llm blocks that exist.
+    /// Small structured details, such as a status or the llm blocks that
+    /// exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<Value>,
 }
@@ -1614,13 +1527,13 @@ impl ErrorInfo {
         }
     }
 
-    /// The engine's own fault, or a failure nothing else describes.
+    /// The engine's own fault, or a failure no other code describes.
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::Internal, message)
     }
 
-    /// Whoever ran the work reported a failure — the default for an error a
-    /// worker or client authored without classifying it.
+    /// Whoever ran the work reported a failure. The default for an error a
+    /// worker or client wrote without a code.
     pub fn handler(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::HandlerError, message)
     }
@@ -1635,9 +1548,8 @@ impl ErrorInfo {
         self
     }
 
-    /// Take what an author supplied, keeping the default where they said
-    /// nothing. The seam for a worker- or client-authored error, which arrives
-    /// flat and may classify itself or not.
+    /// Take what the author supplied and keep the default where they said
+    /// nothing. For an error a worker or client wrote.
     pub fn or_code(mut self, code: Option<ErrorCode>) -> Self {
         if let Some(code) = code {
             self.code = code;
@@ -1658,8 +1570,6 @@ impl std::fmt::Display for ErrorInfo {
         write!(f, "{}", self.message)
     }
 }
-
-// ── Streaming ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "ToolCallChunk")]
@@ -1709,16 +1619,13 @@ pub struct TokenDelta {
     pub finish_reason: Option<String>,
 }
 
-// ── Effects ──────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "EffectStatus")]
 pub enum EffectStatus {
     Pending,
-    /// Dispatched and alive, awaiting its result. Off the deadline clock: the
-    /// work succeeded in starting, and how long it then runs is its own
-    /// business. A delegation sits here for as long as its child turn takes.
+    /// Running, waiting for its result. Off the deadline clock. A delegation
+    /// stays here for as long as its child turn takes.
     Running,
     Completed,
     Failed,
@@ -1726,10 +1633,9 @@ pub enum EffectStatus {
     Queued,
 }
 
-/// What kind of work an effect is. One enum for the wire and for the engine's
-/// own scheduling: a decision and a turn's end queue beside the calls and are
-/// swept the same way, so they are kinds too. Neither ever appears on an
-/// [`Effect`] — a decision rides the decision list, a turn end has no record.
+/// What kind of work an effect is. One enum for the wire and for scheduling. A
+/// decision and a turn's end queue beside the calls and are swept the same way,
+/// so they are kinds too. Neither appears on an [`Effect`].
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
@@ -1743,9 +1649,8 @@ pub enum EffectKind {
     ConnectorSync,
     /// A worker decision.
     Decision,
-    /// The turn's completion, dependent on its `turn.finished` finalizer
-    /// decision settling. Carries the turn id; the frozen output lives in the
-    /// session's `finalizing`. Never swept: it has no deadline of its own.
+    /// The turn's completion, which waits for the `turn.finished` decision to
+    /// settle. Carries the turn id. Never swept, because it has no deadline.
     TurnEnd,
 }
 
@@ -1762,11 +1667,9 @@ impl EffectKind {
     }
 }
 
-/// An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.
-/// A flat envelope plus kind-specific fields: a tool call's
-/// `name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a
-/// sub-agent's `agent_id`/`session_id`. A connector sync carries none — its
-/// `id` is the connection being fetched.
+/// An effect still running, shown on each worker decision. A flat envelope
+/// plus the fields of its kind. A connector sync carries none. Its `id` is the
+/// connection being fetched.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "Effect")]
 pub struct Effect {
@@ -1789,30 +1692,26 @@ pub struct Effect {
     pub stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
-    /// The model tool call a delegation answers; its own `id` is the child session.
+    /// The model tool call a delegation answers. Its `id` is the child
+    /// session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
 
-// ── Tool contract ────────────────────────────────────────────────────────
-
-/// The engine's classification of a tool call's arguments, delivered on the
-/// `tool.execute` trigger alongside the raw `arguments` string. Always on the
-/// wire — absence never carries meaning.
+/// What the engine made of a tool call's arguments, sent with the raw
+/// `arguments` string. Always on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "lowercase")]
 #[schemars(title = "ToolInput")]
 pub enum ToolInput {
-    /// Parsed and, when the tool declares an `input` schema, conforming to it.
-    /// `value` is exactly the parsed `arguments` — the engine never mutates it.
+    /// Parsed, and valid against the `input` schema if the tool declares one.
+    /// `value` is the parsed `arguments`. The engine never changes it.
     Valid { value: Value },
     /// Parsed to an object that violates the declared `input` schema.
     Invalid { value: Value, error: String },
-    /// Not a JSON object: malformed JSON or a non-object value.
+    /// Not a JSON object. Either malformed JSON or another type.
     Malformed { error: String },
 }
-
-// ── Client → engine ──────────────────────────────────────────────────────
 
 /// The body of a `client.message`: one message, optionally streamed.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1834,10 +1733,10 @@ pub struct ClientMessages {
     pub client: ClientContext,
 }
 
-/// The body of a `client.append`: messages appended at the session head. The
-/// view is composed against the active path at delivery, so a queued append
-/// lands after whatever turn beat it — it can never fork the tree. Messages
-/// whose ids are already recorded are dropped.
+/// The body of a `client.append`. Messages are added at the session head,
+/// against the active path at delivery. A queued append lands after whatever
+/// turn beat it, so it cannot fork the tree. A message whose id is already
+/// recorded is dropped.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub struct ClientAppend {
@@ -1857,11 +1756,9 @@ pub struct ClientAction {
     pub args: Option<Value>,
 }
 
-/// The client→engine inbound *submit* wire form: an untrusted client submits a message,
-/// its full conversation view, an append batch, or a named action. Lowered to domain events at the
-/// `SubmitClientPayload` command seam (`runtime::session::command`); never persisted
-/// as-is. Carried verbatim inside [`ClientInput`], which is the full client input
-/// surface.
+/// What a client submits: a message, its full conversation view, an append
+/// batch, or a named action. The engine turns it into events and never stores
+/// it as it arrived.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 #[schemars(title = "ClientPayload")]
@@ -1876,18 +1773,14 @@ pub enum ClientPayload {
     Action(ClientAction),
 }
 
-/// Everything a client can send on the input surface: submit a message / a full view / an
-/// append batch / a named action, resume an interrupt, or settle a client tool. A flat,
-/// internally-tagged union — its seven tags produce serde's "unknown variant, expected one
-/// of …" error for free. `Runtime::handle_client_input` is the single seam that dispatches
-/// it (mirroring `resolve_response` on the worker side).
+/// Everything a client can send: submit a message, a full view, an append
+/// batch, or a named action; resume an interrupt; or settle a client tool.
 ///
-/// Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
-/// the turn, creating the session if new) and the optional idempotency `turn_id` are
-/// fields of the four submit variants only. A resume/settle addresses an interrupt/effect
-/// id and continues whatever turn is active, so it carries neither — misplacing them is
-/// unrepresentable rather than rejected. `session_id` is the one universal address and
-/// rides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.
+/// Each variant carries only the addressing it needs. The four submit variants
+/// carry `agent_id`, which routes the turn and starts the session if it is new,
+/// and an optional `turn_id`. A resume or settle names an interrupt or effect
+/// and continues whatever turn is running, so it carries neither.
+/// `session_id` is on the envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 #[schemars(title = "ClientInput")]
@@ -1900,9 +1793,8 @@ pub enum ClientInput {
         message: DraftMessage,
         #[serde(default)]
         stream: bool,
-        /// Hold this message for the next turn instead of refusing it when one
-        /// is already running. Off by default: rejection stays the contract for
-        /// a plain submitter, and queuing is declared intent.
+        /// Hold this message for the next turn instead of refusing it while a
+        /// turn is running. Off by default.
         #[serde(default)]
         queue: bool,
     },
@@ -1927,9 +1819,8 @@ pub enum ClientInput {
         stream: bool,
         #[serde(default)]
         client: ClientContext,
-        /// Hold this batch for the next turn instead of refusing it when one is
-        /// already running. Off by default: rejection stays the contract for a
-        /// plain submitter, and queuing is declared intent.
+        /// Hold this batch for the next turn instead of refusing it while a
+        /// turn is running. Off by default.
         #[serde(default)]
         queue: bool,
     },
@@ -1981,25 +1872,14 @@ pub struct InterruptResumption {
     pub payload: Value,
 }
 
-// ── Interrupt payload convention ─────────────────────────────────────────
-//
-// Offered vocabulary, never enforced: interrupt payloads stay opaque on the
-// wire, but a payload shaped like the AG-UI Interrupt renders in every
-// channel (Slack buttons, the AG-UI Interrupt object), and resumes authored
-// by channels arrive as an [`InterruptResolution`]. Top-level keys come from
-// the AG-UI spec; everything convention-specific rides `metadata`, which is
-// client-visible by definition — anything private belongs in worker state,
-// not the payload. Workers should treat an unrecognized resolution as their
-// safe default — a resume can carry any payload.
-
-/// An interrupt payload following the AG-UI Interrupt shape (spec spelling;
-/// `id` and `reason` live on the interrupt itself).
+/// An interrupt payload in the AG-UI shape. `id` and `reason` live on the
+/// interrupt itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(title = "InterruptPayload")]
 pub struct InterruptPayload {
-    /// Markdown; channels down-convert. Without it, channels fall back to
-    /// the interrupt's `reason`.
+    /// Markdown. A channel converts it as it needs. Without it, a channel
+    /// shows the interrupt's `reason`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Binds the interrupt to a prior tool call.
@@ -2008,30 +1888,30 @@ pub struct InterruptPayload {
     /// JSON Schema for the expected resolution payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<Value>,
-    /// RFC 3339; display only until engine TTLs land.
+    /// RFC 3339. Display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
-    /// Free-form, delivered to clients verbatim. `metadata.options`
-    /// ([`InterruptOption`] list) renders as Slack buttons.
+    /// Free-form, delivered to clients unchanged. `metadata.options` is a
+    /// list of [`InterruptOption`], which Slack shows as buttons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
 
-/// One enumerated response under `metadata.options` (Slack: a button). A
-/// click resumes with the option's `value` as the resolution payload.
+/// One answer under `metadata.options`. Slack shows it as a button. A click
+/// resumes with the option's `value`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "InterruptOption")]
 pub struct InterruptOption {
     pub label: String,
-    /// Delivered verbatim as the resolution's `payload`; worker vocabulary.
+    /// Delivered unchanged as the resolution's `payload`. The worker chooses
+    /// what it means.
     pub value: Value,
-    /// `primary` or `danger`; anything else renders plain.
+    /// `primary` or `danger`. Anything else shows plain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,
 }
 
-/// A channel-authored resume payload: the AG-UI resume shape
-/// (`{status, payload}`) plus a provenance stamp.
+/// A resume payload a channel wrote: the AG-UI shape plus who resolved it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "InterruptResolution")]
 pub struct InterruptResolution {
@@ -2050,7 +1930,7 @@ pub enum ResumeStatus {
     Cancelled,
 }
 
-/// Who resolved it, stamped by the channel — never by the requester.
+/// Who resolved it. The channel sets this, never the requester.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "InterruptResponder")]
 pub struct InterruptResponder {
@@ -2067,13 +1947,9 @@ pub struct InterruptResponder {
     pub style: Option<String>,
 }
 
-// ── Engine → worker ──────────────────────────────────────────────────────
-
-/// The trigger a worker sees on the wire — the materialized projection of the
-/// engine's internal decision trigger. It has no `ClientMessage`: a bare client
-/// message is always materialized to `ClientTranscript` by `to_wire_trigger`
-/// (`runtime::session::wire`) before delivery, so an unmaterialized message can
-/// never reach a worker.
+/// The trigger a worker sees on the wire. There is no `ClientMessage`: the
+/// engine turns a bare client message into `ClientTranscript` before it sends
+/// it.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 #[schemars(title = "DecisionTrigger")]
@@ -2085,8 +1961,8 @@ pub enum DecisionTrigger {
     ClientTranscript {
         messages: Vec<DraftMessage>,
         new_from: usize,
-        /// Inputs the client declared on its run; the engine layers `client.tools`
-        /// onto the proposed config by default.
+        /// Inputs the client declared on its run. The engine adds
+        /// `client.tools` to the proposed config.
         client: ClientContext,
     },
     #[serde(rename = "client.action")]
@@ -2101,10 +1977,8 @@ pub enum DecisionTrigger {
         id: String,
         name: String,
         arguments: String,
-        /// The engine's classification of `arguments` against the tool's
-        /// declared `input` schema: `valid` (with the parsed `value`),
-        /// `invalid` (value plus the violation), or `malformed` (not a JSON
-        /// object). Always on the wire.
+        /// What the engine made of `arguments` against the tool's `input`
+        /// schema: `valid`, `invalid`, or `malformed`. Always on the wire.
         input: ToolInput,
         attempt: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2141,9 +2015,8 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<DraftMessage>,
         truncated: bool,
-        /// True when the model declined the request rather than answering it.
-        /// A refusal reads as a turn that stopped well and said nothing, so
-        /// without this the run continues from a blank answer.
+        /// True when the model declined the request. Without it, a refusal
+        /// looks like a turn that ended well and said nothing.
         #[serde(default)]
         refused: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2170,8 +2043,8 @@ pub enum DecisionTrigger {
         #[serde(flatten)]
         resumption: InterruptResumption,
     },
-    /// Fired after a turn completes, carrying its final output; blocks the session
-    /// going idle until answered. Echo the proposed `done` to finalize.
+    /// Sent after a turn completes, with its final output. The session stays
+    /// busy until it is answered. Echo the proposed `done` to finish.
     #[serde(rename = "turn.finished")]
     TurnFinished {
         turn_id: String,
@@ -2203,30 +2076,25 @@ impl DecisionTrigger {
     }
 }
 
-// ── Worker → engine ──────────────────────────────────────────────────────
-
-/// The action a worker authors on the wire. Mirrors the internal `Action`, but a
-/// settle's effect id may be omitted: on the sync/pull paths the answered
-/// `*.execute` trigger names it, so echoing it is redundant. `resolve_response`
-/// (`runtime::session::wire`) turns this into the internal `Action` (id always
-/// present) at the transport boundary.
+/// The action a worker writes on the wire. A settle can leave out the effect
+/// id, because the `*.execute` trigger it answers already names it.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 #[schemars(title = "DecisionAction")]
 pub enum DecisionAction {
-    /// A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it
-    /// becomes the assistant node's id. Omitted fields are filled from the agent
-    /// config (merge source), then engine defaults; `messages` omitted ⇒
-    /// `[config.system?] + the decision's declared view`. Explicit `messages`
-    /// suppress system injection. A bare `{"type":"llm.call"}` prompts per the
-    /// agent's identity over the current view.
+    /// A flat LLM request. Every field is optional.
+    ///
+    /// Without `id`, the engine mints one, and it becomes the assistant node's
+    /// id. A field left out comes from the agent config, then from the engine's
+    /// default. Without `messages`, the request carries the config's system
+    /// message and the decision's view. Given `messages`, no system message is
+    /// added.
     #[serde(rename = "llm.call")]
     CallLlm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        /// The `[llm.*]` block this call runs on; omitted ⇒ the merge source
-        /// config's `llm`. Naming a different block moves one call to another
-        /// venue or vendor.
+        /// The `[llm.*]` block this call runs on. Absent uses the config's
+        /// `llm`. Naming another block moves this one call elsewhere.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         llm: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2243,32 +2111,30 @@ pub enum DecisionAction {
         reasoning: Option<ReasoningConfig>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream: Option<bool>,
-        /// Layered over the agent config's `llm` policy, else over the engine's
+        /// Layered over the agent config's `llm` policy, or over the engine's
         /// default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryOverride>,
     },
-    /// `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
+    /// Without `id`, the engine mints one. A tool the model called carries the
+    /// model's id.
     ///
-    /// There is no `handler`: where a call runs follows from its name. A tool
-    /// resolved from a connector runs on the engine, a tool declared
-    /// `handler: client` runs on the client, and anything else runs on the
-    /// worker. The engine already knows all three, so asking the worker to
-    /// restate it only creates a way for the two to disagree.
+    /// There is no `handler`. The name says where the call runs: a connector
+    /// tool on the engine, a `handler: client` tool on the client, anything
+    /// else on the worker. The engine knows all three already.
     #[serde(rename = "tool.call")]
     CallTool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         name: String,
-        // Any JSON value; non-strings are canonicalized to JSON text.
         arguments: Value,
-        /// Layered over the agent config's policy for this kind, else over the
+        /// Layered over the agent config's policy for this kind, or over the
         /// engine's default for where the tool runs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryOverride>,
     },
-    /// `id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,
-    /// fencing the result to the attempt that ran.
+    /// Without `id` and `attempt`, both come from the `tool.execute` trigger
+    /// this answers. That ties the result to the attempt that ran.
     #[serde(rename = "tool.result")]
     ToolResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2284,16 +2150,16 @@ pub enum DecisionAction {
         #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
-    /// `id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,
-    /// fencing the result to the attempt that ran.
+    /// Without `id` and `attempt`, both come from the `llm.execute` trigger
+    /// this answers. That ties the result to the attempt that ran.
     #[serde(rename = "llm.result")]
     LlmResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<u32>,
-        /// A neutral `LlmResponse`, or the provider's native response when the
-        /// answered `llm.execute` carried a `format`.
+        /// An `LlmResponse`, or the provider's own response when the
+        /// `llm.execute` this answers carried a `format`.
         response: Value,
     },
     #[serde(rename = "tool.error")]
@@ -2330,13 +2196,13 @@ pub enum DecisionAction {
     SpawnSubAgent {
         session_id: String,
         agent_id: String,
-        /// The model tool-call this delegation answers — always required.
+        /// The model tool call this delegation answers. Required.
         tool_call_id: String,
         /// The child's opening message. It travels with the spawn, so it
-        /// cannot race the creation of the session it opens.
+        /// cannot arrive before the session exists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<DraftMessage>,
-        /// Layered over the agent config's `sub_agent` policy, else over the
+        /// Layered over the agent config's `sub_agent` policy, or over the
         /// engine's default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryOverride>,
@@ -2346,7 +2212,8 @@ pub enum DecisionAction {
         session_id: String,
         message: DraftMessage,
     },
-    /// `interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.
+    /// Without `interrupt_id`, the engine mints one to match the later
+    /// resume.
     #[serde(rename = "interrupt")]
     Interrupt {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2373,9 +2240,9 @@ pub enum DecisionAction {
     },
 }
 
-/// A decision: the messages/actions to author, plus optional state/agent writes.
-/// The worker returns one; the engine also proposes one as the default
-/// continuation (`DecisionRequest::proposed`), which the worker echoes or amends.
+/// The messages and actions to author, plus optional state and agent writes.
+/// A worker returns one. The engine proposes one too, which the worker echoes
+/// or changes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "DecisionResponse")]
 pub struct DecisionResponse {
@@ -2383,14 +2250,15 @@ pub struct DecisionResponse {
     pub messages: Vec<DraftMessage>,
     #[serde(default)]
     pub actions: Vec<DecisionAction>,
-    /// Omitted or `null` keeps the current state; clear with a non-null empty value.
+    /// Absent or `null` keeps the current state. Send an empty value to
+    /// clear it.
     #[serde(default)]
     pub state: Option<WorkerState>,
     /// A new agent config write; omitted keeps the current config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentConfig>,
-    /// How each channel shows this decision, keyed by channel kind (e.g.
-    /// `slack`). Opaque to the engine.
+    /// How each channel shows this decision, keyed by channel kind. The engine
+    /// does not read it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub channels: BTreeMap<String, Value>,
 }
@@ -2414,11 +2282,11 @@ pub struct DecisionRequest<'a> {
     pub agent_id: &'a str,
     pub identity: WorkerIdentity,
     pub trigger: &'a DecisionTrigger,
-    /// The engine's default continuation for `trigger` (empty when it needs
-    /// worker knowledge). Advisory: accept by echoing it as the decision.
+    /// The engine's default continuation for `trigger`. Empty when only the
+    /// worker can decide. Accept it by echoing it back.
     pub proposed: &'a DecisionResponse,
     pub state: &'a WorkerState,
-    /// The agent config resolved for the active path (`null` when none is set).
+    /// The agent config for the active path. `null` when none is set.
     pub agent: &'a Option<AgentConfig>,
     pub calls: &'a [Effect],
     /// Count of in-flight `tool_call`/`sub_agent` calls.
@@ -2483,8 +2351,8 @@ mod tests {
         ToolResult::from_action(Some(value), None, None, false).expect("a readable result")
     }
 
-    /// `result` is documented as a whole `ToolResult`, and every worker example
-    /// writes one. Reading it as a value quoted its JSON into a text block.
+    /// `result` is a whole `ToolResult`. Reading it as a plain value quoted
+    /// its JSON into a text block.
     #[test]
     fn a_result_written_as_a_tool_result_is_read_as_one() {
         let result = from_result(serde_json::json!({
@@ -2511,8 +2379,8 @@ mod tests {
         );
     }
 
-    /// The outer flag still wins: an action that says the call failed says so
-    /// whatever the result it carries claims.
+    /// The outer flag wins. An action that says the call failed says so
+    /// whatever its result claims.
     #[test]
     fn the_actions_own_error_flag_is_kept() {
         let result = ToolResult::from_action(
@@ -2525,8 +2393,8 @@ mod tests {
         assert!(result.is_error);
     }
 
-    /// `deny_unknown_fields` is what tells a result apart from data that only
-    /// looks like one, so a worker's own answer still reads as its own answer.
+    /// `deny_unknown_fields` tells a result apart from data that looks like
+    /// one.
     #[test]
     fn data_that_is_not_a_tool_result_is_left_alone() {
         assert_eq!(from_result(serde_json::json!("Lisbon")).as_text(), "Lisbon");
@@ -2534,7 +2402,6 @@ mod tests {
             from_result(serde_json::json!({ "temp": 62 })).as_text(),
             r#"{"temp":62}"#
         );
-        // `content` of the wrong shape is data, not a result.
         assert_eq!(
             from_result(serde_json::json!({ "content": 3 })).as_text(),
             r#"{"content":3}"#

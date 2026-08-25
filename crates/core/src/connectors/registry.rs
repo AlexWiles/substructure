@@ -1,11 +1,3 @@
-//! Where a connector id turns into something the engine can call.
-//!
-//! Three steps, and all three exist in every deployment even when one of them
-//! is trivial locally: **look up** the connection, **check the grant** that lets
-//! this tenant use it, **resolve the credential**. Keeping the shape constant is
-//! the point — the cloud swaps the implementations for a database, a grant
-//! table, and a vault without moving a step into or out of the pipeline.
-
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -27,21 +19,10 @@ use crate::runtime::blob::BlobStore;
 #[serde(deny_unknown_fields)]
 pub struct ConnectionDecl {
     pub url: String,
-    /// How this connection authenticates, when the file says. Absent is the
-    /// usual case: a server announces OAuth or answers without a challenge, so
-    /// asking it beats writing down what it would have said.
-    ///
-    /// Written for the one thing no request can discover — a static token — and
-    /// for a server whose discovery is broken enough to need overriding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthKind>,
-    /// Header carrying a static token. Absent ⇒ `Authorization: Bearer`.
-    /// Only under `auth = "token"`: OAuth binds its own header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
-    /// Whose credential this connection dials with. Absent is `shared`, and
-    /// stays absent so a rewrite does not stamp the default into every
-    /// section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<CredentialScope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -50,17 +31,6 @@ pub struct ConnectionDecl {
     pub client_id_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret_env: Option<String>,
-    /// Whether the model sees `<id>__<tool>` rather than the connection's own
-    /// tool names. On by default, and the operator's call rather than the agent
-    /// author's: only whoever configured the connections knows whether their
-    /// names collide.
-    ///
-    /// Turning it off is safe — a name that collides with another connection, a
-    /// declared tool, or a sub-agent is dropped and reported rather than
-    /// silently shadowing anything.
-    ///
-    /// Written only when turned off, so a rewritten config does not gain a line
-    /// per connection saying what the default already says.
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub prefix_tools: bool,
 }
@@ -86,9 +56,6 @@ impl ConnectionDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectionSpec {
     pub path: ConnectionPath,
-    /// Which protocol reaches this connection. Not written in the config: it
-    /// follows from the section the connection was declared under, and a second
-    /// copy would only be a way for the two to disagree. The loader stamps it.
     pub protocol: ConnectorProtocol,
     pub decl: ConnectionDecl,
 }
@@ -117,13 +84,10 @@ fn env_value(var: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Whose credential a connection dials with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CredentialScope {
-    /// One credential for the whole deployment.
     Shared,
-    /// One credential per person, usable only in a private conversation.
     User,
 }
 
@@ -136,25 +100,15 @@ impl CredentialScope {
     }
 }
 
-/// How a connection is authenticated, where the file overrides what asking the
-/// server would answer. Never *what with*: a file meant to be committed must
-/// not be able to hold a secret, so the credential itself is always set out of
-/// band — `subs auth <path>` — and an attempt to write one here is a loud
-/// parse error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthKind {
-    /// The MCP authorization spec's own scheme: discovery, consent, refresh.
     Oauth,
-    /// A static token this deployment holds, sent on every call.
     Token,
-    /// The server wants no credential, and saying so keeps it out of every
-    /// report of what is left to authorize.
     None,
 }
 
 impl AuthKind {
-    /// The spelling the file uses.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Oauth => "oauth",
@@ -163,8 +117,6 @@ impl AuthKind {
         }
     }
 
-    /// The reverse of `as_str`, for a store that keeps the word rather than
-    /// the enum.
     pub fn parse(v: &str) -> Option<Self> {
         match v {
             "oauth" => Some(Self::Oauth),
@@ -175,8 +127,6 @@ impl AuthKind {
     }
 }
 
-/// Hand-written so the shape this key used to take answers with the migration
-/// rather than with `invalid type: map`.
 impl<'de> Deserialize<'de> for AuthKind {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Kind;
@@ -210,12 +160,8 @@ impl<'de> Deserialize<'de> for AuthKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
-    /// No connection by that id.
     Unknown(String),
-    /// The connection exists but this tenant has no grant for it.
     NotGranted(String),
-    /// The app may use the connection, and nobody has authorized it. Carries
-    /// the need because no credential is ever reached to be refused.
     NotAuthorized { id: String, need: AuthNeed },
 }
 
@@ -237,8 +183,6 @@ impl std::fmt::Display for RegistryError {
     }
 }
 
-/// Only an unauthorized connection asks for a person. A misconfigured one is
-/// caught in the config, not at runtime.
 impl From<RegistryError> for ConnectorError {
     fn from(err: RegistryError) -> Self {
         let message = err.to_string();
@@ -260,9 +204,6 @@ pub trait ConnectionRegistry: Send + Sync {
     ) -> Result<ConnectionSpec, RegistryError>;
 }
 
-/// Every connection declared in `substructure.toml`, granted to the single
-/// tenant a local engine serves. The grant check is a constant `true` here; it
-/// is a real lookup in the cloud.
 pub struct LocalRegistry {
     connections: BTreeMap<ConnectionPath, ConnectionSpec>,
 }
@@ -293,10 +234,6 @@ impl ConnectionRegistry for LocalRegistry {
 
 #[async_trait]
 pub trait CredentialResolver: Send + Sync {
-    /// The credential headers for one connection, resolved at call time. The
-    /// cloud implementation reads a vault and refreshes an expired token here;
-    /// this is the seam that keeps tokens out of the event store.
-    ///
     async fn resolve(
         &self,
         tenant_id: &str,
@@ -305,8 +242,6 @@ pub trait CredentialResolver: Send + Sync {
         spec: &ConnectionSpec,
     ) -> Result<HeaderMap, ConnectorError>;
 
-    /// Replace the credential this connection dials with, after the server
-    /// refused it. `Ok(false)` if nothing can be replaced without a person.
     async fn refresh(
         &self,
         _tenant_id: &str,
@@ -335,43 +270,28 @@ impl CredentialSource for Resolved {
     }
 }
 
-/// One connection's tool list as fetched, with the prefix it expands under.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Offer {
     pub prefix: Option<String>,
     pub server: Option<String>,
     pub tools: Vec<RemoteTool>,
-    /// What the server said it is for at the handshake, if it said anything.
     pub instructions: Option<String>,
 }
 
-/// One live client and when it last carried a call, for the idle sweep.
 struct CachedClient {
     client: Arc<McpClient>,
     last_used: std::time::Instant,
 }
 
-/// One client per person per connection grows without limit, so the map is
-/// bounded. Eviction only drops the map's `Arc`; a call in flight holds its
-/// own and the transport closes on the last drop.
 const MAX_CLIENTS: usize = 64;
 const CLIENT_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// The engine's handle on its connections. Holds one live client per resolved
-/// credential so an agent's calls reuse a single connector session; a rejected
-/// credential drops the client so the next call resolves a fresh one.
 pub struct Connections {
     registry: Arc<dyn ConnectionRegistry>,
     credentials: Arc<dyn CredentialResolver>,
     blobs: Arc<dyn BlobStore>,
     http: reqwest::Client,
-    /// Keyed by the credential's identity, not the connection's: two persons
-    /// on one connection are two credentials, and one client would send the
-    /// first person's to the second.
     clients: Mutex<HashMap<(String, String, Slot), CachedClient>>,
-    /// What each server answered an unauthenticated call with, keyed by URL:
-    /// one server gives one answer however many connections name it, and the
-    /// answer is the same for every person, so sharing it is correct.
     probed: Mutex<HashMap<String, Probed>>,
 }
 
@@ -391,9 +311,6 @@ impl Connections {
         }
     }
 
-    /// Which credential this call reads, or why it must read none. The one
-    /// decision point: every call and every fetch passes here, and an outside
-    /// implementation applies it rather than restating it.
     pub fn slot_for(
         id: &str,
         spec: &ConnectionSpec,
@@ -417,10 +334,6 @@ impl Connections {
         }
     }
 
-    /// What a connection offers, with the prefix its tools expand under. The
-    /// prefix rides along so the caller can record it with the offer rather than
-    /// reading config again at prompt time, where a since-edited file would
-    /// rename tools underneath a live session.
     pub async fn list_tools(
         &self,
         tenant_id: &str,
@@ -465,11 +378,6 @@ impl Connections {
         .await
     }
 
-    /// Run one operation, and once more with a fresh credential if the first
-    /// attempt was refused. Without this a refused token that has not expired
-    /// goes out again on every attempt, and the connection never recovers.
-    ///
-    /// The connector session is kept: only the credential was refused.
     async fn attempt<T, F, Fut>(
         &self,
         tenant_id: &str,
@@ -534,8 +442,6 @@ impl Connections {
 
         let mut clients = self.clients.lock().await;
         Self::evict(&mut clients);
-        // Another caller may have won the race; keep whichever landed first so
-        // one credential means one session.
         Ok(clients
             .entry(key)
             .or_insert(CachedClient {
@@ -546,8 +452,6 @@ impl Connections {
             .clone())
     }
 
-    /// Drop idle clients, then the least recently used past the cap. Dropping
-    /// the map's `Arc` is the whole eviction: a call in flight holds its own.
     fn evict(clients: &mut HashMap<(String, String, Slot), CachedClient>) {
         let now = std::time::Instant::now();
         clients.retain(|_, c| now.duration_since(c.last_used) < CLIENT_IDLE);
@@ -563,14 +467,8 @@ impl Connections {
         }
     }
 
-    ///
-    /// A refusal is also the answer to how the connection authenticates, where
-    /// the file did not say — so this is where a declaration-free connection
-    /// finds out, at the one moment it matters and at no cost until then.
     async fn explain_refusal(&self, spec: &ConnectionSpec, err: ConnectorError) -> ConnectorError {
         match spec.decl.auth {
-            // The file already said how. A refusal means the credential is
-            // wrong or spent, and the command that replaces it is the answer.
             Some(AuthKind::Token) => ConnectorError::unauthorized(
                 AuthNeed::TokenRejected,
                 format!(
@@ -583,16 +481,7 @@ impl Connections {
         }
     }
 
-    /// What a connection the file says nothing about wants, asked of the server
-    /// that just refused. Nothing to say is not an error: the original refusal
-    /// stands.
-    ///
-    /// Asked once per server per process. A refused connection is retried, and
-    /// probing on every attempt would double the traffic we send somewhere that
-    /// is already turning us away.
     async fn explain(&self, spec: &ConnectionSpec) -> Option<ConnectorError> {
-        // Dropped before the miss branch runs: a guard held across the `await`
-        // below would wait on a lock this task is the one holding.
         let cached = self.probed.lock().await.get(&spec.decl.url).copied();
         let probed = match cached {
             Some(probed) => probed,
@@ -949,9 +838,6 @@ mod tests {
         );
     }
 
-    /// The one decision point, row by row: a shared connection answers with
-    /// the company slot for anybody; a personal one answers only for a person
-    /// in a private conversation, and refuses the rest with the reason.
     #[test]
     fn the_scope_and_requester_decide_whose_slot_a_call_reads() {
         use crate::protocol::Visibility;
@@ -1000,8 +886,6 @@ mod tests {
         assert!(machine.to_string().contains("gmail"), "names it: {machine}");
     }
 
-    /// Eviction drops the map's `Arc` only: a bounded map, and never a client
-    /// pulled out from under a call.
     #[test]
     fn the_client_map_stays_bounded_and_evicts_the_least_recent() {
         let mut clients: HashMap<(String, String, Slot), CachedClient> = HashMap::new();
@@ -1100,9 +984,6 @@ mod tests {
         assert!(err.to_string().contains("\"token\""), "got {err}");
     }
 
-    /// The probe is what makes a refusal explain itself, and a refused
-    /// connection is retried. Asking the server once per process is the
-    /// difference between one extra request and one per attempt.
     #[tokio::test]
     async fn a_server_is_asked_once_however_often_it_refuses() {
         use std::sync::atomic::{AtomicUsize, Ordering};

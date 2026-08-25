@@ -1,4 +1,4 @@
-use crate::protocol::{AuthNeed, TOOL_SEARCH};
+use crate::protocol::{AuthNeed, ConnectionPath, TOOL_SEARCH};
 
 pub const NOTHING_MATCHED: &str =
     "Nothing matched. Search again with an empty query for every tool.";
@@ -15,7 +15,7 @@ pub fn matches_truncated(shown: usize, matched: usize) -> String {
     )
 }
 
-pub fn no_such_tool(named: &str, near: &[&str], unavailable: &[String]) -> String {
+pub fn no_such_tool(named: &str, near: &[&str], unavailable: &[ConnectionPath]) -> String {
     let mut said = if near.is_empty() {
         format!(
             "no tool `{named}` for this agent. Call `{TOOL_SEARCH}` with an empty query for \

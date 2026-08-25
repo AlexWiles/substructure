@@ -1,23 +1,3 @@
-//! The boundaries that convert the wire protocol ([`crate::protocol`]) to and from
-//! the internal representation.
-//!
-//! - Inbound (client → engine): [`ClientInput`] is the authoritative set of everything a
-//!   client can send — a submit, an interrupt resume, or a client tool settle. Each variant
-//!   carries its own addressing (a submit's `agent_id`/`turn_id`; a settle's effect id), so
-//!   `Runtime::handle_client_input` dispatches it directly, mirroring `resolve_response` on the
-//!   worker side. A submit rebuilds a [`ClientPayload`] — still what the
-//!   `SubmitClientPayload` command seam (`command.rs`) lowers to domain events, and still a
-//!   live wire type on the machine and embedded surfaces.
-//! - Inbound (worker → engine): [`DecisionAction`] is deserialized from untrusted worker
-//!   output; `resolve_response` is the single seam where it becomes the strict internal
-//!   [`Action`] the core consumes.
-//! - Outbound (engine → worker): [`DecisionTrigger`] is the materialized projection of the
-//!   internal [`Trigger`] a worker sees; `to_wire_trigger` is the single seam
-//!   that produces it. It has no `ClientMessage` — that variant can never reach a worker.
-//!
-//! The outbound request also carries `proposed`, the engine-derived default
-//! continuation for the trigger; its derivation lives in [`super::propose`].
-
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -52,7 +32,6 @@ impl From<Message> for DraftMessage {
 }
 
 impl DraftMessage {
-    /// Record with the wire id if present, else a minted one.
     pub fn record(self) -> Message {
         Message {
             id: self.id.unwrap_or_else(new_message_id),
@@ -65,7 +44,6 @@ impl DraftMessage {
         }
     }
 
-    /// Record as a fresh node, ignoring any wire id (for reconcile re-record).
     pub fn rerecord(self) -> Message {
         Message {
             id: new_message_id(),
@@ -105,7 +83,6 @@ impl<'a> From<&'a WorkerDecisionRequest> for DecisionRequest<'a> {
     }
 }
 
-/// Which `*.execute` trigger can name an omitted settle id.
 #[derive(Debug, Clone, Copy)]
 enum SettleKind {
     Tool,
@@ -121,32 +98,23 @@ impl SettleKind {
     }
 }
 
-/// A wire action could not be lowered to an internal [`Action`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    /// A settle omitted its effect id, but the answered decision was not the matching
-    /// `*.execute` (or there was no trigger context), so the id can't be inferred.
     UnresolvableSettleId {
         kind: &'static str,
     },
-    /// An `llm.call` omitted `model` and no agent config supplied one.
     MissingModel,
-    /// An `llm.call` named no `[llm.*]` block and no agent config supplied one.
     MissingLlm {
         declared: String,
     },
-    /// An `llm.call` named a block this app does not declare.
     UnknownLlm {
         name: String,
         declared: String,
     },
-    /// A handler value the addressed surface does not support: `server` on a
-    /// declared tool.
     InvalidHandler {
         surface: &'static str,
         handler: &'static str,
     },
-    /// An `llm.result` response that doesn't parse in the call's format.
     InvalidLlmResponse {
         message: String,
     },
@@ -154,7 +122,6 @@ pub enum ResolveError {
 }
 
 impl ResolveError {
-    /// The one field to go and fix, in the sense of Stripe's `param`.
     pub fn param(&self) -> Option<String> {
         Some(match self {
             ResolveError::UnresolvableSettleId { kind } => format!("{kind}.result.id"),
@@ -166,9 +133,6 @@ impl ResolveError {
         })
     }
 
-    /// The machine-readable form, for the error event's `detail`. A consumer
-    /// that wants to say "you named `claud`, did you mean `claude`?" needs the
-    /// names, not the sentence they were rendered into.
     pub fn detail(&self) -> Value {
         match self {
             ResolveError::UnresolvableSettleId { kind } => {
@@ -229,9 +193,6 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-/// A tool a worker declares runs on the worker or the client, never on the
-/// engine. Engine-executed tools come from a connector, which the worker names
-/// by id in `mcp`, so `server` here is always a mistake.
 fn declared_tool_handler(h: Handler) -> Result<ToolHandler, ResolveError> {
     match h {
         Handler::Server => Err(ResolveError::InvalidHandler {
@@ -247,12 +208,6 @@ fn declared_tool_handler(h: Handler) -> Result<ToolHandler, ResolveError> {
     }
 }
 
-/// Resolve a settle's `id` and `attempt` against the `*.execute` trigger it
-/// answers. An omitted `id` is filled from the trigger (an error out-of-band,
-/// where there is none). An omitted `attempt` is fenced to the trigger's attempt
-/// on the answer path, so a settle targets the exact attempt it ran — a stale
-/// executor whose attempt has since been superseded no longer settles the wrong
-/// one. Out-of-band (no trigger), an omitted attempt stays `None`: settle current.
 fn resolve_settle(
     id: Option<String>,
     attempt: Option<u32>,
@@ -279,25 +234,17 @@ fn resolve_settle(
     Ok((id, attempt.or(answered.map(|(_, attempt)| attempt))))
 }
 
-/// An `llm.result` response value → the neutral `LlmResponse`: parsed with the
-/// answered call's provider format when one was declared, else deserialized as-is.
 fn parse_llm_response(
     response: Value,
     format: Option<LlmFormat>,
 ) -> Result<LlmResponse, ResolveError> {
     match format {
         Some(f) => f.response_from_wire(response),
-        // Path-aware: `llm.result` bodies are the deepest thing a worker
-        // authors, so "response does not parse" without a field name is the
-        // least actionable error the engine can give.
         None => crate::json::from_value("llm.result response", response).map_err(|e| e.to_string()),
     }
     .map_err(|message| ResolveError::InvalidLlmResponse { message })
 }
 
-/// The internal, fully-resolved form of a worker decision response: canonical
-/// `Action`s (ids minted, `llm.call` merged into a full `LlmRequest`), plus the
-/// transcript and the state/agent-config writes.
 #[derive(Debug)]
 pub struct ResolvedResponse {
     pub messages: Vec<DraftMessage>,
@@ -307,19 +254,6 @@ pub struct ResolvedResponse {
     pub channels: std::collections::BTreeMap<String, Value>,
 }
 
-/// Lower a worker-authored decision response to its canonical internal form.
-///
-/// Fills omitted settle ids from `trigger` (the `*.execute` this decision
-/// answers; `None` on the out-of-band submit route, where an omitted id is an
-/// error) and merges each flat `llm.call` into a full [`LlmRequest`] using
-/// precedence explicit > merge-source config > engine default. The merge source
-/// is the config the response itself sets, else `echoed_config` (the config
-/// resolved for this decision). The declared view for an omitted-`messages`
-/// `llm.call` is the response's `messages`.
-///
-/// `blocks` is where a call's `llm` name becomes a venue and a wire shape: this
-/// is the one seam that reads the declared `[llm.*]`, so nothing downstream has
-/// to re-derive where a call runs.
 pub async fn resolve_response(
     response: DecisionResponse,
     echoed_config: Option<&AgentConfig>,
@@ -356,8 +290,6 @@ pub async fn resolve_response(
     })
 }
 
-/// Lower each wire action to its internal [`Action`]. `view` is the response's
-/// declared transcript, used to fill an omitted-`messages` `llm.call`.
 async fn lower_actions(
     actions: Vec<DecisionAction>,
     view: &[DraftMessage],
@@ -387,8 +319,6 @@ async fn lower_actions(
                     let model = model
                         .or_else(|| config.map(|c| c.model.clone()))
                         .ok_or(ResolveError::MissingModel)?;
-                    // Explicit messages are used verbatim (no system injection);
-                    // omitted ⇒ config.system prepended to the declared view.
                     let messages = messages.unwrap_or_else(|| match config {
                         Some(c) => c.prompt_for(view),
                         None => view.to_vec(),
@@ -397,8 +327,6 @@ async fn lower_actions(
                     let stream = stream.unwrap_or(true);
                     let retry =
                         RetryPolicy::resolve(retry.as_ref(), config_retry, RetryTarget::Llm);
-                    // The block settles the venue and, for a worker-run call,
-                    // the wire shape; a server call is always neutral.
                     let llm = llm
                         .or_else(|| config.and_then(|c| c.llm.clone()))
                         .ok_or_else(|| ResolveError::MissingLlm {
@@ -558,13 +486,6 @@ async fn lower_actions(
     Ok(lowered)
 }
 
-/// Project an internal [`Trigger`] to the [`DecisionTrigger`] a worker sees. A bare
-/// `ClientMessage` becomes a full proposed transcript; a `ClientTranscript` has its
-/// `new_from` recomputed against the frozen tree; a `ToolExecute` has its arguments
-/// classified against the tool's declared `input` schema (resolved from
-/// `open_llm_calls`); every other trigger maps 1:1. The tree is frozen while the
-/// decision is pending, so the result is stable across redeliveries and matches
-/// what reconciling the echo will write.
 pub fn result_to_string(value: Value) -> String {
     match value {
         Value::String(s) => s,
@@ -583,8 +504,6 @@ pub async fn to_wire_trigger(
 ) -> Result<DecisionTrigger, LlmCallError> {
     Ok(match trigger {
         Trigger::SessionStart => DecisionTrigger::SessionStart,
-        // The worker wire has no notion of a deferred turn: by delivery the turn
-        // is running, so `turn_id` is dropped here.
         Trigger::ClientMessage {
             messages, client, ..
         } => {
@@ -596,9 +515,6 @@ pub async fn to_wire_trigger(
                 .map(DraftMessage::from)
                 .collect();
             let new_from = view.len();
-            // Already-recorded ids are dropped: an append is "ensure these
-            // are at the head", and a duplicate would land the news on its
-            // old node instead of the head.
             view.extend(
                 messages
                     .into_iter()
@@ -749,8 +665,6 @@ mod tests {
     use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::LlmCallSpec;
 
-    /// The two blocks these tests resolve against: one the engine runs, one the
-    /// worker runs in Anthropic's own wire shape.
     fn blocks() -> LlmBlocks {
         LlmBlocks::from_iter([
             ("claude".to_string(), LlmBlock::engine()),
@@ -761,7 +675,6 @@ mod tests {
         ])
     }
 
-    /// Lower just `actions` (no messages/config) through the response seam.
     async fn resolve_test_actions(
         actions: Vec<DecisionAction>,
         trigger: Option<&DecisionTrigger>,
@@ -931,13 +844,11 @@ mod tests {
             .await
             .expect("resolves")
         };
-        // Omitted ⇒ fenced to the trigger's attempt, not left unfenced.
         let a = resolved(None).await;
         match &a[0] {
             Action::ToolResult { attempt, .. } => assert_eq!(*attempt, Some(2)),
             other => panic!("unexpected: {other:?}"),
         }
-        // Explicit ⇒ preserved verbatim (fence a specific attempt).
         let a = resolved(Some(0)).await;
         match &a[0] {
             Action::ToolResult { attempt, .. } => assert_eq!(*attempt, Some(0)),
@@ -947,7 +858,6 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_band_omitted_attempt_stays_current() {
-        // No answering trigger: an omitted attempt settles the current one (None).
         let actions = resolve_test_actions(
             vec![DecisionAction::ToolResult {
                 id: Some("eff-1".to_string()),
@@ -987,8 +897,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_block_settles_the_venue_and_the_wire_shape() {
-        // A worker-run block carries its format onto the call; an engine-run
-        // one is always neutral. Neither is stated on the call itself.
         let byo = cfg_on("byo", "m1", None);
         match resolve_one_call(bare_llm_call(), vec![user_wire("hi")], Some(&byo), None)
             .await
@@ -1020,7 +928,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_call_may_name_a_different_block_than_the_config() {
-        // Mixing venues per call: the call's own `llm` wins over the config's.
         let claude = cfg("m1", None);
         let mut call = bare_llm_call();
         if let DecisionAction::CallLlm { llm, .. } = &mut call {
@@ -1092,7 +999,6 @@ mod tests {
             t => panic!("expected llm.execute; got {t:?}"),
         }
 
-        // No format ⇒ the neutral LlmRequest JSON, verbatim.
         let wire = to_wire_trigger(
             Trigger::LlmExecute {
                 defer_tools_strategy: Default::default(),
@@ -1443,8 +1349,6 @@ mod tests {
         ];
         let tree = linear_tree(&path);
 
-        // "a1" is already recorded: dropped, so the news lands on the head
-        // instead of folding back onto its old node.
         let (messages, new_from) = transcript_of(
             to_wire_trigger(
                 Trigger::ClientMessage {
@@ -1513,7 +1417,6 @@ mod tests {
             msg("u2", Role::User, "more"),
         ];
         let tree = linear_tree(&path);
-        // An edit of a1: fresh id, resent up to that point.
         let view = wire_view(&[msg("u1", Role::User, "hi"), msg("e1", Role::User, "edited")]);
 
         let (_, new_from) = transcript_of(
@@ -1889,8 +1792,6 @@ mod tests {
 
     #[test]
     fn a_submit_without_an_agent_id_is_a_deserialize_error() {
-        // `agent_id` is a required field of the submit variants, so a missing one is a
-        // type error at the boundary — not a runtime check.
         let err = serde_json::from_str::<ClientInput>(
             r#"{"type":"client.message","message":{"role":"user","content":"hi"}}"#,
         )
@@ -1904,8 +1805,6 @@ mod tests {
 
     #[test]
     fn a_settle_has_no_agent_or_turn_slot_to_misplace() {
-        // A stray `agent_id`/`turn_id` on a settle has no field to land in, so it is
-        // ignored rather than mistaken for addressing.
         let input: ClientInput = serde_json::from_str(
             r#"{"type":"tool.result","id":"c1","result":{"content":[]},"agent_id":"bot","turn_id":"t1"}"#,
         )
@@ -1915,8 +1814,6 @@ mod tests {
 
     #[test]
     fn submit_payload_json_stays_flat_after_the_newtype_conversion() {
-        // The `client.action` body was `#[serde(flatten)]`; the newtype variant must keep
-        // `name`/`args` at the top level rather than nesting them under `action`.
         let payload = ClientPayload::Action(crate::protocol::ClientAction {
             name: "approve".to_string(),
             args: Some(serde_json::json!({"ok": true})),

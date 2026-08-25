@@ -14,18 +14,14 @@ export interface Protocol {
 }
 
 /**
- * Everything a client can send on the input surface: submit a message / a full view / an
- * append batch / a named action, resume an interrupt, or settle a client tool. A flat,
- * internally-tagged union — its seven tags produce serde's "unknown variant, expected one
- * of …" error for free. `Runtime::handle_client_input` is the single seam that dispatches
- * it (mirroring `resolve_response` on the worker side).
+ * Everything a client can send: submit a message, a full view, an append
+ * batch, or a named action; resume an interrupt; or settle a client tool.
  *
- * Addressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes
- * the turn, creating the session if new) and the optional idempotency `turn_id` are
- * fields of the four submit variants only. A resume/settle addresses an interrupt/effect
- * id and continues whatever turn is active, so it carries neither — misplacing them is
- * unrepresentable rather than rejected. `session_id` is the one universal address and
- * rides the envelope. A submit's body rebuilds a [`ClientPayload`] at the seam.
+ * Each variant carries only the addressing it needs. The four submit variants
+ * carry `agent_id`, which routes the turn and starts the session if it is new,
+ * and an optional `turn_id`. A resume or settle names an interrupt or effect
+ * and continues whatever turn is running, so it carries neither.
+ * `session_id` is on the envelope.
  *
  * The body of an interrupt resume: which interrupt, and the payload delivered
  * to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
@@ -35,13 +31,11 @@ export interface ClientInput {
     agent_id?: string;
     message?: DraftMessage;
     /**
-     * Hold this message for the next turn instead of refusing it when one
-     * is already running. Off by default: rejection stays the contract for
-     * a plain submitter, and queuing is declared intent.
+     * Hold this message for the next turn instead of refusing it while a
+     * turn is running. Off by default.
      *
-     * Hold this batch for the next turn instead of refusing it when one is
-     * already running. Off by default: rejection stays the contract for a
-     * plain submitter, and queuing is declared intent.
+     * Hold this batch for the next turn instead of refusing it while a
+     * turn is running. Off by default.
      */
     queue?: boolean;
     stream?: boolean;
@@ -64,14 +58,13 @@ export interface ClientInput {
 }
 
 /**
- * Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/
- * `forwardedProps`), forwarded to the worker on the `client.messages` decision.
- * `tools` are the browser's frontend tools, normalized to client-handled
- * [`AgentTool`]s; the engine layers them onto the proposed config by default, and
- * the worker may override (e.g. whitelist) by returning its own `agent`.
+ * Inputs a client declares on its run, passed to the worker on the
+ * `client.messages` decision. `tools` are the browser's own tools, read as
+ * client-handled [`AgentTool`]s. The engine adds them to the proposed config.
+ * A worker can override that by returning its own `agent`.
  *
- * Inputs the client declared on its run; the engine layers `client.tools`
- * onto the proposed config by default.
+ * Inputs the client declared on its run. The engine adds
+ * `client.tools` to the proposed config.
  */
 export interface ClientContext {
     context?: unknown[];
@@ -81,11 +74,10 @@ export interface ClientContext {
 }
 
 /**
- * A function tool the agent offers. The model-facing contract is
- * `name`/`description`/`input`/`output`; `handler` selects where a call runs —
- * `Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).
- * `server` is invalid for tools: engine-executed tools come from a connector,
- * which a worker declares by id rather than by tool.
+ * A function tool the agent offers. `handler` says where a call runs:
+ * `client` for the client, absent for the worker. `server` is invalid here.
+ * The engine runs only connector tools, and a worker declares those by
+ * connection id.
  */
 export interface AgentTool {
     /**
@@ -101,11 +93,12 @@ export interface AgentTool {
 }
 
 /**
- * Server-side executor resolves the provider or connection and makes the call.
+ * The engine makes the call.
  *
- * Dispatched to the work queue for the worker to execute.
+ * The worker executes it.
  *
- * Executed by the client. Session goes Idle while waiting (tools only).
+ * The client executes it. The session goes idle until it answers.
+ * Tools only.
  */
 export type Handler = "server" | "worker" | "client";
 
@@ -129,10 +122,8 @@ export interface ResourceContents {
 export type ToolContentType = "text" | "image" | "audio" | "resource" | "resource_link";
 
 /**
- * The wire form of a [`Message`]: `id` is optional because a client-submitted or
- * worker-authored message is not yet recorded. `record`/`rerecord`
- * (`runtime::session::wire`) are the seams that lower it to the internal
- * [`Message`] (id always present) at recording time.
+ * The wire form of a [`Message`]. `id` is absent until the message is
+ * recorded.
  */
 export interface DraftMessage {
     content?: StoredContent[] | null | string;
@@ -155,9 +146,9 @@ export interface StoredContent {
 export type StoredContentType = "text" | "blob" | "link";
 
 /**
- * What the model thought before it answered. `text` is for a reader; `blocks`
- * are the provider's own, held verbatim because Anthropic requires the
- * thinking that precedes a tool call back unmodified, signature included.
+ * What the model thought before it answered. `text` is for a reader.
+ * `blocks` are the provider's own and stay unchanged. Anthropic requires the
+ * thinking before a tool call back with its signature.
  */
 export interface Reasoning {
     blocks?: unknown[];
@@ -166,9 +157,8 @@ export interface Reasoning {
 }
 
 /**
- * Which provider wrote a [`Reasoning`]'s blocks. They ride back only to it:
- * another provider reads them as noise, and Anthropic rejects blocks it did
- * not sign.
+ * Which provider wrote the blocks. They go back only to that provider.
+ * Anthropic rejects blocks it did not sign.
  */
 export type ReasoningProvider = "anthropic" | "openai" | "openrouter";
 
@@ -195,22 +185,19 @@ export type ClientInputType =
     | "tool.error";
 
 /**
- * The client→engine inbound *submit* wire form: an untrusted client submits a message,
- * its full conversation view, an append batch, or a named action. Lowered to domain events
- * at the
- * `SubmitClientPayload` command seam (`runtime::session::command`); never persisted
- * as-is. Carried verbatim inside [`ClientInput`], which is the full client input
- * surface.
+ * What a client submits: a message, its full conversation view, an append
+ * batch, or a named action. The engine turns it into events and never stores
+ * it as it arrived.
  *
  * The body of a `client.message`: one message, optionally streamed.
  *
  * The body of a `client.messages`: the client's full conversation view, optionally
  * streamed.
  *
- * The body of a `client.append`: messages appended at the session head. The
- * view is composed against the active path at delivery, so a queued append
- * lands after whatever turn beat it — it can never fork the tree. Messages
- * whose ids are already recorded are dropped.
+ * The body of a `client.append`. Messages are added at the session head,
+ * against the active path at delivery. A queued append lands after whatever
+ * turn beat it, so it cannot fork the tree. A message whose id is already
+ * recorded is dropped.
  *
  * The payload of a `client.action`: a named action with optional JSON args.
  */
@@ -228,7 +215,7 @@ export type ClientPayloadType = "client.message" | "client.messages" | "client.a
 
 export interface DecisionRequest {
     /**
-     * The agent config resolved for the active path (`null` when none is set).
+     * The agent config for the active path. `null` when none is set.
      */
     agent?: AgentConfig | null;
     agent_id: string;
@@ -245,8 +232,8 @@ export interface DecisionRequest {
      */
     pending_calls: number;
     /**
-     * The engine's default continuation for `trigger` (empty when it needs
-     * worker knowledge). Advisory: accept by echoing it as the decision.
+     * The engine's default continuation for `trigger`. Empty when only the
+     * worker can decide. Accept it by echoing it back.
      */
     proposed: DecisionResponse;
     session_id: string;
@@ -256,30 +243,22 @@ export interface DecisionRequest {
 }
 
 /**
- * A declared agent identity — the same shape whether it is written in an
- * `[agent.<id>]` section or returned by a worker.
+ * A declared agent. The same shape whether a file writes it or a worker
+ * returns it.
  *
- * `llm` names the `[llm.*]` block every proposed call runs on, and so decides
- * both the venue (the engine with a vendor key, or the agent's own worker) and
- * the wire shape of a worker-run call. It is effectively required: a config
- * that names none fails when the engine resolves a call against it.
+ * `llm` names the `[llm.*]` block every call runs on. That block decides where
+ * the call runs and what shape it takes. A config that names no block fails
+ * when the engine resolves a call.
  */
 export interface AgentConfig {
     /**
-     * Defer every tool this agent offers, from any source, unless the tool or
-     * the connection says otherwise. Absent ⇒ the agent defers nothing of its
-     * own; a connection may still defer on its own account.
-     *
-     * Presence is the switch, so an agent cannot carry settings that do
-     * nothing. Declared on the agent because an agent can hold this opinion
-     * before it names a connection: one that sets it gets the search tools
-     * from its first turn, so a connection added later costs no cache.
+     * Defer every tool this agent offers, whatever its source. A tool or a
+     * connection overrides this with its own `defer`. Absent, the agent defers
+     * nothing; a connection can still defer on its own.
      */
     defer_tools?: boolean | null | DeferTools;
     /**
-     * How hard the model thinks, carried on the agent because it pairs with
-     * the model. Unset sends no reasoning config and leaves the provider its
-     * own default.
+     * How hard the model thinks. Unset leaves the provider's own default.
      */
     effort?: ReasoningEffort | null;
     /**
@@ -287,16 +266,12 @@ export interface AgentConfig {
      */
     llm?: null | string;
     /**
-     * MCP servers
+     * MCP servers this agent draws tools from.
      */
     mcp?: MCPServer[];
     /**
-     * Where the engine tells the model that an MCP server is available, and
+     * Whether the engine tells the model that an MCP server is available, and
      * what that server says it is for.
-     *
-     * Separate from `defer_tools`: a server exists whether or not its tools
-     * are deferred, and where a notice lands is a fact about this agent's
-     * prompt rather than about any server.
      */
     mcp_announce?: MCPAnnounce;
     model: string;
@@ -305,14 +280,12 @@ export interface AgentConfig {
      */
     plugins?: AgentPlugin[];
     /**
-     * Boxed: five per-kind overrides is a lot of bytes to carry inline
-     * through every command that holds a config.
+     * Boxed. Five per-kind overrides are too many bytes to carry inline.
      */
     retry?: RetryConfig | null;
     /**
-     * Sub-agents the model can delegate to. Presented to the model as tools (by
-     * id) alongside `tools`, but each call spawns a child session rather than
-     * executing a function.
+     * Sub-agents the model can delegate to. The model sees them as tools.
+     * Each call starts a child session.
      */
     sub_agents?: SubAgent[];
     system?: null | string;
@@ -343,27 +316,20 @@ export interface DeferTools {
  *
  * How the tools an agent defers reach the model.
  *
- * The engine holds every deferred definition whatever this says, and answers
- * its own tools whatever this says. This chooses two things: which of those
- * tools the request advertises, and whether the request carries the deferred
- * definitions.
- *
- * Declared on the agent, beside `defer_tools`: which tools an agent gets is
- * the agent's business, the same way as whether it defers at all.
+ * The engine holds every deferred definition whatever this says. This chooses
+ * which tools the request advertises, and whether the request carries the
+ * deferred definitions.
  *
  * `tool_search` and `call_tool`. A search answers with the schema, so one
- * search is the whole distance to a call, and nothing hands the model a
- * name it cannot then reach.
+ * search is enough to make a call.
  */
 export type DeferToolsStrategy = "search";
 
 export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
 
 /**
- * An MCP server the agent draws tools from. `path` resolves against the
- * engine's connection registry — locally from `substructure.toml`, in the
- * cloud from the connections an admin granted this app. The worker never names
- * a URL or a credential.
+ * An MCP server the agent draws tools from. `path` names a connection the
+ * engine holds. A worker never writes a URL or a credential.
  */
 export interface MCPServer {
     approve?: Approve;
@@ -384,21 +350,17 @@ export interface MCPServer {
 export type Approve = "never" | "always" | "destructive";
 
 /**
- * What a session does when a connection needs a person to authorize it. It
- * belongs to the pair: one credential serves an agent that stops and asks, and
- * an agent that has nobody to ask.
+ * What a session does when a connection needs a person to authorize it.
  *
- * Stop and ask. A channel that cannot show the question degrades instead.
+ * Stop and ask. A channel that cannot show the question degrades.
  *
  * Go on without this connection's tools.
  */
 export type MCPAuthFailure = "interrupt" | "degrade";
 
 /**
- * What a session does when a connection's tool fetch fails for the last time.
- * The turn goes ahead without those tools either way, because only the agent
- * knows whether it can work without them. This chooses whether the model is
- * told, or is left to read their absence as nothing being there.
+ * Whether the model is told that a connection's tool fetch failed. The turn
+ * goes ahead without those tools either way.
  *
  * Name the connection wherever its tools would have been.
  *
@@ -407,18 +369,18 @@ export type MCPAuthFailure = "interrupt" | "degrade";
 export type MCPToolSyncFailure = "warn" | "silent";
 
 /**
- * What the model sees of one connection, for one agent: which tools, and how
- * they reach the model.
+ * Which of a connection's tools the model sees, and how they reach it.
  *
- * The filter is applied in order — capability predicates, then `include`, then
- * `exclude` — and only ever narrowing, so a filter can never widen what the
- * connection grants. `defer` runs after it and removes nothing.
+ * The filter runs in order: capability predicates, then `include`, then
+ * `exclude`. Each step only removes, so a filter cannot widen what the
+ * connection grants. `defer` runs last and removes nothing.
  *
- * `include`/`exclude` are globs matched against the tool's name on the
- * connection, the name its own documentation uses, not the prefixed name the
- * model sees. Capability predicates read the MCP annotations; a tool that
- * carries none fails the predicate, so an unannotated server yields nothing
- * under `read_only` rather than silently passing everything through.
+ * `include` and `exclude` are globs over the tool's name on the connection,
+ * not the prefixed name the model sees.
+ *
+ * Capability predicates read the MCP annotations. A tool with no annotation
+ * fails the predicate, so a server that annotates nothing yields nothing under
+ * `read_only`.
  */
 export interface MCPTools {
     /**
@@ -434,26 +396,22 @@ export interface MCPTools {
 }
 
 /**
- * Where the engine tells the model that an MCP server is available, and
+ * Whether the engine tells the model that an MCP server is available, and
  * what that server says it is for.
- *
- * Separate from `defer_tools`: a server exists whether or not its tools
- * are deferred, and where a notice lands is a fact about this agent's
- * prompt rather than about any server.
  *
  * Where an MCP announcement lands.
  *
- * The system prompt while no call has dispatched; then a block on the
- * last user message; then a message of its own. The engine takes the
- * first place it can use, so the order is not a setting.
+ * The system prompt while no call has run. Then a block on the last user
+ * message. Then a message of its own. The engine takes the first place it
+ * can use.
  *
- * Nowhere. For a server whose own words help nobody.
+ * Nowhere. For a server whose own description does not help.
  */
 export type MCPAnnounce = "auto" | "never";
 
 /**
- * A plugin an agent uses. The skills and servers are stamped from the bundle
- * when the config loads. To enable a plugin, write it into the config.
+ * A plugin an agent uses. The skills and servers come from the bundle when the
+ * config loads.
  */
 export interface AgentPlugin {
     approve?: Approve;
@@ -481,12 +439,8 @@ export interface SkillMeta {
 }
 
 /**
- * An agent's retry overrides, one per effect kind. `default` covers the kinds
- * that name nothing; a kind is layered on top of it, so the two compose.
- *
- * Per kind because the kinds are not alike: an LLM call is idempotent and worth
- * retrying, a tool call may not be, and a connector fetch holds up every
- * decision behind it.
+ * Retry overrides, one for each effect kind. `default` covers the kinds that
+ * name nothing. A kind layers on top of `default`.
  */
 export interface RetryConfig {
     connector?: RetryOverride | null;
@@ -497,8 +451,8 @@ export interface RetryConfig {
 }
 
 /**
- * Only the fields it names change; the rest are inherited. An override cannot
- * set a timeout back to unbounded.
+ * Only the fields it names change. An override cannot make a timeout
+ * unbounded.
  */
 export interface RetryOverride {
     backoff_base_secs?: number | null;
@@ -510,9 +464,8 @@ export interface RetryOverride {
 }
 
 /**
- * A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,
- * and the tool name the model calls); its model-facing input is the conventional
- * single-`message` delegation schema.
+ * A sub-agent the model can delegate to. `id` is both the child agent and the
+ * tool name the model calls. Its input is one `message`.
  */
 export interface SubAgent {
     description?: string;
@@ -520,11 +473,9 @@ export interface SubAgent {
 }
 
 /**
- * An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.
- * A flat envelope plus kind-specific fields: a tool call's
- * `name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a
- * sub-agent's `agent_id`/`session_id`. A connector sync carries none — its
- * `id` is the connection being fetched.
+ * An effect still running, shown on each worker decision. A flat envelope
+ * plus the fields of its kind. A connector sync carries none. Its `id` is the
+ * connection being fetched.
  */
 export interface Effect {
     agent_id?: null | string;
@@ -542,37 +493,35 @@ export interface Effect {
     status: EffectStatus;
     stream?: boolean | null;
     /**
-     * The model tool call a delegation answers; its own `id` is the child session.
+     * The model tool call a delegation answers. Its `id` is the child
+     * session.
      */
     tool_call_id?: null | string;
 }
 
 /**
- * What kind of work an effect is. One enum for the wire and for the engine's
- * own scheduling: a decision and a turn's end queue beside the calls and are
- * swept the same way, so they are kinds too. Neither ever appears on an
- * [`Effect`] — a decision rides the decision list, a turn end has no record.
+ * What kind of work an effect is. One enum for the wire and for scheduling. A
+ * decision and a turn's end queue beside the calls and are swept the same way,
+ * so they are kinds too. Neither appears on an [`Effect`].
  *
  * Fetching one connection's tool list. Its `id` is the connection id.
  *
  * A worker decision.
  *
- * The turn's completion, dependent on its `turn.finished` finalizer
- * decision settling. Carries the turn id; the frozen output lives in the
- * session's `finalizing`. Never swept: it has no deadline of its own.
+ * The turn's completion, which waits for the `turn.finished` decision to
+ * settle. Carries the turn id. Never swept, because it has no deadline.
  */
 export type EffectKind = "tool_call" | "sub_agent" | "llm_call" | "connector_sync" | "decision" | "turn_end";
 
 /**
- * Dispatched and alive, awaiting its result. Off the deadline clock: the
- * work succeeded in starting, and how long it then runs is its own
- * business. A delegation sits here for as long as its child turn takes.
+ * Running, waiting for its result. Off the deadline clock. A delegation
+ * stays here for as long as its child turn takes.
  */
 export type EffectStatus = "pending" | "completed" | "failed" | "retry_scheduled" | "queued" | "running";
 
 /**
- * The owner as delivered to the worker on `DecisionRequest.identity`, without
- * the tenant. Read `kind` with `id`: only `frontend` is an end user.
+ * The owner as the worker receives it, without the tenant. Read `kind` with
+ * `id`. Only `frontend` is an end user.
  */
 export interface WorkerIdentity {
     metadata: { [key: string]: string };
@@ -581,9 +530,8 @@ export interface WorkerIdentity {
 }
 
 /**
- * One identity, as the source that authenticated it named it: OIDC's
- * `(iss, sub)`. An id means nothing without its issuer, because it is only
- * unique within one.
+ * One identity, as the source that authenticated it named it. An id is
+ * unique only within its issuer.
  */
 export interface Subject {
     id: string;
@@ -591,11 +539,9 @@ export interface Subject {
 }
 
 /**
- * Who can read what a session says. The transport sets it once, at the
- * session's start; everything absent or unknown reads as `shared`, because
- * `shared` is the value that never selects a personal credential.
- *
- * Not OAuth's `aud`, which names a resource server rather than a readership.
+ * Who can read what a session says. The transport sets it once, when the
+ * session starts. Absent or unknown reads as `shared`. `shared` never selects
+ * a personal credential.
  *
  * More than one person can read the answer.
  *
@@ -624,12 +570,12 @@ export interface Message {
 }
 
 /**
- * The engine's default continuation for `trigger` (empty when it needs
- * worker knowledge). Advisory: accept by echoing it as the decision.
+ * The engine's default continuation for `trigger`. Empty when only the
+ * worker can decide. Accept it by echoing it back.
  *
- * A decision: the messages/actions to author, plus optional state/agent writes.
- * The worker returns one; the engine also proposes one as the default
- * continuation (`DecisionRequest::proposed`), which the worker echoes or amends.
+ * The messages and actions to author, plus optional state and agent writes.
+ * A worker returns one. The engine proposes one too, which the worker echoes
+ * or changes.
  */
 export interface DecisionResponse {
     actions?: DecisionAction[];
@@ -638,46 +584,45 @@ export interface DecisionResponse {
      */
     agent?: AgentConfig | null;
     /**
-     * How each channel shows this decision, keyed by channel kind (e.g.
-     * `slack`). Opaque to the engine.
+     * How each channel shows this decision, keyed by channel kind. The engine
+     * does not read it.
      */
     channels?: { [key: string]: unknown };
     messages?: DraftMessage[];
     /**
-     * Omitted or `null` keeps the current state; clear with a non-null empty value.
+     * Absent or `null` keeps the current state. Send an empty value to
+     * clear it.
      */
     state?: unknown;
 }
 
 /**
- * The action a worker authors on the wire. Mirrors the internal `Action`, but a
- * settle's effect id may be omitted: on the sync/pull paths the answered
- * `*.execute` trigger names it, so echoing it is redundant. `resolve_response`
- * (`runtime::session::wire`) turns this into the internal `Action` (id always
- * present) at the transport boundary.
+ * The action a worker writes on the wire. A settle can leave out the effect
+ * id, because the `*.execute` trigger it answers already names it.
  *
- * A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it
- * becomes the assistant node's id. Omitted fields are filled from the agent
- * config (merge source), then engine defaults; `messages` omitted ⇒
- * `[config.system?] + the decision's declared view`. Explicit `messages`
- * suppress system injection. A bare `{"type":"llm.call"}` prompts per the
- * agent's identity over the current view.
+ * A flat LLM request. Every field is optional.
  *
- * `id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).
+ * Without `id`, the engine mints one, and it becomes the assistant node's
+ * id. A field left out comes from the agent config, then from the engine's
+ * default. Without `messages`, the request carries the config's system
+ * message and the decision's view. Given `messages`, no system message is
+ * added.
  *
- * There is no `handler`: where a call runs follows from its name. A tool
- * resolved from a connector runs on the engine, a tool declared
- * `handler: client` runs on the client, and anything else runs on the
- * worker. The engine already knows all three, so asking the worker to
- * restate it only creates a way for the two to disagree.
+ * Without `id`, the engine mints one. A tool the model called carries the
+ * model's id.
  *
- * `id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,
- * fencing the result to the attempt that ran.
+ * There is no `handler`. The name says where the call runs: a connector
+ * tool on the engine, a `handler: client` tool on the client, anything
+ * else on the worker. The engine knows all three already.
  *
- * `id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,
- * fencing the result to the attempt that ran.
+ * Without `id` and `attempt`, both come from the `tool.execute` trigger
+ * this answers. That ties the result to the attempt that ran.
  *
- * `interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.
+ * Without `id` and `attempt`, both come from the `llm.execute` trigger
+ * this answers. That ties the result to the attempt that ran.
+ *
+ * Without `interrupt_id`, the engine mints one to match the later
+ * resume.
  *
  * Resolve an open interrupt and resume the session.
  *
@@ -687,9 +632,8 @@ export interface DecisionResponse {
 export interface DecisionAction {
     id?: null | string;
     /**
-     * The `[llm.*]` block this call runs on; omitted ⇒ the merge source
-     * config's `llm`. Naming a different block moves one call to another
-     * venue or vendor.
+     * The `[llm.*]` block this call runs on. Absent uses the config's
+     * `llm`. Naming another block moves this one call elsewhere.
      */
     llm?: null | string;
     max_completion_tokens?: number | null;
@@ -697,13 +641,13 @@ export interface DecisionAction {
     model?: null | string;
     reasoning?: ReasoningConfig | null;
     /**
-     * Layered over the agent config's `llm` policy, else over the engine's
+     * Layered over the agent config's `llm` policy, or over the engine's
      * default.
      *
-     * Layered over the agent config's policy for this kind, else over the
+     * Layered over the agent config's policy for this kind, or over the
      * engine's default for where the tool runs.
      *
-     * Layered over the agent config's `sub_agent` policy, else over the
+     * Layered over the agent config's `sub_agent` policy, or over the
      * engine's default.
      */
     retry?: RetryOverride | null;
@@ -719,8 +663,8 @@ export interface DecisionAction {
     result?: unknown;
     structured_content?: unknown;
     /**
-     * A neutral `LlmResponse`, or the provider's native response when the
-     * answered `llm.execute` carried a `format`.
+     * An `LlmResponse`, or the provider's own response when the
+     * `llm.execute` this answers carried a `format`.
      */
     response?: unknown;
     code?: ErrorCode | null;
@@ -733,12 +677,12 @@ export interface DecisionAction {
     agent_id?: string;
     /**
      * The child's opening message. It travels with the spawn, so it
-     * cannot race the creation of the session it opens.
+     * cannot arrive before the session exists.
      */
     message?: DraftMessage | null;
     session_id?: string;
     /**
-     * The model tool-call this delegation answers — always required.
+     * The model tool call this delegation answers. Required.
      */
     tool_call_id?: string;
     interrupt_id?: null | string;
@@ -749,18 +693,15 @@ export interface DecisionAction {
 }
 
 /**
- * What kind of failure, for a consumer that branches instead of reading the
- * sentence. A closed set, and required on every [`ErrorInfo`]: an optional
- * code is one nobody fills in, which leaves every consumer handling a `None`
- * that should not exist.
+ * What kind of failure, so a consumer can branch on it instead of reading the
+ * sentence. A closed set, required on every [`ErrorInfo`].
  *
- * `provider_error`, `rate_limited`, `refused`, `budget_exceeded` and
- * `deadline_exceeded` describe a call that ran and went wrong.
- * `invalid_response` — a document did not parse, or parsed into something
- * unusable. `handler_error` — whoever was asked to do the work (a worker, a
- * client) reported a failure of its own. `worker_unreachable` — it was never
- * reached. `unroutable` — nothing could decide. `internal` — the engine's own
- * fault, and the honest answer when nothing else fits.
+ * `provider_error`, `rate_limited`, `refused`, `budget_exceeded`, and
+ * `deadline_exceeded` mean a call ran and went wrong.
+ * `invalid_response` means a document did not parse, or parsed into something
+ * unusable. `handler_error` means the worker or client reported its own
+ * failure. `worker_unreachable` means it was never reached. `unroutable`
+ * means nothing could decide. `internal` means the engine's own fault.
  */
 export type ErrorCode =
     | "provider_error"
@@ -782,34 +723,31 @@ export interface ReasoningConfig {
 }
 
 /**
- * A tool's declared contract: flat on the wire. Providers that need
- * OpenAI-style `{"type": "function", "function": {…}}` nesting re-wrap at
- * their own boundary.
+ * A tool's declared contract. Flat on the wire. A provider that needs it
+ * nested re-wraps it at its own boundary.
  */
 export interface LlmTool {
     /**
      * Keep this definition out of the request.
      *
      * The engine still records it, still routes a call to it, and still finds
-     * it in a search. Only the request omits it, which is what keeps a large
-     * tool set out of the model's context and out of the cached prefix.
+     * it in a search. Only the request leaves it out. That keeps a large tool
+     * set out of the model's context and out of the cached prefix.
      *
-     * Any source can set it: a tool the config declares, a connection, or
-     * whatever comes next. Deferral is a property of a tool, not of where it
+     * Any source can set it. Deferral belongs to a tool, not to where the tool
      * came from.
      */
     defer?: boolean;
     description: string;
     /**
-     * JSON Schema for the tool's arguments; omitted declares a no-argument
-     * tool. The engine validates each call's arguments against it and hands
-     * providers their native form.
+     * JSON Schema for the arguments. Absent declares a tool with no
+     * arguments. The engine checks every call against it.
      */
     input?: unknown;
     name: string;
     /**
-     * JSON Schema the settled result must satisfy; never sent to the model.
-     * A violating result settles as a terminal tool error.
+     * JSON Schema the result must satisfy. The model never sees it. A result
+     * that breaks it becomes a terminal tool error.
      */
     output?: unknown;
 }
@@ -829,11 +767,9 @@ export type DecisionActionType =
     | "done";
 
 /**
- * The trigger a worker sees on the wire — the materialized projection of the
- * engine's internal decision trigger. It has no `ClientMessage`: a bare client
- * message is always materialized to `ClientTranscript` by `to_wire_trigger`
- * (`runtime::session::wire`) before delivery, so an unmaterialized message can
- * never reach a worker.
+ * The trigger a worker sees on the wire. There is no `ClientMessage`: the
+ * engine turns a bare client message into `ClientTranscript` before it sends
+ * it.
  *
  * The first decision of every session; carries no proposal.
  *
@@ -845,14 +781,14 @@ export type DecisionActionType =
  * to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
  * [`DecisionTrigger::InterruptResumed`] trigger.
  *
- * Fired after a turn completes, carrying its final output; blocks the session
- * going idle until answered. Echo the proposed `done` to finalize.
+ * Sent after a turn completes, with its final output. The session stays
+ * busy until it is answered. Echo the proposed `done` to finish.
  */
 export interface DecisionTrigger {
     type: DecisionTriggerType;
     /**
-     * Inputs the client declared on its run; the engine layers `client.tools`
-     * onto the proposed config by default.
+     * Inputs the client declared on its run. The engine adds
+     * `client.tools` to the proposed config.
      */
     client?: ClientContext;
     messages?: DraftMessage[];
@@ -864,10 +800,8 @@ export interface DecisionTrigger {
     deadline?: Date | null;
     id?: string;
     /**
-     * The engine's classification of `arguments` against the tool's
-     * declared `input` schema: `valid` (with the parsed `value`),
-     * `invalid` (value plus the violation), or `malformed` (not a JSON
-     * object). Always on the wire.
+     * What the engine made of `arguments` against the tool's `input`
+     * schema: `valid`, `invalid`, or `malformed`. Always on the wire.
      */
     input?: ToolInput;
     error?: ErrorInfo | null;
@@ -883,9 +817,8 @@ export interface DecisionTrigger {
     cost?: null | string;
     message?: DraftMessage | null;
     /**
-     * True when the model declined the request rather than answering it.
-     * A refusal reads as a turn that stopped well and said nothing, so
-     * without this the run continues from a blank answer.
+     * True when the model declined the request. Without it, a refusal
+     * looks like a turn that ended well and said nothing.
      */
     refused?: boolean;
     truncated?: boolean;
@@ -899,28 +832,27 @@ export interface DecisionTrigger {
 }
 
 /**
- * Why something failed. One shape on every event, on the wire, and in the
- * internal carriers that produce them — shaped after a Stripe API error.
+ * Why something failed. One shape on every event and on the wire.
  *
- * `retryable` is deliberately absent: whether to try again is a decision the
- * engine makes about one attempt, not a fact about the failure, and it is
- * meaningless on a terminal like `turn.completed`. It rides on the events
- * that settle an attempt instead.
+ * There is no `retryable` field. Whether to try again is a decision about one
+ * attempt, not a fact about the failure. The events that settle an attempt
+ * carry it instead.
  */
 export interface ErrorInfo {
     code: ErrorCode;
     /**
-     * Small structured particulars: a status, the llm blocks that exist.
+     * Small structured details, such as a status or the llm blocks that
+     * exist.
      */
     detail?: unknown;
     /**
-     * One engine-authored sentence, safe to show a human. Never a raw
-     * document — an unbounded body belongs in the log.
+     * One sentence the engine wrote, safe to show a human. Never a raw
+     * document. An unbounded body belongs in the log.
      */
     message: string;
     /**
-     * The one input to go and fix, when the failure names one: `agent.llm`,
-     * `actions[0].type`. Stripe's `param`.
+     * The one input to fix, when the failure names one. For example
+     * `agent.llm` or `actions[0].type`.
      */
     param?: null | string;
 }
@@ -933,21 +865,18 @@ export interface ErrorInfo {
 export type LlmFormat = "openai" | "anthropic";
 
 /**
- * The engine's classification of `arguments` against the tool's
- * declared `input` schema: `valid` (with the parsed `value`),
- * `invalid` (value plus the violation), or `malformed` (not a JSON
- * object). Always on the wire.
+ * What the engine made of `arguments` against the tool's `input`
+ * schema: `valid`, `invalid`, or `malformed`. Always on the wire.
  *
- * The engine's classification of a tool call's arguments, delivered on the
- * `tool.execute` trigger alongside the raw `arguments` string. Always on the
- * wire — absence never carries meaning.
+ * What the engine made of a tool call's arguments, sent with the raw
+ * `arguments` string. Always on the wire.
  *
- * Parsed and, when the tool declares an `input` schema, conforming to it.
- * `value` is exactly the parsed `arguments` — the engine never mutates it.
+ * Parsed, and valid against the `input` schema if the tool declares one.
+ * `value` is the parsed `arguments`. The engine never changes it.
  *
  * Parsed to an object that violates the declared `input` schema.
  *
- * Not a JSON object: malformed JSON or a non-object value.
+ * Not a JSON object. Either malformed JSON or another type.
  */
 export interface ToolInput {
     status: Status;
@@ -976,13 +905,12 @@ export type DecisionTriggerType =
     | "turn.finished";
 
 /**
- * What one call read and wrote, in counts every provider means the same way.
+ * What one call read and wrote. Every provider means these counts the same
+ * way.
  *
- * Each vendor names and scopes these differently: Anthropic reports the part
- * of the prompt it did not read from the cache, OpenAI reports the whole
- * prompt including that part. A session that changes model, and a tree whose
- * agents name different blocks, add these counts together, so the adapter
- * normalizes them rather than the reader.
+ * Vendors report different things. Anthropic gives the part of the prompt it
+ * did not read from the cache. OpenAI gives the whole prompt. Each adapter
+ * converts to this shape, because these counts get added together.
  */
 export interface Usage {
     /**
@@ -999,8 +927,8 @@ export interface Usage {
     input: number;
     output: number;
     /**
-     * The counts as the provider reported them, for a reader that wants a
-     * number this type does not name.
+     * The counts as the provider reported them, for a number this type does
+     * not name.
      */
     provider?: unknown;
     /**
@@ -1014,22 +942,22 @@ export interface Usage {
 }
 
 /**
- * An interrupt payload following the AG-UI Interrupt shape (spec spelling;
- * `id` and `reason` live on the interrupt itself).
+ * An interrupt payload in the AG-UI shape. `id` and `reason` live on the
+ * interrupt itself.
  */
 export interface InterruptPayload {
     /**
-     * RFC 3339; display only until engine TTLs land.
+     * RFC 3339. Display only.
      */
     expiresAt?: null | string;
     /**
-     * Markdown; channels down-convert. Without it, channels fall back to
-     * the interrupt's `reason`.
+     * Markdown. A channel converts it as it needs. Without it, a channel
+     * shows the interrupt's `reason`.
      */
     message?: null | string;
     /**
-     * Free-form, delivered to clients verbatim. `metadata.options`
-     * ([`InterruptOption`] list) renders as Slack buttons.
+     * Free-form, delivered to clients unchanged. `metadata.options` is a
+     * list of [`InterruptOption`], which Slack shows as buttons.
      */
     metadata?: unknown;
     /**
@@ -1043,8 +971,7 @@ export interface InterruptPayload {
 }
 
 /**
- * A channel-authored resume payload: the AG-UI resume shape
- * (`{status, payload}`) plus a provenance stamp.
+ * A resume payload a channel wrote: the AG-UI shape plus who resolved it.
  */
 export interface InterruptResolution {
     payload?: unknown;
@@ -1053,7 +980,7 @@ export interface InterruptResolution {
 }
 
 /**
- * Who resolved it, stamped by the channel — never by the requester.
+ * Who resolved it. The channel sets this, never the requester.
  */
 export interface InterruptResponder {
     /**

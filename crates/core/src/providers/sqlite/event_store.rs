@@ -19,7 +19,6 @@ use crate::shard::shard_key;
 
 use super::{parse_dt, sea_params, spawn_err, SqliteDb};
 
-/// The two version logs, split by kind, as loaded from `session_versions`.
 type VersionLogs = (Vec<Logged<StateVersion>>, Vec<Logged<AgentVersion>>);
 
 #[derive(Iden)]
@@ -101,10 +100,6 @@ impl EventStore for SqliteEventStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn internal(e: impl ToString) -> StoreError {
     StoreError::Internal(e.to_string())
 }
@@ -146,7 +141,6 @@ fn do_append(conn: &mut Connection, input: &AppendInput) -> Result<(), StoreErro
     Ok(())
 }
 
-/// One event: the CAS-guarded envelope insert, then its side-table rows.
 fn insert_event(
     tx: &rusqlite::Transaction<'_>,
     snap: &SessionAggregate,
@@ -203,7 +197,6 @@ fn insert_event(
         });
     }
 
-    // OR IGNORE keeps appends idempotent under the conflict-retry loop.
     match &event.payload {
         EventPayload::NewMessage(node) => {
             let data = serde_json::to_string(&node.message).map_err(internal)?;
@@ -221,9 +214,6 @@ fn insert_event(
             )
             .map_err(internal)?;
         }
-        // The worker-constructed prompt, verbatim; a re-request replaces
-        // it, mirroring apply(). Stored from post-apply state so load
-        // rejoins byte-identical bytes.
         EventPayload::LlmCallRequested(req) => {
             if let Some(call) = snap.state.llm_call(&req.id) {
                 let data = serde_json::to_string(&call.prompt).map_err(internal)?;
@@ -330,8 +320,6 @@ fn do_load(
     })
 }
 
-/// Tree, versions, and prompts live in their own tables; the snapshot holds
-/// the rest.
 fn strip(state: &SessionState) -> SessionState {
     let mut state = state.clone();
     state.nodes = Vec::new();
@@ -345,7 +333,6 @@ fn strip(state: &SessionState) -> SessionState {
     state
 }
 
-/// The inverse of `strip`: rejoin side-table rows onto the snapshot state.
 fn hydrate(
     mut state: SessionState,
     nodes: Vec<Logged<NewMessage>>,
@@ -506,7 +493,6 @@ fn do_query_events(
         .apply_if(filter.limit, |q, n| {
             q.limit(n as u64);
         })
-        // Grouped by stream, ascending within one: the only order there is.
         .order_by(Events::TenantId, Order::Asc)
         .order_by(Events::SessionId, Order::Asc)
         .order_by(Events::Seq, Order::Asc)
@@ -666,8 +652,6 @@ mod tests {
         ]
     }
 
-    /// The snapshot strips tree/versions into their own tables; load must
-    /// reassemble a state identical to the in-memory one.
     #[tokio::test]
     async fn append_then_load_round_trips_the_session() {
         let (store, path) = temp_store();
@@ -682,8 +666,6 @@ mod tests {
             serde_json::to_value(&agg.state).unwrap(),
         );
 
-        // A second cycle: load → commit → append → load. The prompt diverges
-        // from the tree (worker-constructed system message).
         let mut reloaded = loaded;
         let input = commit(
             &mut reloaded,
@@ -692,7 +674,6 @@ mod tests {
                     message: message("m2", "again"),
                     parent_id: Some("m1".to_string()),
                 }),
-                // Same anchor: appended; newest wins resolution.
                 EventPayload::WorkerStateUpdated(WorkerStateUpdated {
                     state: WorkerState(json!({"v": 2})),
                     anchor: Some("m1".to_string()),
@@ -782,7 +763,6 @@ mod tests {
         cleanup(&path);
     }
 
-    /// A conflicting append must leave no rows in any table.
     #[tokio::test]
     async fn version_conflict_rolls_back_every_table() {
         let (store, path) = temp_store();

@@ -99,19 +99,15 @@ pub struct SessionCreated {
     pub worker_retry: RetryPolicy,
 }
 
-/// Pure lifecycle marker — no data. Turn output lives in TurnCompleted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDone {}
 
-/// The head moved to an existing node (truncation or branch switch); the only
-/// non-append head writer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeadMoved {
     pub head_id: String,
 }
 
 impl MessageTree {
-    /// Root-to-`leaf` messages; empty if `leaf` is unknown.
     pub fn path_to(&self, leaf: &str) -> Vec<Message> {
         let mut by_id: HashMap<&str, &NewMessage> = self
             .nodes
@@ -120,7 +116,6 @@ impl MessageTree {
             .collect();
         let mut path = Vec::new();
         let mut cursor = Some(leaf.to_string());
-        // `remove` so a malformed parent cycle can't loop forever.
         while let Some(id) = cursor.take() {
             let Some(node) = by_id.remove(id.as_str()) else {
                 break;
@@ -137,7 +132,6 @@ impl MessageTree {
 pub struct LlmCallRequested {
     pub id: String,
     pub attempt: u32,
-    /// The `[llm.*]` block the call runs on.
     pub llm: String,
     pub request: LlmRequest,
     pub stream: bool,
@@ -146,31 +140,22 @@ pub struct LlmCallRequested {
     pub handler: LlmHandler,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<LlmFormat>,
-    /// How a deferred tool reaches the model, from the block this call names.
     #[serde(default)]
     pub defer_tools_strategy: DeferToolsStrategy,
 }
 
-/// Dispatch marker: the queued call cleared its gates and starts executing.
-/// The payload lives on the call's `*Requested` event and in state; executors
-/// key off this marker and read the call from state, mirroring how worker
-/// delivery reads a promoted decision. For an LLM call, applying this merges
-/// the connector tools in force into the stored spec — dispatch time is when
-/// derived context is current.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallDispatched {
     pub id: String,
     pub attempt: u32,
 }
 
-/// Dispatch marker; see [`LlmCallDispatched`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallDispatched {
     pub id: String,
     pub attempt: u32,
 }
 
-/// Dispatch marker; see [`LlmCallDispatched`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentDispatched {
     pub id: String,
@@ -196,9 +181,6 @@ pub struct LlmCallErrored {
     pub retryable: bool,
 }
 
-/// Fetch one connection's tool list. Keyed on the connection id, not on the
-/// agent version that asked for it: the offer is a fact about the remote, and
-/// a config rewritten for unrelated reasons must not cost another round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncRequested {
     pub path: ConnectionPath,
@@ -206,10 +188,6 @@ pub struct ConnectorSyncRequested {
     pub retry: RetryPolicy,
 }
 
-/// What a connection offered, verbatim and unfiltered, plus the prefix its
-/// tools are expanded under. The prefix is recorded rather than read back from
-/// config so that editing `substructure.toml` cannot rename tools underneath a
-/// live session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncCompleted {
     pub path: ConnectionPath,
@@ -218,7 +196,6 @@ pub struct ConnectorSyncCompleted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
     pub tools: Vec<RemoteTool>,
-    /// What the server said it is for at the handshake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 }
@@ -233,8 +210,6 @@ pub struct ConnectorSyncErrored {
     pub auth: Option<AuthNeed>,
 }
 
-/// A tool call found that the credential is not valid. The call settles
-/// separately with its own error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorAuthFailed {
     pub path: ConnectionPath,
@@ -247,7 +222,6 @@ pub struct SubAgentRequested {
     pub agent_id: String,
     #[serde(default)]
     pub tool_call_id: String,
-    /// The child's opening message, sent once its session is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<DraftMessage>,
     pub retry: RetryPolicy,
@@ -266,26 +240,19 @@ pub struct SubAgentErrored {
     pub retryable: bool,
 }
 
-/// Where an engine-executed call lands. Frozen onto the call beside its
-/// handler, so a config change cannot reroute a call already in flight — and
-/// so the audit record names the connection rather than only the model's
-/// prefixed alias.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConnectorTarget {
-    /// Call `remote_name` on the connection.
     Remote {
         path: ConnectionPath,
         remote_name: String,
     },
-    /// Search the recorded offer. This reaches nothing.
     Find,
-    /// A `call_tool` naming nothing reachable; the engine answers the fault.
     Call,
-    /// Load a skill's instructions from a plugin bundle. `plugin` is empty
-    /// when the model wrote a name without one; the executor answers the
-    /// fault.
-    Skill { plugin: String, skill: String },
+    Skill {
+        plugin: String,
+        skill: String,
+    },
 }
 
 impl ConnectorTarget {
@@ -307,7 +274,6 @@ pub struct ToolCallRequested {
     pub arguments: String,
     #[serde(default)]
     pub handler: ToolHandler,
-    /// Set exactly when `handler` is `Server`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ConnectorTarget>,
     pub retry: RetryPolicy,
@@ -346,7 +312,6 @@ pub struct SessionInterrupted {
     pub origin: InterruptOrigin,
     pub reason: String,
     pub payload: serde_json::Value,
-    /// Head when raised; `None` parks every path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
 }
@@ -357,8 +322,6 @@ pub struct InterruptResumed {
     pub payload: serde_json::Value,
 }
 
-/// Promotion marker: the queued decision is now live. The trigger lives on
-/// the decision's `DecisionQueued` event, which always precedes this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionDispatched {
     pub id: String,
@@ -386,7 +349,6 @@ pub struct SessionMessageRequested {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerStateUpdated {
     pub state: WorkerState,
-    /// Active head when written; `None` if the tree was empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
 }
@@ -394,7 +356,6 @@ pub struct WorkerStateUpdated {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfigUpdated {
     pub config: AgentConfig,
-    /// Active head when written; `None` if the tree was empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
 }
@@ -404,9 +365,6 @@ pub struct TurnStarted {
     pub turn_id: String,
 }
 
-/// The run terminal (pass 2): the turn's `turn.finished` finalizer has settled, so
-/// the turn — output plus post-turn side effects — is done. `error` is set when the
-/// finalizer failed terminally; the output is still durable but the run failed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCompleted {
     pub turn_id: String,
@@ -416,9 +374,6 @@ pub struct TurnCompleted {
     pub turn_cost: Decimal,
     #[serde(default)]
     pub turn_token_usage: Usage,
-    /// Set when the run failed. The turn terminal is the only event every
-    /// consumer watches, so this is where a renderer decides how a failure
-    /// reads — by its `code`, not by matching on the sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorInfo>,
 }
@@ -429,25 +384,19 @@ pub struct DecisionQueued {
     pub trigger: Trigger,
 }
 
-/// A settle decision dropped when its branch was forked away.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionDropped {
     pub id: String,
 }
 
-/// How each channel shows a settled decision, keyed by channel kind. Opaque
-/// to the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelsUpdated {
     pub decision_id: String,
-    /// True when the decision answered `turn.finished`.
     #[serde(default)]
     pub finishes_turn: bool,
     pub channels: BTreeMap<String, serde_json::Value>,
 }
 
-/// An abandoned in-flight call, named the way its kind names itself: a
-/// sub-agent's `id` is the child session, a connector sync's the connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallVoided {
     pub kind: EffectKind,
@@ -461,7 +410,6 @@ pub struct SubAgentTurnCompleted {
     pub cost: Decimal,
     #[serde(default)]
     pub token_usage: Usage,
-    /// The child's turn result.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
 }

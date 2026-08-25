@@ -1,26 +1,3 @@
-//! The session's canonical state, and the reducer that builds it.
-//!
-//! # Laws
-//!
-//! **A transition writes state; it never stores a task.** `apply` records what
-//! happened and nothing else. What runs next is derived from the result by
-//! [`schedule::plan`](super::schedule::plan), every time. There is no queue of
-//! pending work here beyond `schedule_queue`, which is position — an arrival
-//! order — not a work list. The reflex to "enqueue the follow-up while we know
-//! about it" is the thing this design exists to prevent: it puts the same
-//! decision in two places, and they drift.
-//!
-//! **One table, one lifecycle.** Every tracked effect lives in `effects`, keyed
-//! by `(kind, id)`, and carries an [`EffectTracking`] whose status only its own
-//! transitions may write. Deadlines, retries, voiding, the wire projection and
-//! the queue invariant are each one pass over that table, so adding a kind adds
-//! no sweep.
-//!
-//! **Orthogonal regions.** The turn's phase, each effect's lifecycle, and the
-//! interrupt overlay are independent. An interrupt is projected from
-//! `open_interrupts` at read time and never stored as a status; `Interrupted`
-//! is a [`SessionStatus`], never an [`EffectStatus`].
-
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
@@ -37,8 +14,6 @@ use crate::protocol::{
     AgentTool, ConnectorTool, DeferToolsStrategy, Handler, McpServer, StoredResult,
 };
 
-/// One connection as the engine's own tools see it: what the agent declared,
-/// what the connection offered, and what it said it is for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Source {
     pub server: McpServer,
@@ -46,10 +21,6 @@ pub struct Source {
     pub instructions: Option<String>,
 }
 
-/// One connection as an announcement gives it to the model.
-///
-/// A struct, and not a `json!` map: a map sorts its keys, which would put a
-/// server's own words ahead of the name that says whose they are.
 #[derive(serde::Serialize)]
 struct Summary<'a> {
     mcp_server: &'a ConnectionPath,
@@ -58,8 +29,6 @@ struct Summary<'a> {
     about: Option<&'a str>,
 }
 
-/// What a `call_tool` addresses. Any source, because deferral is a property of
-/// a tool and not of where it came from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallTarget {
     Connector(ConnectorTool),
@@ -75,10 +44,6 @@ impl CallTarget {
     }
 }
 
-/// The tool's own arguments, out of the `call_tool` wrapper.
-///
-/// A model that sent them as a JSON string meant the object, and we hold the
-/// schema that says so. Refusing it would teach the model nothing.
 pub(in crate::runtime::session) fn inner_arguments(raw: &serde_json::Value) -> String {
     match raw.get("arguments") {
         Some(serde_json::Value::String(text)) => text.clone(),
@@ -111,46 +76,26 @@ pub struct ApplyContext {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
-    /// Waiting for external input: LLM responses, tool results, worker decisions.
     Idle,
-    /// Paused for external input. Never stored — projected from `open_interrupts`.
     Interrupted {
         interrupt_id: String,
         origin: InterruptOrigin,
         reason: String,
     },
-    /// Agent loop finished. Waiting for next user input.
     Done,
 }
 
-/// One effect's lifecycle, the same for every kind.
-///
-/// ```text
-/// Queued ─dispatch→ Pending ─complete──────────────→ Completed
-///                      │ ─error[retries left]──────→ RetryScheduled ─requeue→ Queued
-///                      │ ─error[exhausted]─────────→ Failed
-///                      └ ─void────────────────────→ Failed
-/// ```
-///
-/// `status` is only ever written by the transitions below, each of which asserts
-/// the move is legal. Nothing else assigns it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectTracking {
     status: EffectStatus,
     pub retry: RetryState,
     pub retry_policy: RetryPolicy,
-    /// The current attempt's deadline. Cleared once the effect is `Running`:
-    /// the attempt landed, and how long the work then takes is its own business.
     pub deadline: Option<DateTime<Utc>>,
-    /// When the effect first left the queue. Never reset, so the whole-effect
-    /// bound covers every attempt and the backoff between them — a retry cannot
-    /// buy more time by restarting the clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<DateTime<Utc>>,
 }
 
 impl EffectTracking {
-    /// A fetch: requested and in flight at once, never queued.
     pub fn new(retry_policy: RetryPolicy, now: DateTime<Utc>) -> Self {
         let deadline = retry_policy.attempt_deadline(now);
         Self {
@@ -185,11 +130,6 @@ impl EffectTracking {
         self.status = next;
     }
 
-    /// Start a settled effect over, with its retry budget whole again. Not a
-    /// retry: the cause of every failed attempt has been corrected.
-    ///
-    /// `Completed` is the usual start. A fetch that succeeded proves only that
-    /// the credential was good then. Only a connector fetch takes this.
     pub fn restart(&mut self, now: DateTime<Utc>) {
         self.move_to(
             EffectStatus::Pending,
@@ -200,7 +140,6 @@ impl EffectTracking {
         self.started_at = Some(now);
     }
 
-    /// Re-armed for another attempt: a retry, or a re-request of work still queued.
     pub fn requeue(&mut self) {
         self.move_to(
             EffectStatus::Queued,
@@ -214,7 +153,6 @@ impl EffectTracking {
         );
     }
 
-    /// Started: the deadline clock runs from here.
     pub fn dispatch(&mut self, now: DateTime<Utc>) {
         self.move_to(
             EffectStatus::Pending,
@@ -229,25 +167,16 @@ impl EffectTracking {
         self.retry.next_at = None;
     }
 
-    /// Alive and working: the spawn landed, so the *attempt* clock stops
-    /// applying — a child turn may legitimately run far longer than the call
-    /// that started it. The whole-effect bound stays, so a dead child still
-    /// settles instead of stalling its parent forever.
     pub fn run(&mut self) {
         self.move_to(EffectStatus::Running, &[EffectStatus::Pending]);
         self.deadline = None;
     }
 
-    /// The whole-effect deadline, measured from the first dispatch. None until
-    /// the effect has started, or when the policy sets no total.
     pub fn total_deadline(&self) -> Option<DateTime<Utc>> {
         self.started_at
             .and_then(|at| self.retry_policy.total_deadline(at))
     }
 
-    /// When this effect is past due, whichever bound lapses first. `Pending`
-    /// answers to both clocks; `Running` only to the total, having already
-    /// cleared its attempt.
     pub fn expiry(&self) -> Option<DateTime<Utc>> {
         let total = self.total_deadline();
         match self.status {
@@ -260,9 +189,6 @@ impl EffectTracking {
         }
     }
 
-    /// Whether the whole-effect bound is what lapsed. A retry cannot help once
-    /// it has: the budget covers every attempt, so the failure is terminal
-    /// however retryable it looks on its own.
     pub fn total_expired(&self, now: DateTime<Utc>) -> bool {
         self.total_deadline().is_some_and(|d| d <= now)
     }
@@ -274,7 +200,6 @@ impl EffectTracking {
         );
     }
 
-    /// Abandoned mid-flight — its branch was forked away, or the session ended.
     pub fn void(&mut self) {
         self.move_to(
             EffectStatus::Failed,
@@ -288,9 +213,6 @@ impl EffectTracking {
         );
     }
 
-    /// Whether recording a failure now would be terminal (no further attempt):
-    /// pure, computed from the pre-failure state so callers can branch before
-    /// mutating. `record_error` reuses it to keep the two in lockstep.
     pub fn is_terminal_failure(&self, retryable: bool) -> bool {
         self.retry_policy.exhausted(&self.retry, retryable)
     }
@@ -314,12 +236,10 @@ impl EffectTracking {
         );
     }
 
-    /// Whether a connector offer is usable — settled, and settled successfully.
     pub fn is_ready(&self) -> bool {
         self.status == EffectStatus::Completed
     }
 
-    /// Whether the effect is still going to produce something.
     pub fn is_in_flight(&self) -> bool {
         matches!(
             self.status,
@@ -327,12 +247,10 @@ impl EffectTracking {
         )
     }
 
-    /// Recorded but not started.
     pub fn is_queued(&self) -> bool {
         self.status == EffectStatus::Queued
     }
 
-    /// Not settled: recorded, running, or waiting to run again.
     pub fn is_open(&self) -> bool {
         self.is_queued() || self.is_in_flight()
     }
@@ -346,16 +264,10 @@ impl EffectTracking {
     }
 }
 
-/// One tracked effect: the envelope every kind shares, plus its own data.
-///
-/// `id` is the id that kind's own events name it by — a tool call, an LLM call,
-/// a child session, a connection, a decision — so `(kind, id)` keys the table
-/// and nothing needs a second identifier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectState {
     pub id: String,
     pub tracking: EffectTracking,
-    /// The active head when the effect was first requested; retries keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
     pub payload: EffectPayload,
@@ -383,10 +295,6 @@ impl EffectPayload {
     }
 }
 
-/// `payload()` reads a kind's data off an effect of that kind; `None` means the
-/// caller asked the wrong kind, which the table's key makes impossible in
-/// practice. One pair per kind, written out rather than generated so the
-/// matches stay greppable.
 macro_rules! payload_views {
     ($($get:ident, $get_mut:ident => $variant:ident($ty:ty)),* $(,)?) => {
         impl EffectState {
@@ -438,11 +346,8 @@ payload_views! {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallState {
-    /// The verbatim prompt the worker sent, stored for retries.
     #[serde(default)]
     pub prompt: Vec<Message>,
-    /// The `[llm.*]` block the call names, kept for retries and for the
-    /// executor to pick its client by.
     pub llm: String,
     pub spec: LlmCallSpec,
     pub stream: bool,
@@ -450,18 +355,12 @@ pub struct LlmCallState {
     pub handler: LlmHandler,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<LlmFormat>,
-    /// How a deferred tool reaches the model, frozen from the block at request
-    /// time so a replay lowers the same way.
     #[serde(default)]
     pub defer_tools_strategy: DeferToolsStrategy,
-    /// Ids of the engine-derived context this call's prompt already carries.
-    /// The record a retry checks, and the record a later call of this path
-    /// reads to know what the model has already been told.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_ids: Vec<String>,
 }
 
-/// An `LlmRequest` without its message list; the prompt is stored alongside.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmCallSpec {
     pub model: String,
@@ -509,10 +408,8 @@ pub struct ToolCallState {
     pub name: String,
     #[serde(default)]
     pub handler: ToolHandler,
-    /// The connection and remote name for a `Server` call; `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ConnectorTarget>,
-    /// Original arguments, stored for retries and crash recovery.
     #[serde(default)]
     pub arguments: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -521,66 +418,43 @@ pub struct ToolCallState {
     pub is_error: bool,
 }
 
-/// A delegation, keyed by the child session it runs — the id every sub-agent
-/// event names it by.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentCallState {
     pub agent_id: String,
-    /// The model tool-call id this delegation answers.
     #[serde(default)]
     pub tool_call_id: String,
-    /// The child's opening message, held until the spawn creates its session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<DraftMessage>,
-    /// The child's turn result (or error); `Some` once the turn is terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
 }
 
-/// One connection's fetched tool list.
-///
-/// Unanchored, and deliberately not rewound with the tree: what a connection
-/// offered at a sequence is a fact about the remote, not about a branch. So a
-/// fork back to an older head reuses the offer instead of refetching, the same
-/// way the call maps stay current across a rewind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorSyncState {
-    /// Every tool the connection offered, unfiltered. Empty until it settles.
     #[serde(default)]
     pub tools: Vec<RemoteTool>,
-    /// The prefix its tools expand under, frozen at fetch time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
-    /// What the server said it is for. The only description of a connection
-    /// that the engine does not have to write itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// Why the last attempt failed; `Some` only while the fetch is unsettled or
-    /// terminally failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthNeed>,
 }
 
-/// One anchored document write. Both typed channels — worker state and agent
-/// config — are versioned and resolved newest-on-path identically, so they are
-/// one type over what they carry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Versioned<T> {
     pub value: T,
     pub anchor: Option<String>,
 }
 
-/// Anchored worker-state write; current state is resolved, not stored.
 pub type StateVersion = Versioned<WorkerState>;
 
-/// Anchored agent-config write, the sibling channel for agent identity.
 pub type AgentVersion = Versioned<AgentConfig>;
 
-/// An unresumed interrupt: parks paths through its anchor (`None` = every path).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenInterrupt {
     pub interrupt_id: String,
@@ -590,19 +464,12 @@ pub struct OpenInterrupt {
     pub anchor: Option<String>,
 }
 
-/// What holds a parked decision. A park is region-shaped: the entry is skipped
-/// while a region elsewhere holds it, and the queue flows past. Each variant
-/// names the region — a branch under an interrupt, or the phase under a turn.
 #[derive(Debug, Clone, Copy)]
 pub enum DecisionPark<'a> {
-    /// An open interrupt parks the branch the decision lands on.
     Interrupt(&'a OpenInterrupt),
-    /// The named turn holds the phase; this decision opens a different one.
     Turn(&'a str),
 }
 
-/// A history-log entry tagged with the seq of the event that appended it —
-/// the as-of cursor is the event's own seq, nothing stamped elsewhere.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Logged<T> {
     pub seq: u64,
@@ -617,15 +484,11 @@ impl<T> std::ops::Deref for Logged<T> {
     }
 }
 
-/// Truncate an append-only log to entries at or before `seq`.
 fn rewind_log<T>(log: &mut Vec<Logged<T>>, seq: u64) {
     debug_assert!(log.windows(2).all(|w| w[0].seq <= w[1].seq));
     log.truncate(log.partition_point(|e| e.seq <= seq));
 }
 
-/// A versioned, anchored document write. Both worker state and agent config
-/// resolve newest-on-path identically; this shares that logic without
-/// touching either struct's serialized shape.
 pub trait Anchored {
     fn anchor(&self) -> Option<&str>;
 }
@@ -648,7 +511,6 @@ impl Anchored for OpenInterrupt {
     }
 }
 
-/// Newest version whose anchor is on `on_path`; an unanchored version matches any path.
 pub fn resolve_on_path<'a, V: Anchored>(
     versions: &'a [V],
     on_path: &std::collections::HashSet<&str>,
@@ -666,9 +528,6 @@ pub struct WorkerDecisionState {
     pub source_event_sequence: u64,
 }
 
-/// One entry of the schedule queue: work recorded but not yet dispatched.
-/// `seq` is the queued event's own sequence — arrival order is log order.
-/// The payload stays in its kind's map; the entry is position, not data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub seq: u64,
@@ -676,8 +535,6 @@ pub struct QueueEntry {
     pub id: String,
 }
 
-/// The frozen turn output held while its `turn.finished` finalizer runs, emitted as
-/// `TurnCompleted` once the finalizer settles (pass 2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnEnd {
     pub turn_id: String,
@@ -689,36 +546,18 @@ pub struct TurnEnd {
     pub usage: Usage,
 }
 
-/// Where the session is in a turn.
-///
-/// ```text
-/// Idle ─turn.started→ Active{turn_id} ─turn.finished queued→ Finalizing(TurnEnd)
-///  ↑                                                              │
-///  └────────────────────── turn.completed ────────────────────────┘
-/// ```
-///
-/// One of three orthogonal regions a session lives in — turn phase ∥ effect
-/// lifecycles ∥ the interrupt overlay — so it says nothing about what work is in
-/// flight or whether a branch is parked. There is deliberately no `Interrupted`
-/// variant: an interrupt parks a branch of the tree, and a turn can be
-/// interrupted in any phase. `SessionStatus` is the same story from the other
-/// side — stored `Idle`/`Done`, with `Interrupted` projected from the overlay.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum TurnPhase {
-    /// No turn is running. The session may still hold settled work and a tree.
     #[default]
     Idle,
-    /// The agent is working.
-    Active { turn_id: String },
-    /// The agent's turn is over and its output is frozen; the worker's
-    /// `turn.finished` finalizer is in flight. Holds what `TurnCompleted` will
-    /// carry, and is the pass-1/pass-2 discriminator.
+    Active {
+        turn_id: String,
+    },
     Finalizing(TurnEnd),
 }
 
 impl TurnPhase {
-    /// The turn in progress, in either working phase.
     pub fn turn_id(&self) -> Option<&str> {
         match self {
             TurnPhase::Idle => None,
@@ -727,7 +566,6 @@ impl TurnPhase {
         }
     }
 
-    /// The frozen output, once the turn has one.
     pub fn finalizing(&self) -> Option<&TurnEnd> {
         match self {
             TurnPhase::Finalizing(end) => Some(end),
@@ -736,9 +574,6 @@ impl TurnPhase {
     }
 }
 
-/// Per-event stamp: scalars plus bounded in-flight status. History-sized
-/// state (tree, versions, prompts) lives in the store; `head_id` +
-/// `node_count` locate the as-of-event tree prefix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMeta {
     pub status: SessionStatus,
@@ -756,8 +591,6 @@ pub struct EventMeta {
     pub cost: Decimal,
     #[serde(default)]
     pub sub_agent_cost: Decimal,
-    /// The active branch at this event; with the event's `seq`, the full
-    /// as-of cursor for `SessionState::rewind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -766,12 +599,10 @@ pub struct EventMeta {
     pub decisions: Vec<MetaDecision>,
 }
 
-/// A Pending/Queued decision at stamp time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaDecision {
     pub decision_id: String,
     pub status: EffectStatus,
-    /// Trigger is `ToolFinished`/`SubAgentFinished`: an unrecorded result.
     pub finished: bool,
     pub attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -780,12 +611,6 @@ pub struct MetaDecision {
 }
 
 impl EventMeta {
-    /// Outstanding parallel work the decision `decision_id` must wait for before
-    /// it prompts: in-flight tool/sub-agent calls, plus other `*.finished`
-    /// decisions still queued or pending — results not yet folded into the
-    /// transcript. Without the latter, every finished decision of a parallel
-    /// fan-out sees zero (all calls already completed) and prompts, so each
-    /// sibling issues a follow-up call against an incomplete transcript.
     pub fn pending_work(&self, decision_id: &str) -> usize {
         let in_flight_calls = self
             .calls
@@ -813,8 +638,6 @@ impl EventMeta {
     }
 }
 
-/// The effect table serializes as a flat list: its key is `(payload.kind(), id)`,
-/// both of which every entry already carries, and JSON has no tuple keys.
 mod effect_table {
     use super::{EffectKind, EffectState};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -845,7 +668,6 @@ pub fn new_message_id() -> String {
     Uuid::now_v7().to_string()
 }
 
-/// A JSON string passes through; anything else is serialized.
 pub fn json_to_string(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
@@ -862,23 +684,18 @@ pub struct SessionState {
     #[serde(default)]
     pub token_usage: Usage,
 
-    /// Accumulated cost across all LLM calls in this session.
     #[serde(default)]
     pub cost: Decimal,
 
-    /// Accumulated cost from sub-agent sessions.
     #[serde(default)]
     pub sub_agent_cost: Decimal,
 
-    /// Cost accumulated in the current turn only.
     #[serde(default)]
     pub turn_cost: Decimal,
 
-    /// Token usage accumulated in the current turn only.
     #[serde(default)]
     pub turn_token_usage: Usage,
 
-    /// Token usage accumulated from sub-agent sessions.
     #[serde(default)]
     pub sub_agent_token_usage: Usage,
 
@@ -897,36 +714,21 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_retry: Option<RetryPolicy>,
 
-    /// Every tracked effect, keyed by `(kind, id)`. One table so that every
-    /// generic sweep — deadlines, retries, voiding, the wire projection, the
-    /// queue invariant — is one iteration rather than one per kind.
-    ///
-    /// Connector syncs live here too, keyed by connection id. They are keyed on
-    /// the connection rather than on the agent version that asked for one, so a
-    /// config rewritten for unrelated reasons — a client tool appearing, a
-    /// branch switch — costs no round trip.
     #[serde(with = "effect_table", default = "BTreeMap::new")]
     pub effects: BTreeMap<(EffectKind, String), EffectState>,
 
-    /// Queued work in arrival order — every effect and decision waits here
-    /// between its queued event and its dispatch event. Maintained solely by
-    /// `apply`: queued events push, dispatch/settle/void/drop events remove.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schedule_queue: Vec<QueueEntry>,
 
-    /// Where the session is in a turn — the whole turn region, in one field.
     #[serde(default)]
     pub phase: TurnPhase,
 
-    /// The seq of the running turn's `turn.started` event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_started_seq: Option<u64>,
 
-    /// Turn IDs that have completed, used for idempotency checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_turn_ids: Vec<String>,
 
-    /// The active branch's leaf; advances to each appended message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
 
@@ -936,14 +738,6 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_interrupts: Vec<OpenInterrupt>,
 
-    /// `session.start` failed terminally: no config can ever be resolved, so
-    /// user payloads are refused and queued decisions are dropped. Cleared by a
-    /// re-queued `session.start`.
-    ///
-    /// Its own region, not a [`TurnPhase`] variant: a start failure outlives the
-    /// turn it happened in — the re-queued start rides the *next* user message,
-    /// which opens a new turn — so a phase that held it would be cleared by the
-    /// very turn meant to recover from it.
     #[serde(default)]
     pub session_start_failed: bool,
 }
@@ -986,10 +780,6 @@ impl SessionState {
         self.at(self.head_id.as_deref())
     }
 
-    /// The turn events belong to: the live one, or — once it has completed —
-    /// the one that just finished. The tail matters: `TurnCompleted` is stamped
-    /// after it applies, so a turn-scoped stream would otherwise miss its own
-    /// terminal event.
     pub fn turn_id(&self) -> Option<&str> {
         self.phase
             .turn_id()
@@ -1004,8 +794,6 @@ impl SessionState {
         self.effects.get_mut(&(kind, id.to_string()))
     }
 
-    /// Record an effect verbatim. For fixtures and store hydration; `apply` uses
-    /// [`SessionState::insert_effect`], which anchors at the head.
     pub fn put_effect(&mut self, effect: EffectState) {
         self.effects
             .insert((effect.kind(), effect.id.clone()), effect);
@@ -1019,7 +807,6 @@ impl SessionState {
         self.effect(kind, id).map(|e| &e.tracking)
     }
 
-    /// Every effect of one kind, in id order.
     pub fn effects_of(&self, kind: EffectKind) -> impl Iterator<Item = &EffectState> {
         self.effects.values().filter(move |e| e.kind() == kind)
     }
@@ -1042,8 +829,6 @@ impl SessionState {
             .and_then(|e| e.connector())
     }
 
-    /// Record an effect anchored at the current head — where it was requested.
-    /// A fetch anchors nowhere: it belongs to the connection, not to a branch.
     fn insert_effect(&mut self, id: &str, tracking: EffectTracking, payload: EffectPayload) {
         let anchor = match payload {
             EffectPayload::ConnectorSync(_) => None,
@@ -1064,8 +849,6 @@ impl SessionState {
         self.effects.remove(&(kind, id.to_string()))
     }
 
-    /// Push a queue entry; idempotent per (kind, id) so a retry re-request of
-    /// an entry still queued re-arms in place instead of duplicating it.
     fn enqueue(&mut self, seq: u64, kind: EffectKind, id: &str) {
         if !self
             .schedule_queue
@@ -1085,8 +868,6 @@ impl SessionState {
             .retain(|e| !(e.kind == kind && e.id == id));
     }
 
-    /// A (re-)issued call: re-arm an existing one, else record it. Applies after
-    /// the same batch's `NewMessage` events, so `head_id` is post-reconcile.
     fn apply_llm_requested(&mut self, payload: &LlmCallRequested, ctx: &ApplyContext) {
         let prompt: Vec<Message> = payload
             .request
@@ -1126,9 +907,6 @@ impl SessionState {
         self.enqueue(ctx.sequence, EffectKind::LlmCall, &payload.id);
     }
 
-    /// The queued call clears its gates: merge the connector tools in force
-    /// (dispatch is when derived context is current), start the deadline clock,
-    /// leave the queue.
     fn apply_llm_dispatched(&mut self, payload: &LlmCallDispatched, now: DateTime<Utc>) {
         let node = self
             .effect(EffectKind::LlmCall, &payload.id)
@@ -1161,7 +939,6 @@ impl SessionState {
         self.dequeue(EffectKind::LlmCall, &payload.id);
     }
 
-    /// A (re-)issued tool call: re-arm an existing one, else record it.
     fn apply_tool_requested(&mut self, payload: &ToolCallRequested, ctx: &ApplyContext) {
         if let Some(existing) = self.effect_mut(EffectKind::ToolCall, &payload.id) {
             existing.tracking.requeue();
@@ -1185,7 +962,6 @@ impl SessionState {
         self.enqueue(ctx.sequence, EffectKind::ToolCall, &payload.id);
     }
 
-    /// A (re-)issued delegation: re-arm an existing one, else record it.
     fn apply_sub_agent_requested(&mut self, payload: &SubAgentRequested, ctx: &ApplyContext) {
         if let Some(existing) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
             existing.tracking.requeue();
@@ -1205,8 +981,6 @@ impl SessionState {
         self.enqueue(ctx.sequence, EffectKind::SubAgent, &payload.id);
     }
 
-    /// One open interrupt per id. Pending decisions void so late submissions
-    /// no-op; calls void via their own `CallVoided` events.
     fn apply_interrupted(&mut self, payload: &SessionInterrupted) {
         if !self
             .open_interrupts
@@ -1226,8 +1000,6 @@ impl SessionState {
         });
     }
 
-    /// A terminally-failed decision leaves the map, and a failed `session.start`
-    /// poisons the session until another start is queued.
     fn apply_decision_errored(&mut self, p: &DecisionErrored, now: DateTime<Utc>) {
         let failed = self
             .effect_mut(EffectKind::Decision, &p.id)
@@ -1246,13 +1018,7 @@ impl SessionState {
         }
     }
 
-    /// Queuing `turn.finished` (pass 1) captures the frozen output; the turn is
-    /// finalizing until `TurnCompleted` (pass 2). The turn's completion queues as
-    /// a dependent of the finalizer decision, so a finalizer that settles without
-    /// a `done` echo still completes the turn at the next walk.
     fn apply_decision_queued(&mut self, p: &DecisionQueued, ctx: &ApplyContext) {
-        // A re-queued start clears the poison: the session gets another chance
-        // at a config, so client input is accepted again.
         if matches!(p.trigger, Trigger::SessionStart) {
             self.session_start_failed = false;
         }
@@ -1284,11 +1050,6 @@ impl SessionState {
         }
     }
 
-    /// A voided effect fails in place and leaves the queue.
-    ///
-    /// A fetch is the exception: it belongs to the connection, not to the branch
-    /// that asked for it, so a fork never abandons one. The queue removal is a
-    /// guard — fetches never queue in practice.
     fn apply_call_voided(&mut self, p: &CallVoided) {
         let kind = p.kind;
         if kind != EffectKind::ConnectorSync {
@@ -1375,9 +1136,6 @@ impl SessionState {
                 }
                 self.dequeue(EffectKind::SubAgent, &payload.id);
             }
-            // The spawn landed; the delegation is not done. It stays in flight
-            // until its turn returns, so a sibling finishing first cannot
-            // re-prompt the model with this one's result still missing.
             EventPayload::SubAgentStarted(payload) => {
                 if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
                     e.tracking.run();
@@ -1398,8 +1156,6 @@ impl SessionState {
                 self.open_interrupts
                     .retain(|i| i.interrupt_id != p.interrupt_id);
             }
-            // Dispatch marker: the decision (seeded by DecisionQueued)
-            // goes live and leaves the queue.
             EventPayload::DecisionDispatched(p) => {
                 if let Some(e) = self.effect_mut(EffectKind::Decision, &p.id) {
                     e.tracking.dispatch(now);
@@ -1407,8 +1163,6 @@ impl SessionState {
                 self.dequeue(EffectKind::Decision, &p.id);
                 self.status = SessionStatus::Idle;
             }
-            // Settled decisions leave the table: absent reads as not-Pending, so
-            // late submissions still no-op and stored triggers don't accumulate.
             EventPayload::DecisionCompleted(p) => {
                 self.remove_effect(EffectKind::Decision, &p.id);
                 self.dequeue(EffectKind::Decision, &p.id);
@@ -1417,7 +1171,6 @@ impl SessionState {
             EventPayload::SessionMessageRequested(_) => {}
             EventPayload::DecisionQueued(p) => self.apply_decision_queued(p, ctx),
             EventPayload::DecisionDropped(p) => {
-                // Voided like an interrupted decision: out of the queue, never delivered.
                 self.remove_effect(EffectKind::Decision, &p.id);
                 self.dequeue(EffectKind::Decision, &p.id);
             }
@@ -1436,9 +1189,6 @@ impl SessionState {
                         }),
                     );
                 }
-                // A retry re-arms the same entry rather than starting a new one:
-                // one connection, one fetch, however many attempts. A settled
-                // effect starts over, because its attempts are spent.
                 if let Some(e) = self.effect_mut(EffectKind::ConnectorSync, &p.path.to_string()) {
                     match e.tracking.status() {
                         EffectStatus::Failed | EffectStatus::Completed => e.tracking.restart(now),
@@ -1467,7 +1217,6 @@ impl SessionState {
                     }
                 }
             }
-            // The fetch does not change. Only the credential is not valid.
             EventPayload::ConnectorAuthFailed(p) => {
                 if let Some(sync) = self
                     .effect_mut(EffectKind::ConnectorSync, &p.path.to_string())
@@ -1476,8 +1225,6 @@ impl SessionState {
                     sync.auth = Some(p.auth);
                 }
             }
-            // Append-only, like the tree: `resolve_on_path` scans newest-first,
-            // so superseded same-anchor writes never win resolution.
             EventPayload::WorkerStateUpdated(p) => {
                 self.state_versions.push(Logged {
                     seq: ctx.sequence,
@@ -1498,7 +1245,6 @@ impl SessionState {
             }
             EventPayload::SessionCancelled => {
                 self.status = SessionStatus::Done;
-                // Terminal: void pending decisions so late submissions no-op; calls void via CallVoided events.
                 self.effects.retain(|(kind, _), e| {
                     *kind != EffectKind::Decision || e.tracking.status() != EffectStatus::Pending
                 });
@@ -1509,7 +1255,6 @@ impl SessionState {
                 } else {
                     self.status = SessionStatus::Idle;
                 }
-                // A run terminal leaves nothing to finalize.
                 self.schedule_queue
                     .retain(|e| e.kind != EffectKind::TurnEnd);
             }
@@ -1523,7 +1268,6 @@ impl SessionState {
                         sa.result = Some(json_to_string(&payload.data));
                         sa.is_error = false;
                     }
-                    // The result is what settles a delegation.
                     if e.tracking.status() == EffectStatus::Running {
                         e.tracking.complete();
                     }
@@ -1539,8 +1283,6 @@ impl SessionState {
                 self.turn_token_usage = Usage::default();
             }
             EventPayload::TurnCompleted(payload) => {
-                // The event names the turn it ends, and every emitter builds it
-                // from the live phase, so the log needs no second source.
                 self.completed_turn_ids.push(payload.turn_id.clone());
                 self.data = payload.data.clone();
                 self.turn_cost = Decimal::ZERO;
@@ -1552,10 +1294,6 @@ impl SessionState {
         }
     }
 
-    /// The scheduling invariants, as one enumeration. `Working` asserts these
-    /// after every emit (so a violation names the event that caused it) and the
-    /// property tests assert them on committed state; both read this, so the
-    /// two can't drift.
     pub(crate) fn check_invariants(&self) -> Result<(), String> {
         let live = self
             .effects_of(EffectKind::Decision)
@@ -1569,16 +1307,12 @@ impl SessionState {
                 "a decision is live while a fetch its config owes is in flight".to_string(),
             );
         }
-        // Queue and statuses agree: Queued status ⟺ a queue entry. Fetches are
-        // excluded on both sides — they never queue.
         let queued_statuses = self
             .effects
             .values()
             .filter(|e| e.kind() != EffectKind::ConnectorSync)
             .filter(|e| e.tracking.status == EffectStatus::Queued)
             .count();
-        // TurnEnd entries carry no status of their own: their payload is the
-        // finalizing phase, so they are counted against it instead.
         let effect_entries = self
             .schedule_queue
             .iter()
@@ -1600,17 +1334,14 @@ impl SessionState {
         Ok(())
     }
 
-    /// An open interrupt by id, on any path.
     pub fn open_interrupt(&self, id: &str) -> Option<&OpenInterrupt> {
         self.open_interrupts.iter().find(|i| i.interrupt_id == id)
     }
 
-    /// Whether an open interrupt parks the active branch.
     pub fn head_parked(&self) -> bool {
         self.at_head().active_interrupt_for().is_some()
     }
 
-    /// Stored status, overridden when an interrupt parks the head path.
     pub fn projected_status(&self) -> SessionStatus {
         match self.at_head().active_interrupt_for() {
             Some(i) => SessionStatus::Interrupted {
@@ -1622,7 +1353,6 @@ impl SessionState {
         }
     }
 
-    /// The anchor of the effect a decision settles.
     pub fn trigger_anchor(&self, trigger: &Trigger) -> Option<&str> {
         match trigger {
             Trigger::ToolFinished { id, .. } | Trigger::ToolExecute { id, .. } => {
@@ -1639,14 +1369,11 @@ impl SessionState {
         .and_then(|e| e.anchor.as_deref())
     }
 
-    /// A decision's stored data, by id.
     pub fn worker_decision(&self, id: &str) -> Option<&WorkerDecisionState> {
         self.effect(EffectKind::Decision, id)
             .and_then(|e| e.decision())
     }
 
-    /// Whether work at `anchor` lands on a parked branch: on-head anchors gate
-    /// on the head, off-head anchors on their own path.
     pub fn anchor_parked(&self, anchor: Option<&str>) -> bool {
         match anchor {
             Some(a) if !self.at_head().anchor_on_path(Some(a)) => {
@@ -1656,30 +1383,20 @@ impl SessionState {
         }
     }
 
-    /// Whether a decision waits on a region elsewhere.
     pub fn decision_parked(&self, trigger: &Trigger) -> bool {
         self.decision_park(trigger).is_some()
     }
 
-    /// The region holding a decision, if one does. Two members: an interrupt
-    /// parks the branch the decision lands on, and a running turn parks a
-    /// decision that opens a different one.
     pub fn decision_park(&self, trigger: &Trigger) -> Option<DecisionPark<'_>> {
         if let Some(interrupt) = self.decision_park_interrupt(trigger) {
             return Some(DecisionPark::Interrupt(interrupt));
         }
-        // A different turn holds the phase — never "any turn is running": once
-        // this decision dispatches, its own `TurnStarted` makes the phase Active
-        // with its id, and a redelivery must not park against itself.
         match (trigger.deferred_turn_id(), self.phase.turn_id()) {
             (Some(turn_id), Some(active)) if active != turn_id => Some(DecisionPark::Turn(active)),
             _ => None,
         }
     }
 
-    /// The open interrupt parking a decision's landing branch, if any:
-    /// transcripts gate at their landing leaf, effect settles at their anchor.
-    /// Actions are exempt: a click may be what answers the prompt.
     fn decision_park_interrupt(&self, trigger: &Trigger) -> Option<&OpenInterrupt> {
         if matches!(trigger, Trigger::ClientAction { .. }) {
             return None;
@@ -1703,7 +1420,6 @@ impl SessionState {
         self.decisions_with(EffectStatus::Pending).next().is_some()
     }
 
-    /// All queued decisions in arrival order.
     pub fn queued_decisions(&self) -> Vec<&EffectState> {
         let mut queued: Vec<&EffectState> = self.decisions_with(EffectStatus::Queued).collect();
         queued.sort_by_key(|e| e.decision().map(|d| d.source_event_sequence));
@@ -1719,7 +1435,6 @@ impl SessionState {
             .filter(move |e| e.tracking.status == status)
     }
 
-    /// All message ids on the root→`node` chain.
     pub fn path_ids<'a>(&'a self, node: &'a str) -> std::collections::HashSet<&'a str> {
         let by_id: HashMap<&str, &Logged<NewMessage>> = self
             .nodes
@@ -1738,15 +1453,6 @@ impl SessionState {
         ids
     }
 
-    /// Where a call to `name` runs, per the config in force on the current path.
-    ///
-    /// Derived rather than declared: a tool the config marks `handler: client`
-    /// runs on the client, a name a connector resolved runs on the engine, and
-    /// everything else — including a name nothing declares — runs on the worker,
-    /// which is where an undeclared name gets its contract error.
-    ///
-    /// A declared tool is checked first, matching `merge`: a name the config
-    /// claims is never taken by a connector.
     pub fn tool_handler_for(&self, name: &str) -> ToolHandler {
         let config = self.at_head().resolve_agent_for();
         match config.as_ref().and_then(|c| c.tool(name)) {
@@ -1756,21 +1462,17 @@ impl SessionState {
         }
     }
 
-    /// Every model tool call this session took on, settled ones included.
     pub fn dispatched_calls(&self) -> Vec<String> {
         self.effects
             .values()
             .filter_map(|e| match e.kind() {
                 EffectKind::ToolCall => Some(e.id.clone()),
-                // The key is the child session; the call is inside.
                 EffectKind::SubAgent => e.sub_agent().map(|s| s.tool_call_id.clone()),
                 _ => None,
             })
             .collect()
     }
 
-    /// The connector tool `name` resolves to on the current path, if any. The
-    /// executor reads `connector`/`remote_name` off this to place the call.
     pub fn connector_tool_for(&self, name: &str) -> Option<ConnectorTool> {
         self.at_head()
             .connector_tools()
@@ -1796,10 +1498,6 @@ impl SessionState {
                 })
             })
             .collect();
-        // From the config alone: a fetch that has not settled must not decide
-        // whether a tool definition exists. An agent that says `search` thus
-        // gets these from its first turn, and a connection added later moves
-        // no definition. A plugin's servers count the same way.
         let defers = config.defers_tools()
             || config.tools.iter().any(|t| t.defer == Some(true))
             || config.mcp.iter().any(|c| filter::defers(c, false))
@@ -1825,8 +1523,6 @@ impl SessionState {
         filter::merge(resolutions, taken)
     }
 
-    /// The engine's answer to one of its own tools, or `None` when the call is
-    /// the connection's. Read from state, so a replay answers the same.
     pub fn local_connector_answer(&self, tool_call_id: &str) -> Option<StoredResult> {
         let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
         let node = effect.anchor.clone();
@@ -1835,8 +1531,6 @@ impl SessionState {
         super::engine_tools::answer(self.at(node.as_deref()), target.kind(), &tc.arguments)
     }
 
-    /// A skill call's branch, plugin, and arguments. `None` for every other
-    /// call. The plugin is the one frozen on the call.
     pub fn skill_call(&self, tool_call_id: &str) -> Option<SkillCall> {
         let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
         let tc = effect.tool()?;
@@ -1850,14 +1544,10 @@ impl SessionState {
         })
     }
 
-    /// An unanchored effect belongs to every path, the same way an unanchored
-    /// agent version does.
     fn anchored_on(path: &std::collections::HashSet<&str>, anchor: Option<&str>) -> bool {
         anchor.is_none_or(|a| path.contains(a))
     }
 
-    /// The retry policies the config in force declares, if any. None ⇒ nothing
-    /// declared, and every kind falls to the engine's own default.
     pub fn retry_config(&self) -> Option<RetryConfig> {
         self.at_head()
             .resolve_agent_for()
@@ -1865,9 +1555,6 @@ impl SessionState {
             .map(|b| *b)
     }
 
-    /// Every server `config` reaches: its `mcp` entries, then each plugin's
-    /// servers under the plugin's own policy. The one place a plugin's servers
-    /// join the `mcp` machinery.
     pub fn servers_for(&self, config: &AgentConfig) -> Vec<McpServer> {
         let plugin_servers = config
             .plugins
@@ -1883,12 +1570,6 @@ impl SessionState {
         }
     }
 
-    /// The effects still open: queued, in flight, or awaiting a retry.
-    ///
-    /// A fetch is surfaced too, so a worker sees one in flight rather than
-    /// inferring it from a decision that has not arrived.
-    /// Nothing to do until the caller answers: every outstanding call is one
-    /// only the client can settle.
     pub fn waiting_on_client(&self) -> bool {
         waiting_on_client(&self.effects())
     }
@@ -1936,8 +1617,6 @@ impl SessionState {
                         wire.handler = Some(c.handler.into());
                         wire.stream = Some(c.stream);
                     }
-                    // The connection being fetched; unanchored, since a fetch
-                    // belongs to the connection, not to a branch.
                     EffectPayload::ConnectorSync(_) => wire.name = Some(e.id.clone()),
                     EffectPayload::Decision(_) => unreachable!(),
                 }
@@ -1990,11 +1669,6 @@ impl SessionState {
         }
     }
 
-    /// Rewind to an event: every history-shaped log is append-only and
-    /// seq-tagged, so the state at the event is the prefix of entries the
-    /// event's own seq admits. Call maps stay current (entries immutable,
-    /// path picks the as-of subset); path-dependent resolution after a
-    /// rewind is exact.
     #[must_use]
     pub fn rewind(mut self, seq: u64, head_id: Option<&str>) -> Self {
         rewind_log(&mut self.nodes, seq);
@@ -2028,20 +1702,16 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         self.state
     }
 
-    /// The ids from the root to the node, walked once. A caller that asked per
-    /// effect would walk the whole path again for each one.
     fn path_set(&self) -> std::collections::HashSet<&str> {
         self.node
             .map(|n| self.state.path_ids(n))
             .unwrap_or_default()
     }
 
-    /// Newest open interrupt on the path to the node; unanchored matches any path.
     pub fn active_interrupt_for(&self) -> Option<&'a OpenInterrupt> {
         resolve_on_path(&self.state.open_interrupts, &self.path_set())
     }
 
-    /// All open interrupts on the path to the node, oldest first.
     pub fn interrupts_for(&self) -> Vec<&'a OpenInterrupt> {
         let on_path = self.path_set();
         self.state
@@ -2054,32 +1724,20 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .collect()
     }
 
-    /// Whether `anchor` lies on the root→node path. A `None` anchor matches any path.
     pub fn anchor_on_path(&self, anchor: Option<&str>) -> bool {
         SessionState::anchored_on(&self.path_set(), anchor)
     }
 
-    /// Newest worker state whose anchor is on the path to the node; unanchored
-    /// matches any path.
     pub fn resolve_state_for(&self) -> WorkerState {
         resolve_on_path(&self.state.state_versions, &self.path_set())
             .map(|v| v.value.clone())
             .unwrap_or_default()
     }
 
-    /// Newest agent config whose anchor is on the path to the node; unanchored
-    /// matches any path. `None` when no config was ever written on the path.
     pub fn resolve_agent_for(&self) -> Option<AgentConfig> {
         resolve_on_path(&self.state.agent_versions, &self.path_set()).map(|v| v.value.clone())
     }
 
-    /// The connector tools in force on the path to the node, derived by
-    /// filtering each fetched offer through the config's `McpServer` entry.
-    ///
-    /// Pure, and recomputed rather than stored: the offer is the recorded fact,
-    /// so editing a filter or flipping `prefix_tools` re-derives without another
-    /// round trip. `collisions` reports every name dropped for clashing with a
-    /// declared tool, a sub-agent, or another connector.
     pub fn connector_tools(&self) -> filter::Merged {
         let Some(config) = self.resolve_agent_for() else {
             return filter::Merged {
@@ -2090,8 +1748,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         self.state.connector_tools_for_config(&config)
     }
 
-    /// The connection as the config at the node names it, with the offer this
-    /// session recorded.
     fn connector_source(&self, connector_id: &ConnectionPath) -> Option<Source> {
         let config = self.resolve_agent_for()?;
         let server = self
@@ -2107,15 +1763,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         })
     }
 
-    /// Every connection of the agent whose offer has arrived, with that offer.
-    /// What the pair of search tools answers over.
-    ///
-    /// Every connection, not only the searched ones. A connection on `all` is
-    /// listed up front *and* findable, so one search covers the agent and an
-    /// answer of nothing means nothing is there.
-    ///
-    /// Readiness belongs here and not in the tool list: a connection that
-    /// arrives during a session joins the next answer, and no definition moves.
     fn searchable_connectors(&self) -> Vec<Source> {
         let Some(config) = self.resolve_agent_for() else {
             return Vec::new();
@@ -2132,14 +1779,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .collect()
     }
 
-    /// Every tool the agent can reach, deferred or not, as the model would see
-    /// it. What a search answers over.
-    ///
-    /// Each source, not only the connections: deferral is a property of a tool,
-    /// so a search that skipped one source would report an absence that is not
-    /// real. The engine's own two are left out — they are how you search, not
-    /// something to find — and so are the sub-agents, which a `call_tool`
-    /// cannot place.
     pub fn searchable_tools(&self) -> Vec<LlmTool> {
         let Some(config) = self.resolve_agent_for() else {
             return Vec::new();
@@ -2159,9 +1798,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         declared.chain(connector).collect()
     }
 
-    /// What one connection is, for an announcement: its size, and its own
-    /// words. `None` while the connection has not settled, so a notice never
-    /// claims a server the engine cannot yet reach.
     pub fn connection_summary(&self, path: &ConnectionPath) -> Option<String> {
         let source = self
             .searchable_connectors()
@@ -2195,18 +1831,13 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .collect()
     }
 
-    pub fn unavailable_connector_ids(&self, config: &AgentConfig) -> Vec<String> {
+    pub fn unavailable_connector_paths(&self, config: &AgentConfig) -> Vec<ConnectionPath> {
         self.unavailable_connectors(config)
             .into_iter()
-            .map(|(path, _)| path.to_string())
+            .map(|(path, _)| path)
             .collect()
     }
 
-    /// Context ids that an earlier call of this path already carried.
-    ///
-    /// Read from the effects on the path, so a fork that never held a call does
-    /// not inherit what it said, and a rewind that removed one lets it be said
-    /// again.
     pub fn context_ids_on_path(&self, exclude: &str) -> std::collections::HashSet<String> {
         let path = self.path_set();
         self.state
@@ -2218,11 +1849,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .collect()
     }
 
-    /// Whether the system prefix is still free to write.
-    ///
-    /// It is free until a call commits it. A provider caches the prefix, and
-    /// the Anthropic wire gathers every system message into it whatever the
-    /// position, so a system message added later rewrites what is cached.
     pub fn system_prefix_open(&self, exclude: &str) -> bool {
         let path = self.path_set();
         !self.state.effects.values().any(|e| {
@@ -2233,7 +1859,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         })
     }
 
-    /// The tool a `call_tool` names, and where a call to it runs.
     pub fn call_tool_target(&self, named: &str) -> Option<CallTarget> {
         let config = self.resolve_agent_for()?;
         if let Some(declared) = config.tool(named) {
@@ -2245,16 +1870,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .map(CallTarget::Connector)
     }
 
-    /// Why a `call_tool` cannot be placed, if it cannot: an unknown name, or
-    /// arguments that break that tool's schema.
-    ///
-    /// Each fault carries what the model needs to fix it. The engine holds the
-    /// schema the provider never received, so a fault that withheld it would
-    /// leave the model to guess or to search again.
-    ///
-    /// One function for two callers. The route freezes an empty remote name
-    /// when this answers `Some`, and the answer reads the same fault again to
-    /// tell the model which of the three it was.
     pub fn call_tool_fault(&self, arguments: &str) -> Option<String> {
         let raw: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
         let named = raw
@@ -2264,8 +1879,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .to_string();
 
         let Some(target) = self.call_tool_target(&named) else {
-            // The name is the query: a wrong name is usually a near miss, and
-            // the same search the model should have run ranks the neighbours.
             let config = self.resolve_agent_for();
             let tools = self.searchable_tools();
             let cap = config
@@ -2281,21 +1894,16 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
                 .collect();
             let unavailable = config
                 .as_ref()
-                .map(|c| self.unavailable_connector_ids(c))
+                .map(|c| self.unavailable_connector_paths(c))
                 .unwrap_or_default();
             return Some(crate::copy::no_such_tool(&named, &near, &unavailable));
         };
-        // The provider never received this tool's schema, so it checked
-        // nothing. The engine holds one, so the engine checks it — and hands it
-        // back, because the model is the party that can act on it.
         let input = target.input();
         classify_arguments(&inner_arguments(&raw), input.as_ref())
             .error()
             .map(|e| crate::copy::bad_arguments(&named, e, input.as_ref()))
     }
 
-    /// Connections the config in force at the node names but has never fetched.
-    /// Each needs a `connector.sync.requested` before the model can be prompted.
     pub fn unsynced_connectors(&self) -> Vec<ConnectionPath> {
         let Some(config) = self.resolve_agent_for() else {
             return Vec::new();
@@ -2312,14 +1920,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .collect()
     }
 
-    /// Whether a fetch the config at the node depends on is still unsettled. A
-    /// decision that would prompt the model parks behind this, the same way it
-    /// parks behind an unsettled `session.start` — the config names a connection
-    /// whose tools are not known yet, so the turn cannot be authored against it.
-    ///
-    /// A terminally failed fetch is settled, so it never parks anything: the
-    /// engine unblocks and the worker decides whether a missing connector is
-    /// fatal.
     pub fn has_pending_connector_sync(&self) -> bool {
         let Some(config) = self.resolve_agent_for() else {
             return false;
@@ -2338,10 +1938,6 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         }
     }
 
-    /// A call is open while any of its tool calls lacks a recorded answer on the
-    /// active path. The tree is frozen during a pending decision, so the call
-    /// answering the last `tool.finished` is still open when that decision is
-    /// projected — exactly when its re-issue proposal is derived.
     pub(crate) fn open_llm_calls(&self) -> HashMap<String, EffectState> {
         let path = self.transcript();
         let answered: std::collections::HashSet<&str> = path
@@ -2493,7 +2089,6 @@ mod state_version_tests {
         }
     }
 
-    /// A session with the tree  u1 → a1 → u2  and a fork leaf  u1 → x1.
     fn forked_session() -> SessionState {
         let mut s = SessionState::new("sess-1".to_string());
         s.nodes.push(message_node("u1", None));
@@ -2533,7 +2128,6 @@ mod state_version_tests {
         let mut s = forked_session();
         s.state_versions.push(version(json!({"v": 1}), Some("u1")));
         s.state_versions.push(version(json!({"v": 2}), Some("u2")));
-        // u2's version is off the u1→x1 path; the branch sees state as-of u1.
         assert_eq!(s.at(Some("x1")).resolve_state_for().0, json!({"v": 1}));
     }
 
@@ -2564,7 +2158,6 @@ mod state_version_tests {
                 &ctx,
             );
         }
-        // Append-only: superseded same-anchor writes stay but never win.
         assert_eq!(s.state_versions.len(), 3);
         assert_eq!(s.at_head().resolve_state_for().0, json!({"v": 3}));
         assert_eq!(s.at(Some("x1")).resolve_state_for().0, json!({"v": 1}));
@@ -2572,13 +2165,11 @@ mod state_version_tests {
 
     #[test]
     fn a_version_serializes_flat_under_its_log_tag() {
-        // Guard: the log tag flattens alongside the version rather than nesting.
         let v = version(json!({"v": 1}), Some("u1"));
         let value = serde_json::to_value(&v).expect("serializes");
         assert_eq!(value, json!({"seq": 0, "value": {"v": 1}, "anchor": "u1"}));
     }
 
-    /// Rewinding by an event's seq restores every history log to its prefix.
     #[test]
     fn rewind_restores_each_log_to_the_events_prefix() {
         let mut s = SessionState::new("sess-1".to_string());
@@ -2648,7 +2239,6 @@ mod agent_version_tests {
         }
     }
 
-    /// A session with the tree  u1 → a1 → u2  and a fork leaf  u1 → x1.
     fn forked_session() -> SessionState {
         let mut s = SessionState::new("sess-1".to_string());
         s.nodes.push(message_node("u1", None));
@@ -2704,15 +2294,9 @@ mod agent_version_tests {
         let mut s = forked_session();
         s.agent_versions.push(version("m1", Some("u1")));
         s.agent_versions.push(version("m2", Some("u2")));
-        // m2 is off the u1→x1 path; the branch sees config as-of u1.
         assert_eq!(s.at(Some("x1")).resolve_agent_for(), Some(config("m1")));
     }
 
-    /// The summary answers at a place in the tree, and not at the head.
-    ///
-    /// A call built where a connection existed must be able to describe that
-    /// connection, whatever the head has done since. The head is for choosing
-    /// what to do next; a call already in flight reads its own anchor.
     #[test]
     fn a_connection_is_summarised_where_the_work_was_authored() {
         let with_sentry = |model: &str, anchor: Option<&str>| Logged {
@@ -2733,7 +2317,6 @@ mod agent_version_tests {
         };
         let mut s = forked_session();
         s.head_id = Some("u2".to_string());
-        // u1 has the connection; u2 drops it. x1 forks from u1 and keeps it.
         s.agent_versions.push(with_sentry("m1", Some("u1")));
         s.agent_versions.push(version("m2", Some("u2")));
         s.insert_effect(
@@ -2800,7 +2383,6 @@ mod agent_version_tests {
                 &ctx,
             );
         }
-        // Append-only: superseded same-anchor writes stay but never win.
         assert_eq!(s.agent_versions.len(), 3);
         assert_eq!(s.at_head().resolve_agent_for(), Some(config("m3")));
         assert_eq!(s.at(Some("x1")).resolve_agent_for(), Some(config("m1")));
@@ -2828,13 +2410,11 @@ mod effect_tests {
             tool_call_id: None,
         };
         let json = serde_json::to_value(&e).unwrap();
-        // Envelope, tag, and kind-specific fields all on one flat object.
         assert_eq!(json["id"], "call_1");
         assert_eq!(json["status"], "pending");
         assert_eq!(json["kind"], "tool_call");
         assert_eq!(json["name"], "get_weather");
         assert_eq!(json["handler"], "worker");
-        // Absent kinds' fields are omitted, not null.
         assert!(json.get("stream").is_none());
         assert!(json.get("agent_id").is_none());
         let back: Effect = serde_json::from_value(json).unwrap();
@@ -2848,7 +2428,6 @@ mod node_wire_compat_tests {
 
     #[test]
     fn legacy_kind_tagged_node_json_still_deserializes() {
-        // Trees persisted before the Node union was removed carry `kind`.
         let node: NewMessage = serde_json::from_value(serde_json::json!({
             "kind": "message",
             "message": {"id": "m1", "role": "user", "content": "hi", "tool_calls": []},
@@ -2859,8 +2438,6 @@ mod node_wire_compat_tests {
     }
 }
 
-/// Nothing to do until the caller answers: every outstanding call is one only
-/// the client can settle.
 pub fn waiting_on_client(calls: &[Effect]) -> bool {
     !calls.is_empty() && calls.iter().all(|c| c.handler == Some(Handler::Client))
 }

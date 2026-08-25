@@ -1,6 +1,3 @@
-//! Auth: a connection lost its access and a person must restore it. Resolving
-//! the interrupt re-fetches the tools with the new credential.
-
 use super::InterruptKind;
 use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{AuthNeed, Requester};
@@ -9,9 +6,6 @@ use crate::runtime::session::state::SessionStateAtNode;
 
 pub const PREFIX: &str = "mcp-auth:";
 
-/// What a channel builds a way in from: which connection, and who is
-/// asking. Never a link. One is minted when the prompt is delivered, so the
-/// log holds none.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Authorize {
     pub connection: ConnectionPath,
@@ -32,12 +26,10 @@ impl InterruptKind for Auth {
     }
 }
 
-/// Derived from the connection, so a redelivery keeps one prompt.
 fn interrupt_id(connection: &ConnectionPath) -> String {
     format!("{PREFIX}{connection}")
 }
 
-/// The first connection that needs a person and has not been asked about.
 fn needing(at: SessionStateAtNode) -> Option<(ConnectionPath, AuthNeed)> {
     let state = at.state();
     let config = at.resolve_agent_for()?;

@@ -1,16 +1,3 @@
-//! What a project *is*, as `substructure.toml` declares it — the half of the
-//! file a deployment holds rather than the half that describes running an
-//! engine here.
-//!
-//! One type, both ends: `subs apply` sends this, the deployment stores it, and
-//! both run the same `check_*` functions, so the server enforces exactly what
-//! the file already promised. `deny_unknown_fields` throughout makes version
-//! skew a loud error rather than a silently dropped section.
-//!
-//! Nothing here binds a credential. `api_key_env` and `signing_secret_env` name
-//! variables on the machine an engine runs on, which is why [`Manifest`] strips
-//! them before the document crosses the wire.
-
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Context as _, Result};
@@ -31,11 +18,6 @@ use crate::runtime::worker::{AgentEntry, Hosting, WorkerEndpoint};
 
 pub use crate::cli::env::ProviderKind;
 
-/// The declaration a deployment holds: the agents, the blocks they name, the
-/// connections they may reach, and where Slack routes.
-///
-/// Replace, not merge — the document is the whole declaration, so an agent,
-/// block, or channel absent from it is one that was removed.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Manifest {
@@ -54,9 +36,6 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Every check the file's own parse runs, in the order that reports the
-    /// most specific cause: a block before the agent that names it, an agent
-    /// before the Slack table that routes to it.
     pub fn validate(&self) -> Result<()> {
         for (id, spec) in &self.mcp {
             check_id(id).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
@@ -79,9 +58,6 @@ impl Manifest {
         Ok(())
     }
 
-    /// The variables this document names, which a deployment cannot read. The
-    /// wire copy carries none, so a server that receives one is talking to a
-    /// CLI that did not strip them.
     pub fn local_bindings(&self) -> Vec<String> {
         let llm = self
             .llm
@@ -118,8 +94,6 @@ impl Manifest {
         llm.chain(agent).chain(mcp).chain(plugin).collect()
     }
 
-    /// This document with the env-bound fields dropped — the copy that crosses
-    /// the wire. Named, never sent: a deployment holds its own credentials.
     pub fn for_wire(&self) -> Self {
         let mut wire = self.clone();
         for spec in wire.llm.values_mut() {
@@ -132,7 +106,6 @@ impl Manifest {
             spec.client_id_env = None;
             spec.client_secret_env = None;
         }
-        // The content is sent separately; `hash` names it.
         for spec in wire.plugin.values_mut() {
             spec.path = None;
             spec.bundle = None;
@@ -149,7 +122,6 @@ impl Manifest {
             let path = ConnectionPath::Mcp(id.clone());
             (path.clone(), decl.clone().at(path, ConnectorProtocol::Mcp))
         });
-        // A plugin's servers join the registry as ordinary connections.
         let from_plugins = self.plugin.iter().flat_map(|(pid, spec)| {
             spec.bundle.iter().flat_map(move |b| {
                 b.servers.iter().map(move |(name, server)| {
@@ -173,8 +145,6 @@ impl Manifest {
         self.connections().into_keys().collect()
     }
 
-    /// Load each plugin's bundle from its `path`, relative to `base`. Entries
-    /// that already have a bundle do not change.
     pub fn resolve_plugins(&mut self, base: &std::path::Path) -> Result<ResolvedPlugins> {
         let mut resolved = ResolvedPlugins::default();
         for (id, spec) in &mut self.plugin {
@@ -198,13 +168,10 @@ impl Manifest {
                 resolved.pending.insert(id.clone(), loaded.pending);
             }
         }
-        // The bundles add servers, which the checks must see.
         self.validate()?;
         Ok(resolved)
     }
 
-    /// The declared blocks as the engine reads them: venue and wire shape,
-    /// never a credential.
     pub fn llm_blocks(&self) -> LlmBlocks {
         self.llm
             .iter()
@@ -212,7 +179,6 @@ impl Manifest {
             .collect()
     }
 
-    /// Every agent this project declares, keyed by the id a client routes on.
     pub fn agents(&self) -> BTreeMap<String, AgentEntry> {
         self.agent
             .iter()
@@ -224,15 +190,10 @@ impl Manifest {
         self.agent.keys().cloned().collect()
     }
 
-    /// The agent answering DMs, for the engine that serves them.
     pub fn slack_dm_agent(&self) -> Option<String> {
         self.slack.as_ref()?.dm.clone()
     }
 
-    /// Route combinations that cannot work: a `credential = "user"`
-    /// connection reached from a Slack binding whose conversations are
-    /// shared. The route is reported, not the agent — the same agent serving
-    /// direct messages is normal and correct.
     pub fn scope_notices(&self) -> Vec<String> {
         let connections = self.connections();
         let personal: Vec<&ConnectionPath> = connections
@@ -297,31 +258,17 @@ impl Manifest {
     }
 }
 
-/// One `[llm.<id>]` block: what runs a call on it, and — where the engine runs
-/// it — how a key is bound.
-///
-/// The key is named, never written, for the same reason a connection's is: a
-/// committed file must not be able to hold a secret. A `worker` block names no
-/// variable at all — the call never leaves the worker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderSpec {
     #[serde(rename = "type")]
     pub kind: ProviderKind,
-    /// Variable holding the key. Absent ⇒ the type's own default
-    /// (`ANTHROPIC_API_KEY` and so on). Local only: stripped by
-    /// [`Manifest::for_wire`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Wire shape of the `llm.execute` a worker answers. Only ever valid on
-    /// `type = "worker"`; absent ⇒ the engine's neutral format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<LlmFormat>,
-    /// How long the vendor holds a cached prompt prefix. Each vendor spells
-    /// its own lives, so [`check_llm`] reads this against the block's `type`.
-    /// Absent ⇒ the vendor default, which suits a session that turns often.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_ttl: Option<String>,
 }
@@ -334,7 +281,6 @@ impl ProviderSpec {
         }
     }
 
-    /// The variable this block's key is read from, for the types that need one.
     pub fn api_key_env(&self) -> Option<String> {
         self.api_key_env
             .clone()
@@ -342,30 +288,9 @@ impl ProviderSpec {
     }
 }
 
-/// One `[agent.<id>]` section: what the agent is, and who decides for it.
-///
-/// `worker` is the whole routing switch — set, and decisions POST there; unset,
-/// and the engine decides by accepting its own proposals.
-///
-/// The config half mirrors the wire [`AgentConfig`], but every field is
-/// optional here, because a section has two jobs and only the first is
-/// mandatory: it declares that the agent *exists* and where its decisions go,
-/// and it may also *seed* the config. An agent that delegates everything to its
-/// worker needs only the first, so `[agent.<id>]` with nothing but a `worker`
-/// URL is a complete declaration — the worker authors the config on
-/// `session.start`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentSection {
-    /// What this agent is for, read by whoever delegates to it: naming it in
-    /// another section's `sub_agents` is what puts this text in front of a
-    /// model. Declared on the agent rather than on each edge pointing at it,
-    /// so two parents delegating to one specialist cannot describe it
-    /// differently.
-    ///
-    /// Not part of the wire config — it is expanded into the *parent's*
-    /// `sub_agents` at load, which is why an agent that declares nothing but
-    /// this and a `worker` is still a useful declaration.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -374,25 +299,18 @@ pub struct AgentSection {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
-    /// How hard the model thinks. Unset leaves the provider's own default,
-    /// which on the newest models is to think.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
-    /// The agents this one may delegate to, named by id. Each one's
-    /// description comes from the section it names.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sub_agents: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginRef>,
-    /// The default for every tool of this agent. A tool or a connection
-    /// overrides it with its own `defer`. `true` takes the defaults; a table
-    /// sets them.
     #[serde(
         default,
         deserialize_with = "crate::protocol::de_defer_tools",
@@ -407,19 +325,11 @@ pub struct AgentSection {
     pub mcp_tool_sync_failure: Option<McpToolSyncFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
-    /// Environment variable holding the secret an engine here signs this
-    /// agent's decision requests with. Named, never written. Unset means the
-    /// requests go unsigned, rather than signed with a secret nobody can check.
-    ///
-    /// Local only: a deployment mints and holds its own secret per agent, so
-    /// [`Manifest::for_wire`] strips this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret_env: Option<String>,
 }
 
 impl AgentSection {
-    /// Whether the section says anything about the agent beyond its hosting.
-    /// A section that does not is a declaration of existence alone.
     fn declares_config(&self) -> bool {
         self.llm.is_some()
             || self.model.is_some()
@@ -431,9 +341,6 @@ impl AgentSection {
             || !self.plugins.is_empty()
     }
 
-    /// The wire config this section seeds, with the hosting stripped. `None`
-    /// when the section seeds nothing — validation has already made sure a
-    /// worker is there to author one.
     pub fn to_agent_config(&self, manifest: &Manifest) -> Option<AgentConfig> {
         Some(AgentConfig {
             llm: self.llm.clone(),
@@ -465,14 +372,6 @@ impl AgentSection {
         }
     }
 
-    /// The named agents as the wire carries them, each description read from
-    /// the section it names. Resolved here rather than at delegation time
-    /// because a parent builds its tool list before any child session exists,
-    /// so there is nobody else to ask.
-    ///
-    /// An unresolved name yields an empty description rather than being
-    /// dropped: validation rejects one, and a tool the model can still call is
-    /// a better failure than a silently missing teammate.
     fn to_sub_agents(&self, manifest: &Manifest) -> Vec<SubAgent> {
         self.sub_agents
             .iter()
@@ -487,8 +386,6 @@ impl AgentSection {
             .collect()
     }
 
-    /// This agent as the engine routes it: the config it seeds, and the endpoint
-    /// its decisions go to with whatever secret the named variable held.
     pub fn to_entry(&self, manifest: &Manifest) -> AgentEntry {
         AgentEntry {
             config: self.to_agent_config(manifest),
@@ -506,16 +403,12 @@ impl AgentSection {
     }
 }
 
-/// What resolving the plugin directories produced beside the bundles.
 #[derive(Debug, Default)]
 pub struct ResolvedPlugins {
-    /// What loading dropped. Not errors.
     pub notices: Vec<String>,
-    /// Binaries to store, keyed by plugin id. Never written into the manifest.
     pub pending: BTreeMap<String, Vec<crate::plugins::Pending>>,
 }
 
-/// One `[plugin.<id>]`. A file writes `path`; the wire copy carries `bundle`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PluginSpec {
@@ -574,7 +467,6 @@ impl PluginServerSpec {
 
 fn check_plugin(id: &str, spec: &PluginSpec) -> Result<()> {
     check_id(id)?;
-    // A file declares a directory; the wire copy declares a hash.
     if spec.path.is_none() && spec.bundle.is_none() && spec.hash.is_none() {
         bail!("declares nothing. Set `path` to the plugin's directory.");
     }
@@ -603,9 +495,6 @@ fn check_plugin(id: &str, spec: &PluginSpec) -> Result<()> {
     Ok(())
 }
 
-/// A plugin declared by directory has no servers until the CLI reads it, and
-/// the file parses before that. `resolve_plugins` validates again once the
-/// bundle is in, so the check is deferred rather than dropped.
 fn unresolved(path: &ConnectionPath, manifest: &Manifest) -> bool {
     let ConnectionPath::PluginServer { plugin, .. } = path else {
         return false;
@@ -631,26 +520,12 @@ fn check_tool_prefixes(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-/// One connection an agent draws tools from: a bare id for everything the
-/// connection grants, or a table where the agent narrows it.
-///
-/// Two spellings for two different things rather than one thing twice — the
-/// filter belongs to the *pair*, not to the connection, so one `[mcp.<id>]`
-/// with one credential serves an agent that gets `read_only` and one that gets
-/// everything. Most agents narrow nothing, and `{ id = "sentry" }` is a table
-/// wrapped around a string for them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpRef {
-    /// `"sentry"` — every tool the connection grants.
     All(String),
-    /// `{ id = "sentry", tools = { … } }` — narrowed for this agent.
     Filtered(McpEntry),
 }
 
-/// The table form of an [`McpRef`]. `deny_unknown_fields` because the wire
-/// [`McpServer`] has none: a misspelled `tools` would otherwise deserialize to
-/// no filter at all, handing the model every tool the connection grants when
-/// the file asked for a few.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpEntry {
@@ -671,9 +546,6 @@ pub struct McpDefaults {
     pub tool_sync_failure: McpToolSyncFailure,
 }
 
-/// The file's spelling of [`McpTools`], mirrored for the one reason
-/// [`McpEntry`] is: `deny_unknown_fields`. A misspelled `defer` would
-/// otherwise read as no setting. [`McpTools`] documents the fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpToolsEntry {
@@ -734,16 +606,12 @@ impl McpRef {
     }
 }
 
-/// One plugin an agent uses: a bare id, or a table. Same two spellings as
-/// [`McpRef`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum PluginRef {
     All(String),
     Configured(PluginEntry),
 }
 
-/// The table form of a [`PluginRef`]. `tools`, `auth_failure`, and `approve`
-/// apply to each of the plugin's servers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginEntry {
@@ -766,7 +634,6 @@ impl PluginRef {
         }
     }
 
-    /// The wire form, stamped from the bundle the manifest holds.
     fn to_wire(&self, manifest: &Manifest, defaults: McpDefaults) -> AgentPlugin {
         let id = self.id();
         let bundle = manifest.plugin.get(id).and_then(|s| s.bundle.as_ref());
@@ -808,7 +675,6 @@ impl PluginRef {
 }
 
 impl Serialize for PluginRef {
-    /// A bare id stays bare.
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::All(id) => s.serialize_str(id),
@@ -818,7 +684,6 @@ impl Serialize for PluginRef {
 }
 
 impl<'de> Deserialize<'de> for PluginRef {
-    /// Dispatched on the shape written, so a misspelled field is named.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct V;
 
@@ -847,8 +712,6 @@ impl<'de> Deserialize<'de> for PluginRef {
 }
 
 impl Serialize for McpRef {
-    /// Written back as it was written: a bare id stays bare, so a command that
-    /// rewrites the file does not wrap every connection in a table.
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::All(id) => s.serialize_str(id),
@@ -858,9 +721,6 @@ impl Serialize for McpRef {
 }
 
 impl<'de> Deserialize<'de> for McpRef {
-    /// Dispatched on the shape written, not by trying each variant: an
-    /// `#[serde(untagged)]` here would answer a misspelled field with "matched
-    /// no variant" instead of naming the field.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct V;
 
@@ -885,62 +745,33 @@ impl<'de> Deserialize<'de> for McpRef {
     }
 }
 
-/// The `[slack]` section: what the bot needs that is not a secret.
-///
-/// The tokens are absent for the same reason they are absent from `[mcp]` — a
-/// committed file must not be able to hold one — so `SLACK_APP_TOKEN` and
-/// `SLACK_BOT_TOKEN` stay in the environment.
-///
-/// Three questions, asked separately, because they have different answers and
-/// different blast radii: who takes DMs, who takes a channel nobody named, and
-/// who takes each channel that is named. Every one defaults to silence, so a
-/// bot answers only where it was told to.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackConfig {
-    /// Agent for direct messages. Absent leaves DMs unanswered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dm: Option<String>,
-    /// Agent for a mention in any channel that `channel` does not name. A
-    /// channel only ever reaches the bot by mentioning it, which is what this
-    /// is named after; a DM needs no mention, which is why it is a key of its
-    /// own. Absent makes the channel table an allowlist — the bot can be
-    /// invited anywhere and still answer only where it was named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mentions: Option<String>,
-    /// Where one channel differs, keyed by Slack channel id. An id is the
-    /// stable identity; a name is remote state that a rename re-points, so
-    /// only an id is accepted.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub channel: BTreeMap<String, SlackChannelConfig>,
 }
 
 impl SlackConfig {
-    /// Whether this section configures a bot at all.
     pub fn is_configured(&self) -> bool {
         self.dm.is_some() || self.mentions.is_some() || !self.channel.is_empty()
     }
 }
 
-/// One `[slack.channel.<id>]` section: who answers there, or that nobody does.
-///
-/// A channel names an `agent` rather than restating a system prompt or a tool
-/// list, because `[agent.<id>]` already is that bundle: pointing a channel at
-/// a different agent gives it a different prompt, model, and tools at once,
-/// and the tools are the agent's own rather than a request the model may
-/// decline.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SlackChannelConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// The bot stays out of this channel.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub off: bool,
 }
 
 impl SlackChannelConfig {
-    /// The agent that answers here, or `None` where the bot stays out.
     pub fn agent(&self) -> Option<&str> {
         match self.off {
             true => None,
@@ -949,8 +780,6 @@ impl SlackChannelConfig {
     }
 }
 
-/// A block declares one venue, so the fields of the other are not a detail to
-/// ignore — they are a misunderstanding of what the block is.
 pub fn check_llm(id: &str, spec: &ProviderSpec) -> Result<()> {
     check_id(id)?;
     match spec.kind {
@@ -991,7 +820,6 @@ pub fn check_llm(id: &str, spec: &ProviderSpec) -> Result<()> {
     Ok(())
 }
 
-/// The lives one vendor spells for a cached prefix.
 pub fn cache_ttls(kind: ProviderKind) -> &'static [&'static str] {
     match kind {
         ProviderKind::Anthropic | ProviderKind::Openrouter => &["5m", "1h"],
@@ -1000,8 +828,6 @@ pub fn cache_ttls(kind: ProviderKind) -> &'static [&'static str] {
     }
 }
 
-/// Every name an agent uses is declared in this same document, so a typo is
-/// caught here rather than as a failing decision on the first turn.
 pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Result<()> {
     check_id(id)?;
 
@@ -1013,9 +839,6 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
         );
     }
 
-    // Nothing but hosting: the worker authors the config. Legitimate, and the
-    // only way to say "this agent is entirely my code" — but only a worker can
-    // author one, so without one the engine would have nothing to propose.
     if !section.declares_config() {
         if section.worker.is_none() {
             bail!(
@@ -1027,9 +850,6 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
         return Ok(());
     }
 
-    // Anything the document seeds has to be a config the engine can actually
-    // propose from, so a half-declared one is an error rather than a proposal
-    // that fails at the first model call.
     let Some(llm) = section.llm.as_deref() else {
         bail!(
             "no `llm`. Name one of the declared blocks: {}",
@@ -1105,8 +925,6 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
             .map_err(|e| anyhow::anyhow!("`sub_agents`: {e}"))?;
     }
 
-    // A worker-executed tool comes from worker code, so a document that
-    // declares one would be naming a function nothing here can run.
     for tool in &section.tools {
         if tool.handler != Some(Handler::Client) {
             bail!(
@@ -1123,9 +941,6 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
     Ok(())
 }
 
-/// One name in a `sub_agents` list. The description is the delegating model's
-/// only account of what the teammate is for, so an absent one is checked here
-/// — but only where nothing later could supply it.
 fn check_sub_agent(sub: &str, section: &AgentSection, manifest: &Manifest) -> Result<()> {
     let Some(child) = manifest.agent.get(sub) else {
         bail!(
@@ -1133,16 +948,9 @@ fn check_sub_agent(sub: &str, section: &AgentSection, manifest: &Manifest) -> Re
             declared(manifest.agent.keys())
         );
     };
-    // One namespace: a sub-agent reaches the model as a tool named by its id,
-    // so a collision would leave one of the two unreachable.
     if section.tools.iter().any(|t| t.name == sub) {
         bail!("`{sub}` is also a tool name, and the model sees one namespace for both");
     }
-    // A worker receives the expanded config as its `session.start` proposal and
-    // may rewrite it, so it is a legitimate source of the description. An agent
-    // the engine decides for has no such later chance — the document is the
-    // whole account of it — so a missing description there is a delegation tool
-    // the model cannot choose between.
     if child.description.is_none() && section.worker.is_none() {
         bail!(
             "`{sub}` has no description, and there is no `worker` to supply one. Set \
@@ -1152,8 +960,6 @@ fn check_sub_agent(sub: &str, section: &AgentSection, manifest: &Manifest) -> Re
     Ok(())
 }
 
-/// Every agent the bot routes to is declared in this same document, so a typo
-/// is caught here rather than as a bot that answers nowhere.
 pub fn check_slack(slack: &SlackConfig, manifest: &Manifest) -> Result<()> {
     for (key, agent) in [("dm", &slack.dm), ("mentions", &slack.mentions)] {
         if let Some(agent) = agent {
@@ -1165,8 +971,6 @@ pub fn check_slack(slack: &SlackConfig, manifest: &Manifest) -> Result<()> {
         check_channel(id, channel, manifest)
             .map_err(|e| anyhow::anyhow!("[slack.channel.{id}]: {e}"))?;
     }
-    // Channels that are all `off`, no DM agent, and nothing for the rest: a bot
-    // that connects, listens, and can answer nowhere.
     if slack.is_configured()
         && slack.dm.is_none()
         && slack.mentions.is_none()
@@ -1190,14 +994,10 @@ pub fn check_slack_agent(agent: &str, manifest: &Manifest) -> Result<()> {
     )
 }
 
-/// A channel says one of two things, and a section that says both or neither
-/// is a setting with no meaning rather than one to resolve by precedence.
 fn check_channel(id: &str, channel: &SlackChannelConfig, manifest: &Manifest) -> Result<()> {
     if id.is_empty() {
         bail!("the id is empty");
     }
-    // The likeliest mistake, and one that would otherwise match no event and
-    // report nothing: a rename re-points a name, so only an id can be pinned.
     if id.starts_with('#') || id.starts_with('@') {
         bail!(
             "`{id}` is a name, not a channel id. A rename re-points a name; use the id from the \
@@ -1233,8 +1033,6 @@ pub fn declared<'a>(mut ids: impl Iterator<Item = &'a String>) -> String {
     }
 }
 
-/// An id becomes the prefix on every tool name the model sees, so it is held to
-/// what a tool name may contain rather than to what TOML accepts as a key.
 pub fn check_id(id: &str) -> Result<()> {
     if id.is_empty() {
         bail!("the id is empty");
@@ -1248,11 +1046,6 @@ pub fn check_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Rejected while reading the document rather than at the first fetch, where it
-/// would surface as a metadata failure against a URL nobody meant to write.
-/// `header` carries a static token, so it says nothing under a method that
-/// binds its own. Reported rather than ignored: a file that names one means it
-/// to be sent.
 fn check_connection(spec: &ConnectionDecl) -> Result<()> {
     if spec.header.is_some() && spec.auth != Some(AuthKind::Token) {
         bail!("`header` carries a static token, so it needs `auth = \"token\"`");
@@ -1266,10 +1059,6 @@ fn check_connection(spec: &ConnectionDecl) -> Result<()> {
     Ok(())
 }
 
-/// A typo is caught while reading the document rather than at the first fetch.
-/// The scheme is not the engine's to police: a server on this machine or this
-/// network is reached in the clear, and a deployment that needs more says so
-/// where declarations arrive.
 pub fn check_url(url: &str) -> Result<()> {
     reqwest::Url::parse(url).with_context(|| format!("`{url}` is not a URL"))?;
     Ok(())
@@ -1338,7 +1127,6 @@ mod tests {
 
         let wire = m.for_wire();
         assert!(wire.local_bindings().is_empty());
-        // Everything else survives: only the bindings are local.
         assert_eq!(wire.agent["support"].worker, m.agent["support"].worker);
         assert_eq!(wire.llm["claude"].kind, ProviderKind::Anthropic);
         assert_eq!(wire.mcp["gmail"].scopes, m.mcp["gmail"].scopes);
@@ -1423,8 +1211,6 @@ mod tests {
         assert!(err.contains("names no block"), "{err}");
     }
 
-    /// A two-agent team: `assistant` delegates to `poet`, with each section's
-    /// remaining lines supplied by the test.
     fn team(assistant_extra: &str, poet_extra: &str) -> Manifest {
         manifest(&format!(
             r#"
@@ -1492,7 +1278,6 @@ mod tests {
         let err = bad.validate().unwrap_err().to_string();
         assert!(err.contains("no description"), "{err}");
 
-        // A worker receives the config and may write the description itself.
         team(
             r#"sub_agents = ["poet"]
                worker = "https://bot.example.com/agent""#,
@@ -1518,7 +1303,6 @@ mod tests {
         );
     }
 
-    /// One agent drawing on one connection, its `mcp` line supplied by the test.
     fn connected(mcp: &str) -> Result<Manifest, toml::de::Error> {
         toml::from_str(&format!(
             r#"
@@ -1580,9 +1364,6 @@ mod tests {
         assert!(err.contains("sometimes"), "names the value: {err}");
     }
 
-    /// The wire `McpServer` allows unknown fields, so a misspelled `tools` used
-    /// to parse as *no* filter — the file asking for a few tools and the model
-    /// getting all of them.
     #[test]
     fn a_misspelled_filter_is_an_error_rather_than_no_filter() {
         let err = connected(r#"[{ id = "mcp.sentry", tool = { read_only = true } }]"#)
@@ -1829,7 +1610,6 @@ defer_tools = { strategy = "sometimes" }
         );
     }
 
-    /// The same fault as a misspelled `tools`, one level down.
     #[test]
     fn a_misspelled_key_inside_the_tools_table_is_an_error() {
         let err = connected(r#"[{ id = "mcp.sentry", tools = { defr = true } }]"#)
@@ -1864,8 +1644,6 @@ defer_tools = { strategy = "sometimes" }
         assert!(err.contains("names no connection"), "{err}");
     }
 
-    /// `header` only means something for a credential the file says to send
-    /// itself, so it is refused rather than ignored under the other methods.
     #[test]
     fn a_header_belongs_to_a_token_connection() {
         let with = |auth: &str| {
@@ -1882,8 +1660,6 @@ defer_tools = { strategy = "sometimes" }
         }
     }
 
-    /// The route is reported, not the agent: DMs still work, so an agent
-    /// serving both is normal — the notice names the binding that cannot.
     #[test]
     fn a_personal_connection_on_a_shared_binding_is_reported_as_a_route() {
         let m = manifest(
@@ -1926,7 +1702,6 @@ defer_tools = { strategy = "sometimes" }
             notices[0]
         );
 
-        // DMs alone: every route works, so nothing is reported.
         let mut dm_only = m.clone();
         dm_only.slack.as_mut().unwrap().channel.clear();
         assert!(dm_only.scope_notices().is_empty());
@@ -1951,9 +1726,6 @@ defer_tools = { strategy = "sometimes" }
         assert!(err.contains("names no agent"), "{err}");
     }
 
-    /// A file parses before the CLI reads any plugin directory, so a path into
-    /// a plugin cannot be checked yet. `resolve_plugins` validates again with
-    /// the bundle in hand.
     #[test]
     fn a_path_into_an_unresolved_plugin_parses() {
         let m = manifest(
@@ -2226,8 +1998,6 @@ defer_tools = { strategy = "sometimes" }
         );
     }
 
-    /// The model-facing name flattens `-` to `_`, so two ids a person can tell
-    /// apart may still be one prefix. Caught at the file, not at the merge.
     #[test]
     fn two_ids_that_flatten_to_one_prefix_are_refused() {
         let mut m = manifest(

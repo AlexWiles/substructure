@@ -1,18 +1,8 @@
-//! Behavior over the agent config — the static half of an agent's identity,
-//! declared as a document the engine reads. The types live in [`crate::protocol`].
-//!
-//! Unlike opaque worker `state`, this is a typed document the engine interprets:
-//! it lets the engine propose the `client.messages` LLM request (model + tools +
-//! system) that the worker would otherwise have to hand-author. It is versioned
-//! and anchored exactly like worker state (see [`AgentVersion`](super::state::AgentVersion)).
-
 use crate::protocol::{
     AgentConfig, AgentTool, ConnectorTool, Content, DraftMessage, LlmTool, Role, SubAgent,
 };
 
 impl AgentTool {
-    /// The model-facing contract, with routing stripped. `default` is the
-    /// agent's `defer_tools`, which a tool that states its own overrides.
     pub fn to_llm_tool(&self, default: bool) -> LlmTool {
         LlmTool {
             name: self.name.clone(),
@@ -25,8 +15,6 @@ impl AgentTool {
 }
 
 impl ConnectorTool {
-    /// The model-facing contract, with routing stripped. `name` is the prefixed
-    /// name the model calls; `connector`/`remote_name` are the engine's business.
     pub fn to_llm_tool(&self) -> LlmTool {
         LlmTool {
             name: self.name.clone(),
@@ -39,8 +27,6 @@ impl ConnectorTool {
 }
 
 impl SubAgent {
-    /// The model-facing delegation tool: the sub-agent's id as the tool name and a
-    /// fixed single-`message` input schema.
     pub fn to_llm_tool(&self) -> LlmTool {
         let description = if self.description.is_empty() {
             format!("Delegate to {}", self.id)
@@ -58,17 +44,12 @@ impl SubAgent {
                 "required": ["message"]
             })),
             output: None,
-            // A sub-agent is one tool. Nothing is saved by hiding it, and a
-            // delegation is not a call the search tools can place.
             defer: false,
         }
     }
 }
 
 impl AgentConfig {
-    /// The model-facing tool list: declared function tools plus one delegation tool
-    /// per sub-agent. `None` when neither is declared. The two share the model's
-    /// single tool namespace, so a name should not appear in both.
     pub fn tools_as_llm(&self) -> Option<Vec<LlmTool>> {
         if self.tools.is_empty() && self.sub_agents.is_empty() {
             None
@@ -83,11 +64,6 @@ impl AgentConfig {
         }
     }
 
-    /// This config with the run's client-declared tools added: each `client_tools`
-    /// entry whose name isn't already taken (by a tool or sub-agent) is appended.
-    /// `None` when nothing is added, so a steady-state turn needn't rewrite the
-    /// config. Additive only — existing tools are never removed or replaced, so a
-    /// worker-declared tool always wins its name and browser tools accumulate.
     pub fn with_client_tools(&self, client_tools: &[AgentTool]) -> Option<AgentConfig> {
         let mut tools = self.tools.clone();
         for t in client_tools {
@@ -115,8 +91,6 @@ impl AgentConfig {
         self.sub_agents.iter().find(|s| s.id == name)
     }
 
-    /// The prompt for a proposed call over `view`: the configured system message
-    /// (if any) prepended to the view.
     pub fn prompt_for(&self, view: &[DraftMessage]) -> Vec<DraftMessage> {
         match &self.system {
             Some(system) => {

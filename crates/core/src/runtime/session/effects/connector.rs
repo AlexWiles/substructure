@@ -1,22 +1,3 @@
-//! One connection's tool list.
-//!
-//! ```text
-//! Pending ─complete────────────→ Completed  ⇒ its tools are offered
-//!    │ ─error[retries left]────→ RetryScheduled ─due→ Pending
-//!    └ ─error[exhausted]───────→ Failed     ⇒ the turn goes ahead without them
-//! ```
-//!
-//! A fetch is a prerequisite, not queued work: it is requested and in flight at
-//! once, and the planner offers owed fetches first and alone so one can never
-//! queue behind its dependent. Decisions and LLM calls wait on it
-//! ([`Dep::ConnectorSettled`](super::super::schedule::Dep)), which is why a
-//! terminal failure still settles: a connection the engine cannot reach must
-//! release the gate rather than park the session forever.
-//!
-//! Keyed on the connection, not the branch: a fetch belongs to the connection,
-//! so a fork never abandons one and a config rewritten for unrelated reasons
-//! costs nothing.
-
 use super::{fail, mismatched, void_events, KindSpec, Outcome, SettleError};
 use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
@@ -46,7 +27,6 @@ impl KindSpec for ConnectorSpec {
                 instructions,
             } => {
                 state.report_filter(&path, &tools, prefix.as_deref());
-                // The run tail promotes whatever this fetch was parking.
                 vec![EventPayload::ConnectorSyncCompleted(Box::new(
                     ConnectorSyncCompleted {
                         path,
@@ -81,19 +61,11 @@ impl KindSpec for ConnectorSpec {
         }))
     }
 
-    // A terminal fetch failure folds back as nothing: it answers no call, and
-    // the worker learns of it from the tools it is not offered. A fetch is
-    // itself a prerequisite, so it is dep-free by construction and no
-    // dependency cycle can form.
-
-    /// A fetch never queues, so an entry for one is always inconsistent state.
     fn voids_when_missing(&self) -> bool {
         true
     }
 
     fn dispatch(&self, _state: &SessionState, id: &str) -> Vec<EventPayload> {
-        // Fetches never queue; the planner routes an entry for one to
-        // `VoidPhantom`, so this is unreachable.
         void_events(EffectKind::ConnectorSync, id.to_string())
     }
 
@@ -114,10 +86,6 @@ impl KindSpec for ConnectorSpec {
     }
 }
 
-/// A [`Dep`] for every fetch the config in force at the node still owes:
-/// connections never fetched, or fetched but unsettled. The edge other kinds
-/// wait on — a call cannot be authored against tools the engine has not
-/// fetched, and a decision cannot route them.
 pub(in crate::runtime::session) fn owed(at: SessionStateAtNode) -> Vec<Dep> {
     let mut deps: Vec<Dep> = at
         .unsynced_connectors()
@@ -142,8 +110,6 @@ pub(in crate::runtime::session) fn owed(at: SessionStateAtNode) -> Vec<Dep> {
     deps
 }
 
-/// Fetch every connection `config` reaches that this session has never
-/// fetched.
 pub(in crate::runtime::session) fn sync(
     state: &SessionState,
     config: &AgentConfig,
@@ -163,10 +129,6 @@ pub(in crate::runtime::session) fn sync(
         .collect()
 }
 
-/// Announce a failed fetch. A terminal failure is at ERROR because the turn goes
-/// ahead without these tools, and a model answering confidently with a connector
-/// missing looks exactly like one answering with it. `subs run` shows ERROR by
-/// default, so this is the only notice a human gets.
 fn report_failure(
     connection_id: &str,
     error: &str,
@@ -192,12 +154,6 @@ fn report_failure(
 }
 
 impl SessionState {
-    /// Report what the filter did to a fresh offer.
-    ///
-    /// Logged once per fetch rather than carried on every decision: these are
-    /// facts about the config, identical on every turn, and a worker cannot act
-    /// on them anyway — an `include` that matches nothing is a typo for whoever
-    /// wrote the config, not a runtime condition for the agent to handle.
     fn report_filter(
         &self,
         connection_id: &ConnectionPath,
@@ -230,7 +186,6 @@ impl SessionState {
                 "connector include patterns matched no tool"
             );
         }
-        // A search carries a name as an argument, so no name is too long.
         if !r.oversized.is_empty() && !defers {
             tracing::warn!(
                 connection = %connection_id,
@@ -238,8 +193,6 @@ impl SessionState {
                 "connector tool names too long to offer; shorten the connection id or turn off prefixing"
             );
         }
-        // Names this fetch lost. Scoped to this connection, because every other
-        // connection reports its own when it settles.
         let collisions = self.connector_tools_for_config(&config).collisions;
         for name in collisions
             .iter()
@@ -251,9 +204,6 @@ impl SessionState {
                 "tool name claimed twice; it is offered to the model by neither connector"
             );
         }
-        // A worker that took one of the engine's names on purpose is overriding
-        // the engine. One that took it by accident has quietly turned off the
-        // search this connection depends on.
         if defers {
             for name in collisions
                 .iter()

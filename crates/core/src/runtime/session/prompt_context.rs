@@ -1,36 +1,15 @@
-//! What the engine adds to a prompt that the worker did not write.
-//!
-//! Merged at dispatch, beside the connector tools, into the stored prompt — so
-//! a retry and a replay carry what the first attempt carried.
-//!
-//! Every source is pure over [`SessionState`]. One that needs the network
-//! fetches it as its own effect and reads the settled result here, the way a
-//! connector sync settles before its tools are merged.
-//!
-//! The source decides what to say and whether the session has heard it. This
-//! module decides where it lands and whether this request already holds it.
-
 use crate::protocol::{Content, McpAnnounce, Message, Role};
 use crate::runtime::session::state::SessionStateAtNode;
 
-/// Where context lands. Each rung falls to the next when it cannot be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
-    /// The system prefix, until a call commits it. The Anthropic wire hoists a
-    /// system message into the prefix whatever its position, so a later one
-    /// would rewrite what is cached.
     System,
-    /// A block on the last user message. Falls to [`Placement::Own`] otherwise:
-    /// text on an assistant turn reads as the model's own words.
     Inline,
-    /// A message of its own.
     Own,
 }
 
-/// One piece of engine-derived context, and where it goes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptContext {
-    /// Unique to what it says. Keeps a retry from merging the same text twice.
     pub id: String,
     pub placement: Placement,
     pub content: String,
@@ -38,11 +17,8 @@ pub struct PromptContext {
 
 pub type Contributor = fn(SessionStateAtNode, &str) -> Vec<PromptContext>;
 
-/// The order is fixed: two replays that disagreed would send two different
-/// prompts.
 const CONTRIBUTORS: &[Contributor] = &[plugin_catalog, announce_servers, announce_unavailable];
 
-/// Everything the engine owes this call.
 pub fn owed(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
     CONTRIBUTORS
         .iter()
@@ -50,10 +26,6 @@ pub fn owed(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
         .collect()
 }
 
-/// The connections this path has not announced yet.
-///
-/// Once means once in the prompt. The record is the context id on an earlier
-/// call of this path, so a fork that never held the server announces it.
 fn announce_servers(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
     let Some(config) = at.resolve_agent_for() else {
         return Vec::new();
@@ -71,8 +43,6 @@ fn announce_servers(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext>
             Some(PromptContext {
                 id,
                 placement: Placement::System,
-                // The `mcp_server` key is the label, so there is no prose here
-                // to go stale or to need configuring.
                 content: at.connection_summary(&server.path)?,
             })
         })
@@ -113,8 +83,6 @@ struct Unavailable<'a> {
     reason: &'static str,
 }
 
-/// One context per plugin the path has not seen. A plugin added mid-session
-/// gets its own entry and does not change what an earlier call cached.
 fn plugin_catalog(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
     let Some(config) = at.resolve_agent_for() else {
         return Vec::new();
@@ -150,7 +118,6 @@ fn plugin_catalog(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
         .collect()
 }
 
-/// A struct, not a `json!` map, to keep the key order stable.
 #[derive(serde::Serialize)]
 struct PluginListing<'a> {
     plugin: &'a str,
@@ -167,8 +134,6 @@ struct SkillListing {
     description: String,
 }
 
-/// Merge what this call does not already hold. `applied` is the record, not the
-/// text, so it survives a change of wording.
 pub fn merge(
     prompt: &mut Vec<Message>,
     applied: &mut Vec<String>,
@@ -186,7 +151,6 @@ pub fn merge(
     }
 }
 
-/// The first rung this one can use.
 fn resolve(wanted: Placement, prompt: &[Message], system_open: bool) -> Placement {
     match wanted {
         Placement::System if system_open => Placement::System,
@@ -216,7 +180,6 @@ fn place(prompt: &mut Vec<Message>, call_id: &str, c: &PromptContext, placement:
                 return;
             };
             last.content = Some(match last.content.take() {
-                // Non-text parts stay; the context lands as one more part.
                 Some(Content::Parts(mut parts)) => {
                     parts.push(crate::protocol::StoredContent::Text {
                         text: c.content.clone(),
@@ -231,7 +194,6 @@ fn place(prompt: &mut Vec<Message>, call_id: &str, c: &PromptContext, placement:
     }
 }
 
-/// An id a replay mints the same way.
 fn message(call_id: &str, context: &str, role: Role, content: &str) -> Message {
     Message {
         id: format!("{call_id}-ctx-{context}"),
@@ -447,7 +409,10 @@ mod tests {
         assert!(owed_ids(&state).is_empty());
         let config = state.at(None).resolve_agent_for().expect("config");
         assert!(
-            state.at(None).unavailable_connector_ids(&config).is_empty(),
+            state
+                .at(None)
+                .unavailable_connector_paths(&config)
+                .is_empty(),
             "silent covers the search answer too"
         );
     }

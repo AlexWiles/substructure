@@ -1,15 +1,3 @@
-//! Event-trace snapshots.
-//!
-//! Each canonical flow is driven through the aggregate and its ordered event
-//! names asserted verbatim. The traces read as stories, and every later stage
-//! must leave them identical — a diff here is a behaviour change, not a test to
-//! update. (Stage 2 renames events; there the diff is a reviewed rename, and
-//! nothing else.)
-//!
-//! [`traces_cover_every_command_arm`] keeps the set honest: `CommandPayload` is
-//! matched exhaustively, so a new command fails to compile until a trace
-//! exercises it.
-
 use crate::connectors::registry::ConnectionPath;
 use crate::protocol::StoredResult;
 use std::collections::{BTreeSet, HashMap};
@@ -48,7 +36,6 @@ fn frontend() -> Caller {
     }
 }
 
-/// The serde `"type"` tag — the name a trace is written in.
 fn name(payload: &EventPayload) -> String {
     serde_json::to_value(payload)
         .ok()
@@ -56,16 +43,12 @@ fn name(payload: &EventPayload) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Which command a payload is. Matched exhaustively on purpose: a new
-/// `CommandPayload` arm breaks this build until a trace covers it.
 fn arm(cmd: &CommandPayload) -> &'static str {
     match cmd {
         CommandPayload::CreateSession { .. } => "CreateSession",
         CommandPayload::SubmitClientPayload { .. } => "SubmitClientPayload",
         CommandPayload::SendMessage { .. } => "SendMessage",
         CommandPayload::RequestLlmCall { .. } => "RequestLlmCall",
-        // One command, but coverage stays per outcome: a settle that no trace
-        // exercises is as much of a hole as an uncovered command was.
         CommandPayload::SettleEffect { kind, outcome, .. } => match (kind, outcome) {
             (EffectKind::LlmCall, Outcome::Error(_)) => "FailLlmCall",
             (EffectKind::LlmCall, _) => "CompleteLlmCall",
@@ -182,7 +165,6 @@ fn config_with_mcp(connection: &str) -> AgentConfig {
     }
 }
 
-/// A worker-decision policy with room for one redelivery.
 fn retrying() -> RetryPolicy {
     RetryPolicy {
         queue_timeout_secs: None,
@@ -194,8 +176,6 @@ fn retrying() -> RetryPolicy {
     }
 }
 
-/// A session driven command by command, accumulating the names of every event
-/// it commits and of every command it runs.
 struct Trace {
     agg: SessionAggregate,
     names: Vec<String>,
@@ -204,7 +184,6 @@ struct Trace {
 }
 
 impl Trace {
-    /// A fresh session with its `session.start` decision live.
     fn create() -> Self {
         Self::create_with(RetryPolicy::no_retry())
     }
@@ -218,7 +197,6 @@ impl Trace {
             ),
             names: Vec::new(),
             arms: BTreeSet::new(),
-            // A fixed epoch: traces must not depend on the wall clock.
             now: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
@@ -242,7 +220,6 @@ impl Trace {
         trace
     }
 
-    /// Handle and commit one command, exactly as production `execute` does.
     #[track_caller]
     fn run(&mut self, cmd: CommandPayload, caller: &Caller) -> Vec<EventPayload> {
         self.now += Duration::milliseconds(1);
@@ -262,7 +239,6 @@ impl Trace {
         events
     }
 
-    /// A command expected to be rejected: it records the arm but writes nothing.
     #[track_caller]
     fn reject(&mut self, cmd: CommandPayload, caller: &Caller) -> SessionError {
         self.arms.insert(arm(&cmd));
@@ -271,7 +247,6 @@ impl Trace {
             .expect_err("command should have been rejected")
     }
 
-    /// Move the clock without emitting anything, so the next `Wake` is due.
     fn advance(&mut self, secs: i64) {
         self.now += Duration::seconds(secs);
     }
@@ -285,7 +260,6 @@ impl Trace {
         self.run(self.submission(text, turn_id, false), &frontend());
     }
 
-    /// A submit that asks to be held for the next turn rather than refused.
     fn submit_queued(&mut self, text: &str, turn_id: &str) {
         self.run(self.submission(text, Some(turn_id), true), &frontend());
     }
@@ -301,7 +275,6 @@ impl Trace {
         }
     }
 
-    /// The one live decision. The slot admits at most one, so this is unambiguous.
     #[track_caller]
     fn live_decision(&self) -> String {
         let mut live = self
@@ -320,9 +293,6 @@ impl Trace {
         self.agg.state.worker_decision(&id).unwrap().trigger.clone()
     }
 
-    /// The recorded conversation on the active branch, as a client would echo
-    /// it back. A transcript built on this shares the tree's prefix, so only
-    /// what the test appends is written.
     fn recorded(&self) -> Vec<DraftMessage> {
         let tree = self.agg.state.message_tree();
         match tree.head_id.as_deref() {
@@ -335,7 +305,6 @@ impl Trace {
         }
     }
 
-    /// Settle the live decision with a transcript and actions.
     fn decide(&mut self, transcript: Vec<DraftMessage>, actions: Vec<Action>) {
         self.decide_with(transcript, actions, None);
     }
@@ -361,7 +330,6 @@ impl Trace {
         );
     }
 
-    /// Settle the live decision, appending `message` to what is recorded.
     fn decide_appending(&mut self, message: DraftMessage, actions: Vec<Action>) {
         let mut transcript = self.recorded();
         transcript.push(message);
@@ -410,28 +378,17 @@ fn done() -> Action {
     }
 }
 
-// ── The flows ───────────────────────────────────────────────────────────────
-//
-// Each is a function, so `traces_cover_every_command_arm` can run them all and
-// union the commands they issue.
-
-/// create → session.start → client payload → LLM → tool → `*.finished` → done
-/// → finalize → SessionDone.
 fn flow_full_loop() -> Trace {
     let mut t = Trace::create();
-    // The worker declares its identity; nothing else happens yet.
     t.decide(vec![], vec![]);
 
-    // A user message opens a turn and wakes the loop.
     t.submit("hi", Some("turn-1"));
 
-    // The worker records the user turn and asks for a model call.
     t.decide_appending(
         user_message("hi"),
         vec![call_llm("call-1", RetryPolicy::no_retry())],
     );
 
-    // The provider answers with a tool call.
     t.run(
         CommandPayload::settle(
             EffectKind::LlmCall,
@@ -445,7 +402,6 @@ fn flow_full_loop() -> Trace {
         &system(),
     );
 
-    // `llm.finished`: the worker records the assistant node and calls the tool.
     assert!(matches!(
         t.live_trigger(),
         Trigger::LlmFinished { ok: true, .. }
@@ -461,7 +417,6 @@ fn flow_full_loop() -> Trace {
     };
     t.decide_appending(assistant, vec![call_tool("tc-1", "get_weather")]);
 
-    // `tool.execute`: the worker runs the tool and reports the result.
     assert!(matches!(t.live_trigger(), Trigger::ToolExecute { .. }));
     t.decide(
         vec![],
@@ -472,7 +427,6 @@ fn flow_full_loop() -> Trace {
         }],
     );
 
-    // `tool.finished`: the worker records the answer and ends the turn.
     assert!(matches!(
         t.live_trigger(),
         Trigger::ToolFinished { ok: true, .. }
@@ -493,7 +447,6 @@ fn flow_full_loop() -> Trace {
         }],
     );
 
-    // `turn.finished`: the finalizer echoes `done` and the run completes.
     assert!(matches!(t.live_trigger(), Trigger::TurnFinished { .. }));
     t.decide(vec![], vec![done()]);
     t
@@ -542,12 +495,8 @@ fn trace_full_loop() {
     ]);
 }
 
-/// A connector fetch gates the LLM call queued behind it: the call waits in the
-/// queue until the fetch settles, then dispatch merges the fetched tools in.
 fn flow_connector_gating() -> Trace {
     let mut t = Trace::create();
-    // The worker's config names a connection, so settling the start decision
-    // requests the fetch.
     t.decide_with(vec![], vec![], Some(config_with_mcp("conn-1")));
     assert!(
         t.agg
@@ -560,7 +509,6 @@ fn flow_connector_gating() -> Trace {
 
     t.submit("hi", Some("turn-1"));
 
-    // The client's decision is queued behind the fetch, not dispatched.
     assert!(
         !t.agg.state.has_pending_worker_decision(),
         "the decision waits for the fetch"
@@ -571,7 +519,6 @@ fn flow_connector_gating() -> Trace {
         "and says so"
     );
 
-    // The fetch settles; the queued decision goes live at the same walk.
     t.run(
         CommandPayload::settle(
             EffectKind::ConnectorSync,
@@ -636,8 +583,6 @@ fn trace_connector_fetch_gates_an_llm_call() {
     ]);
 }
 
-/// A terminally failed fetch is settled, so it stops gating: the turn goes
-/// ahead without those tools.
 fn flow_connector_failure_releases_the_gate() -> Trace {
     let mut t = Trace::create_with(retrying());
     t.decide_with(vec![], vec![], Some(config_with_mcp("conn-1")));
@@ -676,15 +621,11 @@ fn trace_a_failed_fetch_releases_the_gate() {
     ]);
 }
 
-/// interrupt raise → LLM voiding → resume → the resume decision jumps the queue
-/// ahead of what parked behind the interrupt.
 fn flow_interrupt_and_resume() -> Trace {
     let mut t = Trace::create();
     t.decide_with(vec![], vec![], Some(config_with_client_tool("ask_user")));
     t.submit("hi", Some("turn-1"));
 
-    // One client-handled tool call (the client owes an answer) and one LLM call
-    // (which the interrupt will void).
     t.decide_appending(
         user_message("hi"),
         vec![
@@ -702,7 +643,6 @@ fn flow_interrupt_and_resume() -> Trace {
         &frontend(),
     );
 
-    // A user message on the parked branch is refused; nothing is written.
     let err = t.reject(
         CommandPayload::SubmitClientPayload {
             payload: ClientPayload::Message(ClientMessage {
@@ -716,8 +656,6 @@ fn flow_interrupt_and_resume() -> Trace {
     );
     assert!(matches!(err, SessionError::SessionInterrupted));
 
-    // The client answers its tool call anyway — effects still settle while
-    // parked — so a `tool.finished` decision queues behind the interrupt.
     t.run(
         CommandPayload::settle(
             EffectKind::ToolCall,
@@ -776,14 +714,11 @@ fn trace_interrupt_and_resume() {
     ]);
 }
 
-/// A second message arrives mid-turn and asks to queue: it is accepted, parks
-/// as a decision, and becomes the next turn the moment the first one completes.
 fn flow_queued_turn() -> Trace {
     let mut t = Trace::create();
     t.decide(vec![], vec![]);
     t.submit("hi", Some("turn-1"));
 
-    // Mid-turn, and taken: no turn starts, nothing dispatches.
     t.submit_queued("and another thing", "turn-2");
     assert_eq!(
         t.agg.state.phase.turn_id(),
@@ -791,8 +726,6 @@ fn flow_queued_turn() -> Trace {
         "the running turn keeps the phase"
     );
 
-    // Redelivery of either turn is refused, so a retrying transport cannot ask
-    // the same question twice.
     assert!(matches!(
         t.reject(t.submission("hi", Some("turn-1"), true), &frontend()),
         SessionError::TurnAlreadyActive { .. }
@@ -805,8 +738,6 @@ fn flow_queued_turn() -> Trace {
         SessionError::TurnAlreadyActive { .. }
     ));
 
-    // The first turn runs to its end. Completing it releases the phase, and the
-    // same batch starts the queued turn.
     t.decide_appending(user_message("hi"), vec![done()]);
     t.decide(vec![], vec![done()]);
     t
@@ -832,7 +763,6 @@ fn trace_queued_turn() {
         "turn.started",
         "decision.queued",
         "decision.dispatched",
-        // The queued submit writes one event and starts nothing.
         "decision.queued",
         "decision.completed",
         "message.new",
@@ -841,20 +771,16 @@ fn trace_queued_turn() {
         "decision.completed",
         "turn.completed",
         "session.done",
-        // One batch: the first turn ends and the queued one takes the phase.
         "turn.started",
         "decision.dispatched",
     ]);
 }
 
-/// timeout → retry → exhaustion → a terminal `llm.finished` carrying the error.
 fn flow_timeout_to_exhaustion() -> Trace {
     let mut t = Trace::create();
     t.decide(vec![], vec![]);
     t.submit("hi", Some("turn-1"));
 
-    // One retry, a one-second deadline: the first wake times it out, the second
-    // re-issues it, the third exhausts the policy.
     t.decide_appending(
         user_message("hi"),
         vec![call_llm(
@@ -881,7 +807,6 @@ fn flow_timeout_to_exhaustion() -> Trace {
         t.live_trigger(),
         Trigger::LlmFinished { ok: false, .. }
     ));
-    // The worker sees the failure and ends the turn.
     t.decide(vec![], vec![done()]);
     t.decide(vec![], vec![done()]);
     t
@@ -917,8 +842,6 @@ fn trace_timeout_retry_then_exhaustion() {
     ]);
 }
 
-/// A decision failure: a retryable one is redelivered at its backoff; the next
-/// exhausts the policy and ends the run.
 fn flow_decision_failure() -> Trace {
     let mut t = Trace::create_with(retrying());
     t.decide(vec![], vec![]);
@@ -939,7 +862,6 @@ fn flow_decision_failure() -> Trace {
         "a failed decision leaves the slot"
     );
 
-    // The backoff elapses and the same decision is redelivered.
     t.advance(2);
     t.wake();
     assert_eq!(t.live_decision(), decision_id, "the same decision, retried");
@@ -983,9 +905,6 @@ fn trace_decision_retry_then_terminal_failure() {
     ]);
 }
 
-/// A parallel fan-out: two tool calls settle, and the first `tool.finished`
-/// decision is told its sibling's result is still unrecorded, so it waits
-/// instead of prompting against an incomplete transcript.
 fn flow_parallel_fan_out() -> Trace {
     let mut t = Trace::create();
     t.decide(vec![], vec![]);
@@ -996,7 +915,6 @@ fn flow_parallel_fan_out() -> Trace {
         vec![call_tool("tc-1", "a"), call_tool("tc-2", "b")],
     );
 
-    // Two `tool.execute` decisions queued; the slot admits one at a time.
     assert!(matches!(t.live_trigger(), Trigger::ToolExecute { .. }));
     t.decide(
         vec![],
@@ -1055,14 +973,11 @@ fn trace_parallel_fan_out_holds_a_sibling_result() {
     ]);
 }
 
-/// A worker that answers with an earlier prefix forks the branch: the head
-/// rebases and work anchored off the retained path is voided.
 fn flow_fork_voids_stranded_work() -> Trace {
     let mut t = Trace::create();
     t.decide(vec![], vec![]);
     t.submit("hi", Some("turn-1"));
 
-    // u1 recorded, one model call against it.
     t.decide_appending(
         user_message("hi"),
         vec![call_llm("call-1", RetryPolicy::no_retry())],
@@ -1077,7 +992,6 @@ fn flow_fork_voids_stranded_work() -> Trace {
         &system(),
     );
 
-    // The assistant node is recorded and a tool call anchored on it dispatches.
     let assistant = DraftMessage {
         id: Some("call-1".to_string()),
         role: Role::Assistant,
@@ -1089,8 +1003,6 @@ fn flow_fork_voids_stranded_work() -> Trace {
     };
     t.decide_appending(assistant, vec![call_tool("tc-1", "a")]);
 
-    // The worker now answers with only the first message: the head rebases to
-    // u1 and the tool call anchored on the assistant node is stranded.
     let root: Vec<DraftMessage> = t.recorded().into_iter().take(1).collect();
     t.decide(root, vec![]);
     t
@@ -1136,7 +1048,6 @@ fn trace_fork_voids_stranded_work() {
     ]);
 }
 
-/// A delegation to a child session, both outcomes.
 fn flow_sub_agent_delegation() -> Trace {
     let mut t = Trace::create();
     t.decide(vec![], vec![]);
@@ -1173,8 +1084,6 @@ fn flow_sub_agent_delegation() -> Trace {
         &system(),
     );
 
-    // A second delegation — requested directly this time — that never starts,
-    // then fails.
     assert!(matches!(
         t.live_trigger(),
         Trigger::SubAgentFinished { ok: true, .. }
@@ -1234,9 +1143,6 @@ fn trace_sub_agent_delegation() {
     ]);
 }
 
-/// The engine restarted with work in flight: the pending decision is failed
-/// (its reply rode the severed dispatch) and so is the server-handled LLM call
-/// whose awaiting future died with the process.
 fn flow_reconcile_dispatch() -> Trace {
     let mut t = Trace::create_with(retrying());
     t.decide(vec![], vec![]);
@@ -1246,7 +1152,6 @@ fn flow_reconcile_dispatch() -> Trace {
         user_message("hi"),
         vec![call_llm("call-1", RetryPolicy::no_retry())],
     );
-    // A second message opens another decision, so a decision is live too.
     t.run(
         CommandPayload::SendMessage {
             message: user_message("more"),
@@ -1290,9 +1195,6 @@ fn trace_reconcile_dispatch_after_a_crash() {
     ]);
 }
 
-/// The commands the engine issues to itself: a direct call request, a reported
-/// failure, and the two-pass turn ending. Then a cancel, which voids what is
-/// still in flight.
 fn flow_direct_commands_then_cancel() -> Trace {
     let mut t = Trace::create();
     t.decide(vec![], vec![]);
@@ -1334,7 +1236,6 @@ fn flow_direct_commands_then_cancel() -> Trace {
         },
         &system(),
     );
-    // The worker-handled call's execute decision is live; fail the call itself.
     t.run(
         CommandPayload::settle(
             EffectKind::ToolCall,
@@ -1345,17 +1246,14 @@ fn flow_direct_commands_then_cancel() -> Trace {
         &system(),
     );
 
-    // Pass 1: the turn's output is frozen and the finalizer runs.
     t.run(
         CommandPayload::FinishTurn {
             data: serde_json::json!("out"),
         },
         &system(),
     );
-    // Pass 2, out of band: the run terminal is emitted from the frozen output.
     t.run(CommandPayload::CompleteTurn, &system());
 
-    // Nothing queued may go live behind a cancel.
     t.submit("again", Some("turn-2"));
     t.run(CommandPayload::CancelSession, &system());
     t
@@ -1399,8 +1297,6 @@ fn trace_direct_commands_then_cancel() {
     ]);
 }
 
-/// Every `CommandPayload` arm is exercised by some trace. `arm` matches
-/// exhaustively, so a new command cannot be added without landing here.
 #[test]
 fn traces_cover_every_command_arm() {
     const ALL: &[&str] = &[

@@ -1,5 +1,3 @@
-//! Proposed decisions: the engine implements a basic tool-loop.
-
 use std::collections::HashMap;
 
 use uuid::Uuid;
@@ -62,8 +60,6 @@ fn derive(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionRespon
     let pending_calls = p.pending_calls;
     let decision_id = p.decision_id;
     match trigger {
-        // The engine can now author the agent's identity: record the client's
-        // view and prompt the model per the config. No config ⇒ interrupt.
         DecisionTrigger::ClientTranscript {
             messages, client, ..
         } => Some(match config {
@@ -138,8 +134,6 @@ fn derive(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionRespon
                 tool_error(id, format!("invalid tool arguments: {error}"), transcript)
             }),
         },
-        // Acknowledge and finish: echoing this settles the deferred `SessionDone`
-        // without re-emitting `TurnCompleted` (pass 2 skips it), so `data` is null.
         DecisionTrigger::TurnFinished { .. } => Some(DecisionResponse {
             messages: recorded(transcript),
             actions: vec![DecisionAction::Done {
@@ -147,10 +141,6 @@ fn derive(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionRespon
             }],
             ..Default::default()
         }),
-        // An engine-authored kind answers its own resume. Anything else picks
-        // the turn back up where it stopped: re-issue the model call over the
-        // current transcript. Without this, nothing would author the next call
-        // after an interrupt.
         DecisionTrigger::InterruptResumed { resumption } => {
             let followups = interrupts::resolve_followups(&resumption.interrupt_id);
             let answered = interrupts::kind_for(&resumption.interrupt_id)
@@ -160,15 +150,11 @@ fn derive(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionRespon
             response.actions.splice(0..0, followups);
             (!response.authors_nothing()).then_some(response)
         }
-        // The config a worker declares here is the app's, not the session's, so
-        // the engine cannot derive it from state: the directory seeds it at
-        // delivery (`runtime::worker::handler`) instead.
         DecisionTrigger::SessionStart => None,
         _ => None,
     }
 }
 
-/// Prompt the model again over everything recorded so far, per the config.
 pub(super) fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionResponse {
     let view = recorded(transcript);
     DecisionResponse {
@@ -183,16 +169,12 @@ pub(super) fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionR
             max_completion_tokens: None,
             reasoning: config.reasoning(),
             stream: None,
-            // Omitted on purpose: the seam resolves it against the config.
             retry: None,
         }],
         ..Default::default()
     }
 }
 
-/// Record the assistant message, then dispatch its tool calls — routed per the
-/// config — or, when the model stopped calling tools, end the turn with the
-/// message content.
 fn llm_finished(
     message: &DraftMessage,
     transcript: &[Message],
@@ -224,7 +206,6 @@ fn llm_finished(
     }
 }
 
-/// Nothing once the call is settled, so a repeated answer runs nothing.
 pub(super) fn asked_about<'a>(
     tool_call_id: &str,
     transcript: &'a [Message],
@@ -268,10 +249,6 @@ fn answered(tool_call_id: &str, at: usize, transcript: &[Message]) -> bool {
         .any(|m| m.tool_call_id.as_deref() == Some(tool_call_id))
 }
 
-/// Dispatch one model tool call per config: a sub-agent spawn (paired with the
-/// message that delegates to it) when the called name is a declared sub-agent,
-/// else a `tool.call` handled per the tool's `handler` (worker being the default
-/// and the no-config behavior).
 pub(super) fn route_tool_call(
     call: &ToolCall,
     config: Option<&AgentConfig>,
@@ -294,8 +271,6 @@ pub(super) fn route_tool_call(
     }]
 }
 
-/// The user message that opens a delegated child session: the tool call's
-/// `message` argument when present, else the raw arguments verbatim.
 fn delegation_message(arguments: &str) -> DraftMessage {
     let content = serde_json::from_str::<serde_json::Value>(arguments)
         .ok()
@@ -316,11 +291,8 @@ fn delegation_message(arguments: &str) -> DraftMessage {
     }
 }
 
-/// Namespace for deriving deterministic child session ids (a fixed constant).
 const SPAWN_NAMESPACE: Uuid = Uuid::from_u128(0x7b5e_1f2a_3c4d_5e6f_8091_a2b3_c4d5_e6f7);
 
-/// A stable, collision-safe child session id for a config-routed spawn. Pure in
-/// `(decision_id, tool_call_id)`, so redeliveries derive the same id.
 fn child_session_id(decision_id: &str, tool_call_id: &str) -> String {
     Uuid::new_v5(
         &SPAWN_NAMESPACE,
@@ -329,13 +301,6 @@ fn child_session_id(decision_id: &str, tool_call_id: &str) -> String {
     .to_string()
 }
 
-/// Record the client's view and prompt the model per the config: model, tools,
-/// and retry from the config, with `[system?] + view` as the prompt.
-/// Client system messages are dropped — the config's `system` is the identity,
-/// not client input. The run's client-declared tools are layered onto the config
-/// by default; when that changes the tool set the merged config rides along as
-/// an `agent` write, so echoing the proposal both runs the turn and persists the
-/// tools for routing.
 fn client_turn(
     view: &[DraftMessage],
     config: &AgentConfig,
@@ -360,7 +325,6 @@ fn client_turn(
             max_completion_tokens: None,
             reasoning: effective.reasoning(),
             stream: None,
-            // Omitted on purpose: the seam resolves it against the config.
             retry: None,
         }],
         agent: merged,
@@ -368,9 +332,6 @@ fn client_turn(
     }
 }
 
-/// Pause the session: with no config the engine cannot author the turn, and an
-/// echoed empty proposal would settle it as a silent no-op — the message
-/// recorded but never answered. The client view is still recorded.
 fn unconfigured(view: &[DraftMessage]) -> DecisionResponse {
     DecisionResponse {
         messages: view
@@ -387,12 +348,6 @@ fn unconfigured(view: &[DraftMessage]) -> DecisionResponse {
     }
 }
 
-/// Pause the session: a terminal model failure is the loop's own engine dying,
-/// not news the model can react to, and `done` would unilaterally end a turn
-/// that may be salvageable. Nothing is recorded — a truncation's partial
-/// message lives durably on the finished event.
-/// What a settled call reads as to the model: its result when it worked, the
-/// failure's sentence when it did not.
 fn settled_text(ok: bool, result: &Option<String>, error: &Option<ErrorInfo>) -> String {
     match ok {
         true => result.clone().unwrap_or_default(),
@@ -413,8 +368,6 @@ fn llm_failed(
     let reason = match error {
         Some(error) => format!("llm call failed: {error}"),
         None if truncated => "llm call truncated".to_string(),
-        // The model answered, and the answer was no. Repeating the same
-        // request asks the same question, so the run stops for a person.
         None if refused => "llm call refused".to_string(),
         None => "llm call failed".to_string(),
     };
@@ -435,10 +388,6 @@ fn llm_failed(
     }
 }
 
-/// Answer a `tool.execute` that failed its contract with a `tool.error`, so
-/// the failure flows back to the model, which can repair the call. A worker
-/// that treats `arguments` as an arbitrary string channel, or serves names it
-/// never declared, ignores the proposal and answers itself.
 fn tool_error(id: &str, error: String, transcript: &[Message]) -> DecisionResponse {
     DecisionResponse {
         messages: recorded(transcript),
@@ -487,10 +436,6 @@ fn tool_content(result: &StoredResult) -> Content {
     Content::Parts(parts)
 }
 
-/// Record the tool message (the error text when the call failed, so the model
-/// sees it), then wait for in-flight siblings or re-issue the parent request.
-/// No proposal when the parent call can't be resolved: a half proposal that
-/// records but never continues would stall the turn on echo.
 fn tool_finished(
     id: &str,
     name: &str,
@@ -525,11 +470,6 @@ fn tool_finished(
     })
 }
 
-/// The parent llm.call re-issued: its verbatim prompt (preserving any prompt
-/// shaping the worker did — system message, compaction) extended with the
-/// recorded path from the assistant message on, plus the tool results this
-/// decision adds. The parent is named by lineage: the tool call id appears in
-/// exactly one assistant message, recorded under its llm.call's id.
 pub(super) fn reissue(
     tool_call_id: &str,
     tool_messages: &[DraftMessage],
@@ -556,8 +496,6 @@ pub(super) fn reissue(
     );
     messages.extend(tool_messages.iter().cloned());
 
-    // Every field is explicit from the stored spec, so the seam merges nothing:
-    // this preserves any per-turn override (model, venue, prompt shaping) for the loop.
     Some(DecisionAction::CallLlm {
         id: None,
         llm: Some(call.llm.clone()),
@@ -853,8 +791,6 @@ mod tests {
 
     #[test]
     fn a_refused_call_stops_the_run_rather_than_answering_with_nothing() {
-        // A refusal is a 200 with an empty turn: without its own name it reads
-        // as an answer, and the run carries on from a blank one.
         let transcript = vec![msg("u1", Role::User, "hi")];
         let empty = DraftMessage::from(msg("call-1", Role::Assistant, ""));
         let p = propose(
@@ -1217,8 +1153,6 @@ mod tests {
 
     #[test]
     fn last_tool_finished_reissues_the_parent_call() {
-        // The system message lives only in the stored prompt, not the transcript:
-        // the re-issued request must preserve the worker's prompt shaping.
         let transcript = vec![
             msg("u1", Role::User, "hi"),
             assistant_with_calls("call-1", &[("tc-1", "get_time")]),
@@ -1440,8 +1374,6 @@ mod tests {
 
     #[test]
     fn the_configs_llm_block_flows_to_the_proposed_call() {
-        // Where the call runs is the block's business, resolved at the wire
-        // seam; the proposal's job is only to name the block the config names.
         let view = vec![DraftMessage::from(msg("u1", Role::User, "hi"))];
         let cfg = AgentConfig {
             llm: Some("byo".to_string()),
@@ -1482,13 +1414,11 @@ mod tests {
         };
         let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
             .expect("config ⇒ a proposal");
-        // The run's tool rides along as an agent write, so echoing persists it for routing.
         let agent = p.agent.as_ref().expect("a new tool ⇒ an agent write");
         assert!(
             agent.tool("get_tz").is_some(),
             "run tool merged into the config"
         );
-        // ...and the proposed llm.call offers it to the model.
         match &p.actions[..] {
             [DecisionAction::CallLlm { tools, .. }] => {
                 let names: Vec<_> = tools
@@ -1572,8 +1502,6 @@ mod tests {
                     message.is_some(),
                     "the delegating message rides with the spawn"
                 );
-                // A sub-agent becomes a spawn here; every other name becomes a
-                // plain call, and where it runs is settled at dispatch.
                 assert_eq!(nb.as_str(), "confirm");
                 assert_eq!(nc.as_str(), "get_time");
             }
@@ -1584,7 +1512,6 @@ mod tests {
     #[test]
     fn sub_agent_spawn_forwards_the_delegating_message() {
         let mut assistant = assistant_with_calls("call-1", &[("tc-a", "researcher")]);
-        // The model's tool arguments carry the delegation under `message`.
         assistant.tool_calls[0].function.arguments = r#"{"message":"find X"}"#.to_string();
         let p = propose(
             &llm_finished_trigger(DraftMessage::from(assistant), true, false),
@@ -1614,8 +1541,6 @@ mod tests {
         assert_ne!(child_session_id("d1", "tc1"), child_session_id("d1", "tc2"));
         assert_ne!(child_session_id("d1", "tc1"), child_session_id("d2", "tc1"));
     }
-
-    // ── approval ─────────────────────────────────────────────────────────
 
     fn calling(calls: &[(&str, &str)], defer: bool) -> Option<DecisionResponse> {
         let assistant = DraftMessage::from(assistant_with_calls("call-1", calls));
@@ -1774,8 +1699,6 @@ mod tests {
         }
         assert_eq!(p.messages.len(), 2, "nothing new is recorded");
     }
-
-    // ── one question per call ────────────────────────────────────────────
 
     fn two_held() -> (Vec<Message>, HashMap<String, EffectState>) {
         (
@@ -1940,7 +1863,6 @@ mod tests {
         );
     }
 
-    /// The transcript alone would ask about the call twice.
     #[test]
     fn a_call_already_away_is_not_asked_about_again() {
         let (transcript, llm_calls) = two_held();
@@ -2013,7 +1935,6 @@ mod tests {
         }
     }
 
-    /// Providers reject a prompt that holds a call with no answer.
     #[test]
     fn a_settled_call_waits_for_the_one_still_being_asked_about() {
         let (transcript, llm_calls) = two_held();

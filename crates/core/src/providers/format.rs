@@ -1,13 +1,8 @@
-//! The worker-format seam: translate between the engine's neutral LLM types
-//! and a provider's native wire format, for agents that declare `format`.
-//! Reuses the server-side adapters' translation code.
-
 use crate::protocol::{DeferToolsStrategy, LlmFormat, LlmResponse, PromptRequest, StreamDelta};
 
 use super::{anthropic, openai};
 
 impl LlmFormat {
-    /// The provider-native request body for an `llm.execute` trigger.
     pub fn request_to_wire(
         &self,
         request: &PromptRequest,
@@ -19,7 +14,6 @@ impl LlmFormat {
         }
     }
 
-    /// A provider-native `llm.result` response → the neutral `LlmResponse`.
     pub fn response_from_wire(&self, value: serde_json::Value) -> Result<LlmResponse, String> {
         match self {
             LlmFormat::Openai => openai::response_from_wire(value),
@@ -27,8 +21,6 @@ impl LlmFormat {
         }
     }
 
-    /// A stateful parser for provider-native `llm.token.delta` payloads
-    /// (one per streamed call — provider events are contextual).
     pub fn delta_parser(&self) -> DeltaParser {
         DeltaParser(match self {
             LlmFormat::Openai => Inner::Openai(openai::StreamParser::new()),
@@ -45,8 +37,6 @@ enum Inner {
 }
 
 impl DeltaParser {
-    /// Fold one raw event payload into neutral deltas; payloads that carry
-    /// nothing streamable yield an empty vec.
     pub fn parse_data(&mut self, data: &str) -> Vec<StreamDelta> {
         match &mut self.0 {
             Inner::Openai(p) => p.parse_data(data),

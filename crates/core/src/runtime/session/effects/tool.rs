@@ -1,21 +1,3 @@
-//! A tool call.
-//!
-//! ```text
-//! Queued ─dispatch→ Pending ─complete────────────→ Completed ⇒ queue tool.finished(ok)
-//!    ↑                 │ ─error[retries left]────→ RetryScheduled ─due→ Queued
-//!    │                 │ ─error[exhausted]───────→ Failed    ⇒ queue tool.finished(err)
-//!    └──── requeue ────┘ ─void──────────────────→ Failed
-//! ```
-//!
-//! Where a call runs follows from its name against the config in force,
-//! resolved once at request and frozen onto the call: a `Client` call is
-//! answered by the frontend, a `Worker` one is handed over as `tool.execute`,
-//! and a `Server` one the engine runs against its connection.
-//!
-//! A result that violates the tool's own declared `output` schema settles as a
-//! terminal tool error instead — the contract is the tool's, so breaking it is
-//! the tool failing, not the model.
-
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
 use crate::connectors::registry::ConnectionPath;
 use crate::protocol::{ConnectorToolKind, ErrorCode, ErrorInfo, StoredResult};
@@ -85,11 +67,6 @@ impl KindSpec for ToolSpec {
         }))
     }
 
-    /// When the retry policy is exhausted the error is the result: the model
-    /// sees it as the tool's answer and decides what to do.
-    ///
-    /// A refused credential goes to the connection. The fetch that offered this
-    /// tool was successful, thus only the connection can hold it.
     fn terminal(&self, state: &SessionState, id: &str, e: &SettleError) -> Vec<EventPayload> {
         let mut events = vec![decision_queued(Trigger::ToolFinished {
             id: id.to_string(),
@@ -142,7 +119,6 @@ impl KindSpec for ToolSpec {
             name: tc.name.clone(),
             arguments: tc.arguments.clone(),
             handler: tc.handler,
-            // A retry keeps the target it was routed to.
             target: tc.target.clone(),
             retry: t.retry_policy.clone(),
         })]
@@ -166,9 +142,6 @@ fn connector_target(state: &SessionState, id: &str) -> Option<ConnectionPath> {
         })
 }
 
-/// A tool result: record it and queue `tool.finished`. Also the client-view
-/// path's settle, which answers a pending `Client` call from a submitted
-/// transcript rather than from the settle endpoint.
 pub(in crate::runtime::session) fn complete(
     id: String,
     name: String,
@@ -190,9 +163,6 @@ pub(in crate::runtime::session) fn complete(
     ]
 }
 
-/// Issue a call. Where it runs follows from its name against the config in
-/// force, resolved once here and frozen onto the call — a later config change
-/// must not reroute a call already in flight. Idempotent by id.
 pub(in crate::runtime::session) fn request(
     state: &SessionState,
     tool_call_id: String,
@@ -205,8 +175,6 @@ pub(in crate::runtime::session) fn request(
     let engine_tool = state.connector_tool_for(&name);
     let (name, arguments, handler, target) = match engine_tool {
         Some(tool) if tool.kind == ConnectorToolKind::Call => unwrap_call(state, name, arguments),
-        // Freeze the plugin from the arguments, so a config change cannot
-        // re-aim a call that was already made.
         Some(tool) if tool.kind == ConnectorToolKind::Skill => {
             let named = argument(&arguments, "name").unwrap_or_default();
             let (plugin, skill) = crate::runtime::session::engine_tools::split_skill(&named);
@@ -228,15 +196,11 @@ pub(in crate::runtime::session) fn request(
         }
         None => (name.clone(), arguments, state.tool_handler_for(&name), None),
     };
-    // Resolved here, not at the seam: the default follows the handler, and a
-    // client tool must stay unbounded — an async call waits for a human.
     let config = state.retry_config();
     let retry = RetryPolicy::resolve(retry.as_ref(), config.as_ref(), handler.retry_target());
     if state.has_effect(EffectKind::ToolCall, &tool_call_id) {
         return Ok(Vec::new());
     }
-    // The execute decision for a worker-handled call queues at dispatch,
-    // alongside the deadline clock.
     Ok(vec![EventPayload::ToolCallRequested(ToolCallRequested {
         id: tool_call_id,
         attempt: 0,
@@ -248,19 +212,6 @@ pub(in crate::runtime::session) fn request(
     })])
 }
 
-/// A `call_tool` becomes the call it names: the same name, the same arguments,
-/// and the same route as a direct call to that tool. The wrapper is the
-/// engine's, so it stops at the engine.
-///
-/// The tool may come from any source. A connection runs on the engine, and a
-/// tool the config declares runs where its own handler says.
-///
-/// A name the agent cannot reach keeps the wrapper, with an empty target. The
-/// engine answers it with the fault, and nothing is dialled.
-///
-/// Routed at the head, not an anchor: this call has no effect yet. The config
-/// write lands before the actions run, and `insert_effect` anchors the call at
-/// the head — so the head here is the anchor it is about to be given.
 fn unwrap_call(
     state: &SessionState,
     name: String,
@@ -313,12 +264,6 @@ fn argument(arguments: &str, key: &str) -> Option<String> {
 }
 
 impl SessionState {
-    /// The `output` schema the settling tool was declared with, resolved by
-    /// lineage on the active path. `None` when the tool declared no output
-    /// contract or the call has no resolvable spec.
-    ///
-    /// A `call_tool` was rewritten into the tool it named before it was
-    /// recorded, so the name reaching here is one the spec carries.
     fn declared_output_schema(&self, tool_call_id: &str, name: &str) -> Option<serde_json::Value> {
         let tree = self.message_tree();
         let path = tree.path_to(tree.head_id.as_deref()?);

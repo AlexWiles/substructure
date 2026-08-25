@@ -1,17 +1,3 @@
-//! An LLM call.
-//!
-//! ```text
-//! Queued ─dispatch→ Pending ─complete────────────→ Completed ⇒ queue llm.finished(ok)
-//!    ↑                 │ ─error[retries left]────→ RetryScheduled ─due→ Queued
-//!    │                 │ ─error[exhausted]───────→ Failed    ⇒ queue llm.finished(err)
-//!    └──── requeue ────┘ ─void──────────────────→ Failed
-//! ```
-//!
-//! Dispatch merges the connector tools in force, so a call waits on every fetch
-//! the config at its anchor owes ([`Dep::ConnectorSettled`](super::super::schedule::Dep)).
-//! A `Worker` call is handed to the worker as `llm.execute`; a `Server` one the
-//! engine runs itself.
-
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
 use crate::protocol::{
     Content, DraftMessage, EffectStatus, ErrorCode, ErrorInfo, LlmFormat, LlmRequest, LlmResponse,
@@ -57,7 +43,6 @@ impl KindSpec for LlmSpec {
         }))
     }
 
-    /// The worker decides whether a turn that lost its model call is salvageable.
     fn terminal(&self, _state: &SessionState, id: &str, e: &SettleError) -> Vec<EventPayload> {
         vec![decision_queued(Trigger::llm_err(
             id.to_string(),
@@ -73,8 +58,6 @@ impl KindSpec for LlmSpec {
     }
 
     fn dispatch(&self, state: &SessionState, id: &str) -> Vec<EventPayload> {
-        // A queue entry with no call is inconsistent state; void it so the walk
-        // makes progress instead of spinning.
         let Some(effect) = state.effect(EffectKind::LlmCall, id) else {
             return void_events(EffectKind::LlmCall, id.to_string());
         };
@@ -98,9 +81,6 @@ impl KindSpec for LlmSpec {
         })
     }
 
-    /// A call cannot be authored against tools the engine has not fetched, and
-    /// dispatch merges the tools in force, so it waits for every fetch the
-    /// config *at its own anchor* owes — not the head's, which may have moved.
     fn deps(&self, state: &SessionState, entry: &QueueEntry) -> Vec<Dep> {
         let node = state
             .effect(EffectKind::LlmCall, &entry.id)
@@ -137,7 +117,6 @@ fn attempt(state: &SessionState, id: &str) -> u32 {
         .unwrap_or_default()
 }
 
-/// A model result: record it and queue `llm.finished` with the assistant node.
 fn complete(state: &SessionState, id: &str, response: LlmResponse) -> Vec<EventPayload> {
     let message = assistant_message(id, &response);
     let truncated = response.finish_reason.as_deref() == Some("length");
@@ -161,15 +140,10 @@ fn complete(state: &SessionState, id: &str, response: LlmResponse) -> Vec<EventP
     ]
 }
 
-/// Whether the call ended because the model declined it. Each vendor has its
-/// own word for the same answer, and the call carries a 200 and an empty turn
-/// either way.
 fn refused(finish_reason: Option<&str>) -> bool {
     matches!(finish_reason, Some("refusal") | Some("content_filter"))
 }
 
-/// Issue a call. Idempotent by id: (re-)issue only for a new, `Failed`, or
-/// `RetryScheduled` call, so a repeat request writes nothing.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::runtime::session) fn request(
     state: &SessionState,
@@ -196,10 +170,6 @@ pub(in crate::runtime::session) fn request(
         );
         return Ok(Vec::new());
     }
-    // Mint ids now so the stored prompt (and its retries) is deterministic
-    // across replay; keep the wire form. Connector tools are merged at
-    // dispatch, when they are current; the execute decision for a
-    // worker-handled call queues there too.
     let request = LlmRequest {
         messages: request
             .messages
@@ -208,9 +178,6 @@ pub(in crate::runtime::session) fn request(
             .collect(),
         ..request
     };
-    // Frozen from the config in force, not read again at execution: the
-    // request and the tools merged into it must lower the same way, and a
-    // replay must lower the way the original did.
     let defer_tools_strategy = state
         .at_head()
         .resolve_agent_for()
@@ -229,10 +196,6 @@ pub(in crate::runtime::session) fn request(
     })])
 }
 
-/// The assistant node for a completed call. Recorded under the call id: it's
-/// globally unique (so reconcile still records a new node) and it's the id the
-/// client was already streamed — AG-UI keys the assistant message on the call id
-/// — so a client's full-view echo matches this node instead of forking.
 fn assistant_message(call_id: &str, response: &LlmResponse) -> DraftMessage {
     let tool_calls = (!response.tool_calls.is_empty()).then(|| response.tool_calls.clone());
     let content = if response.images.is_empty() {

@@ -10,48 +10,24 @@ use crate::protocol::ClientInput;
 
 #[derive(Args)]
 pub struct RunArgs {
-    /// The message to send. Shorthand for
-    /// `--input '{"type":"client.message","message":{"role":"user","content":"..."}}'`.
     #[arg(value_name = "MESSAGE")]
     message: Option<String>,
-    /// Agent id to run, naming an `[agent.<id>]` section. Falls back to
-    /// `[run].agent`.
     #[arg(long)]
     agent: Option<String>,
-    /// JSON input, for anything a plain message cannot say. Its `type` selects
-    /// the path:
-    ///   `client.message` / `client.messages` / `client.action`  submit a client payload;
-    ///   `interrupt.resume`                                       resume a parked interrupt;
-    ///   `tool.result` / `tool.error`                             settle a client-side tool call.
-    ///
-    /// A plain user turn:
-    /// `{"type":"client.message","message":{"role":"user","content":"hi"}}`
     #[arg(long, conflicts_with = "message")]
     input: Option<String>,
-    /// Resume/continue an existing session. Omit to start a new one (its id is
-    /// printed). Required for `interrupt.resume` and `tool.result`/`tool.error`.
     #[arg(long)]
     session: Option<String>,
-    /// Environment file (default: walks up from cwd looking for
-    /// `substructure.toml`).
     #[arg(short = 'c', long)]
     config: Option<std::path::PathBuf>,
-    /// Run the turn on the deployment at this URL. Point it at a `subs serve`
-    /// to use the engine that runs there.
     #[arg(long)]
     url: Option<String>,
-    /// SQLite dev database path. [default: `db` in `substructure.toml`, else
-    /// `~/.config/substructure/substructure.db`]
     #[arg(long)]
     db: Option<String>,
-    /// Output mode. (Engine logs go to stderr at error level; set RUST_LOG=info for more.)
     #[arg(long, short = 'o', value_enum)]
     output: Option<OutputFormat>,
 }
 
-/// Parse `--input`, splicing `--agent` in as `agent_id` when the JSON didn't carry one.
-/// A submit needs `agent_id`; the other tags have no such field, so a stray key from
-/// `--agent` is simply ignored by serde.
 fn parse_input(input: &str, agent: Option<String>) -> anyhow::Result<ClientInput> {
     let mut value: serde_json::Value =
         serde_json::from_str(input).map_err(|e| anyhow::anyhow!("invalid --input: {e}"))?;
@@ -69,18 +45,13 @@ impl RunArgs {
 }
 
 pub async fn run(args: RunArgs) -> anyhow::Result<()> {
-    // Anything argv omits can be pinned in the project file. Precedence is
-    // flag > environment > file > default, applied one field at a time.
     let cfg = project_config::load(args.config.as_deref())?;
 
     let run = cfg.run.clone().unwrap_or_default();
     let output_mode = args.output.or(run.output).unwrap_or(OutputFormat::AgUi);
 
-    // Preflight: the agent is checked against the file before a session exists,
-    // so a typo costs nothing and leaves nothing behind.
     let agent_id = select_agent(args.agent, run.agent, &cfg.agent_ids())?;
 
-    // Captured for the resume hint printed at the end, before the args are consumed.
     let payload = args.message.clone().or_else(|| args.input.clone());
 
     let input = match (args.message, args.input) {

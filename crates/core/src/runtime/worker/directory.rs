@@ -9,46 +9,28 @@ pub enum Hosting {
     Http(WorkerEndpoint),
 }
 
-/// One agent as declared: the config the app seeds, plus the hosting that never
-/// crosses the wire.
-///
-/// `config` is `None` for an agent that delegates everything to its worker —
-/// the declaration says the agent exists and where its decisions go, and the
-/// worker authors the identity on `session.start`. An engine-hosted agent
-/// always has one; nothing else could supply it.
 #[derive(Debug, Clone)]
 pub struct AgentEntry {
     pub config: Option<AgentConfig>,
     pub hosting: Hosting,
 }
 
-/// A worker attached to one agent. `signing_secret` is what the named
-/// environment variable held; unset means the requests go unsigned rather than
-/// signed with a secret nobody can check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerEndpoint {
     pub url: String,
     pub signing_secret: Option<String>,
 }
 
-/// Every agent and llm block one deployment serves. Read-only: the declaration
-/// is applied at startup (locally, from `substructure.toml`), never mutated by
-/// a running engine.
 pub trait AgentDirectory: Send + Sync {
-    /// The agent as declared, or `None` when this app declares no such agent.
     fn agent(&self, tenant_id: &str, agent_id: &str) -> Option<AgentEntry>;
 
-    /// The `[llm.*]` blocks this app declares.
     fn llm(&self, tenant_id: &str) -> LlmBlocks;
 
-    /// The declared agent ids, for the error that says what could have been named.
     fn agent_ids(&self, tenant_id: &str) -> Vec<String>;
 
-    /// Tenants with anything declared — the decision loops to start.
     fn tenants(&self) -> Vec<String>;
 }
 
-/// One tenant's declaration, read from the file at startup.
 pub struct StaticAgentDirectory {
     tenant_id: String,
     agents: BTreeMap<String, AgentEntry>,
@@ -94,9 +76,6 @@ impl AgentDirectory for StaticAgentDirectory {
     }
 }
 
-/// An engine nothing is declared to — an embedded runtime whose workers are
-/// registered in process. Every agent is undeclared, so every decision it is
-/// asked to route fails saying so.
 pub struct EmptyAgentDirectory;
 
 impl AgentDirectory for EmptyAgentDirectory {
@@ -117,7 +96,6 @@ impl AgentDirectory for EmptyAgentDirectory {
     }
 }
 
-/// The declared ids as an error names them.
 pub fn declared(ids: &[String]) -> String {
     match ids.is_empty() {
         true => "none".to_string(),
@@ -182,7 +160,6 @@ mod tests {
         );
         assert_eq!(engine_hosted.hosting, Hosting::Engine);
 
-        // A worker-hosted agent may seed nothing: its worker authors the config.
         let pushed = d.agent("default", "triage").expect("declared");
         assert!(pushed.config.is_none());
         let Hosting::Http(endpoint) = pushed.hosting else {

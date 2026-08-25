@@ -12,9 +12,6 @@ pub struct RetryState {
     pub next_at: Option<DateTime<Utc>>,
 }
 
-/// What a policy is being resolved for. Finer than `EffectKind` because a tool
-/// call's default follows where it runs: a worker tool must be bounded, and a
-/// client tool must not be — an async call waits for a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryTarget {
     Llm,
@@ -58,13 +55,6 @@ impl RetryPolicy {
         }
     }
 
-    /// The policy in force: the engine's default for the target, with each
-    /// override layered on top — the agent's `default`, then what it declared
-    /// for this kind, then what the action asked for.
-    ///
-    /// Layered rather than replaced so that naming one field changes one field.
-    /// A whole-policy override would make every partial config a silent way to
-    /// drop the bounds it did not restate.
     pub fn resolve(
         action: Option<&RetryOverride>,
         config: Option<&RetryConfig>,
@@ -80,8 +70,6 @@ impl RetryPolicy {
         }
     }
 
-    /// An unset timeout stays unset, which an override cannot express, so it
-    /// re-resolves to the default instead.
     pub fn as_override(&self) -> RetryOverride {
         RetryOverride {
             queue_timeout_secs: self.queue_timeout_secs,
@@ -131,28 +119,21 @@ impl RetryPolicy {
         Some(now + chrono::Duration::seconds(i64::from(queued) + i64::from(run)))
     }
 
-    /// The deadline for the whole effect, measured from its first dispatch —
-    /// backoff and `Running` time included. None ⇒ unbounded.
     pub fn total_deadline(&self, started_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.total_timeout_secs
             .map(|s| started_at + chrono::Duration::seconds(i64::from(s)))
     }
 
-    /// Record a failure and return the new retry state.
-    /// `next_at` will be set if retries remain, None if exhausted.
     pub fn record_failure(&self, state: &RetryState, now: DateTime<Utc>) -> RetryState {
         let attempts = state.attempts + 1;
         let next_at = self.next_retry_at(attempts, now);
         RetryState { attempts, next_at }
     }
 
-    /// Returns true if the next failure (given current state) would exhaust the
-    /// attempts, or if the failure is not retryable.
     pub fn exhausted(&self, state: &RetryState, retryable: bool) -> bool {
         !retryable || state.attempts + 1 >= self.attempts()
     }
 
-    /// The attempt cap, floored at one: a policy still has to try once.
     fn attempts(&self) -> u32 {
         self.max_attempts.max(1)
     }
@@ -174,9 +155,6 @@ impl RetryPolicy {
 }
 
 impl RetryConfig {
-    /// The overrides that apply to `target`, broadest first: `default`, then
-    /// what the config declares for the kind. Both apply, so a `default` sets
-    /// the shape and a kind adjusts it.
     fn layers_for(&self, target: RetryTarget) -> Vec<&RetryOverride> {
         let declared = match target {
             RetryTarget::Llm => &self.llm,
@@ -185,9 +163,6 @@ impl RetryConfig {
             }
             RetryTarget::SubAgent => &self.sub_agent,
             RetryTarget::ConnectorSync => &self.connector,
-            // Not the agent's to declare, and `default` must not reach it
-            // either: it bounds the call that produces the config, so reading
-            // the policy from there would be circular.
             RetryTarget::Decision => return Vec::new(),
         };
         self.default.iter().chain(declared.iter()).collect()
@@ -221,8 +196,6 @@ impl WorkerRetryResolver for DefaultWorkerRetryResolver {
 mod tests {
     use super::*;
 
-    /// An override naming only `max_attempts` — the partial shape that used to
-    /// be impossible to write.
     fn attempts(n: u32) -> RetryOverride {
         RetryOverride {
             max_attempts: Some(n),

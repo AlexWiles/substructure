@@ -1,11 +1,3 @@
-//! Where a decision goes, end to end.
-//!
-//! The routing rule is one line of code and the whole of the file's contract,
-//! so it is checked against a real engine over a real database rather than
-//! against a mock of the router: an agent with a `worker` is pushed there, an
-//! agent without one is decided in-engine, and an agent nobody declared fails
-//! immediately instead of climbing the retry ladder.
-
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -45,14 +37,6 @@ use tokio_util::sync::CancellationToken;
 
 const TENANT: &str = "default";
 
-// ── A model that answers once ────────────────────────────────────────────
-
-/// Replies with fixed text and records what it was asked, so a test can assert
-/// on the prompt the engine composed without a network.
-///
-/// An offered tool is called once, before any tool result is in the view: a
-/// config declaring a sub-agent gets one delegation, and the result that
-/// follows ends the turn with the reply.
 #[derive(Default)]
 struct StubModel {
     reply: String,
@@ -109,8 +93,6 @@ impl LlmProviderTrait for StubProvider {
     }
 }
 
-// ── Harness ──────────────────────────────────────────────────────────────
-
 fn tmpdir() -> std::path::PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -156,7 +138,6 @@ fn worker_hosted(llm: &str, url: &str) -> AgentEntry {
     }
 }
 
-/// An agent that delegates everything: the file names the URL and nothing else.
 fn delegating(url: &str) -> AgentEntry {
     AgentEntry {
         config: None,
@@ -171,11 +152,9 @@ struct Harness {
     runtime: Arc<Runtime>,
     model: Arc<StubModel>,
     issuer: Issuer,
-    // Held for the test's life: dropping it aborts the decision loops.
     _adapter: Arc<PushAdapter>,
 }
 
-/// A real engine over a temp database, routing per `agents`.
 async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
     start_with(agents, Vec::new(), Issuer::app()).await
 }
@@ -276,11 +255,6 @@ async fn start_with(
     }
 }
 
-/// Send one user message and drain the turn, returning its events.
-///
-/// Stops at the first terminal. A non-retryable decision failure counts as one:
-/// a `session.start` that fails before any turn opens never emits
-/// `TurnCompleted`, so waiting for one would just time out.
 async fn turn(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
     drain(h, agent_id, text, |e| {
         matches!(
@@ -295,9 +269,6 @@ async fn turn(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
     .await
 }
 
-/// [`turn`], draining until the turn's own terminal. A failure emits its
-/// `DecisionErrored` and its `TurnCompleted` in one commit, so a test that
-/// wants the second must not stop at the first.
 async fn turn_completed(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
     drain(h, agent_id, text, |e| {
         matches!(e, EventPayload::TurnCompleted(_))
@@ -377,10 +348,6 @@ async fn drain(
     seen
 }
 
-// ── The route table ──────────────────────────────────────────────────────
-
-/// The whole point: a declared agent with no worker runs a full turn with no
-/// worker process anywhere.
 #[tokio::test]
 async fn a_declared_agent_runs_a_turn_in_engine() {
     let h = start(BTreeMap::from([(
@@ -407,8 +374,6 @@ async fn a_declared_agent_runs_a_turn_in_engine() {
     assert_eq!(seen[0].model, "stub-model", "the declared model is used");
 }
 
-/// A typo in an agent id will not become correct by waiting, so the decision
-/// fails at once rather than retrying for ten minutes.
 #[tokio::test]
 async fn an_undeclared_agent_fails_fast() {
     let h = start(BTreeMap::from([(
@@ -436,8 +401,6 @@ async fn an_undeclared_agent_fails_fast() {
     assert!(h.model.seen.lock().unwrap().is_empty(), "no model call");
 }
 
-/// Hosting is per agent, so the two kinds coexist in one tenant: the same
-/// engine decides for one and pushes the other.
 #[tokio::test]
 async fn engine_hosted_and_worker_hosted_agents_share_a_tenant() {
     let worker = echo_worker().await;
@@ -454,12 +417,9 @@ async fn engine_hosted_and_worker_hosted_agents_share_a_tenant() {
         "the engine-hosted agent never touches the worker"
     );
 
-    // The worker-hosted agent's `session.start` reaches the worker instead.
     turn(&h, "triage", "hi").await;
     assert!(worker.calls() > 0, "the worker-hosted agent is pushed");
 }
-
-// ── A worker that echoes the proposal ────────────────────────────────────
 
 struct StubWorker {
     addr: std::net::SocketAddr,
@@ -486,8 +446,6 @@ impl StubWorker {
     }
 }
 
-/// The starter worker, in one line: `({proposed}) => proposed`. It records what
-/// it was sent, so a test can assert on the request as well as the outcome.
 async fn echo_worker() -> StubWorker {
     use axum::routing::post;
     use axum::{Json, Router};
@@ -517,11 +475,6 @@ async fn echo_worker() -> StubWorker {
     }
 }
 
-// ── What a broken worker tells the operator ──────────────────────────────
-
-/// A worker that answers every decision with `status` and `body`, whatever
-/// those are — the shapes a handler produces when it breaks rather than
-/// decides.
 async fn broken_worker(status: u16, body: &'static str) -> StubWorker {
     use axum::http::{header, StatusCode};
     use axum::routing::post;
@@ -556,7 +509,6 @@ async fn broken_worker(status: u16, body: &'static str) -> StubWorker {
     }
 }
 
-/// The events a broken worker produces, end to end.
 async fn events_from(status: u16, body: &'static str) -> Vec<EventPayload> {
     let worker = broken_worker(status, body).await;
     let h = start(BTreeMap::from([(
@@ -567,7 +519,6 @@ async fn events_from(status: u16, body: &'static str) -> Vec<EventPayload> {
     turn(&h, "triage", "hi").await
 }
 
-/// The decision error a broken worker produces, end to end.
 async fn failure_from(status: u16, body: &'static str) -> DecisionErrored {
     let events = events_from(status, body).await;
     events
@@ -579,9 +530,6 @@ async fn failure_from(status: u16, body: &'static str) -> DecisionErrored {
         .unwrap_or_else(|| panic!("the decision fails: {events:#?}"))
 }
 
-/// A worker whose own configuration is wrong says so in its body. Reporting
-/// only the status leaves the operator with a number, and that number is what
-/// reaches Slack.
 #[tokio::test]
 async fn a_worker_error_body_reaches_the_decision_error() {
     let failed = failure_from(400, r#"{"error":"ANTHROPIC_API_KEY is not set"}"#).await;
@@ -601,9 +549,6 @@ async fn a_worker_error_body_reaches_the_decision_error() {
     assert_eq!(failed.error.detail.as_ref().unwrap()["status"], 400);
 }
 
-/// A handler that catches its own exception and answers `{"error": …}` with a
-/// 200 knows why it failed. That sentence is worth more than the parse failure
-/// its non-protocol shape would otherwise produce.
 #[tokio::test]
 async fn an_error_shaped_body_is_reported_as_the_workers_error() {
     let failed = failure_from(200, r#"{"error":"llm block `claud` is not configured"}"#).await;
@@ -622,9 +567,6 @@ async fn an_error_shaped_body_is_reported_as_the_workers_error() {
     );
 }
 
-/// The reported bug: every malformed decision said "failed to parse response:
-/// error decoding response body" — reqwest's constant, with serde's own message
-/// one link down a source chain nobody printed.
 #[tokio::test]
 async fn a_malformed_decision_names_the_field_that_failed() {
     let failed = failure_from(
@@ -643,8 +585,6 @@ async fn a_malformed_decision_names_the_field_that_failed() {
         failed.error.message
     );
     assert!(!failed.retryable, "the same bytes parse the same way");
-    // An action is an internally-tagged enum, so serde buffers its body and the
-    // param stops at the element rather than reaching `.model`.
     assert_eq!(failed.error.param.as_deref(), Some("actions[0]"));
     assert!(
         !failed.error.message.contains("{"),
@@ -658,9 +598,6 @@ async fn a_malformed_decision_names_the_field_that_failed() {
     );
 }
 
-/// `TurnCompleted` is the only terminal every consumer watches, so it is where
-/// a renderer decides how a failure reads. Carrying only the sentence forced
-/// one to match on prose to tell a budget failure from a malformed decision.
 #[tokio::test]
 async fn the_turn_terminal_carries_the_failure_code() {
     let worker = broken_worker(
@@ -700,9 +637,6 @@ async fn the_turn_terminal_carries_the_failure_code() {
     );
 }
 
-/// An `llm` block the file does not declare is the misconfiguration a worker
-/// hits most, and the engine — not the worker — is the only party that knows
-/// what *was* declared.
 #[tokio::test]
 async fn an_unknown_llm_block_names_the_blocks_that_exist() {
     let failed = failure_from(
@@ -721,9 +655,6 @@ async fn an_unknown_llm_block_names_the_blocks_that_exist() {
     assert_eq!(detail["name"], "claud");
 }
 
-/// A section that declares nothing but a `worker` URL seeds no config, so its
-/// worker authors the whole identity — the shape of an agent that is entirely
-/// your code, and the one the file must not force an `llm`/`model` onto.
 #[tokio::test]
 async fn an_agent_that_delegates_everything_gets_no_seeded_config() {
     use axum::routing::post;
@@ -737,7 +668,6 @@ async fn an_agent_that_delegates_everything_gets_no_seeded_config() {
             let recorder = recorder.clone();
             async move {
                 recorder.lock().unwrap().push(req.clone());
-                // Nothing was seeded, so the worker declares the agent itself.
                 if req["trigger"]["type"] == "session.start" {
                     return Json(serde_json::json!({
                         "agent": { "llm": "claude", "model": "stub-model", "system": "Be brief." }
@@ -780,8 +710,6 @@ async fn an_agent_that_delegates_everything_gets_no_seeded_config() {
     assert_eq!(h.model.seen.lock().unwrap().len(), 1);
 }
 
-/// The seeded `session.start` proposal reaches the worker, so the starter
-/// worker — `({proposed}) => proposed` — inherits the declared config for free.
 #[tokio::test]
 async fn a_worker_sees_the_declared_config_as_its_start_proposal() {
     let worker = echo_worker().await;
@@ -801,8 +729,6 @@ async fn a_worker_sees_the_declared_config_as_its_start_proposal() {
     );
     assert_eq!(start["proposed"]["agent"]["llm"], "claude");
 
-    // Echoing it configures the session, so the turn runs on the declared
-    // identity without the worker authoring one.
     assert!(
         events
             .iter()
@@ -812,10 +738,6 @@ async fn a_worker_sees_the_declared_config_as_its_start_proposal() {
     assert_eq!(h.model.seen.lock().unwrap().len(), 1);
 }
 
-/// A delegation and its opening message travel together, so the message cannot
-/// reach the child before the child's session exists. When it did, the child
-/// started with an empty transcript, never answered, and the parent's turn
-/// hung — which the drain in `turn` reports as a turn that never settled.
 #[tokio::test]
 async fn a_delegation_opens_its_child_with_the_message() {
     let mut boss = config("claude");
@@ -865,8 +787,6 @@ async fn a_delegation_opens_its_child_with_the_message() {
     );
 }
 
-// ── Starting a turn ──────────────────────────────────────────────────────
-
 fn client_message(agent_id: &str, text: &str) -> ClientInput {
     ClientInput::Message {
         agent_id: agent_id.to_string(),
@@ -908,11 +828,6 @@ async fn started(h: &Harness, translated: bool) -> (ChannelContext, String, ag_u
     (ctx, session_id, turn)
 }
 
-/// `subs run`, `subs chat`, and the `/api/v1/projects/{p}/run` route all open a
-/// turn through this one function, so what it admits is what all three read.
-///
-/// The stream is scoped to the turn, which is what closes it: nothing here
-/// asks it to stop.
 #[tokio::test]
 async fn a_started_turn_ends_its_own_stream() {
     let h = start(BTreeMap::from([(
@@ -943,8 +858,6 @@ async fn a_started_turn_ends_its_own_stream() {
     );
 }
 
-/// The same start, read the translated way. A run that reaches its end emits
-/// `RunFinished`, so a CLI that never sees one reports an unfinished run.
 #[tokio::test]
 async fn a_started_turn_translates_to_a_finished_run() {
     let h = start(BTreeMap::from([(

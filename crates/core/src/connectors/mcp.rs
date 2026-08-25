@@ -38,7 +38,6 @@ pub struct McpClient {
 type Running = RunningService<RoleClient, ClientInfo>;
 
 impl McpClient {
-    /// The client reads a token from nowhere else.
     pub fn new(
         http: reqwest::Client,
         endpoint: impl Into<String>,
@@ -79,9 +78,6 @@ impl McpClient {
         }
     }
 
-    /// Call `name` with `arguments`. A tool that fails on the far side comes
-    /// back as `ToolOutcome { is_error: true }`, not an `Err` — only reaching
-    /// the connection at all is this function's concern.
     pub async fn call_tool(
         &self,
         name: &str,
@@ -454,8 +450,6 @@ fn remote_tool(tool: Tool) -> RemoteTool {
     }
 }
 
-/// Build the credential headers for a connection. `Authorization: Bearer` is the
-/// default; a connection may name its own header instead (Sentry uses one).
 pub fn auth_headers(header: Option<&str>, token: &str) -> Result<HeaderMap, ConnectorError> {
     let name = header.unwrap_or("authorization");
     let value = if header.is_none() {
@@ -499,12 +493,10 @@ mod tests {
     struct Mock {
         legacy: bool,
         offers: Option<Vec<String>>,
-        /// Answer with SSE instead of a single JSON body.
         sse: bool,
         no_session: bool,
         expire_once: AtomicBool,
         reject_credential: bool,
-        /// Page `tools/list` once before returning the last page.
         paginate: bool,
         wants_input: bool,
         discovers: AtomicUsize,

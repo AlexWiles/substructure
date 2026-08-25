@@ -118,10 +118,6 @@ pub fn spawn_worker_processor(
     .spawn()
 }
 
-/// Builds the wire request for a decision event: the tree comes rewound from
-/// `load_as_of`, statuses come stamped on the event's meta. A load error must
-/// propagate (the runner retries the batch) — the queue never redelivers a
-/// dropped decision.
 async fn extract(
     store: &dyn EventStore,
     agents: &dyn AgentDirectory,
@@ -148,9 +144,6 @@ async fn extract(
         .await
         .map_err(|e| ProcessorError::Apply(format!("load session for decision: {e}")))?;
 
-    // The trigger's single stored copy rode the decision's queued event into
-    // state; it is immutable per decision. Absent means the decision settled
-    // after this event — nothing left to deliver.
     let Some(trigger) = session
         .state
         .worker_decision(&req.id)
@@ -169,8 +162,6 @@ async fn extract(
         .map(|h| message_tree.path_to(h))
         .unwrap_or_default();
     let at = state.at_head();
-    // Call entries are keyed by immutable prompt/spec; the as-of path picks
-    // the as-of subset even from the current map.
     let open_llm_calls = at.open_llm_calls();
 
     let pending_calls = meta.pending_work(&req.id);
@@ -200,12 +191,6 @@ async fn extract(
             decision_id: &req.id,
         },
     )
-    // `session.start` is the one trigger the engine cannot derive from the
-    // session: the config is the app's declaration, not the session's history.
-    // Seeding it here makes the declared identity the proposal, so an
-    // echo-worker inherits it and an engine-hosted agent starts configured.
-    // An agent that seeds nothing gets no proposal, and its worker authors the
-    // config exactly as it would have before the file could declare one.
     .or_else(|| {
         matches!(trigger, DecisionTrigger::SessionStart)
             .then(|| agents.agent(&event.tenant_id, agent_id)?.config)
@@ -219,8 +204,6 @@ async fn extract(
     let owning = ChannelKind::owning(owner);
     let proposer = proposers.iter().find(|p| Some(p.channel()) == owning);
 
-    // The current turn's events, as of this delivery. Bounded by the turn's
-    // start, so the read costs one turn and not the whole session.
     let turn_events: Vec<SessionEvent> = match (proposer.is_none(), state.turn_started_seq) {
         (false, Some(start)) => store
             .query_events(&EventFilter {
@@ -236,7 +219,6 @@ async fn extract(
             .collect(),
         _ => Vec::new(),
     };
-    // Give no events rather than the wrong turn's.
     let turn_events = match event.meta.turn_id.as_deref() {
         Some(stamped)
             if !turn_events.iter().any(
@@ -321,7 +303,6 @@ mod tests {
     use crate::runtime::worker::EmptyAgentDirectory;
     use crate::runtime::Caller;
 
-    /// Read-only store serving one hydrated session, as `extract` loads it.
     struct FrozenStore {
         session: SessionAggregate,
         events: BroadcastBus,
@@ -387,9 +368,6 @@ mod tests {
         }
     }
 
-    /// Drive a real session to a live client.message decision (session.start
-    /// settled with `agent`), run `extract` on its promotion event, and return
-    /// the serialized wire request.
     fn config(model: &str) -> AgentConfig {
         AgentConfig {
             llm: Some("claude".to_string()),
@@ -406,7 +384,6 @@ mod tests {
         }
     }
 
-    /// A directory declaring `agent-1` with `config`, engine-hosted.
     fn directory(config: AgentConfig) -> StaticAgentDirectory {
         StaticAgentDirectory::new(
             "tenant-a".to_string(),
@@ -496,7 +473,6 @@ mod tests {
         serde_json::to_value(&req).expect("wire request serializes")
     }
 
-    /// The `session.start` request for a fresh session, as `agents` declares it.
     async fn wire_request_for_session_start(agents: &dyn AgentDirectory) -> serde_json::Value {
         let mut agg = SessionAggregate::new(
             "sess-1".to_string(),
@@ -535,8 +511,6 @@ mod tests {
         serde_json::to_value(&req).expect("wire request serializes")
     }
 
-    /// The declared config *is* the `session.start` proposal, so an echo-worker
-    /// inherits it and an engine-hosted agent starts configured.
     #[tokio::test]
     async fn session_start_is_seeded_with_the_declared_config() {
         let wire = wire_request_for_session_start(&directory(config("m1"))).await;
@@ -544,8 +518,6 @@ mod tests {
         assert_eq!(wire["proposed"]["agent"]["llm"], "claude");
     }
 
-    /// Nothing declared, nothing seeded: the proposal stays empty, so a
-    /// proposed-first worker still reaches its own config branch.
     #[tokio::test]
     async fn session_start_without_a_declaration_carries_no_proposal() {
         let wire = wire_request_for_session_start(&EmptyAgentDirectory).await;
@@ -559,8 +531,6 @@ mod tests {
             .is_none_or(|a| a.is_empty()));
     }
 
-    /// Only `session.start` is seeded: every other trigger's proposal is
-    /// derived from the session, and a declaration must not overwrite it.
     #[tokio::test]
     async fn a_non_start_trigger_is_not_seeded() {
         let wire = wire_request_for_client_message(None).await;
@@ -571,12 +541,6 @@ mod tests {
         );
     }
 
-    /// `proposed` is always present — but never a silent no-op. With no config
-    /// the engine cannot author the turn, and an empty proposal echoed by a
-    /// blind worker settles the decision as a no-op: the user's message is
-    /// dropped with no model call, no error, no terminal event. The proposal
-    /// for this case is an interrupt (worker-echoed, like `llm.failed`), so an
-    /// echoing worker pauses the session loudly instead.
     #[tokio::test]
     async fn no_config_client_message_proposes_an_interrupt() {
         let wire = wire_request_for_client_message(None).await;
@@ -592,12 +556,6 @@ mod tests {
         );
     }
 
-    // ── the engine-hosted loop ───────────────────────────────────────────
-    //
-    // These run against a real session. A hand-written transcript can hold a
-    // state that the engine never produces.
-
-    /// `transport::push::decide_in_engine`, with the test settling the effects.
     async fn drive(agg: &mut SessionAggregate, events: Vec<SessionEvent>) -> Vec<SessionEvent> {
         let mut queue: Vec<SessionEvent> = events;
         let mut settled = Vec::new();
@@ -811,7 +769,6 @@ mod tests {
             agg.state.open_interrupts
         );
 
-        // It settles while the second question is open, so its decision is held.
         let events = dispatch(
             &mut agg,
             CommandPayload::settle(

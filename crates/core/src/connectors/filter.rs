@@ -1,18 +1,3 @@
-//! Turning what a connection offers into what the model sees.
-//!
-//! [`resolve`] filters — capability predicates, then `include`, then `exclude`
-//! — and every step only removes, so a filter can never widen what the
-//! connection granted. It also marks each surviving tool deferred or not, which
-//! is the connection's whole part in deferral: the flag lives on the tool, and
-//! the request is what leaves a deferred one out.
-//!
-//! The search tools here are the engine's, and they are not the connection's:
-//! they cover each tool of the agent, from any source.
-//!
-//! Nothing here is silent: a predicate that drops unannotated tools and an
-//! `include` that matches nothing are both reported, because both usually mean
-//! the far side changed under us.
-
 use std::num::NonZeroUsize;
 
 use crate::connectors::RemoteTool;
@@ -21,34 +6,20 @@ use crate::protocol::{
     DeferToolsStrategy, LlmTool, McpServer, McpTools,
 };
 
-/// Separates the connector id from the tool's own name. Doubled because both
-/// halves routinely contain single underscores, and a single separator cannot
-/// be parsed back into its parts — the same reason other MCP clients settled on
-/// `mcp__server__tool`.
 const SEPARATOR: &str = "__";
 
-/// Providers cap function names; OpenAI's limit is 64. An over-long name gets
-/// the whole request rejected, so it is caught here rather than at call time.
 const MAX_NAME: usize = 64;
 
-/// What a connector resolved to, plus what was dropped getting there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolution {
     pub tools: Vec<ConnectorTool>,
-    /// How many tools the connection offered before filtering.
     pub offered: usize,
-    /// Tools a capability predicate dropped because they carry no annotation at
-    /// all. A whole server landing here means it annotates nothing, not that it
-    /// has nothing to offer.
     pub unannotated: usize,
-    /// `include` globs that matched nothing — usually a rename upstream.
     pub unmatched_include: Vec<String>,
-    /// Remote names whose prefixed form would exceed what a provider accepts.
     pub oversized: Vec<String>,
 }
 
 impl Resolution {
-    /// Tools that came from no connection, so nothing was dropped reaching them.
     pub fn of(tools: Vec<ConnectorTool>) -> Self {
         Self {
             tools,
@@ -60,15 +31,6 @@ impl Resolution {
     }
 }
 
-/// Expand one connector's offered tools into model-facing tools.
-///
-/// `prefix` is the connection's, not the agent's: `Some(id)` gives the model
-/// `<id>__<remote name>`, so two connections offering a `search` cannot
-/// collide; `None` offers the connection's own names, and [`merge`] is then
-/// what keeps a collision from shadowing anything.
-///
-/// Filters always match the *remote* name — the one the connection's own
-/// documentation uses — whether or not the model sees a prefix.
 pub fn resolve(
     connector: &McpServer,
     offered: &[RemoteTool],
@@ -96,8 +58,6 @@ pub fn resolve(
     let mut tools = Vec::with_capacity(kept.len());
     let mut oversized = Vec::new();
     for tool in kept {
-        // A deferred name never reaches the request, so no provider's name
-        // limit applies to it.
         match expand(
             &connector.path,
             tool,
@@ -127,8 +87,6 @@ pub fn approves(policy: Approve, tool: &RemoteTool) -> bool {
     }
 }
 
-/// Whether a connection's tools are kept out of the request: its own setting,
-/// else the agent's.
 pub fn defers(connector: &McpServer, default: bool) -> bool {
     connector
         .tools
@@ -137,7 +95,6 @@ pub fn defers(connector: &McpServer, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// Every tool the agent may reach, in offer order.
 pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a RemoteTool> {
     let filter = connector.tools.clone().unwrap_or_default();
     offered
@@ -148,7 +105,6 @@ pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a
 
 pub use crate::protocol::{CALL_TOOL, SKILL, TOOL_SEARCH};
 
-/// Offered whenever the agent has plugins.
 pub fn skill_tool() -> ConnectorTool {
     engine_tool(
         SKILL,
@@ -174,21 +130,6 @@ pub fn skill_tool() -> ConnectorTool {
     )
 }
 
-/// The tools the engine answers for an agent that defers.
-///
-/// One set, not one for each connection: a model that does not know which
-/// connection holds a tool would otherwise search each one in turn.
-///
-/// Each does one thing. A tool whose behaviour turns on whether an argument is
-/// present is a tool a small model uses badly.
-///
-/// Every definition is constant. Nothing about which connections exist reaches
-/// them, so a connection added during a session does not rewrite the tool list,
-/// and the provider's cache holds. The catalog rides in the answer instead.
-///
-/// A new combination is a new arm here and a new [`DeferToolsStrategy`] value.
-/// The arm chooses which tools exist. It does not reword them: each definition
-/// reads the same whichever arm produced it.
 pub fn search_tools(search: DeferToolsStrategy) -> Vec<ConnectorTool> {
     match search {
         DeferToolsStrategy::Search => vec![find_tool(), call_tool()],
@@ -263,15 +204,9 @@ fn call_tool() -> ConnectorTool {
     )
 }
 
-/// The usual BM25 defaults.
 const K1: f64 = 1.2;
 const B: f64 = 0.75;
 
-/// The tools a query matches, best first, by BM25 over the name and the
-/// description. An empty query matches everything.
-///
-/// Any term, not all: a model writes "find all open issues", not keywords. BM25
-/// is what keeps that useful — a term in every tool scores near zero.
 pub fn find<'a>(tools: &'a [LlmTool], query: &str) -> Vec<&'a LlmTool> {
     let terms = words(query);
     if terms.is_empty() || tools.is_empty() {
@@ -307,7 +242,6 @@ pub fn find<'a>(tools: &'a [LlmTool], query: &str) -> Vec<&'a LlmTool> {
             scored.push((score, order, tool));
         }
     }
-    // The list order breaks a tie, so a replay answers the same.
     scored.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -316,7 +250,6 @@ pub fn find<'a>(tools: &'a [LlmTool], query: &str) -> Vec<&'a LlmTool> {
     scored.into_iter().map(|(_, _, tool)| tool).collect()
 }
 
-/// Lower case words. `search_issues` is two.
 fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -328,28 +261,16 @@ fn frequency(doc: &[String], term: &str) -> f64 {
     doc.iter().filter(|word| word.starts_with(term)).count() as f64
 }
 
-/// The result of a `tool_search` call. A match is a tool definition, in the
-/// shape of the tool list, so one search is the full distance to a call.
-///
-/// The connections are not here. Each name carries its connector, and the
-/// announcement gives each server once, so a roster in every answer would be a
-/// second copy of a fact that does not change.
-///
-/// A match of nothing says so, and sends the model back to the search with an
-/// empty query, which is the one thing that always answers.
 pub fn find_answer(
     tools: &[LlmTool],
     query: &str,
     max_matches: NonZeroUsize,
-    unavailable: &[String],
+    unavailable: &[ConnectionPath],
 ) -> String {
     let matched = find(tools, query);
     let shown: Vec<serde_json::Value> = matched
         .iter()
         .take(max_matches.get())
-        // `output` is the engine's contract with the result, not the model's
-        // with the call. [`LlmTool::output`] says it never reaches the model,
-        // and a match is not the exception.
         .map(|tool| {
             serde_json::json!({
                 "name": tool.name,
@@ -382,14 +303,6 @@ fn passes(filter: &McpTools, tool: &RemoteTool) -> bool {
         && !filter.exclude.iter().any(|g| glob_match(g, &tool.name))
 }
 
-/// Every connector's tools in one namespace, with the ambiguous ones removed.
-///
-/// `taken` is what the agent config already occupies — its declared tool names
-/// and its sub-agent ids. A connector tool that lands on one of those loses, in
-/// keeping with a declared tool always winning its own name. Two connector
-/// tools that land on each other both lose: keeping either would be arbitrary,
-/// and routing the model to the wrong connection is worse than being one tool
-/// short. Every dropped name is reported.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Merged {
     pub tools: Vec<ConnectorTool>,
@@ -419,9 +332,6 @@ pub fn merge<'a>(
     Merged { tools, collisions }
 }
 
-/// `None` when the name would be longer than a provider accepts. Truncating
-/// would risk two tools collapsing onto one name, which is worse than the
-/// connector being one tool short and saying so.
 pub fn qualified_name(prefix: Option<&str>, remote_name: &str) -> String {
     match prefix {
         Some(prefix) => format!("{}{SEPARATOR}{remote_name}", name_prefix(prefix)),
@@ -454,8 +364,6 @@ fn expand(
     })
 }
 
-/// Connection ids are operator-chosen, so anything a provider would reject in a
-/// tool name is flattened rather than passed through.
 fn name_prefix(connector_id: &str) -> String {
     connector_id
         .chars()
@@ -466,14 +374,9 @@ fn name_prefix(connector_id: &str) -> String {
 enum Verdict {
     Pass,
     Fail,
-    /// Failed only because the tool says nothing about the capability asked for.
     Unannotated,
 }
 
-/// A predicate is a requirement on the connection's own annotation, and an
-/// absent annotation never satisfies one. MCP defaults `readOnlyHint` to false
-/// and `destructiveHint` to true, so treating silence as a pass would hand the
-/// model exactly the tools the filter was written to keep away from it.
 fn capability_verdict(filter: &McpTools, tool: &RemoteTool) -> Verdict {
     let a = &tool.annotations;
     let checks = [
@@ -498,14 +401,9 @@ fn capability_verdict(filter: &McpTools, tool: &RemoteTool) -> Verdict {
     }
 }
 
-/// `*` matches any run of characters, `?` exactly one. Enough for tool names,
-/// and small enough not to need a dependency.
 fn glob_match(pattern: &str, value: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let v: Vec<char> = value.chars().collect();
-    // `star` remembers where to resume the pattern after the last `*`, so a
-    // failed match backtracks by consuming one more character instead of
-    // rescanning from the start.
     let (mut pi, mut vi) = (0usize, 0usize);
     let (mut star, mut resume) = (None, 0usize);
 
@@ -901,8 +799,6 @@ mod tests {
         assert!(!glob_match("a?", "a"));
     }
 
-    // ── approval ─────────────────────────────────────────────────────────
-
     #[test]
     fn nothing_asks_until_a_connection_says_to() {
         let offered = [read_only("search"), writer("delete")];
@@ -994,8 +890,6 @@ mod tests {
             "the engine's own tools reach nothing on their own"
         );
     }
-
-    // ── deferral ─────────────────────────────────────────────────────────
 
     fn llm(name: &str, description: &str) -> LlmTool {
         LlmTool {
@@ -1156,7 +1050,6 @@ mod tests {
         );
     }
 
-    /// The default cap, so a test reads the same as an agent that says nothing.
     fn cap() -> NonZeroUsize {
         crate::protocol::DeferTools::default().max_matches
     }

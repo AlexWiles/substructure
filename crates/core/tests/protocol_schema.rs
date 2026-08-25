@@ -1,8 +1,3 @@
-//! Generates `schemas/protocol.schema.json` and `schemas/worker.openapi.json`
-//! from [`substructure_core::protocol`] and fails if a checked-in file has
-//! drifted. Running `cargo test` rewrites the files, so a failure means:
-//! commit the update.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -11,11 +6,6 @@ use schemars::transform::RecursiveTransform;
 use schemars::Schema;
 use substructure_core::protocol as p;
 
-/// Close plain object schemas (`additionalProperties: false`) so typo'd keys
-/// fail validation and importers get closed objects. A schema mixing
-/// `properties` with a combinator stays open, as do its direct variants:
-/// closing either would reject the fields the other half validates. (No
-/// protocol type currently produces that shape; the guard is kept for safety.)
 fn close_objects(value: &mut serde_json::Value, closable: bool) {
     match value {
         serde_json::Value::Object(map) => {
@@ -55,14 +45,7 @@ fn close_objects(value: &mut serde_json::Value, closable: bool) {
     }
 }
 
-/// One draft 2020-12 schema: the wire-surface entry points as root
-/// `properties`, every protocol type named under `$defs`.
 fn protocol_schema() -> serde_json::Value {
-    // Strip `default`: it is runtime serde behavior, not part of the wire
-    // contract, and its presence makes type-level TS importers treat optional
-    // fields as required. `ensure_object` rewrites boolean `true` schemas (the
-    // any-JSON `Value` fields) to `{}`: same meaning, but code generators
-    // choke on the boolean form.
     let mut generator = SchemaSettings::draft2020_12()
         .with_transform(RecursiveTransform(|s: &mut Schema| {
             s.ensure_object();
@@ -72,9 +55,6 @@ fn protocol_schema() -> serde_json::Value {
     macro_rules! register {
         ($($t:ty),* $(,)?) => { $( generator.subschema_for::<$t>(); )* };
     }
-    // Types kept `#[schemars(inline)]` (NewMessage, ClientMessage,
-    // ClientMessages, ClientAction) are omitted: they merge into
-    // internally-tagged enum variants, where a `$ref` cannot carry the tag.
     register!(
         p::Role,
         p::ToolCallFunction,
@@ -124,8 +104,6 @@ fn protocol_schema() -> serde_json::Value {
     );
     let mut defs = serde_json::Value::Object(generator.take_definitions(true));
     close_objects(&mut defs, true);
-    // Root entry points give code generators a place to start walking; pure
-    // validators can still target any `$defs` entry directly.
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Substructure protocol",
@@ -138,8 +116,6 @@ fn protocol_schema() -> serde_json::Value {
             "client_payload": { "$ref": "#/$defs/ClientPayload" },
             "token_delta": { "$ref": "#/$defs/TokenDelta" },
             "stream_delta": { "$ref": "#/$defs/StreamDelta" },
-            // Offered vocabulary, not a wire surface: the interrupt payload
-            // convention rides opaque payloads but is typed for workers.
             "interrupt_payload": { "$ref": "#/$defs/InterruptPayload" },
             "interrupt_resolution": { "$ref": "#/$defs/InterruptResolution" },
         },
@@ -147,7 +123,6 @@ fn protocol_schema() -> serde_json::Value {
     })
 }
 
-/// Every `#/$defs/Name` reference in `value`.
 fn collect_refs(value: &serde_json::Value, out: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::Object(map) => {
@@ -190,11 +165,6 @@ fn rewrite_refs(value: &mut serde_json::Value) {
     }
 }
 
-/// The worker's OpenAPI 3.1 doc: one `POST /` (a [`p::DecisionRequest`] in, a
-/// [`p::DecisionResponse`] out), with `components.schemas` pruned to the defs
-/// reachable from those two roots — the client and streaming surfaces are not
-/// part of the worker contract. OpenAPI 3.1 embeds draft 2020-12, so each def
-/// carries over verbatim; only the `$ref` prefix changes.
 fn worker_openapi() -> serde_json::Value {
     let schema = protocol_schema();
     let defs = schema["$defs"].as_object().expect("$defs object");
@@ -290,7 +260,6 @@ fn worker_openapi() -> serde_json::Value {
     })
 }
 
-/// Write-on-drift: regenerate `schemas/<rel>` and fail so the update is committed.
 fn assert_committed(rel: &str, doc: &serde_json::Value) {
     let generated = format!(
         "{}\n",
@@ -339,15 +308,12 @@ fn every_protocol_type_lands_in_defs() {
     ] {
         assert!(defs.contains_key(name), "missing $defs entry: {name}");
     }
-    // Types that merge into internally-tagged enum variants stay inline: a
-    // `$ref` there cannot carry the variant tag.
     for name in ["NewMessage", "ClientMessage", "ClientAction"] {
         assert!(
             !defs.contains_key(name),
             "expected inlined, found $defs entry: {name}"
         );
     }
-    // Retired wire enums must not resurface.
     for name in [
         "ToolHandler",
         "LlmHandler",
@@ -386,10 +352,8 @@ fn plain_objects_are_closed_including_flat_effect() {
     let defs = &schema["$defs"];
     assert_eq!(defs["DecisionResponse"]["additionalProperties"], false);
     assert_eq!(defs["AgentConfig"]["additionalProperties"], false);
-    // Effect is a flat envelope with optional kind-specific fields: one closed object.
     assert_eq!(defs["Effect"]["additionalProperties"], false);
     assert!(defs["Effect"].get("oneOf").is_none());
-    // Standalone tagged unions have self-contained variants: closed.
     for variant in defs["DecisionTrigger"]["oneOf"]
         .as_array()
         .expect("trigger variants")
@@ -480,7 +444,6 @@ fn openapi_components_are_the_worker_closure() {
     ] {
         assert!(schemas.contains_key(name), "missing component: {name}");
     }
-    // Client and streaming surfaces are not part of the worker contract.
     for name in ["ClientInput", "ClientPayload", "TokenDelta", "StreamDelta"] {
         assert!(!schemas.contains_key(name), "unexpected component: {name}");
     }
@@ -527,7 +490,6 @@ fn lenient_fields_accept_any_json() {
         .expect("tool.call variant")
         .clone();
     let arguments = &call_tool["properties"]["arguments"];
-    // A `Value` field is an unconstrained schema (`true`): any JSON value passes.
     let admits_any = arguments == &serde_json::json!(true)
         || arguments
             .as_object()

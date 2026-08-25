@@ -109,7 +109,7 @@ class DecisionAction4(BaseModel):
     id: str | None = None
     response: Any = Field(
         ...,
-        description="A neutral `LlmResponse`, or the provider's native response when the\nanswered `llm.execute` carried a `format`.",
+        description="An `LlmResponse`, or the provider's own response when the\n`llm.execute` this answers carried a `format`.",
     )
     type: Literal['llm.result']
 
@@ -199,7 +199,7 @@ class EffectKind(
         | Literal['turn_end']
     ) = Field(
         ...,
-        description="What kind of work an effect is. One enum for the wire and for the engine's\nown scheduling: a decision and a turn's end queue beside the calls and are\nswept the same way, so they are kinds too. Neither ever appears on an\n[`Effect`] — a decision rides the decision list, a turn end has no record.",
+        description="What kind of work an effect is. One enum for the wire and for scheduling. A\ndecision and a turn's end queue beside the calls and are swept the same way,\nso they are kinds too. Neither appears on an [`Effect`].",
         title='EffectKind',
     )
 
@@ -236,15 +236,15 @@ class ErrorInfo(BaseModel):
     code: ErrorCode
     detail: Any | None = Field(
         None,
-        description='Small structured particulars: a status, the llm blocks that exist.',
+        description='Small structured details, such as a status or the llm blocks that\nexist.',
     )
     message: str = Field(
         ...,
-        description='One engine-authored sentence, safe to show a human. Never a raw\ndocument — an unbounded body belongs in the log.',
+        description='One sentence the engine wrote, safe to show a human. Never a raw\ndocument. An unbounded body belongs in the log.',
     )
     param: str | None = Field(
         None,
-        description="The one input to go and fix, when the failure names one: `agent.llm`,\n`actions[0].type`. Stripe's `param`.",
+        description='The one input to fix, when the failure names one. For example\n`agent.llm` or `actions[0].type`.',
     )
 
 
@@ -275,11 +275,11 @@ class InterruptOption(BaseModel):
     )
     label: str
     style: str | None = Field(
-        None, description='`primary` or `danger`; anything else renders plain.'
+        None, description='`primary` or `danger`. Anything else shows plain.'
     )
     value: Any = Field(
         ...,
-        description="Delivered verbatim as the resolution's `payload`; worker vocabulary.",
+        description="Delivered unchanged as the resolution's `payload`. The worker chooses\nwhat it means.",
     )
 
 
@@ -294,16 +294,14 @@ class InterruptPayload(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    expiresAt: str | None = Field(
-        None, description='RFC 3339; display only until engine TTLs land.'
-    )
+    expiresAt: str | None = Field(None, description='RFC 3339. Display only.')
     message: str | None = Field(
         None,
-        description="Markdown; channels down-convert. Without it, channels fall back to\nthe interrupt's `reason`.",
+        description="Markdown. A channel converts it as it needs. Without it, a channel\nshows the interrupt's `reason`.",
     )
     metadata: Any | None = Field(
         None,
-        description='Free-form, delivered to clients verbatim. `metadata.options`\n([`InterruptOption`] list) renders as Slack buttons.',
+        description='Free-form, delivered to clients unchanged. `metadata.options` is a\nlist of [`InterruptOption`], which Slack shows as buttons.',
     )
     responseSchema: Any | None = Field(
         None, description='JSON Schema for the expected resolution payload.'
@@ -330,7 +328,7 @@ class InterruptResponder(BaseModel):
 class Issuer(RootModel[str]):
     root: str = Field(
         ...,
-        description="Where a person's name comes from — `slack`, `app`, `cli`, or whatever a\ndeployment registers. Stamped by whatever authenticated the request, and\nnever read out of one: a caller free to name its own issuer could name\nanother source's people.",
+        description="Where a person's name comes from: `slack`, `app`, `cli`, or another source\na deployment registers. Set by whatever authenticated the request, never\nread from the request.",
         title='Issuer',
     )
 
@@ -346,17 +344,17 @@ class LlmTool(BaseModel):
     )
     defer: bool | None = Field(
         None,
-        description="Keep this definition out of the request.\n\nThe engine still records it, still routes a call to it, and still finds\nit in a search. Only the request omits it, which is what keeps a large\ntool set out of the model's context and out of the cached prefix.\n\nAny source can set it: a tool the config declares, a connection, or\nwhatever comes next. Deferral is a property of a tool, not of where it\ncame from.",
+        description="Keep this definition out of the request.\n\nThe engine still records it, still routes a call to it, and still finds\nit in a search. Only the request leaves it out. That keeps a large tool\nset out of the model's context and out of the cached prefix.\n\nAny source can set it. Deferral belongs to a tool, not to where the tool\ncame from.",
     )
     description: str
     input: Any | None = Field(
         None,
-        description="JSON Schema for the tool's arguments; omitted declares a no-argument\ntool. The engine validates each call's arguments against it and hands\nproviders their native form.",
+        description='JSON Schema for the arguments. Absent declares a tool with no\narguments. The engine checks every call against it.',
     )
     name: str
     output: Any | None = Field(
         None,
-        description='JSON Schema the settled result must satisfy; never sent to the model.\nA violating result settles as a terminal tool error.',
+        description='JSON Schema the result must satisfy. The model never sees it. A result\nthat breaks it becomes a terminal tool error.',
     )
 
 
@@ -446,8 +444,7 @@ class RetryPolicy(BaseModel):
     backoff_base_secs: conint(ge=0)
     backoff_max_secs: conint(ge=0)
     max_attempts: conint(ge=0) = Field(
-        ...,
-        description='Cap on total attempts, not on retries: `1` allows one try and no retry.',
+        ..., description='Total attempts, not retries. `1` gives one try.'
     )
     queue_timeout_secs: conint(ge=0) | None = None
     run_timeout_secs: conint(ge=0) | None = None
@@ -623,7 +620,7 @@ class ToolInput3(BaseModel):
 class ToolInput(RootModel[ToolInput1 | ToolInput2 | ToolInput3]):
     root: ToolInput1 | ToolInput2 | ToolInput3 = Field(
         ...,
-        description="The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",
+        description="What the engine made of a tool call's arguments, sent with the raw\n`arguments` string. Always on the wire.",
         title='ToolInput',
     )
 
@@ -644,7 +641,7 @@ class Usage(BaseModel):
     output: conint(ge=0)
     provider: Any | None = Field(
         None,
-        description='The counts as the provider reported them, for a reader that wants a\nnumber this type does not name.',
+        description='The counts as the provider reported them, for a number this type does\nnot name.',
     )
     total: conint(ge=0) = Field(..., description='`input` and `output` together.')
     uncached_input: conint(ge=0) = Field(
@@ -740,7 +737,7 @@ class ClientInput6(BaseModel):
 class Content(RootModel[str | list[StoredContent]]):
     root: str | list[StoredContent] = Field(
         ...,
-        description='Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged).',
+        description='A plain string, or an array of typed parts. Untagged.',
         title='Content',
     )
 
@@ -786,7 +783,7 @@ class DecisionAction2(BaseModel):
     name: str
     retry: RetryOverride | None = Field(
         None,
-        description="Layered over the agent config's policy for this kind, else over the\nengine's default for where the tool runs.",
+        description="Layered over the agent config's policy for this kind, or over the\nengine's default for where the tool runs.",
     )
     type: Literal['tool.call']
 
@@ -840,7 +837,7 @@ class DecisionTrigger4(BaseModel):
     id: str
     input: ToolInput = Field(
         ...,
-        description="The engine's classification of `arguments` against the tool's\ndeclared `input` schema: `valid` (with the parsed `value`),\n`invalid` (value plus the violation), or `malformed` (not a JSON\nobject). Always on the wire.",
+        description="What the engine made of `arguments` against the tool's `input`\nschema: `valid`, `invalid`, or `malformed`. Always on the wire.",
     )
     name: str
     type: Literal['tool.execute']
@@ -941,7 +938,7 @@ class Effect(BaseModel):
     stream: bool | None = None
     tool_call_id: str | None = Field(
         None,
-        description='The model tool call a delegation answers; its own `id` is the child session.',
+        description='The model tool call a delegation answers. Its `id` is the child\nsession.',
     )
 
 
@@ -1045,19 +1042,21 @@ class AgentConfig(BaseModel):
     )
     defer_tools: DeferToolsWire | None = Field(
         None,
-        description='Defer every tool this agent offers, from any source, unless the tool or\nthe connection says otherwise. Absent ⇒ the agent defers nothing of its\nown; a connection may still defer on its own account.\n\nPresence is the switch, so an agent cannot carry settings that do\nnothing. Declared on the agent because an agent can hold this opinion\nbefore it names a connection: one that sets it gets the search tools\nfrom its first turn, so a connection added later costs no cache.',
+        description='Defer every tool this agent offers, whatever its source. A tool or a\nconnection overrides this with its own `defer`. Absent, the agent defers\nnothing; a connection can still defer on its own.',
     )
     effort: ReasoningEffort | None = Field(
         None,
-        description='How hard the model thinks, carried on the agent because it pairs with\nthe model. Unset sends no reasoning config and leaves the provider its\nown default.',
+        description="How hard the model thinks. Unset leaves the provider's own default.",
     )
     llm: str | None = Field(
         None, description="The `[llm.*]` block this agent's calls run on."
     )
-    mcp: list[McpServer] | None = Field(None, description='MCP servers')
+    mcp: list[McpServer] | None = Field(
+        None, description='MCP servers this agent draws tools from.'
+    )
     mcp_announce: McpAnnounce | None = Field(
         None,
-        description="Where the engine tells the model that an MCP server is available, and\nwhat that server says it is for.\n\nSeparate from `defer_tools`: a server exists whether or not its tools\nare deferred, and where a notice lands is a fact about this agent's\nprompt rather than about any server.",
+        description='Whether the engine tells the model that an MCP server is available, and\nwhat that server says it is for.',
     )
     model: str
     plugins: list[AgentPlugin] | None = Field(
@@ -1065,11 +1064,11 @@ class AgentConfig(BaseModel):
     )
     retry: RetryConfig | None = Field(
         None,
-        description='Boxed: five per-kind overrides is a lot of bytes to carry inline\nthrough every command that holds a config.',
+        description='Boxed. Five per-kind overrides are too many bytes to carry inline.',
     )
     sub_agents: list[SubAgent] | None = Field(
         None,
-        description='Sub-agents the model can delegate to. Presented to the model as tools (by\nid) alongside `tools`, but each call spawns a child session rather than\nexecuting a function.',
+        description='Sub-agents the model can delegate to. The model sees them as tools.\nEach call starts a child session.',
     )
     system: str | None = None
     tools: list[AgentTool] | None = Field(
@@ -1109,7 +1108,7 @@ class LlmResponse(BaseModel):
     content: str | None = None
     cost: constr(pattern=r'^-?\d+(\.\d+)?$') | None = Field(
         None,
-        description='Cost in dollars for this call, if the provider reports it. A decimal\nstring on the wire.',
+        description='Cost in dollars, if the provider reports it. A decimal string on the\nwire.',
     )
     finish_reason: str | None = None
     images: list[ResponseImage] | None = Field(
@@ -1158,7 +1157,7 @@ class ClientInput1(BaseModel):
     message: DraftMessage
     queue: bool | None = Field(
         None,
-        description='Hold this message for the next turn instead of refusing it when one\nis already running. Off by default: rejection stays the contract for\na plain submitter, and queuing is declared intent.',
+        description='Hold this message for the next turn instead of refusing it while a\nturn is running. Off by default.',
     )
     stream: bool | None = None
     turn_id: str | None = None
@@ -1186,7 +1185,7 @@ class ClientInput3(BaseModel):
     messages: list[DraftMessage]
     queue: bool | None = Field(
         None,
-        description='Hold this batch for the next turn instead of refusing it when one is\nalready running. Off by default: rejection stays the contract for a\nplain submitter, and queuing is declared intent.',
+        description='Hold this batch for the next turn instead of refusing it while a\nturn is running. Off by default.',
     )
     stream: bool | None = None
     turn_id: str | None = None
@@ -1214,7 +1213,7 @@ class ClientInput(
         | ClientInput7
     ) = Field(
         ...,
-        description='Everything a client can send on the input surface: submit a message / a full view / an\nappend batch / a named action, resume an interrupt, or settle a client tool. A flat,\ninternally-tagged union — its seven tags produce serde\'s "unknown variant, expected one\nof …" error for free. `Runtime::handle_client_input` is the single seam that dispatches\nit (mirroring `resolve_response` on the worker side).\n\nAddressing lives where it is meaningful, not in a shared envelope: `agent_id` (routes\nthe turn, creating the session if new) and the optional idempotency `turn_id` are\nfields of the four submit variants only. A resume/settle addresses an interrupt/effect\nid and continues whatever turn is active, so it carries neither — misplacing them is\nunrepresentable rather than rejected. `session_id` is the one universal address and\nrides the envelope. A submit\'s body rebuilds a [`ClientPayload`] at the seam.',
+        description='Everything a client can send: submit a message, a full view, an append\nbatch, or a named action; resume an interrupt; or settle a client tool.\n\nEach variant carries only the addressing it needs. The four submit variants\ncarry `agent_id`, which routes the turn and starts the session if it is new,\nand an optional `turn_id`. A resume or settle names an interrupt or effect\nand continues whatever turn is running, so it carries neither.\n`session_id` is on the envelope.',
         title='ClientInput',
     )
 
@@ -1253,7 +1252,7 @@ class ClientPayload(
 ):
     root: ClientPayload1 | ClientPayload2 | ClientPayload3 | ClientPayload4 = Field(
         ...,
-        description='The client→engine inbound *submit* wire form: an untrusted client submits a message,\nits full conversation view, an append batch, or a named action. Lowered to domain events at the\n`SubmitClientPayload` command seam (`runtime::session::command`); never persisted\nas-is. Carried verbatim inside [`ClientInput`], which is the full client input\nsurface.',
+        description='What a client submits: a message, its full conversation view, an append\nbatch, or a named action. The engine turns it into events and never stores\nit as it arrived.',
         title='ClientPayload',
     )
 
@@ -1265,7 +1264,7 @@ class DecisionAction1(BaseModel):
     id: str | None = None
     llm: str | None = Field(
         None,
-        description="The `[llm.*]` block this call runs on; omitted ⇒ the merge source\nconfig's `llm`. Naming a different block moves one call to another\nvenue or vendor.",
+        description="The `[llm.*]` block this call runs on. Absent uses the config's\n`llm`. Naming another block moves this one call elsewhere.",
     )
     max_completion_tokens: conint(ge=0) | None = None
     messages: list[DraftMessage] | None = None
@@ -1273,7 +1272,7 @@ class DecisionAction1(BaseModel):
     reasoning: ReasoningConfig | None = None
     retry: RetryOverride | None = Field(
         None,
-        description="Layered over the agent config's `llm` policy, else over the engine's\ndefault.",
+        description="Layered over the agent config's `llm` policy, or over the engine's\ndefault.",
     )
     stream: bool | None = None
     temperature: float | None = None
@@ -1288,16 +1287,15 @@ class DecisionAction7(BaseModel):
     agent_id: str
     message: DraftMessage | None = Field(
         None,
-        description="The child's opening message. It travels with the spawn, so it\ncannot race the creation of the session it opens.",
+        description="The child's opening message. It travels with the spawn, so it\ncannot arrive before the session exists.",
     )
     retry: RetryOverride | None = Field(
         None,
-        description="Layered over the agent config's `sub_agent` policy, else over the\nengine's default.",
+        description="Layered over the agent config's `sub_agent` policy, or over the\nengine's default.",
     )
     session_id: str
     tool_call_id: str = Field(
-        ...,
-        description='The model tool-call this delegation answers — always required.',
+        ..., description='The model tool call this delegation answers. Required.'
     )
     type: Literal['sub_agent.spawn']
 
@@ -1342,7 +1340,7 @@ class DecisionAction(
         | DecisionAction12
     ) = Field(
         ...,
-        description="The action a worker authors on the wire. Mirrors the internal `Action`, but a\nsettle's effect id may be omitted: on the sync/pull paths the answered\n`*.execute` trigger names it, so echoing it is redundant. `resolve_response`\n(`runtime::session::wire`) turns this into the internal `Action` (id always\npresent) at the transport boundary.",
+        description='The action a worker writes on the wire. A settle can leave out the effect\nid, because the `*.execute` trigger it answers already names it.',
         title='DecisionAction',
     )
 
@@ -1357,12 +1355,12 @@ class DecisionResponse(BaseModel):
     )
     channels: dict[str, Any] | None = Field(
         None,
-        description='How each channel shows this decision, keyed by channel kind (e.g.\n`slack`). Opaque to the engine.',
+        description='How each channel shows this decision, keyed by channel kind. The engine\ndoes not read it.',
     )
     messages: list[DraftMessage] | None = None
     state: WorkerState | None = Field(
         None,
-        description='Omitted or `null` keeps the current state; clear with a non-null empty value.',
+        description='Absent or `null` keeps the current state. Send an empty value to\nclear it.',
     )
 
 
@@ -1372,7 +1370,7 @@ class DecisionTrigger2(BaseModel):
     )
     client: ClientContext = Field(
         ...,
-        description='Inputs the client declared on its run; the engine layers `client.tools`\nonto the proposed config by default.',
+        description='Inputs the client declared on its run. The engine adds\n`client.tools` to the proposed config.',
     )
     messages: list[DraftMessage]
     new_from: conint(ge=0)
@@ -1390,7 +1388,7 @@ class DecisionTrigger7(BaseModel):
     ok: bool
     refused: bool | None = Field(
         None,
-        description='True when the model declined the request rather than answering it.\nA refusal reads as a turn that stopped well and said nothing, so\nwithout this the run continues from a blank answer.',
+        description='True when the model declined the request. Without it, a refusal\nlooks like a turn that ended well and said nothing.',
     )
     truncated: bool
     type: Literal['llm.finished']
@@ -1424,7 +1422,7 @@ class DecisionTrigger(
         | DecisionTrigger10
     ) = Field(
         ...,
-        description="The trigger a worker sees on the wire — the materialized projection of the\nengine's internal decision trigger. It has no `ClientMessage`: a bare client\nmessage is always materialized to `ClientTranscript` by `to_wire_trigger`\n(`runtime::session::wire`) before delivery, so an unmaterialized message can\nnever reach a worker.",
+        description='The trigger a worker sees on the wire. There is no `ClientMessage`: the\nengine turns a bare client message into `ClientTranscript` before it sends\nit.',
         title='DecisionTrigger',
     )
 
@@ -1435,7 +1433,7 @@ class DecisionRequest(BaseModel):
     )
     agent: AgentConfig | None = Field(
         None,
-        description='The agent config resolved for the active path (`null` when none is set).',
+        description='The agent config for the active path. `null` when none is set.',
     )
     agent_id: str
     ancestry: list[str]
@@ -1451,7 +1449,7 @@ class DecisionRequest(BaseModel):
     )
     proposed: DecisionResponse = Field(
         ...,
-        description="The engine's default continuation for `trigger` (empty when it needs\nworker knowledge). Advisory: accept by echoing it as the decision.",
+        description="The engine's default continuation for `trigger`. Empty when only the\nworker can decide. Accept it by echoing it back.",
     )
     session_id: str
     state: WorkerState

@@ -16,8 +16,6 @@ use crate::protocol::{
     SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
 };
 
-/// Wraps our normalized `LlmTool` with the `"type": "function"` field
-/// that the OpenAI/OpenRouter API expects.
 #[derive(Serialize)]
 struct WireTool {
     #[serde(rename = "type")]
@@ -45,9 +43,6 @@ impl From<&LlmTool> for WireTool {
     }
 }
 
-/// A transcript message as the router takes it. Built rather than serializing a
-/// this API, and `reasoning_details` has to go back under the router's name for
-/// it rather than ours.
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: Role,
@@ -80,7 +75,6 @@ impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
     }
 }
 
-/// The router takes the OpenAI shape. See [`super::openai::turns`].
 fn wire_messages(messages: &[PromptMessage]) -> Vec<WireMessage<'_>> {
     super::openai::turns(messages)
         .into_iter()
@@ -102,9 +96,6 @@ fn wire_messages(messages: &[PromptMessage]) -> Vec<WireMessage<'_>> {
         .collect()
 }
 
-/// Folds streamed `reasoning_details`. They arrive as fragments that share an
-/// `index` — the text in pieces, the signature last — and the router wants back
-/// the whole blocks the model produced, not the pieces it sent.
 #[derive(Default)]
 struct ReasoningAccum {
     blocks: Vec<serde_json::Value>,
@@ -144,7 +135,6 @@ impl ReasoningAccum {
     }
 }
 
-/// Wire-format request body.
 #[derive(Serialize)]
 struct WireBody<'a> {
     model: &'a str,
@@ -158,21 +148,15 @@ struct WireBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<&'a ReasoningConfig>,
     stream: bool,
-    /// One breakpoint, placed by the router. A model that caches on its own
-    /// ignores it; an Anthropic one caches nothing without it.
     cache_control: CacheControl,
-    /// Pins the turn to the provider holding the cache. The root names the
-    /// whole tree, so a delegation keeps the parent's place while it waits.
     #[serde(skip_serializing_if = "str::is_empty")]
     session_id: &'a str,
 }
 
-/// A cache breakpoint, and how long what it caches lives.
 #[derive(Serialize, Clone, Copy)]
 struct CacheControl {
     #[serde(rename = "type")]
     kind: &'static str,
-    /// Absent is the default life, five minutes.
     #[serde(skip_serializing_if = "Option::is_none")]
     ttl: Option<&'static str>,
 }
@@ -223,8 +207,6 @@ struct ChoiceMessage {
     content: Option<String>,
     #[serde(default, alias = "reasoning_content")]
     reasoning: Option<String>,
-    /// The router's own reasoning record. Held verbatim: a model behind it that
-    /// signs its thinking wants these back, and only the router can read them.
     #[serde(default)]
     reasoning_details: Option<Vec<serde_json::Value>>,
     #[serde(default)]
@@ -260,12 +242,8 @@ impl From<WireToolCall> for ToolCall {
     }
 }
 
-/// Extract `cost` from OpenRouter's usage object as a Decimal.
-/// Parses from the raw JSON number string to avoid f64 precision loss.
 fn extract_cost(usage: &Option<serde_json::Value>) -> Option<Decimal> {
     let cost_value = usage.as_ref()?.get("cost")?;
-    // serde_json::Value::Number preserves the original string representation
-    // when using Number::to_string(), so we parse that directly into Decimal.
     cost_value
         .as_number()
         .and_then(|n| n.to_string().parse::<Decimal>().ok())
@@ -310,7 +288,6 @@ impl ChatCompletionResponse {
     }
 }
 
-// Cloning needed for the into_llm_response borrow pattern
 impl Clone for WireToolCall {
     fn clone(&self) -> Self {
         WireToolCall {
@@ -383,7 +360,6 @@ struct ToolCallAccum {
 pub struct OpenRouterConfig {
     pub base_url: String,
     pub api_key: String,
-    /// How long a cached prefix lives: `1h`, or the default five minutes.
     #[serde(default)]
     pub cache_ttl: Option<String>,
 }
@@ -411,9 +387,6 @@ impl OpenRouterClient {
         }
     }
 
-    /// The router refuses a longer name, and a session id is the caller's own
-    /// string: a Slack thread names one, and a client can send any name it
-    /// likes.
     const SESSION_ID_MAX_CHARS: usize = 256;
 
     fn body<'a>(
@@ -469,8 +442,6 @@ impl OpenRouterClient {
                 LlmCallError::new(
                     ErrorCode::ProviderError,
                     format!("HTTP request failed: {e}"),
-                    // Only an unbuildable request is hopeless; it would be
-                    // built the same way again.
                     !e.is_builder(),
                 )
             })
@@ -485,9 +456,6 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
     } else {
         ErrorCode::ProviderError
     };
-    // The provider says why in `error.message`; the rest of the body is a
-    // request id and echoed request, which the log keeps and the reader does
-    // not need.
     let message = match crate::json::error_message(body.as_bytes()) {
         Some(reported) => format!("OpenRouter API error {status}: {reported}"),
         None => format!("OpenRouter API error {status}"),
@@ -787,7 +755,6 @@ mod tests {
     #[test]
     fn streamed_reasoning_fragments_fold_back_into_one_block() {
         let mut accum = ReasoningAccum::default();
-        // The shape a router stream sends: text in pieces, signature last.
         for fragment in [
             serde_json::json!({"type": "reasoning.text", "index": 0,
                                "format": "anthropic-claude-v1", "text": "Let"}),
@@ -912,7 +879,6 @@ mod tests {
             v["cache_control"],
             serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
         );
-        // Anything else is the default five minutes, which sends no ttl.
         assert!(body(Some("5m"), "sess_1")["cache_control"]
             .get("ttl")
             .is_none());

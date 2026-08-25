@@ -1,16 +1,3 @@
-//! A property test over random command sequences.
-//!
-//! Two ingredients make this cheap: `apply` is deterministic, and the schedule
-//! has invariants. So for any sequence of commands the aggregate accepts:
-//!
-//! 1. the scheduling invariants hold after every commit, and
-//! 2. replaying the emitted events into a fresh state converges with the
-//!    aggregate's own state, byte for byte.
-//!
-//! (2) is what catches a representation change that example-based tests miss:
-//! it compares the whole persisted snapshot, not the fields a test thought to
-//! look at.
-
 use crate::connectors::registry::ConnectionPath;
 use crate::protocol::StoredResult;
 use std::collections::HashMap;
@@ -49,8 +36,6 @@ fn frontend() -> Caller {
     }
 }
 
-/// Short deadlines and shallow retries, so a handful of wakes walks an effect
-/// all the way from in-flight to terminally failed.
 fn policy() -> RetryPolicy {
     RetryPolicy {
         queue_timeout_secs: None,
@@ -62,7 +47,6 @@ fn policy() -> RetryPolicy {
     }
 }
 
-/// What a settled decision asks for next.
 #[derive(Debug, Clone)]
 enum ActOp {
     CallLlm { worker: bool },
@@ -72,12 +56,9 @@ enum ActOp {
     Done,
 }
 
-/// One command against the live session. Every index is taken modulo the
-/// candidates in force, so an op is meaningful whatever state it lands in.
 #[derive(Debug, Clone)]
 enum Op {
     ClientMessage {
-        /// Ask to be held for the next turn instead of refused mid-turn.
         queue: bool,
     },
     Decide {
@@ -131,8 +112,6 @@ fn act_op() -> impl Strategy<Value = ActOp> {
 
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
-        // Weighted towards the two commands that drive the loop; the rest keep
-        // their default weight of 1.
         4 => (proptest::collection::vec(act_op(), 0..3), any::<bool>(), any::<bool>()).prop_map(
             |(acts, append, set_config)| Op::Decide { acts, append, set_config }
         ),
@@ -150,24 +129,17 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<usize>().prop_map(|index| Op::Resume { index }),
         2 => (0u32..12).prop_map(|advance_secs| Op::Wake { advance_secs }),
         1 => Just(Op::ReconcileDispatch),
-        // Terminal, so rare: it ends every sequence that reaches it.
         1 => Just(Op::Cancel),
     ]
 }
 
-/// The session under test, plus every event it has committed.
 struct World {
     agg: SessionAggregate,
     now: DateTime<Utc>,
     log: Vec<(u64, DateTime<Utc>, EventPayload)>,
     next_id: u32,
     trace: Vec<String>,
-    /// The instant the planner reads. Mirrors `Working`: the command clock,
-    /// except under a wake, which supplies the scheduler's own.
     plan_now: DateTime<Utc>,
-    /// Set once a cancel lands. Cancellation deliberately skips the schedule
-    /// tail and leaves queued decisions in place, so the idempotence law stops
-    /// describing the session from that point on.
     cancelled: bool,
 }
 
@@ -214,8 +186,6 @@ impl World {
         format!("e-{}", self.next_id)
     }
 
-    /// Handle and commit one command. A rejected command writes nothing, which
-    /// is the behaviour under test as much as an accepted one is.
     fn run(&mut self, cmd: CommandPayload, caller: &Caller) {
         self.now += Duration::milliseconds(1);
         self.plan_now = match &cmd {
@@ -238,7 +208,6 @@ impl World {
         }
     }
 
-    /// Apply the whole log into a fresh state; it must equal the aggregate's.
     fn replayed(&self) -> SessionState {
         let mut state = SessionState::new("sess-1".to_string());
         for (seq, occurred_at, payload) in &self.log {
@@ -253,8 +222,6 @@ impl World {
         state
     }
 
-    /// Ids of the effects a settle can name, sorted so a shrunk sequence
-    /// reproduces exactly.
     fn pending<'a>(&self, ids: impl Iterator<Item = &'a str>) -> Vec<String> {
         let mut ids: Vec<String> = ids.map(str::to_string).collect();
         ids.sort();
@@ -312,7 +279,6 @@ impl World {
         ids.pop()
     }
 
-    /// The active branch as a client would echo it back.
     fn recorded(&self) -> Vec<DraftMessage> {
         let tree = self.agg.state.message_tree();
         match tree.head_id.as_deref() {
@@ -390,8 +356,6 @@ impl World {
             .collect()
     }
 
-    /// A config naming one connection, rewritten each time so the write always
-    /// lands; the connection id is constant, so only the first costs a fetch.
     fn config(&mut self) -> AgentConfig {
         let model = self.mint();
         AgentConfig {
@@ -644,7 +608,6 @@ impl World {
     }
 }
 
-/// `None` when nothing is a candidate; otherwise an index into the candidates.
 fn pick(ids: &[String], index: usize) -> Option<String> {
     if ids.is_empty() {
         return None;
@@ -652,7 +615,6 @@ fn pick(ids: &[String], index: usize) -> Option<String> {
     Some(ids[index % ids.len()].clone())
 }
 
-/// A snapshot round trip: what the store would write, read back.
 fn round_trip(state: &SessionState) -> SessionState {
     let json = serde_json::to_string(state).expect("a session state serializes");
     serde_json::from_str(&json).expect("and deserializes")
@@ -667,8 +629,6 @@ proptest! {
         ..ProptestConfig::default()
     })]
 
-    /// Whatever the sequence, the schedule stays consistent, the event log is
-    /// the whole truth, and a snapshot round trip changes nothing.
     #[test]
     fn random_command_sequences_hold_every_law(
         ops in proptest::collection::vec(op(), 1..24)
@@ -679,19 +639,16 @@ proptest! {
             let state = &world.agg.state;
             let commands = world.trace.join("\n");
 
-            // The invariants hold on committed state, not only mid-command.
             if let Err(violation) = state.check_invariants() {
                 prop_assert!(false, "{violation}\ncommands:\n{commands}");
             }
 
-            // Replay convergence: the log rebuilds the state exactly.
             prop_assert_eq!(
                 serde_json::to_value(world.replayed()).unwrap(),
                 serde_json::to_value(state).unwrap(),
                 "replay diverged\ncommands:\n{}", commands
             );
 
-            // Snapshot round trip: what is persisted is all the state there is.
             let reloaded = round_trip(state);
             prop_assert_eq!(
                 serde_json::to_value(&reloaded).unwrap(),
@@ -699,21 +656,12 @@ proptest! {
                 "snapshot round trip changed the state\ncommands:\n{}", commands
             );
 
-            // Law — the plan is state-only: it reads nothing but the state and
-            // the clock, so a round trip through the store cannot change it.
             let live_plan = schedule::plan(state, world.plan_now);
             prop_assert_eq!(
                 &live_plan, &schedule::plan(&reloaded, world.plan_now),
                 "the plan read differently after a round trip\ncommands:\n{}", commands
             );
 
-            // Law — idempotence: every command ends by running the schedule
-            // tail, so a second look at the same state must find no work ready.
-            // Sweep steps are the exception by policy, not by accident: the
-            // tail takes one per command, so more overdue items may remain and
-            // `wake_at` reschedules until none do. `CancelSession` is the one
-            // command that deliberately skips the tail, so it is the one state
-            // this law does not describe.
             if !world.cancelled {
                 let ready: Vec<&ScheduleStep> =
                     live_plan.iter().filter(|s| !s.is_sweep()).collect();

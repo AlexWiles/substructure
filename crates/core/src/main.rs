@@ -13,13 +13,6 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Precedence: $RUST_LOG > `log` in substructure.toml > the command's
-    // default. Read here rather than inside the command, because a setting that
-    // only took effect after startup would miss what startup has to say.
-    //
-    // A file that will not parse is ignored at this point: the command reads it
-    // again and reports that properly, and failing here would mean failing
-    // before there is anywhere to print to.
     let configured = cli::project_log_filter(cli.command.config_path());
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -37,7 +30,6 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// The reader stopped, as `| head` does. Nothing failed, so report nothing.
 fn is_broken_pipe(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause

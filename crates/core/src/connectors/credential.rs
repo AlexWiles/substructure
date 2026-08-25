@@ -1,11 +1,3 @@
-//! The credential a connection dials with, whichever way it was obtained.
-//!
-//! One slot per connection: `subs auth` fills it — with an OAuth grant or a
-//! static token, whichever the connection declares — and the resolver below
-//! turns whichever landed there into headers. Keeping them in one slot is what
-//! lets a deployment hold either — the store is the seam, and neither kind ever
-//! reaches the event log or the file.
-
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 
@@ -14,12 +6,6 @@ use super::oauth::{refresh, same_origin, OauthError, Tokens};
 use super::registry::{AuthKind, ConnectionPath, ConnectionSpec, CredentialResolver};
 use super::{AuthNeed, ConnectorError, Slot};
 
-/// What the store holds for one connection.
-///
-/// Untagged, and `Static` first: OAuth grants were written here before static
-/// tokens existed, as a bare `Tokens` object, and a stored credential outlives
-/// the release that wrote it. A `Tokens` has no `token` field, so the two
-/// shapes cannot be read for each other.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Credential {
@@ -28,8 +14,6 @@ pub enum Credential {
 }
 
 impl Credential {
-    /// What `auth` this credential answers to, for reporting a slot holding the
-    /// other kind.
     pub fn kind(&self) -> AuthKind {
         match self {
             Self::Static { .. } => AuthKind::Token,
@@ -38,16 +22,10 @@ impl Credential {
     }
 }
 
-/// Where credentials live. Keyed by the connection's id, so two ids naming one
-/// server hold two of them: `[mcp.sentry]` and `[mcp.sentry2]` at the same URL
-/// are two accounts.
 #[async_trait::async_trait]
 pub trait CredentialStore: Send + Sync {
     async fn get(&self, tenant_id: &str, connection_id: &str, subject: &Slot)
         -> Option<Credential>;
-    /// Called on every refresh too, because a rotated refresh token invalidates
-    /// the one it replaced. A failure to persist is reported, not swallowed:
-    /// silently dropping a rotated token locks the connection out.
     async fn put(
         &self,
         tenant_id: &str,
@@ -57,24 +35,15 @@ pub trait CredentialStore: Send + Sync {
     ) -> Result<(), String>;
 }
 
-/// What the slot holds. An empty slot is a failure to one caller below and not
-/// to the other.
 enum Held {
     Grant(Tokens),
     Empty,
     Wrong(&'static str),
 }
 
-/// Resolves a connection's stored credential to headers.
-///
-/// Refresh happens here rather than at login: a long-running agent outlives its
-/// access token, and the resolver is the only place that sees every call.
 pub struct StoredCredentials {
     store: std::sync::Arc<dyn CredentialStore>,
     http: reqwest::Client,
-    /// One refresh at a time per connection. Rotation makes concurrent
-    /// refreshes a correctness problem, not just wasted work: the loser
-    /// persists a refresh token the server has already retired.
     refreshing: tokio::sync::Mutex<
         std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
     >,
@@ -114,11 +83,6 @@ impl StoredCredentials {
             .map(Some)
     }
 
-    /// Renew the grant whether or not it looks expired, because the server
-    /// refused what we sent. A server can revoke a token early, thus a refusal
-    /// is a better signal than the expiry we recorded.
-    ///
-    /// `Ok(false)` if there is nothing to renew.
     async fn refresh_now(
         &self,
         tenant_id: &str,
@@ -137,9 +101,6 @@ impl StoredCredentials {
         Ok(true)
     }
 
-    /// What the slot holds, checked against where the connection now points.
-    /// The id is the key, so an edited `url` would otherwise send one server's
-    /// token to another.
     async fn grant(
         &self,
         tenant_id: &str,
@@ -165,7 +126,6 @@ impl StoredCredentials {
         Ok(Held::Grant(tokens))
     }
 
-    /// Exchange `held` for a new access token, one caller at a time.
     async fn renew(
         &self,
         tenant_id: &str,
@@ -182,8 +142,6 @@ impl StoredCredentials {
         };
         let _guard = gate.lock().await;
 
-        // Adopt a token another caller landed. To refresh again would retire
-        // the one they just wrote.
         if let Some(Credential::Oauth(current)) =
             self.store.get(tenant_id, connection_id, subject).await
         {
@@ -205,8 +163,6 @@ impl StoredCredentials {
         Ok(next.access_token)
     }
 
-    /// The grant a connection holds, as headers, or nothing where the slot is
-    /// empty.
     async fn oauth_headers(
         &self,
         tenant_id: &str,
@@ -220,15 +176,10 @@ impl StoredCredentials {
         {
             Ok(Some(token)) => auth_headers(None, &token).map(Some),
             Ok(None) => Ok(None),
-            // A grant that cannot be renewed is reported even where the file
-            // declared nothing: the connection was authorized once, so falling
-            // back to sending nothing would lose that.
             Err(e) => Err(refresh_failed(&spec.path, &e)),
         }
     }
 
-    /// The static token for one connection, sent under whichever header the
-    /// connection declares.
     async fn static_headers(
         &self,
         tenant_id: &str,
@@ -250,10 +201,6 @@ impl StoredCredentials {
     }
 }
 
-/// Where the file declares a method, that is what this sends. Where it does
-/// not — the usual case — the slot decides: a grant is sent, and an empty slot
-/// sends nothing and lets the server say whether it minded. Asking the server
-/// is what discovery is, and its refusal is the answer.
 #[async_trait::async_trait]
 impl CredentialResolver for StoredCredentials {
     async fn resolve(
@@ -302,8 +249,6 @@ impl CredentialResolver for StoredCredentials {
     }
 }
 
-/// A refresh that failed, as either a spent grant or a passing fault. Logging
-/// in corrects every spent case.
 fn refresh_failed(path: &ConnectionPath, e: &OauthError) -> ConnectorError {
     if !e.is_spent() {
         return ConnectorError::retryable(format!(
@@ -515,9 +460,6 @@ mod tests {
         );
     }
 
-    /// The default. Nothing declared and nothing held sends nothing, so an open
-    /// server works with a bare URL and a protected one answers with its own
-    /// 401 — which is the discovery.
     #[tokio::test]
     async fn an_undeclared_connection_sends_what_it_holds_or_nothing() {
         let headers = resolver(None)
@@ -547,9 +489,6 @@ mod tests {
         assert!(headers.is_empty());
     }
 
-    /// The scheme is the declaration's business: a server on this machine or
-    /// this network is reached in the clear, and a deployment that wants more
-    /// says so where declarations arrive.
     #[tokio::test]
     async fn a_token_goes_to_a_plaintext_url_the_file_named() {
         let mut spec = spec(Some(AuthKind::Token), None);

@@ -17,8 +17,6 @@ use crate::protocol::{
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
-/// Wraps our normalized `LlmTool` with the `"type": "function"` field
-/// that the OpenAI API expects.
 #[derive(Serialize)]
 struct WireTool {
     #[serde(rename = "type")]
@@ -46,7 +44,6 @@ impl From<&LlmTool> for WireTool {
     }
 }
 
-/// Wire-format request body.
 #[derive(Serialize)]
 struct WireBody<'a> {
     model: &'a str,
@@ -61,13 +58,10 @@ struct WireBody<'a> {
     reasoning_effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
-    /// Which cache machine the prompt routes to. Sessions of one agent open
-    /// alike, so without this they crowd onto one machine and spill.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<&'a str>,
-    /// A streamed call reports no tokens at all without this.
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
 }
@@ -77,9 +71,6 @@ struct StreamOptions {
     include_usage: bool,
 }
 
-/// A transcript message as Chat Completions takes it. Built rather than
-/// fields — the node `id`, the reasoning it holds for a provider that wants it
-/// back — are not part of this API, and a strict server rejects an unknown key.
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: Role,
@@ -105,18 +96,12 @@ impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
     }
 }
 
-/// One turn as an OpenAI-shaped API takes it. Shared with the router.
 pub(super) enum Turn<'a> {
     Message(&'a PromptMessage),
-    /// A tool message with its media lifted out, and the text to send.
     ToolText(&'a PromptMessage, String),
-    /// The media of the tool run that just ended, for a user turn.
     Media(Vec<ContentPart>),
 }
 
-/// The transcript with a tool's media moved to a user turn, which is where the
-/// API accepts it. The move waits for the run of tool messages to end, so every
-/// `tool_call_id` still answers back to back. Not recorded.
 pub(super) fn turns(messages: &[PromptMessage]) -> Vec<Turn<'_>> {
     let mut out = Vec::with_capacity(messages.len());
     let mut carried: Vec<ContentPart> = Vec::new();
@@ -173,7 +158,6 @@ fn wire_messages(messages: &[PromptMessage]) -> Vec<WireMessage<'_>> {
         .collect()
 }
 
-/// Which call an attachment answers.
 fn names(message: &PromptMessage) -> String {
     match (&message.name, &message.tool_call_id) {
         (Some(name), Some(id)) => format!("the `{name}` tool ({id})"),
@@ -206,20 +190,14 @@ fn split_media(content: Option<&PromptContent>) -> (String, Vec<ContentPart>) {
     }
 }
 
-/// What the caller knows about caching this call: the session the prompt
-/// belongs to, and how long the vendor holds it.
 #[derive(Default, Clone, Copy)]
 struct CacheOpts<'a> {
     key: Option<&'a str>,
     retention: Option<&'a str>,
 }
 
-/// The API refuses a longer key, and a session id is the caller's own string:
-/// a Slack thread names one, and a client can send any name it likes.
 const CACHE_KEY_MAX_CHARS: usize = 64;
 
-/// The first 64 characters of `session_id`, or nothing for an unnamed session.
-/// Two sessions sharing those characters share a machine, and nothing worse.
 fn cache_key(session_id: &str) -> Option<&str> {
     if session_id.is_empty() {
         return None;
@@ -241,13 +219,10 @@ fn effort_str(e: ReasoningEffort) -> &'static str {
     }
 }
 
-/// The leading run of digits, and what follows it.
 fn digits(s: &str) -> (&str, &str) {
     s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()))
 }
 
-/// The `<major>` of an `o<major>[-...]` name: the o-series reasoning models,
-/// however far the series runs.
 fn o_series(model: &str) -> Option<u32> {
     let (major, rest) = digits(model.strip_prefix('o')?);
     if !rest.is_empty() && !rest.starts_with('-') {
@@ -256,9 +231,6 @@ fn o_series(model: &str) -> Option<u32> {
     major.parse().ok()
 }
 
-/// A `gpt-<major>[.<minor>][-<variant>]` name in pieces. Anchored at the front,
-/// so a fine-tune or a gateway's own spelling — `ft:gpt-9:org:custom:abc`,
-/// `acme-gpt-9-proxy` — is not a GPT name and keeps the careful defaults.
 struct GptName<'a> {
     major: u32,
     minor: Option<u32>,
@@ -277,8 +249,6 @@ fn gpt_name(model: &str) -> Option<GptName<'_>> {
     };
     let variant = match rest {
         "" => None,
-        // What follows the version is a variant only after a dash, so `gpt-4o`
-        // is its own name and not GPT 4.
         rest => Some(rest.strip_prefix('-')?),
     };
     Some(GptName {
@@ -288,9 +258,6 @@ fn gpt_name(model: &str) -> Option<GptName<'_>> {
     })
 }
 
-/// Reasoning models — the o-series, and GPT-5 and later — refuse the sampling
-/// parameters. `gpt-5-chat-latest` is the exception: a chat model wearing a
-/// GPT-5 name, which it is only while it carries no minor version.
 fn is_reasoning_model(model: &str) -> bool {
     if o_series(model).is_some() {
         return true;
@@ -301,14 +268,11 @@ fn is_reasoning_model(model: &str) -> bool {
     })
 }
 
-/// GPT-5.1 and later read `temperature` again, but only at effort `none`.
 fn reads_sampling_at_no_effort(model: &str) -> bool {
     gpt_name(model).is_some_and(|g| (g.major, g.minor.unwrap_or(0)) >= (5, 1))
 }
 
 impl<'a> WireBody<'a> {
-    /// `stream: None` omits the field so the body is valid input for both the
-    /// create and stream calls a worker might make.
     fn build(
         request: &'a PromptRequest,
         search: DeferToolsStrategy,
@@ -321,10 +285,6 @@ impl<'a> WireBody<'a> {
             .and_then(|r| r.effort)
             .map(effort_str);
 
-        // Omit temperature for reasoning models — they 400 on it. An explicit
-        // effort says the caller means a reasoning model even where the name
-        // does not say so, and GPT-5.1 and later take temperature back at
-        // effort `none`.
         let reasoning = reasoning_effort.is_some() || is_reasoning_model(&request.model);
         let sampling_back =
             reasoning_effort == Some("none") && reads_sampling_at_no_effort(&request.model);
@@ -361,8 +321,6 @@ struct ChatCompletionResponse {
     usage: Option<serde_json::Value>,
 }
 
-/// The counts the API reports, where `prompt_tokens` is the whole prompt and
-/// the cached part of it is one level down.
 #[derive(Debug, Default, Deserialize)]
 struct ChatUsage {
     #[serde(default)]
@@ -377,13 +335,10 @@ struct ChatUsage {
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: u64,
-    /// OpenRouter only: an upstream that bills for the write reports it here.
     #[serde(default)]
     cache_write_tokens: u64,
 }
 
-/// The counts of one Chat Completions response, or nothing where the provider
-/// reported none. Shared with OpenRouter, which answers the same shape.
 pub(crate) fn usage_from_value(raw: Option<serde_json::Value>) -> Option<Usage> {
     let raw = raw?;
     let counts: ChatUsage = serde_json::from_value(raw.clone()).unwrap_or_default();
@@ -450,8 +405,6 @@ impl ChatCompletionResponse {
         LlmResponse {
             model: self.model,
             content: choice.as_ref().and_then(|c| c.message.content.clone()),
-            // No blocks: Chat Completions wants no reasoning back, so this is
-            // for a reader only.
             reasoning: Reasoning::new(
                 ReasoningProvider::Openai,
                 choice.as_ref().and_then(|c| c.message.reasoning.clone()),
@@ -491,8 +444,6 @@ struct StreamChunkChoice {
 struct StreamChunkDelta {
     #[serde(default)]
     content: Option<String>,
-    /// `reasoning` is what OpenRouter and Hetzner send; `reasoning_content` is
-    /// what vLLM and DeepSeek send. Same field, two names in the wild.
     #[serde(default, alias = "reasoning_content")]
     reasoning: Option<String>,
     #[serde(default)]
@@ -523,10 +474,6 @@ struct ToolCallAccum {
     arguments: String,
 }
 
-// ── Worker-format seam ───────────────────────────────────────────────────
-
-/// The Chat Completions body for `request`, `stream` omitted. The worker owns
-/// its own call, so the caching fields are the worker's to add.
 pub(crate) fn request_to_wire(
     request: &PromptRequest,
     search: DeferToolsStrategy,
@@ -535,16 +482,12 @@ pub(crate) fn request_to_wire(
         .unwrap_or_default()
 }
 
-/// A raw Chat Completions response → the neutral `LlmResponse`.
 pub(crate) fn response_from_wire(value: serde_json::Value) -> Result<LlmResponse, String> {
     crate::json::from_value::<ChatCompletionResponse>("openai response", value)
         .map(ChatCompletionResponse::into_llm_response)
         .map_err(|e| e.to_string())
 }
 
-/// Folds Chat Completions stream chunks into `StreamDelta`s and the final
-/// response. Shared by the server-side SSE loop and the worker-format delta
-/// seam (`providers::format`).
 #[derive(Default)]
 pub(crate) struct StreamParser {
     content: String,
@@ -560,7 +503,6 @@ impl StreamParser {
         Self::default()
     }
 
-    /// Fold one raw chunk payload; `[DONE]` and unknown payloads yield nothing.
     pub(crate) fn parse_data(&mut self, data: &str) -> Vec<StreamDelta> {
         if data == "[DONE]" {
             return Vec::new();
@@ -680,8 +622,6 @@ pub struct OpenAiConfig {
     pub organization: Option<String>,
     #[serde(default)]
     pub project: Option<String>,
-    /// How long a cached prefix lives: `24h`, or `in_memory` for the default
-    /// few minutes. Absent sends nothing, which the newer models want.
     #[serde(default)]
     pub cache_retention: Option<String>,
 }
@@ -753,8 +693,6 @@ impl OpenAiClient {
                 LlmCallError::new(
                     ErrorCode::ProviderError,
                     format!("HTTP request failed: {e}"),
-                    // Only an unbuildable request is hopeless; it would be
-                    // built the same way again.
                     !e.is_builder(),
                 )
             })
@@ -769,9 +707,6 @@ fn classify_error(status: reqwest::StatusCode, body: &str) -> LlmCallError {
     } else {
         ErrorCode::ProviderError
     };
-    // The provider says why in `error.message`; the rest of the body is a
-    // request id and echoed request, which the log keeps and the reader does
-    // not need.
     let message = match crate::json::error_message(body.as_bytes()) {
         Some(reported) => format!("OpenAI API error {status}: {reported}"),
         None => format!("OpenAI API error {status}"),
@@ -919,7 +854,6 @@ mod tests {
             let reasoning = parsed.reasoning.expect(field);
             assert_eq!(reasoning.provider, ReasoningProvider::Openai);
             assert_eq!(reasoning.text.as_deref(), Some("thought"));
-            // Chat Completions takes none back, so there is nothing to hold.
             assert!(reasoning.blocks.is_empty());
         }
     }
@@ -1028,7 +962,6 @@ mod tests {
 
     #[test]
     fn a_reasoning_name_is_read_whole_and_not_by_its_first_letters() {
-        // The o-series runs as far as it runs, and GPT 5 and later reason.
         for model in [
             "o1",
             "o3-mini",
@@ -1042,18 +975,13 @@ mod tests {
             assert!(is_reasoning_model(model), "{model}");
         }
 
-        // A chat model wearing a GPT-5 name is still a chat model, and takes
-        // the temperature it is given.
         assert!(!is_reasoning_model("gpt-5-chat-latest"));
-        // It is the chat model only without a minor version.
         assert!(is_reasoning_model("gpt-5.4-chat-latest"));
 
         for model in ["gpt-4o", "gpt-4.1-mini", "gpt-3.5-turbo", "o"] {
             assert!(!is_reasoning_model(model), "{model}");
         }
 
-        // A name that only carries a reasoning name inside it is another
-        // model, and keeps the careful defaults.
         for model in ["ft:gpt-9:acme:custom:abc123", "acme-gpt-9-proxy"] {
             assert!(!is_reasoning_model(model), "{model}");
         }
@@ -1090,7 +1018,6 @@ mod tests {
         assert_eq!(v["reasoning_effort"], "none");
         assert_eq!(v["temperature"], 0.7, "GPT-5.1 reads it again at no effort");
 
-        // GPT-5.0 does not, and neither does the o-series.
         for model in ["gpt-5", "o3"] {
             let mut r = req(model);
             r.reasoning = Some(ReasoningConfig {
@@ -1149,8 +1076,6 @@ mod tests {
             "prompt_tokens_details": { "cached_tokens": 9000 }
         })))
         .expect("usage");
-        // The vendor counts the cached part inside `prompt_tokens`, so the
-        // uncached part is what is left of it.
         assert_eq!(usage.input, 10000);
         assert_eq!(usage.uncached_input, 1000);
         assert_eq!(usage.cache_read, 9000);
@@ -1257,7 +1182,6 @@ mod tests {
         .unwrap();
         let m = v["messages"].as_array().unwrap();
 
-        // Every call answers back to back; the media waits for the run to end.
         let roles: Vec<&str> = m.iter().map(|x| x["role"].as_str().unwrap()).collect();
         assert_eq!(roles, ["user", "tool", "tool", "tool", "user"]);
         assert_eq!(m[2]["content"], "plain", "a text answer is untouched");

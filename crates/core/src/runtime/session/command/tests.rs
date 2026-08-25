@@ -23,7 +23,6 @@ use crate::runtime::session::events::EventPayload;
 use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
 
-/// Run a command through the handler and commit the resulting events, like production `execute`.
 fn dispatch(agg: &mut SessionAggregate, cmd: CommandPayload, caller: &Caller) -> Vec<EventPayload> {
     let now = Utc::now();
     let events = agg.handle(cmd, caller, now).expect("setup command failed");
@@ -35,10 +34,6 @@ fn dispatch(agg: &mut SessionAggregate, cmd: CommandPayload, caller: &Caller) ->
     events
 }
 
-/// Build an empty aggregate and run `CreateSession`, then drain the
-/// `session.start` decision with an empty (no-config) response so tests
-/// resume from a clean "no pending decision" state. Use
-/// [`create_session_with_config`] when a test needs an agent config set.
 fn create_session(session_id: &str, tenant_id: &str, user_id: &str) -> SessionAggregate {
     create_session_with_config(session_id, tenant_id, user_id, None)
 }
@@ -97,9 +92,6 @@ fn create_session_with_config(
     agg
 }
 
-/// Complete the pending `session.start` decision with an empty response, for
-/// tests that build the aggregate directly (e.g. a custom `worker_retry`)
-/// instead of through [`create_session`].
 fn drain_session_start(agg: &mut SessionAggregate) {
     let start = agg
         .state
@@ -264,9 +256,6 @@ fn frontend_cannot_complete_worker_handled_tool_call() {
     );
 }
 
-/// Declare a `get_weather` tool with an output contract, run its llm.call
-/// to the point where the tool call is in flight, and settle it with
-/// `result`. Returns the settle's events.
 fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayload>) {
     use crate::protocol::{LlmTool, ToolCall, ToolCallFunction};
 
@@ -335,7 +324,6 @@ fn settle_with_output_contract(result: &str) -> (SessionAggregate, Vec<EventPayl
             _ => None,
         })
         .expect("llm.finished opens a decision");
-    // Echo the default: record the assistant under the call id, dispatch the call.
     dispatch(
         &mut agg,
         CommandPayload::SubmitWorkerDecision {
@@ -496,7 +484,6 @@ fn request_tool_call_with_worker_handler_emits_decision_to_execute() {
 
 #[test]
 fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
-    // Async-tool flow: worker acks the tool.execute with no actions, then the tool settles out-of-band.
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let request_events = dispatch(
         &mut agg,
@@ -571,7 +558,6 @@ fn machine_completes_worker_handled_tool_call_after_worker_releases_decision() {
 
 #[test]
 fn machine_completes_worker_handled_tool_call_before_worker_releases_decision() {
-    // Tool result arrives before the worker acks its tool.execute decision.
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     dispatch(
         &mut agg,
@@ -831,7 +817,6 @@ fn duplicate_submit_worker_decision_is_no_op() {
         &machine,
     );
 
-    // Second submission with the same decision_id should be a no-op.
     let events = agg
         .try_handle(
             CommandPayload::SubmitWorkerDecision {
@@ -1004,7 +989,6 @@ fn mark_done_emits_session_done() {
         },
     );
 
-    // No active turn, no ancestry → just SessionDone, status returns to Idle.
     assert!(
         matches!(events.as_slice(), [EventPayload::SessionDone(_)]),
         "expected [SessionDone]; got {events:?}"
@@ -1217,7 +1201,6 @@ fn request_with(messages: Vec<DraftMessage>) -> LlmRequest {
     }
 }
 
-/// Drive a worker `Append` action onto the tree via a user-message decision.
 fn append_via_worker(agg: &mut SessionAggregate, transcript: Vec<DraftMessage>) {
     let setup = dispatch(
         agg,
@@ -1274,7 +1257,6 @@ fn request_llm_call_stores_prompt_without_minting_nodes() {
         },
     );
 
-    // The call records the worker's prompt but mints no tree nodes.
     assert!(
         !events
             .iter()
@@ -1362,8 +1344,6 @@ fn submit_append_queues_the_batch_as_a_client_message_trigger() {
         },
     );
 
-    // Nothing records at submit; the batch rides the trigger and
-    // materializes against the path at delivery.
     assert!(!events
         .iter()
         .any(|e| matches!(e, EventPayload::NewMessage(_))));
@@ -1404,8 +1384,6 @@ fn tool_node(id: &str, tool_call_id: &str, content: &str) -> DraftMessage {
     }
 }
 
-/// Record `transcript` into the tree via one worker decision, giving tests
-/// exact control over recorded ids (reconcile keeps explicit unknown ids).
 fn seed_tree(agg: &mut SessionAggregate, transcript: Vec<DraftMessage>) {
     let events = dispatch(
         agg,
@@ -1434,7 +1412,6 @@ fn seed_tree(agg: &mut SessionAggregate, transcript: Vec<DraftMessage>) {
     );
 }
 
-/// The messages carried by the (fired or queued) `client.messages` decision.
 fn transcript_messages(events: &[EventPayload]) -> Option<Vec<DraftMessage>> {
     events.iter().find_map(|e| {
         let trigger = match e {
@@ -1471,8 +1448,6 @@ fn submit_messages_single_answer_takes_the_fast_path() {
 
     let events = submit_messages(&mut agg, vec![tool_msg("tc-1", "the answer")]);
 
-    // The view's only change is one answer to one pending call: settle plus
-    // a tool.finished decision, mirroring the settle endpoint. No transcript.
     assert!(events
         .iter()
         .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
@@ -1496,8 +1471,6 @@ fn submit_messages_settles_client_tools_across_submissions() {
     request_client_tool(&mut agg, "a");
     request_client_tool(&mut agg, "b");
 
-    // Each lone answer is its own fast path (tool.finished), settling one
-    // call at a time.
     let first = submit_messages(&mut agg, vec![tool_msg("a", "RA")]);
     assert_eq!(fired_tool_result(&first), vec!["a".to_string()]);
     assert_eq!(
@@ -1528,7 +1501,6 @@ fn submit_messages_settles_all_client_tools_with_one_decision() {
     request_client_tool(&mut agg, "b");
 
     let events = submit_messages(&mut agg, vec![tool_msg("a", "RA"), tool_msg("b", "RB")]);
-    // Both settle up front, then one live transcript decision carries the proposal.
     let sequence: Vec<&str> = events
         .iter()
         .filter_map(|e| match e {
@@ -1555,8 +1527,6 @@ fn submit_messages_echoing_a_resolved_tool_result_settles_nothing() {
     request_client_tool(&mut agg, "tc-1");
     submit_messages(&mut agg, vec![tool_msg("tc-1", "done")]);
 
-    // A re-sent, already-resolved tool result matches nothing pending and must
-    // not fabricate a completion; it proceeds as a plain transcript submission.
     let echo = submit_messages(&mut agg, vec![tool_msg("tc-1", "done")]);
     assert!(
         !echo
@@ -1623,8 +1593,6 @@ fn transcript_with_completions_passes_the_interrupt_gate_and_queues() {
 
     let events = submit_messages(&mut agg, vec![tool_msg("tc-1", "R")]);
 
-    // A lone answer still takes the fast path while interrupted; the
-    // tool.finished decision queues until resume rather than firing.
     assert!(events
         .iter()
         .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))));
@@ -1674,7 +1642,6 @@ fn plain_transcript_rejected_while_interrupted() {
 #[test]
 fn normalize_folds_a_client_tool_echo_onto_its_recorded_node() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
-    // Recorded tree: u1, a1, and a tool-result node w1 answering tc-1.
     seed_tree(
         &mut agg,
         vec![
@@ -1684,8 +1651,6 @@ fn normalize_folds_a_client_tool_echo_onto_its_recorded_node() {
         ],
     );
 
-    // A local-memory client resends the whole view with ITS OWN id for the
-    // already-recorded tool message, plus a new user turn.
     let events = submit_messages(
         &mut agg,
         vec![
@@ -1697,8 +1662,6 @@ fn normalize_folds_a_client_tool_echo_onto_its_recorded_node() {
     );
 
     let messages = transcript_messages(&events).expect("a transcript decision");
-    // The echo adopts w1's id, so the whole prefix is known and only the new
-    // user turn is news — no fork.
     assert_eq!(
         messages[2].id.as_deref(),
         Some("w1"),
@@ -1731,9 +1694,6 @@ fn tool_echo_frozen_before_recording_folds_at_the_write_seam() {
         ],
     );
 
-    // The client's view froze before w1 recorded (queued behind the
-    // tool.finished decision), so its echo carries a client id. The worker
-    // echoes that stale view; the write seam still folds it onto w1.
     let d = open_decision(&mut agg, "resubmit");
     let events = submit_state(
         &mut agg,
@@ -1767,7 +1727,6 @@ fn tool_echo_frozen_before_recording_folds_at_the_write_seam() {
 #[test]
 fn edit_with_tail_replay_keeps_the_tool_result() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
-    // Recorded: u1, a1, tool node w1 (tc-1), a2.
     seed_tree(
         &mut agg,
         vec![
@@ -1778,9 +1737,6 @@ fn edit_with_tail_replay_keeps_the_tool_result() {
         ],
     );
 
-    // Edit u1 (fresh id), then replay the tail including the client's own
-    // copy of the tool result. The echo folds onto w1, so the re-recorded
-    // branch keeps the tool result rather than dangling a tool_use.
     let events = submit_messages(
         &mut agg,
         vec![
@@ -1804,8 +1760,6 @@ fn edit_with_tail_replay_keeps_the_tool_result() {
         .map(|n| n.message.id.as_str())
         .collect();
     let plan = plan_reconcile(&known, &messages);
-    // News starts at the edit and doesn't stop: all four re-record onto the
-    // new branch, tool result included.
     assert_eq!(
         plan.len(),
         4,
@@ -1822,8 +1776,6 @@ fn scrambled_answer_takes_the_bedrock_path() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     request_client_tool(&mut agg, "tc-1");
 
-    // A view whose recording changes more than the one answer (an extra new
-    // assistant turn) can't take the fast path — it's recorded as-is.
     let events = submit_messages(
         &mut agg,
         vec![
@@ -1855,7 +1807,6 @@ fn duplicate_answers_in_one_view_settle_once() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     request_client_tool(&mut agg, "tc-1");
 
-    // Two tool messages answer the same pending call; only the first counts.
     let events = submit_messages(
         &mut agg,
         vec![tool_msg("tc-1", "first"), tool_msg("tc-1", "second")],
@@ -1877,9 +1828,6 @@ fn duplicate_answers_in_one_view_settle_once() {
 
 #[test]
 fn recorded_echo_beside_a_new_answer_fast_paths_the_new_one() {
-    // The across-runs case: run 1's answer to tc-1 has been recorded (worker
-    // echoed w1) by the time run 2 arrives. Run 2 resends its stale copy of
-    // tc-1 beside a genuinely new answer to tc-2.
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     seed_tree(
         &mut agg,
@@ -1901,7 +1849,6 @@ fn recorded_echo_beside_a_new_answer_fast_paths_the_new_one() {
         ],
     );
 
-    // The stale echo folds onto w1, so only the new answer is news: fast path.
     assert_eq!(fired_tool_result(&events), vec!["tc-2".to_string()]);
     assert!(
         transcript_messages(&events).is_none(),
@@ -1950,8 +1897,6 @@ fn mixed_answer_and_message_while_interrupted_queues_bedrock() {
 
 #[test]
 fn queued_client_message_stays_a_delta_until_delivery() {
-    // Materialization happens at delivery, so a queued message composes with
-    // whatever the decision ahead of it writes.
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let first = dispatch(
         &mut agg,
@@ -2025,8 +1970,6 @@ fn reconcile_re_records_known_ids_past_the_first_new_node() {
     );
     assert_eq!(agg.state.head_id.as_deref(), Some("u2"));
 
-    // Edit a1 while keeping u2's known id after the fork point: the known id
-    // must be re-recorded as a fresh node, not grafted back onto the old branch.
     let events = dispatch(
         &mut agg,
         CommandPayload::SubmitClientPayload {
@@ -2165,8 +2108,6 @@ fn llm_completion_records_the_assistant_under_the_call_id() {
     request_llm(&mut agg, "call-1", LlmHandler::Server);
     let events = complete_llm(&mut agg, "call-1", 0, &system());
 
-    // The assistant node's id is the call id, matching what AG-UI streamed,
-    // so a client's echo of it reconciles instead of forking.
     let msg_id = events
         .iter()
         .find_map(|e| match e {
@@ -2185,8 +2126,6 @@ fn llm_completion_records_the_assistant_under_the_call_id() {
 #[test]
 fn agui_resend_of_a_prior_assistant_turn_appends_without_forking() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
-    // Turn 1: a user message, then an LLM turn whose assistant is recorded
-    // under the call id, then the worker echoes it into the tree.
     let d1 = decision_with(
         &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
         |_| true,
@@ -2206,8 +2145,6 @@ fn agui_resend_of_a_prior_assistant_turn_appends_without_forking() {
     );
     request_llm(&mut agg, "call-1", LlmHandler::Server);
     let done = complete_llm(&mut agg, "call-1", 0, &system());
-    // The worker echoes the assistant message straight from the trigger; its
-    // id is whatever the engine recorded it under (the fix: the call id).
     let (d2, assistant) = done
         .iter()
         .find_map(|e| match e {
@@ -2232,8 +2169,6 @@ fn agui_resend_of_a_prior_assistant_turn_appends_without_forking() {
         },
         &machine(),
     );
-    // The client was streamed the assistant under the call id, so its
-    // full-view echo uses "call-1". The recorded node must carry the same id.
     assert_eq!(agg.state.head_id.as_deref(), Some("call-1"));
 
     let events = submit_messages(
@@ -2299,7 +2234,6 @@ fn fail_llm_call_emits_errored() {
         },
     );
 
-    // Retry exhausted, so the handler fires a follow-up worker decision with the error.
     assert!(
         matches!(
             events.as_slice(),
@@ -2329,7 +2263,6 @@ fn llm_retry_reuses_the_stored_prompt() {
         backoff_base_secs: 1,
         backoff_max_secs: 1,
     };
-    // The retry re-issues the stored prompt.
     append_via_worker(
         &mut agg,
         vec![
@@ -2611,7 +2544,6 @@ fn fail_tool_call_emits_errored() {
         key_id: "prod-key-1".to_string(),
     };
 
-    // Worker releases its decision so the failure emits a fresh follow-up.
     dispatch(
         &mut agg,
         CommandPayload::SubmitWorkerDecision {
@@ -2705,8 +2637,6 @@ fn request_sub_agent_emits_requested() {
     assert_eq!(sa.tracking.status(), EffectStatus::Pending);
 }
 
-/// The opening message rides on the delegation rather than following it as a
-/// separate send, so it cannot reach the child before the child exists.
 #[test]
 fn request_sub_agent_holds_the_opening_message() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -2893,9 +2823,6 @@ fn complete_sub_agent_turn_emits_completed() {
     assert!(!sa.is_error);
 }
 
-/// Two delegations from one assistant message: the first to return must not
-/// re-prompt the model while its sibling still runs, or the request carries a
-/// `tool_use` with no matching `tool_result` and the provider rejects it.
 #[test]
 fn a_returned_delegation_waits_for_its_running_sibling() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -2924,7 +2851,6 @@ fn a_returned_delegation_waits_for_its_running_sibling() {
         );
     }
 
-    // Started is not finished: both children are alive and unreturned.
     let running = agg
         .state
         .event_meta(Utc::now())
@@ -2962,8 +2888,6 @@ fn a_returned_delegation_waits_for_its_running_sibling() {
     assert_eq!(still_running, 0, "a returned delegation is settled");
 }
 
-// ── Batched effect completion ────────────────────────────────────────
-
 fn machine() -> Caller {
     Caller::ApiKey {
         tenant_id: "tenant-a".to_string(),
@@ -2992,11 +2916,6 @@ fn admin() -> Caller {
     }
 }
 
-/// Declare `name` as client-handled, unanchored so it covers every path.
-///
-/// Where a call runs is derived from the config rather than passed in, so a
-/// test that exercises the client path has to say so. Pushed straight onto
-/// the log rather than through a decision, to leave event assertions alone.
 fn declare_client_tool(agg: &mut SessionAggregate, name: &str) {
     let mut agent = agent_config("m1");
     agent.tools.push(AgentTool {
@@ -3050,7 +2969,6 @@ fn wake(agg: &mut SessionAggregate) -> Vec<EventPayload> {
     dispatch(agg, CommandPayload::Wake { now: Utc::now() }, &system())
 }
 
-/// The `tool_call_id`s of every `tool.finished`/`sub_agent.finished` trigger, in order (deduped by decision id).
 fn fired_tool_result(events: &[EventPayload]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     events
@@ -3372,9 +3290,6 @@ fn timed_out_effect_fires_tool_result_via_wake() {
     );
 }
 
-/// A tool call with no policy of its own takes the default for *where it runs*,
-/// which is the whole point of splitting them: a worker tool must not hang a
-/// turn forever, and an async client tool must be free to.
 #[test]
 fn a_tool_call_takes_the_default_for_where_it_runs() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -3407,7 +3322,6 @@ fn a_tool_call_takes_the_default_for_where_it_runs() {
     );
 }
 
-/// The config reaches tool calls at all — the field used to bind LLM calls only.
 #[test]
 fn the_agent_config_binds_tool_calls_not_just_llm_calls() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -3461,7 +3375,6 @@ fn tool_named(name: &str, handler: Option<Handler>) -> AgentTool {
     }
 }
 
-/// Issue one tool call and report the policy the engine froze onto it.
 fn requested_tool_retry(
     agg: &mut SessionAggregate,
     id: &str,
@@ -3825,7 +3738,6 @@ fn machine_resumes_frontend_interrupt() {
     );
 }
 
-/// A click may be what answers the prompt.
 #[test]
 fn client_action_dispatches_while_interrupted() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -4032,7 +3944,6 @@ fn an_action_answer_can_resolve_an_open_interrupt() {
     );
 }
 
-/// A worker's resolve acts at machine privilege.
 #[test]
 fn a_worker_resolve_cannot_answer_a_system_interrupt() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -4107,7 +4018,6 @@ fn a_failed_action_decision_does_not_end_the_running_turn() {
             _ => None,
         })
         .expect("the message decision dispatches");
-    // Settle it into a server-run call, so the decision slot is free.
     dispatch(
         &mut agg,
         CommandPayload::SubmitWorkerDecision {
@@ -4378,7 +4288,6 @@ fn interrupt_voids_pending_worker_decision() {
     );
     assert!(!agg.state.has_pending_worker_decision());
 
-    // A late submission from the worker is a no-op, not an error.
     let stale = dispatch(
         &mut agg,
         CommandPayload::SubmitWorkerDecision {
@@ -4400,7 +4309,6 @@ fn interrupt_voids_pending_worker_decision() {
         "stale submission should no-op; got {stale:?}"
     );
 
-    // Resume requests a fresh decision immediately.
     let events = dispatch(
         &mut agg,
         CommandPayload::ResumeInterrupt {
@@ -4486,7 +4394,6 @@ fn tool_result_during_interrupt_queues_until_resume() {
         &system,
     );
 
-    // The late tool result is recorded but its decision is queued, not delivered.
     let events = dispatch(
         &mut agg,
         CommandPayload::settle(
@@ -4509,7 +4416,6 @@ fn tool_result_during_interrupt_queues_until_resume() {
         agg.state.tool_call("tc-1").unwrap().result.as_deref(),
         Some("done")
     );
-    // The tool.finished trigger is queued while interrupted; only its delivery is deferred.
     assert!(
         events
             .iter()
@@ -4523,7 +4429,6 @@ fn tool_result_during_interrupt_queues_until_resume() {
         "no decision should be delivered while interrupted; got {events:?}"
     );
 
-    // Resume delivers interrupt.resumed first...
     let events = dispatch(
         &mut agg,
         CommandPayload::ResumeInterrupt {
@@ -4709,8 +4614,6 @@ fn fail_worker_decision_emits_errored() {
         },
     );
 
-    // A terminal failure also ends the run: the turn it was driving can never
-    // settle on its own, and TurnCompleted is the only terminal consumers watch.
     assert!(
         matches!(
             events.as_slice(),
@@ -4926,8 +4829,6 @@ fn complete_tool_call_fires_tool_result_without_appending() {
     assert!(!tc.tool().unwrap().is_error);
 }
 
-// ── Parallel worker-tool results must stay on one linear path ─────────
-
 fn submit_decision(
     agg: &mut SessionAggregate,
     decision_id: String,
@@ -4965,8 +4866,6 @@ fn tool_result_action(id: &str) -> Action {
     }
 }
 
-/// The transcript the runtime would hand a decision requested right now:
-/// the root→head path, exactly as `try_extract` materializes it.
 fn delivered_transcript(agg: &SessionAggregate) -> Vec<DraftMessage> {
     agg.state
         .head_id
@@ -4985,7 +4884,6 @@ fn pending_worker_decisions(agg: &SessionAggregate) -> usize {
         .count()
 }
 
-/// The single live (pending) decision — its id and trigger.
 fn live_decision(agg: &SessionAggregate) -> (String, Trigger) {
     agg.state
         .effects_of(EffectKind::Decision)
@@ -4995,10 +4893,6 @@ fn live_decision(agg: &SessionAggregate) -> (String, Trigger) {
         .expect("a live decision")
 }
 
-/// Freeze the transcript each newly-requested decision is handed — the
-/// root→head path at request time, exactly as `try_extract` materializes it
-/// into the delivered decision. A decision keeps this base even if the head
-/// later moves; that is why two writers promoted against the same head fork.
 fn record_bases(
     events: &[EventPayload],
     agg: &SessionAggregate,
@@ -5012,10 +4906,6 @@ fn record_bases(
     }
 }
 
-/// Drive the worker to quiescence the way the runtime does: a single thread
-/// answers each live decision with the transcript it was frozen, and a wake
-/// fires after every step to surface queued work. Executes reply with a
-/// result; finishes append their result node to the frozen base.
 fn drive_worker(agg: &mut SessionAggregate, bases: &mut HashMap<String, Vec<DraftMessage>>) {
     for _ in 0..128 {
         let mut live: Vec<(String, Trigger)> = agg
@@ -5055,17 +4945,10 @@ fn drive_worker(agg: &mut SessionAggregate, bases: &mut HashMap<String, Vec<Draf
     panic!("worker did not settle");
 }
 
-// A wake exists to promote a queued worker decision when the session is
-// otherwise idle. It must not promote one while a decision is already live —
-// a second live decision lets two transcript writers run against the same
-// head and fork the tree. This is the exact hole that split a real session's
-// parallel tool results (a wake fired between two tool.execute submits).
 #[test]
 fn a_wake_does_not_promote_a_second_decision_while_one_is_pending() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
 
-    // One decision fans out into two worker-handled tool calls: one execute
-    // is promoted inline, the other queues behind it.
     let d0 = decision_with(
         &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
         |_| true,
@@ -5093,16 +4976,11 @@ fn a_wake_does_not_promote_a_second_decision_while_one_is_pending() {
     );
 }
 
-// The downstream symptom: a model that fans out into parallel worker-handled
-// tool calls must land every result on one linear path, so the next LLM call
-// is sent all of them. A forked tree hides some results from the model.
 #[test]
 fn parallel_tool_finishes_keep_results_on_one_path() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let mut bases: HashMap<String, Vec<DraftMessage>> = HashMap::new();
 
-    // Record [user, assistant] and fan out into two worker-handled tool
-    // calls in one batch — the shape a parallel tool call produces.
     let d0 = decision_with(
         &submit_messages(&mut agg, vec![node_msg("u1", Role::User, "hi")]),
         |_| true,
@@ -5123,7 +5001,6 @@ fn parallel_tool_finishes_keep_results_on_one_path() {
 
     drive_worker(&mut agg, &mut bases);
 
-    // Both results must lie on the single path an LLM call would be sent.
     let head = agg.state.head_id.clone().expect("a head");
     let path = agg.state.message_tree().path_to(&head);
     let seen: Vec<&str> = path
@@ -5136,12 +5013,6 @@ fn parallel_tool_finishes_keep_results_on_one_path() {
     );
 }
 
-// Parallel worker tools all complete before any `tool.finished` is processed
-// (executes queue ahead of finishes), so counting only in-flight calls leaves
-// every finish seeing zero pending work — and each prompts, the earlier ones
-// against a transcript missing the still-unrecorded sibling results. Only the
-// last finish should prompt; `pending_work` also counts sibling finishes
-// still awaiting recording.
 #[test]
 fn only_the_last_parallel_tool_finish_reports_no_pending_work() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -5160,15 +5031,11 @@ fn only_the_last_parallel_tool_finish_reports_no_pending_work() {
         vec![call_tool_action("tc-a"), call_tool_action("tc-b")],
     );
 
-    // Run both executes; both tool calls complete and their finishes queue.
     let (exec_a, _) = live_decision(&agg);
     submit_decision(&mut agg, exec_a, vec![], vec![tool_result_action("tc-a")]);
     let (exec_b, _) = live_decision(&agg);
     submit_decision(&mut agg, exec_b, vec![], vec![tool_result_action("tc-b")]);
 
-    // Both calls are done — in-flight work is zero. The first finish is live
-    // with the second still queued, so it must report pending work, or it
-    // would prompt now against a transcript missing the second result.
     let (finish_first, trigger) = live_decision(&agg);
     assert!(matches!(trigger, Trigger::ToolFinished { .. }));
     assert_eq!(
@@ -5177,7 +5044,6 @@ fn only_the_last_parallel_tool_finish_reports_no_pending_work() {
         "the first finish must wait: a sibling result is still unrecorded"
     );
 
-    // Record the first result; the last finish is now live, nothing pending.
     let mut answer = delivered_transcript(&agg);
     answer.push(tool_msg("tc-a", "A"));
     submit_decision(&mut agg, finish_first, answer, vec![]);
@@ -5191,13 +5057,6 @@ fn only_the_last_parallel_tool_finish_reports_no_pending_work() {
     );
 }
 
-// Async and client-handled tools (and sub-agents) leave their call
-// Pending after `tool.execute` returns — the result arrives later, out of
-// band. A fast sibling's finish must not prompt while that call is still in
-// flight, or the model is prompted without the async result. An in-flight
-// call keeps `pending_work` non-zero exactly as an unrecorded finish does, so
-// the two patterns compose. (The old in-flight-only count already handled
-// this half; the point here is the fix did not regress it.)
 #[test]
 fn an_in_flight_async_sibling_keeps_a_fast_tool_from_prompting() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -5216,9 +5075,6 @@ fn an_in_flight_async_sibling_keeps_a_fast_tool_from_prompting() {
         vec![call_tool_action("tc-fast"), call_tool_action("tc-async")],
     );
 
-    // Answer the fast tool's execute with a result; "start" the async one
-    // by answering its execute with nothing — the engine leaves its call
-    // Pending, just as an async tool or a client-handled tool would.
     let (exec_fast, t) = live_decision(&agg);
     assert!(matches!(&t, Trigger::ToolExecute { id, .. } if id == "tc-fast"));
     submit_decision(
@@ -5232,8 +5088,6 @@ fn an_in_flight_async_sibling_keeps_a_fast_tool_from_prompting() {
     assert!(matches!(&t, Trigger::ToolExecute { id, .. } if id == "tc-async"));
     submit_decision(&mut agg, exec_async, vec![], vec![]);
 
-    // The fast tool's finish is live while the async call is still in
-    // flight — it must report pending work and record only, not prompt.
     let (finish_fast, trigger) = live_decision(&agg);
     assert!(matches!(trigger, Trigger::ToolFinished { .. }));
     assert_eq!(
@@ -5251,8 +5105,6 @@ fn an_in_flight_async_sibling_keeps_a_fast_tool_from_prompting() {
         "the fast tool must wait: an async sibling is still in flight"
     );
 }
-
-// ── Concurrent LLM calls (fan-out) ───────────────────────────────────
 
 fn call_llm_action(id: &str, handler: LlmHandler) -> Action {
     Action::CallLlm {
@@ -5313,7 +5165,6 @@ fn complete_llm(
     )
 }
 
-/// Open a worker decision (via a user message) and answer it with `actions`.
 fn submit_decision_with(agg: &mut SessionAggregate, actions: Vec<Action>) -> Vec<EventPayload> {
     let setup = dispatch(
         agg,
@@ -5348,7 +5199,6 @@ fn submit_decision_with(agg: &mut SessionAggregate, actions: Vec<Action>) -> Vec
     )
 }
 
-/// The call ids of every `llm.execute` trigger, deduped by decision id.
 fn fired_llm_execute(events: &[EventPayload]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     events
@@ -5368,7 +5218,6 @@ fn fired_llm_execute(events: &[EventPayload]) -> Vec<String> {
         .collect()
 }
 
-/// The call ids of every `llm.finished` trigger, deduped by decision id.
 fn settled_llm_ids(events: &[EventPayload]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     events
@@ -5666,8 +5515,6 @@ fn done_then_late_llm_completion_still_settles() {
     );
 }
 
-// ── turn.finished notification ───────────────────────────────────────
-
 fn create_session_with_retry(retry: RetryPolicy) -> SessionAggregate {
     let mut agg = SessionAggregate::new(
         "sess-1".to_string(),
@@ -5695,8 +5542,6 @@ fn create_session_with_retry(retry: RetryPolicy) -> SessionAggregate {
     agg
 }
 
-/// Open a turn via a client message and answer it with `done`, driving pass 1
-/// (TurnCompleted + a queued/promoted turn.finished decision).
 fn drive_turn_done(
     agg: &mut SessionAggregate,
     turn_id: &str,
@@ -5752,7 +5597,6 @@ fn turn_finished_notifies_worker_and_defers_completion() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let events = drive_turn_done(&mut agg, "t1", serde_json::json!("answer"));
 
-    // Pass 1 emits no terminal — the turn.finished trigger IS the pass-1 signal.
     assert!(
         turn_completed(&events).is_none(),
         "pass 1 does not complete the turn; got {events:?}"
@@ -5782,16 +5626,11 @@ fn turn_finished_notifies_worker_and_defers_completion() {
         )),
         "the deferred decision is promoted; got {events:?}"
     );
-    // The frozen output is captured for pass 2.
     let f = agg.state.phase.finalizing().expect("finalizing set");
     assert_eq!(f.turn_id, "t1");
     assert_eq!(f.data, serde_json::json!("answer"));
 }
 
-/// A session holds one turn at a time. A submit that arrives while the agent is
-/// working is refused and told which turn holds the session, rather than opening
-/// a second turn that strands the first without a terminal. Redirecting a
-/// working agent is an interrupt followed by a submit.
 #[test]
 fn a_submit_during_an_active_turn_is_refused() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -5853,9 +5692,6 @@ fn a_submit_during_an_active_turn_is_refused() {
     );
 }
 
-/// A finalizing turn is not running: it has produced its answer and only awaits
-/// the worker's finalizer, whose queued `TurnEnd` owes the terminal anyway. A
-/// new turn delivers it rather than bouncing the caller off a hook it cannot see.
 #[test]
 fn a_new_turn_completes_the_finalizing_one_first() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -5898,10 +5734,6 @@ fn a_new_turn_completes_the_finalizing_one_first() {
     assert_eq!(agg.state.completed_turn_ids, vec!["t1".to_string()]);
 }
 
-/// Input that continues a turn rather than requesting one joins the turn that
-/// is running instead of being refused. AG-UI requires a resume and the revised
-/// view to arrive as a single input while an interrupt is open, and resuming
-/// does not end the turn it unpauses.
 #[test]
 fn a_continuing_submit_joins_the_running_turn() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -5962,8 +5794,6 @@ fn a_continuing_submit_joins_the_running_turn() {
     assert_eq!(agg.state.completed_turn_ids, Vec::<String>::new());
 }
 
-/// With no turn running there is nothing to continue, so the fallback id opens
-/// one — a resume can outlive the turn that raised its interrupt.
 #[test]
 fn a_continuing_submit_opens_its_fallback_turn_when_none_is_running() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -6009,8 +5839,6 @@ fn turn_finished_echo_completes_the_turn() {
         &machine(),
     );
 
-    // Pass 2 is the run terminal: exactly one TurnCompleted (the frozen output,
-    // no error) then SessionDone.
     let tc = turn_completed(&p2).expect("pass 2 completes the turn");
     assert_eq!(tc.turn_id, "t1");
     assert_eq!(
@@ -6035,9 +5863,6 @@ fn turn_finished_echo_completes_the_turn() {
     assert!(agg.state.phase.finalizing().is_none(), "finalizing cleared");
 }
 
-/// The turn's completion is a queue entry dependent on the finalizer
-/// decision. A worker that settles the finalizer without echoing `done`
-/// no longer strands the turn: the walk completes it.
 #[test]
 fn turn_finished_settled_without_done_still_completes_the_turn() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -6153,8 +5978,6 @@ fn turn_finished_terminal_failure_completes_as_failed_run() {
             .any(|e| matches!(e, EventPayload::DecisionErrored(_))),
         "the finalizer errors; got {events:?}"
     );
-    // The run still terminates — but as a failed run carrying the error, with the
-    // output preserved.
     let tc = turn_completed(&events).expect("a failed finalizer still completes the turn");
     assert_eq!(tc.turn_id, "t1");
     assert_eq!(tc.data, serde_json::json!("answer"), "output stays durable");
@@ -6251,8 +6074,6 @@ fn turn_finished_deadline_completes_when_exhausted() {
     assert!(has_session_done(&events));
 }
 
-// ── Branch-scoped worker state ───────────────────────────────────────
-
 use crate::protocol::{Issuer, Requester, Subject};
 use serde_json::json;
 
@@ -6319,7 +6140,6 @@ fn echoed_state_writes_nothing() {
         "the first write records a version; got {events:?}"
     );
 
-    // Echo with shuffled key order: structural equality dedups it.
     let d2 = open_decision(&mut agg, "again");
     let events = submit_state(
         &mut agg,
@@ -6456,8 +6276,6 @@ fn submit_agent(
     )
 }
 
-// ── Connectors ───────────────────────────────────────────────────────
-
 fn connector_config(ids: &[&str]) -> AgentConfig {
     AgentConfig {
         mcp: ids
@@ -6530,8 +6348,6 @@ fn settle_sync_at(agg: &mut SessionAggregate, written: &str, tools: &[&str]) -> 
     )
 }
 
-/// A session whose config names `ids`, with every fetch settled and each
-/// connection offering `tools`.
 fn session_with_connectors(ids: &[&str], tools: &[&str]) -> SessionAggregate {
     let mut agg =
         create_session_with_config("sess-1", "tenant-a", "user-1", Some(connector_config(ids)));
@@ -6555,8 +6371,6 @@ fn declaring_a_connector_fetches_it_and_parks_the_turn() {
         "the config write fetches the connection it names"
     );
 
-    // A message now cannot be decided: the config names tools the engine
-    // has not fetched, so the turn cannot be authored against it.
     let events = dispatch(
         &mut agg,
         CommandPayload::SubmitClientPayload {
@@ -6837,9 +6651,6 @@ fn work_started_beside_a_new_connector_queues_its_decision_rather_than_running_i
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d = open_decision(&mut agg, "hi");
 
-    // One decision that both declares a connector and starts a worker tool
-    // call. The tool call's `tool.execute` must not go out: the fetch this
-    // batch just requested has not settled.
     let events = dispatch(
         &mut agg,
         CommandPayload::SubmitWorkerDecision {
@@ -6901,9 +6712,6 @@ fn resuming_an_interrupt_still_waits_on_an_unsettled_fetch() {
         &machine(),
     );
 
-    // Resume promotes directly rather than through the usual gate, because
-    // that gate would park on the interrupt this batch just cleared. The
-    // fetch still has to hold it.
     let events = dispatch(
         &mut agg,
         CommandPayload::ResumeInterrupt {
@@ -6929,8 +6737,6 @@ fn resuming_an_interrupt_still_waits_on_an_unsettled_fetch() {
 fn a_fetch_is_keyed_on_the_connection_not_the_agent_version() {
     let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
 
-    // A config rewritten for an unrelated reason — a new declared tool —
-    // must not cost another round trip.
     let mut rewritten = connector_config(&["sentry"]);
     rewritten.tools.push(AgentTool {
         name: "get_time".to_string(),
@@ -6952,7 +6758,6 @@ fn a_fetch_is_keyed_on_the_connection_not_the_agent_version() {
         "an unrelated config rewrite refetches nothing; got {events:?}"
     );
 
-    // Adding a connection fetches only the new one.
     let d = open_decision(&mut agg, "again");
     let events = submit_agent(
         &mut agg,
@@ -7107,8 +6912,6 @@ fn connector_tools_reach_the_model_and_route_to_the_engine() {
         },
         &system(),
     );
-    // The merge happens at dispatch, when the tools in force are current;
-    // the executor reads the spec from state, not the requested event.
     assert!(
         events
             .iter()
@@ -7132,7 +6935,6 @@ fn connector_tools_reach_the_model_and_route_to_the_engine() {
         "the engine adds the connector's tools, which no worker could name"
     );
 
-    // A connector call is the engine's to run: no worker execute trigger.
     let events = dispatch(
         &mut agg,
         CommandPayload::RequestToolCall {
@@ -7155,8 +6957,6 @@ fn connector_tools_reach_the_model_and_route_to_the_engine() {
         "the handler is frozen onto the call"
     );
 }
-
-// ── Deferred tools ───────────────────────────────────────────────────
 
 fn searching_connector_config(ids: &[&str]) -> AgentConfig {
     AgentConfig {
@@ -7188,8 +6988,6 @@ fn session_with_searched_connector(id: &str, tools: &[&str]) -> SessionAggregate
     agg
 }
 
-/// What the request would carry: the engine holds every tool, and the request
-/// leaves out the deferred ones.
 fn offered(agg: &SessionAggregate) -> Vec<String> {
     agg.state
         .at(None)
@@ -7224,17 +7022,11 @@ fn call(agg: &mut SessionAggregate, id: &str, name: &str, arguments: &str) -> Ve
     )
 }
 
-/// A search answers from the place the call was made, and not from the head.
-///
-/// The model was shown the tools of one config. It searched against those.
-/// An answer resolved at a head that has since dropped the connection would
-/// describe a different agent from the request the model was answering.
 #[test]
 fn a_search_answers_at_the_anchor_of_the_call() {
     let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"issues"}"#);
 
-    // The head moves on, and the config there no longer names the connection.
     let ctx = CommitContext {
         span: SpanContext::root(),
         occurred_at: Utc::now(),
@@ -7274,8 +7066,6 @@ fn a_search_answers_at_the_anchor_of_the_call() {
     );
 }
 
-/// The engine tells the model that a server exists. The worker did not write
-/// this, and could not: it does not know what the connection answered.
 #[test]
 fn a_connection_is_announced_once_in_the_system_prefix() {
     let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
@@ -7321,7 +7111,6 @@ fn a_connection_is_announced_once_in_the_system_prefix() {
     );
 }
 
-/// `never` is the remedy for a server whose own words help nobody.
 #[test]
 fn announce_never_says_nothing() {
     let mut agg = create_session_with_config(
@@ -7438,9 +7227,6 @@ fn find_tools_is_answered_from_the_recorded_offer_without_the_connection() {
     );
 }
 
-/// A `call_tool` becomes the call it names. Nothing after the request sees a
-/// wrapper: not the target, not the recorded name, not the arguments, and not
-/// the `tool.finished` the worker reads.
 #[test]
 fn call_tool_becomes_the_call_it_names() {
     let mut agg = session_with_searched_connector("sentry", &["search_issues"]);
@@ -7563,15 +7349,12 @@ fn two_searched_connections_share_one_pair_and_one_search() {
     );
 }
 
-/// The whole point of the search shape: a connection that arrives during a
-/// session must not move one byte of the tool list.
 #[test]
 fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
     let mut agg = session_with_searched_connector("sentry", &["list_projects"]);
     let before = offered(&agg);
     assert_eq!(before, ["tool_search", "call_tool"]);
 
-    // The worker writes a config that names a second searched connection.
     let d = open_decision(&mut agg, "and now linear");
     dispatch(
         &mut agg,
@@ -7607,8 +7390,6 @@ fn a_connection_added_during_a_session_does_not_move_the_tool_list() {
     );
 }
 
-/// A listed connection is findable too, so one search covers the agent and an
-/// empty answer means the agent truly has nothing.
 #[test]
 fn a_search_covers_a_connection_that_lists_its_own_tools() {
     let mut agg = create_session_with_config(
@@ -7685,7 +7466,6 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
     );
 }
 
-/// The worker overrides the engine, and keeps whatever it did not override.
 #[test]
 fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
     let mut agg = create_session_with_config(
@@ -7739,9 +7519,6 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
     );
 }
 
-/// The agent holds the opinion, so the tools exist before any connection does.
-/// A worker can then add a connection at any turn, and the tool list is the
-/// same as it was on turn one.
 #[test]
 fn an_agent_can_declare_search_before_it_names_a_connection() {
     let mut agg = create_session_with_config(
@@ -7892,8 +7669,6 @@ fn call_tool_refuses_arguments_that_break_the_tools_own_schema() {
     );
 }
 
-/// The set of engine tools is a strategy the agent picks. A different
-/// combination is a different `defer_tools_strategy`.
 #[test]
 fn tool_search_picks_which_engine_tools_the_agent_gets() {
     let agent = |strategy: DeferToolsStrategy| AgentConfig {
@@ -7933,8 +7708,6 @@ fn tool_search_picks_which_engine_tools_the_agent_gets() {
     );
 }
 
-/// The agent-wide default reaches every source, not only the connections, and
-/// a tool that states its own overrides it.
 #[test]
 fn defer_tools_defers_every_source_and_a_tool_can_opt_out() {
     let agent = |defers: bool| AgentConfig {
@@ -7979,8 +7752,6 @@ fn defer_tools_defers_every_source_and_a_tool_can_opt_out() {
     );
 }
 
-/// Deferral belongs to a tool, not to MCP. A worker tool that sets it is left
-/// out of the request, found by a search, and run by the worker.
 #[test]
 fn a_worker_tool_can_defer_and_the_search_finds_it() {
     let mut agg = create_session_with_config(
@@ -8021,7 +7792,6 @@ fn a_worker_tool_can_defer_and_the_search_finds_it() {
         "no connection anywhere, and the agent still gets the search"
     );
 
-    // The search reaches a tool no connection owns.
     call(&mut agg, "tc-1", "tool_search", r#"{"query":"email"}"#);
     let settled = agg
         .state
@@ -8036,7 +7806,6 @@ fn a_worker_tool_can_defer_and_the_search_finds_it() {
         "a search covers each source, so an empty answer means the agent has nothing"
     );
 
-    // And the call runs on the worker, as a call to `send_email` always would.
     call(
         &mut agg,
         "tc-2",
@@ -8133,9 +7902,6 @@ fn call_tool_refuses_a_connection_this_agent_does_not_have() {
     );
 }
 
-/// The connection's own `output` contract rides on the tool the engine holds,
-/// so the ordinary check finds it. There is no separate path for a `call_tool`:
-/// the wrapper is rewritten into this tool before anything settles.
 #[test]
 fn a_deferred_connector_tool_carries_its_output_contract() {
     let mut agg = create_session_with_config(
@@ -8175,8 +7941,6 @@ fn a_deferred_connector_tool_carries_its_output_contract() {
     assert_eq!(tool.to_llm_tool().output, Some(schema));
 }
 
-/// A deferred tool is left out of the request, and nothing else about it
-/// changes: the engine holds it, routes it, and runs it.
 #[test]
 fn a_deferred_tool_is_still_the_engines_to_run() {
     let agg = session_with_searched_connector("sentry", &["search_issues"]);
@@ -8190,9 +7954,6 @@ fn a_deferred_tool_is_still_the_engines_to_run() {
     );
 }
 
-/// The decision that declares a connector and calls the model in one
-/// breath: the call queues behind the fetch and dispatches with the
-/// fetched tools merged.
 #[test]
 fn a_call_beside_a_new_connector_waits_for_the_fetch_and_gets_its_tools() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -8292,8 +8053,6 @@ fn a_dead_connection_dispatches_the_call_without_its_tools() {
     );
 }
 
-/// Strict order: a blocked entry blocks everything queued behind it, and
-/// the held entry names what it waits behind.
 #[test]
 fn strict_order_holds_work_behind_a_gated_call() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -8345,8 +8104,6 @@ fn strict_order_holds_work_behind_a_gated_call() {
     );
 }
 
-/// A worker-run call queues its execute decision at dispatch, so the
-/// trigger carries the post-merge request.
 #[test]
 fn a_worker_run_call_gets_its_execute_decision_at_dispatch_with_the_tools() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
@@ -8396,9 +8153,6 @@ fn a_worker_run_call_gets_its_execute_decision_at_dispatch_with_the_tools() {
 fn a_re_prompt_does_not_offer_a_connector_tool_twice() {
     let mut agg = session_with_connectors(&["sentry"], &["search_issues"]);
 
-    // A re-prompt is authored from the previous call's stored spec, which
-    // already carries the connector's tools. Adding them again is a 400
-    // from every provider: tool names must be unique.
     let already = LlmRequest {
         model: "m1".to_string(),
         messages: vec![],
@@ -8511,8 +8265,6 @@ fn a_filter_change_re_derives_without_another_fetch() {
 fn a_fork_keeps_the_offer_it_already_fetched() {
     let agg = session_with_connectors(&["sentry"], &["search_issues"]);
 
-    // Rewind past the fetch: an offer is a fact about the remote, not about
-    // a branch, so it survives the way the call maps do.
     let rewound = agg.state.clone().rewind(0, None);
     assert!(
         rewound
@@ -8549,7 +8301,6 @@ fn changed_agent_config_anchors_at_head_and_dedups() {
         Some(agent_config("m1"))
     );
 
-    // Echo the same config: structural equality dedups it.
     let d2 = open_decision(&mut agg, "again");
     let events = submit_agent(
         &mut agg,
@@ -8656,7 +8407,6 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
         &system(),
     );
 
-    // A client message arrives before session.start completes: it queues.
     let setup = dispatch(
         &mut agg,
         CommandPayload::SubmitClientPayload {
@@ -8676,7 +8426,6 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
         "the client decision queues behind session.start; got {setup:?}"
     );
 
-    // The worker declares its config on session.start.
     let start = agg
         .state
         .effects_of(EffectKind::Decision)
@@ -8699,8 +8448,6 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
         &machine(),
     );
 
-    // Completing session.start promotes the queued client decision, whose
-    // derived snapshot now resolves the just-written config.
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -8718,10 +8465,6 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
     );
 }
 
-/// `session.start` is unsettled while RetryScheduled, not just while
-/// Pending: a client message arriving between failure and retry must park
-/// behind it, or the turn runs configless and the retry is starved by the
-/// now-live client decision.
 #[test]
 fn client_message_parks_while_session_start_retry_is_scheduled() {
     let mut agg = SessionAggregate::new(
@@ -8805,8 +8548,6 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
              exactly as it does while session.start is Pending; got {events:?}"
     );
 
-    // The due retry re-delivers session.start ahead of the queued client
-    // decision — the reverse order starves the retry behind live traffic.
     let events = dispatch(
         &mut agg,
         CommandPayload::Wake {
@@ -8851,10 +8592,6 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
     );
 }
 
-/// A terminally-failed `session.start` leaves the session unable to ever
-/// configure a turn. Parked work must not be promoted into a configless
-/// turn that settles as a silent no-op, and new work must be refused with
-/// a typed error, not swallowed. Recovery is the retry policy's job.
 #[test]
 fn terminal_session_start_failure_restarts_on_the_next_message() {
     let mut agg = SessionAggregate::new(
@@ -8887,7 +8624,6 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
         })
         .expect("CreateSession opens a session.start decision");
 
-    // A message arrives while session.start is pending: it queues behind it.
     let queued = dispatch(
         &mut agg,
         CommandPayload::SubmitClientPayload {
@@ -8919,15 +8655,11 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
             .any(|e| matches!(e, EventPayload::DecisionErrored(_))),
         "the failure is recorded; got {events:?}"
     );
-    // No turn was ever started, so there is no run to end — the error event
-    // is the whole record. A TurnCompleted here would invent a turn.
     assert!(
         turn_completed(&events).is_none(),
         "no turn to complete without one started; got {events:?}"
     );
 
-    // The queued decision can never resolve a config: promoting it runs the
-    // turn configless and settles it as a silent no-op.
     let events = wake(&mut agg);
     assert!(
         !events.iter().any(|e| matches!(
@@ -8938,8 +8670,6 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
              failed terminally; got {events:?}"
     );
 
-    // The next user message retries the start rather than bouncing: fix the
-    // worker, say something, and the session picks up where it died.
     let retried = dispatch(
         &mut agg,
         CommandPayload::SubmitClientPayload {
@@ -8971,7 +8701,6 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
         "the message parks behind the restart; got {retried:?}"
     );
 
-    // The restart lands a config, and the message runs against it.
     let events = dispatch(
         &mut agg,
         CommandPayload::SubmitWorkerDecision {
@@ -9035,7 +8764,6 @@ fn fork_anchors_new_state_and_resolves_as_of_the_prefix_without_one() {
     assert_eq!(updates[0].anchor.as_deref(), Some("x1"));
     assert_eq!(agg.state.at_head().resolve_state_for().0, json!({"v": 3}));
 
-    // Fork with no state opinion resolves as-of the fork point.
     let d4 = open_decision(&mut agg, "retry");
     let events = submit_state(
         &mut agg,
@@ -9112,13 +8840,11 @@ fn truncating_view_moves_head_and_forks_the_regenerated_reply() {
     );
     assert_eq!(agg.state.head_id.as_deref(), Some("a1"));
 
-    // Regenerate: the view stops at u1 — nothing to write, head rebases.
     let d2 = open_decision(&mut agg, "regen");
     let events = submit_state(&mut agg, d2, vec![node_msg("u1", Role::User, "hi")], None);
     assert_eq!(head_moves(&events), ["u1"], "got {events:?}");
     assert_eq!(agg.state.head_id.as_deref(), Some("u1"));
 
-    // The regenerated reply forks: a sibling of a1, not its child.
     let d3 = open_decision(&mut agg, "next");
     submit_state(
         &mut agg,
@@ -9190,7 +8916,6 @@ fn known_branch_view_switches_the_head() {
         ],
         None,
     );
-    // Fork to a second branch via an edit.
     let d2 = open_decision(&mut agg, "edit");
     submit_state(
         &mut agg,
@@ -9203,7 +8928,6 @@ fn known_branch_view_switches_the_head() {
     );
     assert_eq!(agg.state.head_id.as_deref(), Some("b1"));
 
-    // Submitting the first branch's view switches back to it.
     let d3 = open_decision(&mut agg, "switch");
     let events = submit_state(
         &mut agg,
@@ -9281,7 +9005,6 @@ fn settle_without_attempt_settles_the_current_attempt() {
         "an attempt-less settle lands on the current attempt; got {events:?}"
     );
 
-    // A supplied attempt still fences.
     request_client_tool(&mut agg, "tc-2");
     let err = agg
         .try_handle(
@@ -9327,7 +9050,6 @@ fn fork_voids_a_pending_tool_call() {
         "the fork voids the stranded call; got {events:?}"
     );
 
-    // A late settle is rejected: the effect died with its branch.
     let err = agg
         .try_handle(
             CommandPayload::settle(
@@ -9351,7 +9073,6 @@ fn fork_spares_work_anchored_on_the_shared_prefix() {
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
     request_client_tool(&mut agg, "tc-1"); // anchored at u1
 
-    // Head advances past the anchor then forks below it; u1 stays on-path.
     let d2 = open_decision(&mut agg, "more");
     submit_state(
         &mut agg,
@@ -9436,7 +9157,6 @@ fn promoting_submit_drops_a_queued_settle_for_the_branch_it_forked_away() {
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
     request_client_tool(&mut agg, "tc-1"); // anchored at u1
 
-    // Settle queues behind the pending edit; a user message queues behind the settle.
     let d2 = open_decision(&mut agg, "redo");
     let events = dispatch(
         &mut agg,
@@ -9499,7 +9219,6 @@ fn fork_voids_a_pending_llm_call() {
         "the fork voids the in-flight call; got {events:?}"
     );
 
-    // The executor's late result no-ops.
     let events = complete_llm(&mut agg, "llm-1", 0, &system());
     assert!(events.is_empty(), "got {events:?}");
 }
@@ -9526,7 +9245,6 @@ fn fork_drops_a_queued_execute_decision() {
         },
         &machine(),
     );
-    // t1's execute is delivered; t2's queues behind it.
     let exec_t1 = decision_with(
         &events,
         |t| matches!(t, Trigger::ToolExecute { id, .. } if id == "t1"),
@@ -9650,7 +9368,6 @@ fn void_guard_matches_kind_not_just_id() {
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
     request_client_tool(&mut agg, "shared"); // anchored at u1
 
-    // Sub-agent with the same id, anchored one node deeper.
     let d2 = open_decision(&mut agg, "more");
     submit_state(
         &mut agg,
@@ -9673,8 +9390,6 @@ fn void_guard_matches_kind_not_just_id() {
         &system(),
     );
 
-    // Forking voids the sub-agent by its child session, so the tool call it
-    // answers — same id — is untouched and its settle still lands.
     let d3 = open_decision(&mut agg, "redo");
     let events = dispatch(
         &mut agg,
@@ -9741,7 +9456,6 @@ fn fork_drops_a_retrying_settle_decision() {
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
     request_client_tool(&mut agg, "tc-1"); // anchored at u1
 
-    // The on-path settle is delivered, then the worker errors retryably.
     let events = dispatch(
         &mut agg,
         CommandPayload::settle(
@@ -9792,8 +9506,6 @@ fn fork_drops_a_retrying_settle_decision() {
     assert!(events.is_empty(), "got {events:?}");
 }
 
-// ── Branch-scoped interrupts ─────────────────────────────────────────
-
 fn interrupt(agg: &mut SessionAggregate, id: &str) -> Vec<EventPayload> {
     dispatch(
         agg,
@@ -9817,7 +9529,6 @@ fn resume(agg: &mut SessionAggregate, id: &str) -> Vec<EventPayload> {
     )
 }
 
-/// A session with `u1 -> a1` recorded and the head at `a1`.
 fn parked_session() -> SessionAggregate {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d1 = open_decision(&mut agg, "hi");
@@ -9946,7 +9657,6 @@ fn answer_carrying_view_is_accepted_and_queued_while_parked() {
     );
 }
 
-/// Escape a parked `u1 -> a1` session onto a sibling branch `u1 -> e1`.
 fn escape_to_e1(agg: &mut SessionAggregate) {
     let events = submit_messages(
         agg,
@@ -10010,7 +9720,6 @@ fn two_parked_branches_coexist_and_resume_independently() {
 #[test]
 fn resume_with_a_live_escape_decision_queues_the_trigger() {
     let mut agg = parked_session();
-    // Escape dispatched but not yet submitted: a live decision.
     submit_messages(
         &mut agg,
         vec![
@@ -10188,7 +9897,6 @@ fn promotion_and_wake_skip_parked_branches() {
 fn wake_promotes_a_queued_decision_on_an_unparked_branch() {
     let mut agg = parked_session();
     escape_to_e1(&mut agg);
-    // Plant an anchorless queued decision: promotable from the unparked head.
     agg.commit(
         vec![EventPayload::DecisionQueued(DecisionQueued {
             id: "d-queued".to_string(),
@@ -10360,7 +10068,6 @@ fn parked_branch_deadlines_are_suppressed_but_live_branch_timers_run() {
         "a parked branch's deadline schedules nothing"
     );
 
-    // The escape voids tc-parked; the live branch's deadline still runs.
     escape_to_e1(&mut agg);
     dispatch(
         &mut agg,
@@ -10378,12 +10085,6 @@ fn parked_branch_deadlines_are_suppressed_but_live_branch_timers_run() {
     );
 }
 
-// ── Queued turns ────────────────────────────────────────────────────────────
-//
-// A submit that asks to queue is accepted mid-turn and held as a parked
-// decision, which becomes the next turn when the phase frees up.
-
-/// Submit `text` as turn `turn_id`, asking to be held rather than refused.
 fn submit_queued(
     agg: &mut SessionAggregate,
     text: &str,
@@ -10409,7 +10110,6 @@ fn submit_queued(
     Ok(events)
 }
 
-/// A session with `turn-1` running and its first decision live.
 fn session_mid_turn() -> SessionAggregate {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     dispatch(
@@ -10427,7 +10127,6 @@ fn session_mid_turn() -> SessionAggregate {
     agg
 }
 
-/// Settle the one live decision with no transcript and `actions`.
 fn decide(agg: &mut SessionAggregate, actions: Vec<Action>) -> Vec<EventPayload> {
     let id = agg
         .state
@@ -10449,7 +10148,6 @@ fn decide(agg: &mut SessionAggregate, actions: Vec<Action>) -> Vec<EventPayload>
     )
 }
 
-/// End the running turn: the agent is done, then the finalizer echoes it.
 fn end_turn(agg: &mut SessionAggregate) -> Vec<EventPayload> {
     decide(
         agg,
@@ -10504,9 +10202,6 @@ fn a_queued_turn_starts_in_the_batch_that_ends_the_one_before_it() {
         .expect("the queued decision holding turn-2");
 
     let events = end_turn(&mut agg);
-    // The whole handoff, in order, in one batch: the turn that held the phase
-    // ends, the queued one opens, and its decision goes out — the turn cannot
-    // start without the work, and the work cannot start without the turn.
     let handoff: Vec<String> = events
         .iter()
         .filter_map(|e| match e {
@@ -10532,9 +10227,6 @@ fn a_queued_turn_starts_in_the_batch_that_ends_the_one_before_it() {
 
 #[test]
 fn a_queued_submit_defers_while_the_turn_before_it_finalizes() {
-    // A finalizing turn still holds the phase: its output is frozen but the
-    // turn has not ended, so a queued submit waits for its terminal rather than
-    // opening a second turn beside it.
     let mut agg = session_mid_turn();
     decide(
         &mut agg,
@@ -10557,7 +10249,6 @@ fn a_queued_submit_defers_while_the_turn_before_it_finalizes() {
         "and it waits on the turn, which is still turn-1's"
     );
 
-    // The finalizer settles: turn-1 ends and turn-2 takes the phase.
     let events = decide(
         &mut agg,
         vec![Action::Done {
@@ -10590,17 +10281,14 @@ fn a_queued_turn_id_is_refused_until_it_has_run() {
     let mut agg = session_mid_turn();
     submit_queued(&mut agg, "and another thing", "turn-2").expect("queued submit");
 
-    // Queued: a redelivery names work the session already holds.
     match submit_queued(&mut agg, "and another thing", "turn-2") {
         Err(SessionError::TurnAlreadyActive { turn_id }) => assert_eq!(turn_id, "turn-2"),
         other => panic!("expected TurnAlreadyActive; got {other:?}"),
     }
-    // Running.
     match submit_queued(&mut agg, "hi", "turn-1") {
         Err(SessionError::TurnAlreadyActive { turn_id }) => assert_eq!(turn_id, "turn-1"),
         other => panic!("expected TurnAlreadyActive; got {other:?}"),
     }
-    // Completed.
     end_turn(&mut agg);
     match submit_queued(&mut agg, "hi", "turn-1") {
         Err(SessionError::TurnAlreadyCompleted { turn_id }) => assert_eq!(turn_id, "turn-1"),
@@ -10664,7 +10352,6 @@ fn a_failed_turn_does_not_un_ask_the_turn_queued_behind_it() {
         .map(|d| d.id.clone())
         .expect("turn-1's decision is live");
 
-    // The running turn's decision dies terminally: the run fails.
     let events = dispatch(
         &mut agg,
         CommandPayload::settle(
@@ -10707,7 +10394,6 @@ fn cancelling_never_starts_a_queued_turn() {
 fn an_interrupt_holds_a_queued_turn_until_the_one_before_it_finishes() {
     let mut agg = session_mid_turn();
     submit_queued(&mut agg, "and another thing", "turn-2").expect("queued submit");
-    // turn-1's worker goes quiet, then the branch is interrupted.
     decide(&mut agg, vec![]);
     dispatch(
         &mut agg,
@@ -10730,7 +10416,6 @@ fn an_interrupt_holds_a_queued_turn_until_the_one_before_it_finishes() {
         "the branch is what holds it now, not the turn"
     );
 
-    // The resume answers first: turn-2 waits for turn-1 to actually end.
     let events = dispatch(
         &mut agg,
         CommandPayload::ResumeInterrupt {
@@ -10761,9 +10446,6 @@ fn an_interrupt_holds_a_queued_turn_until_the_one_before_it_finishes() {
 
 #[test]
 fn a_queued_turn_id_cannot_be_opened_by_another_path() {
-    // Dedup is one rule, so every path that opens a turn sees a queued one —
-    // not only the submit path that queued it. A turn holding a queued decision
-    // owes a run, and opening a second turn for it would start it twice.
     let mut agg = session_mid_turn();
     submit_queued(&mut agg, "and another thing", "turn-2").expect("queued submit");
     decide(
@@ -10794,8 +10476,6 @@ fn a_queued_turn_id_cannot_be_opened_by_another_path() {
     }
 }
 
-// ── Admin ────────────────────────────────────────────────────────────
-
 #[test]
 fn admin_cannot_submit_a_worker_decision() {
     assert!(matches!(
@@ -10821,8 +10501,6 @@ fn an_admin_can_cancel_a_session_and_an_end_user_cannot() {
     ));
 }
 
-/// The caller is judged before the call, so an unknown call still separates
-/// them: a worker gets "no such call", everyone else "not yours".
 #[test]
 fn only_a_worker_answers_an_llm_call() {
     let state = SessionState::new("sess-1".to_string());
@@ -10856,7 +10534,6 @@ fn an_admin_does_not_answer_to_a_session_owner() {
     assert!(state.ensure_owns_session(&admin()).is_ok());
 }
 
-/// A person unblocks what a program parked, not the reverse.
 #[test]
 fn an_admin_outranks_a_machine_and_answers_to_the_engine() {
     use crate::protocol::InterruptOrigin;
@@ -10877,8 +10554,6 @@ fn an_admin_caller_raises_an_admin_interrupt() {
         InterruptOrigin::Machine
     ));
 }
-
-// ── Plugins ──────────────────────────────────────────────────────────
 
 fn plugin_config() -> AgentConfig {
     AgentConfig {
@@ -10988,7 +10663,6 @@ fn using_a_skill_only_freezes_the_call() {
 #[test]
 fn the_catalog_rides_the_first_prompt_once() {
     let mut agg = plugin_session();
-    // A call waits for the plugin's servers, so settle them first.
     settle_sync_at(&mut agg, "plugin.pdf.mcp.renderer", &["fill_form"]);
     let prompt = |agg: &mut SessionAggregate, id: &str| {
         dispatch(

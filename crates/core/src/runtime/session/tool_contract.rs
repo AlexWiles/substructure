@@ -1,29 +1,7 @@
-//! The tool contract: a tool's declared `input`/`output` JSON Schemas and the
-//! engine's enforcement of them, in both directions.
-//!
-//! Inbound (model → tool), [`classify_arguments`] sorts a call's raw argument
-//! string into the tagged [`ToolInput`] delivered on the `tool.execute`
-//! trigger: `valid` (parsed, meets the declared schema), `invalid` (parsed,
-//! violates it), or `malformed` (not a JSON object at all). Outbound (tool →
-//! model), [`output_violation`] checks a settled result against the declared
-//! `output` schema so the engine can refuse a result the tool's own contract
-//! forbids.
-//!
-//! The engine validates, it never mutates: a `valid` value is exactly the
-//! parsed argument string — no coercion, no default-filling. Real parsing
-//! (typed bindings) belongs to the worker.
-//!
-//! Schemas are resolved by lineage ([`declared_tool`]): the executing call's
-//! id appears in one assistant message on the active path, recorded under its
-//! llm.call's id; that call's spec names the tool. A call with no resolvable
-//! spec (worker-authored, off-path) is [`DeclaredTool::Unknowable`] — the
-//! engine can't judge it and skips every check.
-
 use super::state::LlmCallState;
 use crate::protocol::{LlmTool, Message, ToolInput};
 
 impl ToolInput {
-    /// The error text for a non-valid classification.
     pub fn error(&self) -> Option<&str> {
         match self {
             ToolInput::Valid { .. } => None,
@@ -32,8 +10,6 @@ impl ToolInput {
     }
 }
 
-/// Classify a call's raw argument string against the tool's declared `input`
-/// schema (`None` skips the schema check). Empty arguments normalize to `{}`.
 pub fn classify_arguments(arguments: &str, schema: Option<&serde_json::Value>) -> ToolInput {
     let value = if arguments.trim().is_empty() {
         serde_json::json!({})
@@ -69,22 +45,13 @@ fn json_type(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// What the originating llm.call declared about the tool a call names.
 #[derive(Debug)]
 pub enum DeclaredTool<'a> {
-    /// The call's spec declares this tool.
     Declared(&'a LlmTool),
-    /// The call's spec declares tools, but not this name — a hallucinated call.
     Undeclared,
-    /// No spec to judge against: a worker-authored call, an off-path call, or
-    /// a request that declared no tools.
     Unknowable,
 }
 
-/// Resolve what the originating request declared about tool `name`, by
-/// lineage: `tool_call_id` appears in one assistant message on the active
-/// path, recorded under its llm.call's id; that call's spec lists the tools
-/// the model was offered.
 pub fn declared_tool<'a>(
     tool_call_id: &str,
     name: &str,
@@ -107,17 +74,12 @@ pub fn declared_tool<'a>(
     }
 }
 
-/// Check a settled result against the tool's declared `output` schema. The
-/// result string is interpreted as JSON when it parses, else as a plain
-/// string value.
 pub fn output_violation(schema: &serde_json::Value, result: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(result)
         .unwrap_or_else(|_| serde_json::Value::String(result.to_string()));
     schema_violations(schema, &value)
 }
 
-/// Validate a value against a JSON Schema. An unbuildable schema skips
-/// validation rather than failing the call.
 fn schema_violations(schema: &serde_json::Value, value: &serde_json::Value) -> Option<String> {
     let validator = jsonschema::validator_for(schema).ok()?;
     let violations: Vec<String> = validator

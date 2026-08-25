@@ -3,7 +3,7 @@
     "schemas": {
       "AgentConfig": {
         "additionalProperties": false,
-        "description": "A declared agent identity — the same shape whether it is written in an\n`[agent.<id>]` section or returned by a worker.\n\n`llm` names the `[llm.*]` block every proposed call runs on, and so decides\nboth the venue (the engine with a vendor key, or the agent's own worker) and\nthe wire shape of a worker-run call. It is effectively required: a config\nthat names none fails when the engine resolves a call against it.",
+        "description": "A declared agent. The same shape whether a file writes it or a worker\nreturns it.\n\n`llm` names the `[llm.*]` block every call runs on. That block decides where\nthe call runs and what shape it takes. A config that names no block fails\nwhen the engine resolves a call.",
         "properties": {
           "defer_tools": {
             "anyOf": [
@@ -14,7 +14,7 @@
                 "type": "null"
               }
             ],
-            "description": "Defer every tool this agent offers, from any source, unless the tool or\nthe connection says otherwise. Absent ⇒ the agent defers nothing of its\nown; a connection may still defer on its own account.\n\nPresence is the switch, so an agent cannot carry settings that do\nnothing. Declared on the agent because an agent can hold this opinion\nbefore it names a connection: one that sets it gets the search tools\nfrom its first turn, so a connection added later costs no cache."
+            "description": "Defer every tool this agent offers, whatever its source. A tool or a\nconnection overrides this with its own `defer`. Absent, the agent defers\nnothing; a connection can still defer on its own."
           },
           "effort": {
             "anyOf": [
@@ -25,7 +25,7 @@
                 "type": "null"
               }
             ],
-            "description": "How hard the model thinks, carried on the agent because it pairs with\nthe model. Unset sends no reasoning config and leaves the provider its\nown default."
+            "description": "How hard the model thinks. Unset leaves the provider's own default."
           },
           "llm": {
             "description": "The `[llm.*]` block this agent's calls run on.",
@@ -35,7 +35,7 @@
             ]
           },
           "mcp": {
-            "description": "MCP servers",
+            "description": "MCP servers this agent draws tools from.",
             "items": {
               "$ref": "#/components/schemas/McpServer"
             },
@@ -43,7 +43,7 @@
           },
           "mcp_announce": {
             "$ref": "#/components/schemas/McpAnnounce",
-            "description": "Where the engine tells the model that an MCP server is available, and\nwhat that server says it is for.\n\nSeparate from `defer_tools`: a server exists whether or not its tools\nare deferred, and where a notice lands is a fact about this agent's\nprompt rather than about any server."
+            "description": "Whether the engine tells the model that an MCP server is available, and\nwhat that server says it is for."
           },
           "model": {
             "type": "string"
@@ -64,10 +64,10 @@
                 "type": "null"
               }
             ],
-            "description": "Boxed: five per-kind overrides is a lot of bytes to carry inline\nthrough every command that holds a config."
+            "description": "Boxed. Five per-kind overrides are too many bytes to carry inline."
           },
           "sub_agents": {
-            "description": "Sub-agents the model can delegate to. Presented to the model as tools (by\nid) alongside `tools`, but each call spawns a child session rather than\nexecuting a function.",
+            "description": "Sub-agents the model can delegate to. The model sees them as tools.\nEach call starts a child session.",
             "items": {
               "$ref": "#/components/schemas/SubAgent"
             },
@@ -95,7 +95,7 @@
       },
       "AgentPlugin": {
         "additionalProperties": false,
-        "description": "A plugin an agent uses. The skills and servers are stamped from the bundle\nwhen the config loads. To enable a plugin, write it into the config.",
+        "description": "A plugin an agent uses. The skills and servers come from the bundle when the\nconfig loads.",
         "properties": {
           "approve": {
             "$ref": "#/components/schemas/Approve"
@@ -145,7 +145,7 @@
       },
       "AgentTool": {
         "additionalProperties": false,
-        "description": "A function tool the agent offers. The model-facing contract is\n`name`/`description`/`input`/`output`; `handler` selects where a call runs —\n`Some(Client)` ⇒ client-executed, absent ⇒ worker-executed (the default).\n`server` is invalid for tools: engine-executed tools come from a connector,\nwhich a worker declares by id rather than by tool.",
+        "description": "A function tool the agent offers. `handler` says where a call runs:\n`client` for the client, absent for the worker. `server` is invalid here.\nThe engine runs only connector tools, and a worker declares those by\nconnection id.",
         "properties": {
           "defer": {
             "description": "Keep this tool out of the request. See [`LlmTool::defer`]. Absent ⇒\nthe agent's `defer_tools`.",
@@ -199,7 +199,7 @@
       },
       "ClientContext": {
         "additionalProperties": false,
-        "description": "Inputs a client declares on its run (the AG-UI `tools`/`context`/`state`/\n`forwardedProps`), forwarded to the worker on the `client.messages` decision.\n`tools` are the browser's frontend tools, normalized to client-handled\n[`AgentTool`]s; the engine layers them onto the proposed config by default, and\nthe worker may override (e.g. whitelist) by returning its own `agent`.",
+        "description": "Inputs a client declares on its run, passed to the worker on the\n`client.messages` decision. `tools` are the browser's own tools, read as\nclient-handled [`AgentTool`]s. The engine adds them to the proposed config.\nA worker can override that by returning its own `agent`.",
         "properties": {
           "context": {
             "items": {},
@@ -233,15 +233,15 @@
             "type": "array"
           }
         ],
-        "description": "Message content: either a plain string or an array of typed parts.\nSerializes as a raw string or array respectively (untagged).",
+        "description": "A plain string, or an array of typed parts. Untagged.",
         "title": "Content"
       },
       "DecisionAction": {
-        "description": "The action a worker authors on the wire. Mirrors the internal `Action`, but a\nsettle's effect id may be omitted: on the sync/pull paths the answered\n`*.execute` trigger names it, so echoing it is redundant. `resolve_response`\n(`runtime::session::wire`) turns this into the internal `Action` (id always\npresent) at the transport boundary.",
+        "description": "The action a worker writes on the wire. A settle can leave out the effect\nid, because the `*.execute` trigger it answers already names it.",
         "oneOf": [
           {
             "additionalProperties": false,
-            "description": "A flat, all-optional LLM request. `id` omitted ⇒ the engine mints one; it\nbecomes the assistant node's id. Omitted fields are filled from the agent\nconfig (merge source), then engine defaults; `messages` omitted ⇒\n`[config.system?] + the decision's declared view`. Explicit `messages`\nsuppress system injection. A bare `{\"type\":\"llm.call\"}` prompts per the\nagent's identity over the current view.",
+            "description": "A flat LLM request. Every field is optional.\n\nWithout `id`, the engine mints one, and it becomes the assistant node's\nid. A field left out comes from the agent config, then from the engine's\ndefault. Without `messages`, the request carries the config's system\nmessage and the decision's view. Given `messages`, no system message is\nadded.",
             "properties": {
               "id": {
                 "type": [
@@ -250,7 +250,7 @@
                 ]
               },
               "llm": {
-                "description": "The `[llm.*]` block this call runs on; omitted ⇒ the merge source\nconfig's `llm`. Naming a different block moves one call to another\nvenue or vendor.",
+                "description": "The `[llm.*]` block this call runs on. Absent uses the config's\n`llm`. Naming another block moves this one call elsewhere.",
                 "type": [
                   "string",
                   "null"
@@ -298,7 +298,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Layered over the agent config's `llm` policy, else over the engine's\ndefault."
+                "description": "Layered over the agent config's `llm` policy, or over the engine's\ndefault."
               },
               "stream": {
                 "type": [
@@ -334,7 +334,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "`id` omitted ⇒ the engine mints one (LLM-driven tools carry the model's id).\n\nThere is no `handler`: where a call runs follows from its name. A tool\nresolved from a connector runs on the engine, a tool declared\n`handler: client` runs on the client, and anything else runs on the\nworker. The engine already knows all three, so asking the worker to\nrestate it only creates a way for the two to disagree.",
+            "description": "Without `id`, the engine mints one. A tool the model called carries the\nmodel's id.\n\nThere is no `handler`. The name says where the call runs: a connector\ntool on the engine, a `handler: client` tool on the client, anything\nelse on the worker. The engine knows all three already.",
             "properties": {
               "arguments": {},
               "id": {
@@ -355,7 +355,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Layered over the agent config's policy for this kind, else over the\nengine's default for where the tool runs."
+                "description": "Layered over the agent config's policy for this kind, or over the\nengine's default for where the tool runs."
               },
               "type": {
                 "const": "tool.call",
@@ -371,7 +371,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "`id`/`attempt` omitted ⇒ taken from the answering `tool.execute` trigger,\nfencing the result to the attempt that ran.",
+            "description": "Without `id` and `attempt`, both come from the `tool.execute` trigger\nthis answers. That ties the result to the attempt that ran.",
             "properties": {
               "attempt": {
                 "format": "uint32",
@@ -413,7 +413,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "`id`/`attempt` omitted ⇒ taken from the answering `llm.execute` trigger,\nfencing the result to the attempt that ran.",
+            "description": "Without `id` and `attempt`, both come from the `llm.execute` trigger\nthis answers. That ties the result to the attempt that ran.",
             "properties": {
               "attempt": {
                 "format": "uint32",
@@ -430,7 +430,7 @@
                 ]
               },
               "response": {
-                "description": "A neutral `LlmResponse`, or the provider's native response when the\nanswered `llm.execute` carried a `format`."
+                "description": "An `LlmResponse`, or the provider's own response when the\n`llm.execute` this answers carried a `format`."
               },
               "type": {
                 "const": "llm.result",
@@ -550,7 +550,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "The child's opening message. It travels with the spawn, so it\ncannot race the creation of the session it opens."
+                "description": "The child's opening message. It travels with the spawn, so it\ncannot arrive before the session exists."
               },
               "retry": {
                 "anyOf": [
@@ -561,13 +561,13 @@
                     "type": "null"
                   }
                 ],
-                "description": "Layered over the agent config's `sub_agent` policy, else over the\nengine's default."
+                "description": "Layered over the agent config's `sub_agent` policy, or over the\nengine's default."
               },
               "session_id": {
                 "type": "string"
               },
               "tool_call_id": {
-                "description": "The model tool-call this delegation answers — always required.",
+                "description": "The model tool call this delegation answers. Required.",
                 "type": "string"
               },
               "type": {
@@ -606,7 +606,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "`interrupt_id` omitted ⇒ the engine mints one to correlate the later resume.",
+            "description": "Without `interrupt_id`, the engine mints one to match the later\nresume.",
             "properties": {
               "interrupt_id": {
                 "type": [
@@ -695,7 +695,7 @@
                 "type": "null"
               }
             ],
-            "description": "The agent config resolved for the active path (`null` when none is set)."
+            "description": "The agent config for the active path. `null` when none is set."
           },
           "agent_id": {
             "type": "string"
@@ -747,7 +747,7 @@
           },
           "proposed": {
             "$ref": "#/components/schemas/DecisionResponse",
-            "description": "The engine's default continuation for `trigger` (empty when it needs\nworker knowledge). Advisory: accept by echoing it as the decision."
+            "description": "The engine's default continuation for `trigger`. Empty when only the\nworker can decide. Accept it by echoing it back."
           },
           "session_id": {
             "type": "string"
@@ -785,7 +785,7 @@
       },
       "DecisionResponse": {
         "additionalProperties": false,
-        "description": "A decision: the messages/actions to author, plus optional state/agent writes.\nThe worker returns one; the engine also proposes one as the default\ncontinuation (`DecisionRequest::proposed`), which the worker echoes or amends.",
+        "description": "The messages and actions to author, plus optional state and agent writes.\nA worker returns one. The engine proposes one too, which the worker echoes\nor changes.",
         "properties": {
           "actions": {
             "items": {
@@ -806,7 +806,7 @@
           },
           "channels": {
             "additionalProperties": {},
-            "description": "How each channel shows this decision, keyed by channel kind (e.g.\n`slack`). Opaque to the engine.",
+            "description": "How each channel shows this decision, keyed by channel kind. The engine\ndoes not read it.",
             "type": "object"
           },
           "messages": {
@@ -824,14 +824,14 @@
                 "type": "null"
               }
             ],
-            "description": "Omitted or `null` keeps the current state; clear with a non-null empty value."
+            "description": "Absent or `null` keeps the current state. Send an empty value to\nclear it."
           }
         },
         "title": "DecisionResponse",
         "type": "object"
       },
       "DecisionTrigger": {
-        "description": "The trigger a worker sees on the wire — the materialized projection of the\nengine's internal decision trigger. It has no `ClientMessage`: a bare client\nmessage is always materialized to `ClientTranscript` by `to_wire_trigger`\n(`runtime::session::wire`) before delivery, so an unmaterialized message can\nnever reach a worker.",
+        "description": "The trigger a worker sees on the wire. There is no `ClientMessage`: the\nengine turns a bare client message into `ClientTranscript` before it sends\nit.",
         "oneOf": [
           {
             "additionalProperties": false,
@@ -852,7 +852,7 @@
             "properties": {
               "client": {
                 "$ref": "#/components/schemas/ClientContext",
-                "description": "Inputs the client declared on its run; the engine layers `client.tools`\nonto the proposed config by default."
+                "description": "Inputs the client declared on its run. The engine adds\n`client.tools` to the proposed config."
               },
               "messages": {
                 "items": {
@@ -920,7 +920,7 @@
               },
               "input": {
                 "$ref": "#/components/schemas/ToolInput",
-                "description": "The engine's classification of `arguments` against the tool's\ndeclared `input` schema: `valid` (with the parsed `value`),\n`invalid` (value plus the violation), or `malformed` (not a JSON\nobject). Always on the wire."
+                "description": "What the engine made of `arguments` against the tool's `input`\nschema: `valid`, `invalid`, or `malformed`. Always on the wire."
               },
               "name": {
                 "type": "string"
@@ -1071,7 +1071,7 @@
                 "type": "boolean"
               },
               "refused": {
-                "description": "True when the model declined the request rather than answering it.\nA refusal reads as a turn that stopped well and said nothing, so\nwithout this the run continues from a blank answer.",
+                "description": "True when the model declined the request. Without it, a refusal\nlooks like a turn that ended well and said nothing.",
                 "type": "boolean"
               },
               "truncated": {
@@ -1166,7 +1166,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Fired after a turn completes, carrying its final output; blocks the session\ngoing idle until answered. Echo the proposed `done` to finalize.",
+            "description": "Sent after a turn completes, with its final output. The session stays\nbusy until it is answered. Echo the proposed `done` to finish.",
             "properties": {
               "cost": {
                 "pattern": "^-?\\d+(\\.\\d+)?$",
@@ -1217,11 +1217,11 @@
         "type": "object"
       },
       "DeferToolsStrategy": {
-        "description": "How the tools an agent defers reach the model.\n\nThe engine holds every deferred definition whatever this says, and answers\nits own tools whatever this says. This chooses two things: which of those\ntools the request advertises, and whether the request carries the deferred\ndefinitions.\n\nDeclared on the agent, beside `defer_tools`: which tools an agent gets is\nthe agent's business, the same way as whether it defers at all.",
+        "description": "How the tools an agent defers reach the model.\n\nThe engine holds every deferred definition whatever this says. This chooses\nwhich tools the request advertises, and whether the request carries the\ndeferred definitions.",
         "oneOf": [
           {
             "const": "search",
-            "description": "`tool_search` and `call_tool`. A search answers with the schema, so one\nsearch is the whole distance to a call, and nothing hands the model a\nname it cannot then reach.",
+            "description": "`tool_search` and `call_tool`. A search answers with the schema, so one\nsearch is enough to make a call.",
             "type": "string"
           }
         ],
@@ -1241,7 +1241,7 @@
       },
       "DraftMessage": {
         "additionalProperties": false,
-        "description": "The wire form of a [`Message`]: `id` is optional because a client-submitted or\nworker-authored message is not yet recorded. `record`/`rerecord`\n(`runtime::session::wire`) are the seams that lower it to the internal\n[`Message`] (id always present) at recording time.",
+        "description": "The wire form of a [`Message`]. `id` is absent until the message is\nrecorded.",
         "properties": {
           "content": {
             "anyOf": [
@@ -1302,7 +1302,7 @@
       },
       "Effect": {
         "additionalProperties": false,
-        "description": "An in-flight effect (Pending or RetryScheduled) surfaced on each worker decision.\nA flat envelope plus kind-specific fields: a tool call's\n`name`/`arguments`/`handler`, an LLM call's `handler`/`stream`, a\nsub-agent's `agent_id`/`session_id`. A connector sync carries none — its\n`id` is the connection being fetched.",
+        "description": "An effect still running, shown on each worker decision. A flat envelope\nplus the fields of its kind. A connector sync carries none. Its `id` is the\nconnection being fetched.",
         "properties": {
           "agent_id": {
             "type": [
@@ -1367,7 +1367,7 @@
             ]
           },
           "tool_call_id": {
-            "description": "The model tool call a delegation answers; its own `id` is the child session.",
+            "description": "The model tool call a delegation answers. Its `id` is the child\nsession.",
             "type": [
               "string",
               "null"
@@ -1384,7 +1384,7 @@
         "type": "object"
       },
       "EffectKind": {
-        "description": "What kind of work an effect is. One enum for the wire and for the engine's\nown scheduling: a decision and a turn's end queue beside the calls and are\nswept the same way, so they are kinds too. Neither ever appears on an\n[`Effect`] — a decision rides the decision list, a turn end has no record.",
+        "description": "What kind of work an effect is. One enum for the wire and for scheduling. A\ndecision and a turn's end queue beside the calls and are swept the same way,\nso they are kinds too. Neither appears on an [`Effect`].",
         "oneOf": [
           {
             "enum": [
@@ -1406,7 +1406,7 @@
           },
           {
             "const": "turn_end",
-            "description": "The turn's completion, dependent on its `turn.finished` finalizer\ndecision settling. Carries the turn id; the frozen output lives in the\nsession's `finalizing`. Never swept: it has no deadline of its own.",
+            "description": "The turn's completion, which waits for the `turn.finished` decision to\nsettle. Carries the turn id. Never swept, because it has no deadline.",
             "type": "string"
           }
         ],
@@ -1426,14 +1426,14 @@
           },
           {
             "const": "running",
-            "description": "Dispatched and alive, awaiting its result. Off the deadline clock: the\nwork succeeded in starting, and how long it then runs is its own\nbusiness. A delegation sits here for as long as its child turn takes.",
+            "description": "Running, waiting for its result. Off the deadline clock. A delegation\nstays here for as long as its child turn takes.",
             "type": "string"
           }
         ],
         "title": "EffectStatus"
       },
       "ErrorCode": {
-        "description": "What kind of failure, for a consumer that branches instead of reading the\nsentence. A closed set, and required on every [`ErrorInfo`]: an optional\ncode is one nobody fills in, which leaves every consumer handling a `None`\nthat should not exist.\n\n`provider_error`, `rate_limited`, `refused`, `budget_exceeded` and\n`deadline_exceeded` describe a call that ran and went wrong.\n`invalid_response` — a document did not parse, or parsed into something\nunusable. `handler_error` — whoever was asked to do the work (a worker, a\nclient) reported a failure of its own. `worker_unreachable` — it was never\nreached. `unroutable` — nothing could decide. `internal` — the engine's own\nfault, and the honest answer when nothing else fits.",
+        "description": "What kind of failure, so a consumer can branch on it instead of reading the\nsentence. A closed set, required on every [`ErrorInfo`].\n\n`provider_error`, `rate_limited`, `refused`, `budget_exceeded`, and\n`deadline_exceeded` mean a call ran and went wrong.\n`invalid_response` means a document did not parse, or parsed into something\nunusable. `handler_error` means the worker or client reported its own\nfailure. `worker_unreachable` means it was never reached. `unroutable`\nmeans nothing could decide. `internal` means the engine's own fault.",
         "enum": [
           "provider_error",
           "rate_limited",
@@ -1451,20 +1451,20 @@
       },
       "ErrorInfo": {
         "additionalProperties": false,
-        "description": "Why something failed. One shape on every event, on the wire, and in the\ninternal carriers that produce them — shaped after a Stripe API error.\n\n`retryable` is deliberately absent: whether to try again is a decision the\nengine makes about one attempt, not a fact about the failure, and it is\nmeaningless on a terminal like `turn.completed`. It rides on the events\nthat settle an attempt instead.",
+        "description": "Why something failed. One shape on every event and on the wire.\n\nThere is no `retryable` field. Whether to try again is a decision about one\nattempt, not a fact about the failure. The events that settle an attempt\ncarry it instead.",
         "properties": {
           "code": {
             "$ref": "#/components/schemas/ErrorCode"
           },
           "detail": {
-            "description": "Small structured particulars: a status, the llm blocks that exist."
+            "description": "Small structured details, such as a status or the llm blocks that\nexist."
           },
           "message": {
-            "description": "One engine-authored sentence, safe to show a human. Never a raw\ndocument — an unbounded body belongs in the log.",
+            "description": "One sentence the engine wrote, safe to show a human. Never a raw\ndocument. An unbounded body belongs in the log.",
             "type": "string"
           },
           "param": {
-            "description": "The one input to go and fix, when the failure names one: `agent.llm`,\n`actions[0].type`. Stripe's `param`.",
+            "description": "The one input to fix, when the failure names one. For example\n`agent.llm` or `actions[0].type`.",
             "type": [
               "string",
               "null"
@@ -1479,33 +1479,33 @@
         "type": "object"
       },
       "Handler": {
-        "description": "Where a call runs — one wire enum so `handler` has a single type on every\nsurface. Tool calls accept `worker` (default), `client`, or `server` (set by\nthe engine for connector tools, never declared by a worker). An LLM call has\nno `handler`: where it runs follows from the `[llm.*]` block it names.",
+        "description": "Where a call runs. A tool call takes `worker` (the default), `client`, or\n`server`. The engine sets `server` for connector tools; a worker cannot.\nAn LLM call has no handler. It runs where its `[llm.*]` block says.",
         "oneOf": [
           {
             "const": "server",
-            "description": "Server-side executor resolves the provider or connection and makes the call.",
+            "description": "The engine makes the call.",
             "type": "string"
           },
           {
             "const": "worker",
-            "description": "Dispatched to the work queue for the worker to execute.",
+            "description": "The worker executes it.",
             "type": "string"
           },
           {
             "const": "client",
-            "description": "Executed by the client. Session goes Idle while waiting (tools only).",
+            "description": "The client executes it. The session goes idle until it answers.\nTools only.",
             "type": "string"
           }
         ],
         "title": "Handler"
       },
       "Issuer": {
-        "description": "Where a person's name comes from — `slack`, `app`, `cli`, or whatever a\ndeployment registers. Stamped by whatever authenticated the request, and\nnever read out of one: a caller free to name its own issuer could name\nanother source's people.",
+        "description": "Where a person's name comes from: `slack`, `app`, `cli`, or another source\na deployment registers. Set by whatever authenticated the request, never\nread from the request.",
         "title": "Issuer",
         "type": "string"
       },
       "LlmFormat": {
-        "description": "The wire shape of a worker-run LLM call, declared on a `type = \"worker\"`\n`[llm.*]` block. Absent ⇒ the engine's neutral format. Set ⇒ `llm.execute`\ncarries the provider's native request body, and `llm.result`/\n`llm.token.delta` accept the provider's native response and stream events.",
+        "description": "The shape of a worker-run LLM call. Absent gives the engine's own format.\nSet gives the provider's own request, response, and stream events.",
         "oneOf": [
           {
             "const": "openai",
@@ -1522,23 +1522,23 @@
       },
       "LlmTool": {
         "additionalProperties": false,
-        "description": "A tool's declared contract: flat on the wire. Providers that need\nOpenAI-style `{\"type\": \"function\", \"function\": {…}}` nesting re-wrap at\ntheir own boundary.",
+        "description": "A tool's declared contract. Flat on the wire. A provider that needs it\nnested re-wraps it at its own boundary.",
         "properties": {
           "defer": {
-            "description": "Keep this definition out of the request.\n\nThe engine still records it, still routes a call to it, and still finds\nit in a search. Only the request omits it, which is what keeps a large\ntool set out of the model's context and out of the cached prefix.\n\nAny source can set it: a tool the config declares, a connection, or\nwhatever comes next. Deferral is a property of a tool, not of where it\ncame from.",
+            "description": "Keep this definition out of the request.\n\nThe engine still records it, still routes a call to it, and still finds\nit in a search. Only the request leaves it out. That keeps a large tool\nset out of the model's context and out of the cached prefix.\n\nAny source can set it. Deferral belongs to a tool, not to where the tool\ncame from.",
             "type": "boolean"
           },
           "description": {
             "type": "string"
           },
           "input": {
-            "description": "JSON Schema for the tool's arguments; omitted declares a no-argument\ntool. The engine validates each call's arguments against it and hands\nproviders their native form."
+            "description": "JSON Schema for the arguments. Absent declares a tool with no\narguments. The engine checks every call against it."
           },
           "name": {
             "type": "string"
           },
           "output": {
-            "description": "JSON Schema the settled result must satisfy; never sent to the model.\nA violating result settles as a terminal tool error."
+            "description": "JSON Schema the result must satisfy. The model never sees it. A result\nthat breaks it becomes a terminal tool error."
           }
         },
         "required": [
@@ -1553,23 +1553,23 @@
         "oneOf": [
           {
             "const": "auto",
-            "description": "The system prompt while no call has dispatched; then a block on the\nlast user message; then a message of its own. The engine takes the\nfirst place it can use, so the order is not a setting.",
+            "description": "The system prompt while no call has run. Then a block on the last user\nmessage. Then a message of its own. The engine takes the first place it\ncan use.",
             "type": "string"
           },
           {
             "const": "never",
-            "description": "Nowhere. For a server whose own words help nobody.",
+            "description": "Nowhere. For a server whose own description does not help.",
             "type": "string"
           }
         ],
         "title": "McpAnnounce"
       },
       "McpAuthFailure": {
-        "description": "What a session does when a connection needs a person to authorize it. It\nbelongs to the pair: one credential serves an agent that stops and asks, and\nan agent that has nobody to ask.",
+        "description": "What a session does when a connection needs a person to authorize it.",
         "oneOf": [
           {
             "const": "interrupt",
-            "description": "Stop and ask. A channel that cannot show the question degrades instead.",
+            "description": "Stop and ask. A channel that cannot show the question degrades.",
             "type": "string"
           },
           {
@@ -1582,7 +1582,7 @@
       },
       "McpServer": {
         "additionalProperties": false,
-        "description": "An MCP server the agent draws tools from. `path` resolves against the\nengine's connection registry — locally from `substructure.toml`, in the\ncloud from the connections an admin granted this app. The worker never names\na URL or a credential.",
+        "description": "An MCP server the agent draws tools from. `path` names a connection the\nengine holds. A worker never writes a URL or a credential.",
         "properties": {
           "approve": {
             "$ref": "#/components/schemas/Approve"
@@ -1615,7 +1615,7 @@
         "type": "object"
       },
       "McpToolSyncFailure": {
-        "description": "What a session does when a connection's tool fetch fails for the last time.\nThe turn goes ahead without those tools either way, because only the agent\nknows whether it can work without them. This chooses whether the model is\ntold, or is left to read their absence as nothing being there.",
+        "description": "Whether the model is told that a connection's tool fetch failed. The turn\ngoes ahead without those tools either way.",
         "oneOf": [
           {
             "const": "warn",
@@ -1632,7 +1632,7 @@
       },
       "McpTools": {
         "additionalProperties": false,
-        "description": "What the model sees of one connection, for one agent: which tools, and how\nthey reach the model.\n\nThe filter is applied in order — capability predicates, then `include`, then\n`exclude` — and only ever narrowing, so a filter can never widen what the\nconnection grants. `defer` runs after it and removes nothing.\n\n`include`/`exclude` are globs matched against the tool's name on the\nconnection, the name its own documentation uses, not the prefixed name the\nmodel sees. Capability predicates read the MCP annotations; a tool that\ncarries none fails the predicate, so an unannotated server yields nothing\nunder `read_only` rather than silently passing everything through.",
+        "description": "Which of a connection's tools the model sees, and how they reach it.\n\nThe filter runs in order: capability predicates, then `include`, then\n`exclude`. Each step only removes, so a filter cannot widen what the\nconnection grants. `defer` runs last and removes nothing.\n\n`include` and `exclude` are globs over the tool's name on the connection,\nnot the prefixed name the model sees.\n\nCapability predicates read the MCP annotations. A tool with no annotation\nfails the predicate, so a server that annotates nothing yields nothing under\n`read_only`.",
         "properties": {
           "defer": {
             "description": "Keep every surviving tool out of the request. See [`LlmTool::defer`].\nAbsent ⇒ the agent's `defer_tools`.",
@@ -1769,7 +1769,7 @@
       },
       "Reasoning": {
         "additionalProperties": false,
-        "description": "What the model thought before it answered. `text` is for a reader; `blocks`\nare the provider's own, held verbatim because Anthropic requires the\nthinking that precedes a tool call back unmodified, signature included.",
+        "description": "What the model thought before it answered. `text` is for a reader.\n`blocks` are the provider's own and stay unchanged. Anthropic requires the\nthinking before a tool call back with its signature.",
         "properties": {
           "blocks": {
             "items": {},
@@ -1841,7 +1841,7 @@
         "type": "string"
       },
       "ReasoningProvider": {
-        "description": "Which provider wrote a [`Reasoning`]'s blocks. They ride back only to it:\nanother provider reads them as noise, and Anthropic rejects blocks it did\nnot sign.",
+        "description": "Which provider wrote the blocks. They go back only to that provider.\nAnthropic rejects blocks it did not sign.",
         "enum": [
           "anthropic",
           "openai",
@@ -1883,7 +1883,7 @@
       },
       "RetryConfig": {
         "additionalProperties": false,
-        "description": "An agent's retry overrides, one per effect kind. `default` covers the kinds\nthat name nothing; a kind is layered on top of it, so the two compose.\n\nPer kind because the kinds are not alike: an LLM call is idempotent and worth\nretrying, a tool call may not be, and a connector fetch holds up every\ndecision behind it.",
+        "description": "Retry overrides, one for each effect kind. `default` covers the kinds that\nname nothing. A kind layers on top of `default`.",
         "properties": {
           "connector": {
             "anyOf": [
@@ -1941,7 +1941,7 @@
       },
       "RetryOverride": {
         "additionalProperties": false,
-        "description": "Only the fields it names change; the rest are inherited. An override cannot\nset a timeout back to unbounded.",
+        "description": "Only the fields it names change. An override cannot make a timeout\nunbounded.",
         "properties": {
           "backoff_base_secs": {
             "format": "uint32",
@@ -2109,7 +2109,7 @@
       },
       "SubAgent": {
         "additionalProperties": false,
-        "description": "A sub-agent the model can delegate to. Named by `id` (the child agent to spawn,\nand the tool name the model calls); its model-facing input is the conventional\nsingle-`message` delegation schema.",
+        "description": "A sub-agent the model can delegate to. `id` is both the child agent and the\ntool name the model calls. Its input is one `message`.",
         "properties": {
           "description": {
             "type": "string"
@@ -2126,7 +2126,7 @@
       },
       "Subject": {
         "additionalProperties": false,
-        "description": "One identity, as the source that authenticated it named it: OIDC's\n`(iss, sub)`. An id means nothing without its issuer, because it is only\nunique within one.",
+        "description": "One identity, as the source that authenticated it named it. An id is\nunique only within its issuer.",
         "properties": {
           "id": {
             "type": "string"
@@ -2291,11 +2291,11 @@
         "title": "ToolContent"
       },
       "ToolInput": {
-        "description": "The engine's classification of a tool call's arguments, delivered on the\n`tool.execute` trigger alongside the raw `arguments` string. Always on the\nwire — absence never carries meaning.",
+        "description": "What the engine made of a tool call's arguments, sent with the raw\n`arguments` string. Always on the wire.",
         "oneOf": [
           {
             "additionalProperties": false,
-            "description": "Parsed and, when the tool declares an `input` schema, conforming to it.\n`value` is exactly the parsed `arguments` — the engine never mutates it.",
+            "description": "Parsed, and valid against the `input` schema if the tool declares one.\n`value` is the parsed `arguments`. The engine never changes it.",
             "properties": {
               "status": {
                 "const": "valid",
@@ -2331,7 +2331,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "Not a JSON object: malformed JSON or a non-object value.",
+            "description": "Not a JSON object. Either malformed JSON or another type.",
             "properties": {
               "error": {
                 "type": "string"
@@ -2352,7 +2352,7 @@
       },
       "Usage": {
         "additionalProperties": false,
-        "description": "What one call read and wrote, in counts every provider means the same way.\n\nEach vendor names and scopes these differently: Anthropic reports the part\nof the prompt it did not read from the cache, OpenAI reports the whole\nprompt including that part. A session that changes model, and a tree whose\nagents name different blocks, add these counts together, so the adapter\nnormalizes them rather than the reader.",
+        "description": "What one call read and wrote. Every provider means these counts the same\nway.\n\nVendors report different things. Anthropic gives the part of the prompt it\ndid not read from the cache. OpenAI gives the whole prompt. Each adapter\nconverts to this shape, because these counts get added together.",
         "properties": {
           "cache_read": {
             "description": "The part of `input` the provider read from the cache.",
@@ -2378,7 +2378,7 @@
             "type": "integer"
           },
           "provider": {
-            "description": "The counts as the provider reported them, for a reader that wants a\nnumber this type does not name."
+            "description": "The counts as the provider reported them, for a number this type does\nnot name."
           },
           "total": {
             "description": "`input` and `output` together.",
@@ -2405,7 +2405,7 @@
         "type": "object"
       },
       "Visibility": {
-        "description": "Who can read what a session says. The transport sets it once, at the\nsession's start; everything absent or unknown reads as `shared`, because\n`shared` is the value that never selects a personal credential.\n\nNot OAuth's `aud`, which names a resource server rather than a readership.",
+        "description": "Who can read what a session says. The transport sets it once, when the\nsession starts. Absent or unknown reads as `shared`. `shared` never selects\na personal credential.",
         "oneOf": [
           {
             "const": "shared",
@@ -2422,7 +2422,7 @@
       },
       "WorkerIdentity": {
         "additionalProperties": false,
-        "description": "The owner as delivered to the worker on `DecisionRequest.identity`, without\nthe tenant. Read `kind` with `id`: only `frontend` is an end user.",
+        "description": "The owner as the worker receives it, without the tenant. Read `kind` with\n`id`. Only `frontend` is an end user.",
         "properties": {
           "metadata": {
             "additionalProperties": {

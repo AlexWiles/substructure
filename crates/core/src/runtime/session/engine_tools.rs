@@ -1,13 +1,8 @@
-//! The engine's own tools. Each answer is a function of [`SessionState`], so a
-//! replay gives the same answer. Definitions live in [`filter`].
-//! An answer is a [`StoredResult`], the same as a connection's or a worker's.
-
 use super::state::SessionStateAtNode;
 use crate::connectors::filter;
 use crate::plugins::{PluginBundle, Skill};
 use crate::protocol::{AgentConfig, ConnectorToolKind, StoredContent, StoredResult};
 
-/// `None` hands the call to its target.
 pub fn answer(
     at: SessionStateAtNode,
     kind: ConnectorToolKind,
@@ -17,12 +12,10 @@ pub fn answer(
         ConnectorToolKind::Remote => None,
         ConnectorToolKind::Find => Some(find(at, arguments)),
         ConnectorToolKind::Call => Some(call(at, arguments)),
-        // The bundle is not in state; the executor answers this one.
         ConnectorToolKind::Skill => None,
     }
 }
 
-/// BM25 over every tool the agent can reach.
 fn find(at: SessionStateAtNode, arguments: &str) -> StoredResult {
     let config = at.resolve_agent_for();
     StoredResult::text(filter::find_answer(
@@ -35,12 +28,11 @@ fn find(at: SessionStateAtNode, arguments: &str) -> StoredResult {
             .max_matches,
         &config
             .as_ref()
-            .map(|c| at.unavailable_connector_ids(c))
+            .map(|c| at.unavailable_connector_paths(c))
             .unwrap_or_default(),
     ))
 }
 
-/// A `call_tool` that gets here could not be routed.
 fn call(at: SessionStateAtNode, arguments: &str) -> StoredResult {
     StoredResult::error(
         at.call_tool_fault(arguments)
@@ -55,14 +47,10 @@ fn argument(arguments: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The two halves of a `<plugin>:<skill>` name. Without a colon, the plugin
-/// half is empty.
 pub fn split_skill(named: &str) -> (&str, &str) {
     named.split_once(':').unwrap_or(("", named))
 }
 
-/// A skill body, or one of its files. Each fault lists what the model can ask
-/// for.
 pub fn skill_answer(
     at: SessionStateAtNode,
     bundle: Option<&PluginBundle>,
@@ -128,7 +116,6 @@ pub fn skill_answer(
     }
 }
 
-/// Text inlines; a binary answers with its blob.
 fn file_answer(skill: &Skill, named: &str, path: &str) -> StoredResult {
     if let Some(content) = skill.files.get(path) {
         return StoredResult::text(content.clone());
@@ -147,7 +134,6 @@ fn file_answer(skill: &Skill, named: &str, path: &str) -> StoredResult {
     }
 }
 
-/// Text files by path, binaries with what they are.
 fn skill_files(skill: &Skill) -> String {
     let text = skill.files.keys().map(|path| format!("- {path}"));
     let binaries = skill

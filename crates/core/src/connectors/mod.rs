@@ -1,8 +1,3 @@
-//! Connections the engine holds and executes tools against, on the agent's
-//! behalf. The agent config names a connection by id and never sees a URL or a
-//! credential; the protocol below that id is an implementation detail, so a
-//! non-MCP source is additive.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,7 +9,6 @@ pub mod registry;
 
 pub use crate::protocol::{AuthNeed, Issuer, Requester, Subject, Visibility};
 
-/// Which credential a call reads: the deployment's one, or one person's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Slot {
@@ -31,12 +25,6 @@ impl std::fmt::Display for Slot {
     }
 }
 
-/// A tool as a connection offers it, before filtering or prefixing. The neutral
-/// shape every protocol lowers to.
-///
-/// Stored verbatim on `connector.sync.completed`, unfiltered: filtering is pure,
-/// so recording the offer lets a filter change re-derive the model's tool list
-/// without another round trip, and lets the log answer what was filtered *out*.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoteTool {
     pub name: String,
@@ -52,10 +40,6 @@ pub struct RemoteTool {
     pub annotations: ToolAnnotations,
 }
 
-/// Behavioural hints a connection attaches to a tool. Every field is optional
-/// because a server need not annotate anything, and absent is not false — a
-/// capability filter treats an unannotated tool as failing, so a bare server
-/// yields nothing under `read_only` instead of passing everything through.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolAnnotations {
     pub read_only: Option<bool>,
@@ -64,9 +48,6 @@ pub struct ToolAnnotations {
     pub open_world: Option<bool>,
 }
 
-/// The credential headers for one connection, read for each request. A
-/// credential replaced in the store thus reaches the next request, and the
-/// connector session stays.
 #[async_trait::async_trait]
 pub trait CredentialSource: Send + Sync {
     async fn headers(&self) -> Result<reqwest::header::HeaderMap, ConnectorError>;
@@ -75,10 +56,7 @@ pub trait CredentialSource: Send + Sync {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectorError {
     pub message: String,
-    /// Whether another attempt could plausibly succeed. Transport faults and 5xx
-    /// are retryable; a rejected credential or an unknown tool is not.
     pub retryable: bool,
-    /// Set if the connection refused the credential.
     pub auth: Option<AuthNeed>,
 }
 

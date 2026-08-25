@@ -1,15 +1,3 @@
-//! OAuth for MCP connections: discovery, client registration, and the
-//! authorization code flow.
-//!
-//! Storage-free and transport-free. The caller owns the browser, the redirect
-//! target, and wherever tokens land, so the same flow drives the CLI's loopback
-//! login and a deployed server's callback route.
-//!
-//! Implements the pieces the MCP authorization spec makes mandatory:
-//! protected resource metadata (RFC 9728), authorization server metadata
-//! (RFC 8414 and OpenID Discovery), PKCE with `S256`, the `resource` indicator
-//! (RFC 8707) on both requests, and issuer validation (RFC 9207).
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
@@ -19,7 +7,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Refresh this far ahead of expiry so a call never races the clock.
 pub const REFRESH_SKEW: i64 = 120;
 
 #[derive(Debug, thiserror::Error)]
@@ -30,26 +17,18 @@ pub enum OauthError {
     Registration(String),
     #[error("{0}")]
     Token(String),
-    /// The authorization server refused, in the shape RFC 6749 defines.
     #[error("{code}{}", .description.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
     Refused {
         code: String,
         description: Option<String>,
     },
-    /// The stored grant cannot produce another access token by itself.
     #[error("{0}")]
     Unrenewable(String),
-    /// The authorization response named an issuer other than the one whose
-    /// metadata we validated. The code is not redeemed and the error the
-    /// response carried is not reported: neither can be trusted.
     #[error("authorization server mismatch: expected `{expected}`, got `{got}`")]
     IssuerMismatch { expected: String, got: String },
 }
 
 impl OauthError {
-    /// Whether what we hold is gone, and thus a person must authorize again.
-    /// Only the server saying so counts. A network fault says nothing about the
-    /// grant.
     pub fn is_spent(&self) -> bool {
         match self {
             Self::Unrenewable(_) => true,
@@ -62,7 +41,6 @@ impl OauthError {
     }
 }
 
-/// An OAuth error response (RFC 6749 §5.2).
 #[derive(Debug, Deserialize)]
 struct ErrorResponse {
     error: String,
@@ -70,12 +48,8 @@ struct ErrorResponse {
     error_description: Option<String>,
 }
 
-/// What a protected MCP server says about itself (RFC 9728).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProtectedResource {
-    /// The canonical URI the `resource` indicator must carry. Used verbatim —
-    /// servers disagree on trailing slashes and the token is bound to whichever
-    /// form the server published.
     pub resource: String,
     #[serde(default)]
     pub authorization_servers: Vec<String>,
@@ -83,7 +57,6 @@ pub struct ProtectedResource {
     pub scopes_supported: Vec<String>,
 }
 
-/// The authorization server's own metadata (RFC 8414 / OpenID Discovery).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthServer {
     pub issuer: String,
@@ -101,16 +74,12 @@ pub struct AuthServer {
     pub authorization_response_iss_parameter_supported: bool,
 }
 
-/// How this client identifies itself. Selection order follows the spec:
-/// pre-registered, then a metadata document, then dynamic registration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClientId {
-    /// An HTTPS URL that resolves to this client's metadata document. Portable
-    /// across authorization servers, so it is never bound to an issuer.
-    Metadata { url: String },
-    /// Credentials issued to us, either by hand or by dynamic registration.
-    /// Only valid at the issuer that minted them.
+    Metadata {
+        url: String,
+    },
     Registered {
         client_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,22 +103,17 @@ impl ClientId {
     }
 }
 
-/// A discovered connection, ready to authorize against.
 #[derive(Debug, Clone)]
 pub struct Discovered {
     pub resource: ProtectedResource,
     pub server: AuthServer,
 }
 
-/// Everything the caller must hold between opening the browser and the
-/// redirect coming back. Short-lived and single-use. Serialized only into the
-/// secret store, for a flow whose redirect lands on a later request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {
     pub url: String,
     pub state: String,
     pub verifier: String,
-    /// Recorded from validated metadata, for the RFC 9207 check on return.
     pub issuer: String,
     pub redirect_uri: String,
     pub resource: String,
@@ -157,8 +121,6 @@ pub struct Pending {
     pub iss_expected: bool,
 }
 
-/// A credential as stored. `client` rides along because dynamic registration
-/// mints an id that refresh needs back, and the spec binds it to its issuer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tokens {
     pub access_token: String,
@@ -170,16 +132,11 @@ pub struct Tokens {
     pub scope: Option<String>,
     pub issuer: String,
     pub token_endpoint: String,
-    /// Sent again on every refresh: a refresh is a token request, and RFC 8707
-    /// binds the new token to the same audience as the old one.
     pub resource: String,
     pub client: ClientId,
 }
 
 impl Tokens {
-    /// Whether the access token is close enough to expiry to refresh. An
-    /// absent expiry is treated as live: the server never said otherwise, and
-    /// a 401 is the authoritative signal.
     pub fn stale(&self) -> bool {
         self.expires_at
             .is_some_and(|at| Utc::now() + Duration::seconds(REFRESH_SKEW) >= at)
@@ -201,13 +158,6 @@ struct TokenResponse {
     scope: Option<String>,
 }
 
-// ── Discovery ────────────────────────────────────────────────────────────
-
-/// Find the authorization server protecting an MCP endpoint.
-///
-/// The unauthenticated probe is what the spec intends: the 401 carries a
-/// `resource_metadata` pointer. A server that omits it still resolves, via the
-/// well-known path built from the endpoint URL.
 pub async fn discover(http: &Client, mcp_url: &str) -> Result<Discovered, OauthError> {
     let metadata_url = match probe(http, mcp_url).await {
         Some(url) => url,
@@ -217,9 +167,6 @@ pub async fn discover(http: &Client, mcp_url: &str) -> Result<Discovered, OauthE
         .await
         .map_err(|e| OauthError::Discovery(format!("reading {metadata_url}: {e}")))?;
 
-    // RFC 9728: the metadata a server points us at must describe that server.
-    // Without this a compromised endpoint could aim the flow at an
-    // authorization server of its choosing.
     if !same_origin(&resource.resource, mcp_url) {
         return Err(OauthError::Discovery(format!(
             "{metadata_url} describes `{}`, not `{mcp_url}`",
@@ -238,27 +185,13 @@ pub async fn discover(http: &Client, mcp_url: &str) -> Result<Discovered, OauthE
     Ok(Discovered { resource, server })
 }
 
-/// What one unauthenticated request says about how a server authenticates.
-///
-/// Three answers, not two. A server that challenges without publishing where
-/// to authorize has told us only that it wants *something*, and no request can
-/// find out what — which is the case the file has to settle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Probed {
-    /// Did not ask for a credential. Weaker than "needs none": Hugging Face
-    /// answers an unauthenticated `tools/list` with a protocol complaint about
-    /// the session, and a server may still refuse a later call. It is grounds
-    /// for sending nothing, not for reporting that nothing is wanted.
     NoChallenge,
-    /// Challenged, and publishes the metadata an OAuth flow needs.
     Oauth,
-    /// Challenged, and publishes nothing to discover.
     Protected,
 }
 
-/// Ask the server how it authenticates, by making a call and reading the
-/// refusal. Cheap, and the only thing that can answer: nothing in a manifest
-/// knows this and nothing in MCP announces it up front.
 pub async fn sniff(http: &Client, mcp_url: &str) -> Result<Probed, OauthError> {
     let answered = unauthenticated(http, mcp_url).await?;
     if !answered.challenged {
@@ -267,8 +200,6 @@ pub async fn sniff(http: &Client, mcp_url: &str) -> Result<Probed, OauthError> {
     if answered.metadata.is_some() {
         return Ok(Probed::Oauth);
     }
-    // Some servers publish the document without pointing at it from the
-    // challenge, so its absence is not the answer on its own.
     match fetch_json::<ProtectedResource>(http, &prm_url(mcp_url)?).await {
         Ok(_) => Ok(Probed::Oauth),
         Err(_) => Ok(Probed::Protected),
@@ -280,7 +211,6 @@ struct Answered {
     metadata: Option<String>,
 }
 
-/// One unauthenticated `tools/list`, which every MCP server answers.
 async fn unauthenticated(http: &Client, mcp_url: &str) -> Result<Answered, OauthError> {
     let response = http
         .post(mcp_url)
@@ -292,8 +222,6 @@ async fn unauthenticated(http: &Client, mcp_url: &str) -> Result<Answered, Oauth
         .send()
         .await
         .map_err(|e| OauthError::Discovery(format!("could not reach {mcp_url}: {e}")))?;
-    // Context7 refuses with 400 and still carries the challenge, so the status
-    // alone does not decide this.
     let challenged = matches!(response.status().as_u16(), 401 | 403);
     let metadata = response
         .headers()
@@ -306,13 +234,10 @@ async fn unauthenticated(http: &Client, mcp_url: &str) -> Result<Answered, Oauth
     })
 }
 
-/// The `resource_metadata` URL a 401 challenge points at, if there is one.
 async fn probe(http: &Client, mcp_url: &str) -> Option<String> {
     unauthenticated(http, mcp_url).await.ok()?.metadata
 }
 
-/// One parameter out of a `WWW-Authenticate` header. Values may be quoted or
-/// bare; both appear in the wild.
 pub fn challenge_param(challenge: &str, name: &str) -> Option<String> {
     for part in challenge.split(',') {
         let (key, value) = part.split_once('=')?;
@@ -330,8 +255,6 @@ pub(crate) fn same_origin(a: &str, b: &str) -> bool {
     }
 }
 
-/// RFC 9728 well-known location: the path is inserted after the well-known
-/// segment, not appended to the origin.
 fn prm_url(mcp_url: &str) -> Result<String, OauthError> {
     let url = reqwest::Url::parse(mcp_url)
         .map_err(|e| OauthError::Discovery(format!("`{mcp_url}` is not a URL: {e}")))?;
@@ -342,16 +265,11 @@ fn prm_url(mcp_url: &str) -> Result<String, OauthError> {
     ))
 }
 
-/// Authorization server metadata, trying every location the spec requires a
-/// client to support. The path-insertion forms come first: an issuer with a
-/// path (GitHub's `https://github.com/login/oauth`) only answers there.
 async fn fetch_auth_server(http: &Client, issuer: &str) -> Result<AuthServer, OauthError> {
     let mut last = String::new();
     for candidate in metadata_urls(issuer)? {
         match fetch_json::<AuthServer>(http, &candidate).await {
             Ok(server) => {
-                // RFC 8414: the document must claim the issuer we asked about,
-                // or it is somebody else's metadata.
                 if !same_issuer(&server.issuer, issuer) {
                     return Err(OauthError::Discovery(format!(
                         "{candidate} claims issuer `{}`, expected `{issuer}`",
@@ -395,13 +313,6 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(http: &Client, url: &str) ->
     response.json().await.map_err(|e| e.to_string())
 }
 
-// ── Client registration ──────────────────────────────────────────────────
-
-/// Pick how to identify this client, preferring what the spec prefers.
-///
-/// `metadata_document` is this deployment's own document URL, present only
-/// where something serves one at a stable HTTPS address; a laptop has none and
-/// falls through to dynamic registration.
 pub async fn client_id(
     http: &Client,
     server: &AuthServer,
@@ -416,9 +327,6 @@ pub async fn client_id(
             });
         }
     }
-    // The mechanisms are not named: a reader can act on neither, and what to do
-    // instead depends on who is asking. The CLI offers a token; a deployment
-    // has its own registered clients. Both say so themselves.
     let endpoint = server.registration_endpoint.as_deref().ok_or_else(|| {
         OauthError::Registration(format!(
             "`{}` does not support dynamic client registration",
@@ -428,16 +336,12 @@ pub async fn client_id(
     register(http, endpoint, redirect_uri, client_name).await
 }
 
-/// Dynamic client registration (RFC 7591). Deprecated in favour of metadata
-/// documents, and still the only mechanism several servers offer.
 async fn register(
     http: &Client,
     endpoint: &str,
     redirect_uri: &str,
     client_name: &str,
 ) -> Result<ClientId, OauthError> {
-    // `application_type` is mandatory: omitted, OIDC servers default to `web`
-    // and reject a loopback redirect.
     let application_type = if is_loopback(redirect_uri) {
         "native"
     } else {
@@ -479,8 +383,6 @@ async fn register(
     })
 }
 
-/// A redirect back to this machine, which registers as a native client rather
-/// than a web one.
 pub(crate) fn is_loopback(redirect_uri: &str) -> bool {
     reqwest::Url::parse(redirect_uri).is_ok_and(|u| {
         matches!(
@@ -490,10 +392,6 @@ pub(crate) fn is_loopback(redirect_uri: &str) -> bool {
     })
 }
 
-// ── Authorization ────────────────────────────────────────────────────────
-
-/// Build the URL to send the user to, and the secrets that must survive until
-/// the redirect returns.
 pub fn authorize(
     discovered: &Discovered,
     client: &ClientId,
@@ -544,11 +442,6 @@ pub fn authorize(
     })
 }
 
-/// Check the `iss` an authorization response carried, per RFC 9207 §2.4.
-///
-/// A present issuer is always compared, even where metadata did not promise
-/// one — servers emit `iss` before advertising it. Comparison is byte-for-byte:
-/// normalizing here would defeat the check.
 pub fn check_issuer(pending: &Pending, iss: Option<&str>) -> Result<(), OauthError> {
     match iss {
         Some(iss) if iss != pending.issuer => Err(OauthError::IssuerMismatch {
@@ -564,8 +457,6 @@ pub fn check_issuer(pending: &Pending, iss: Option<&str>) -> Result<(), OauthErr
     }
 }
 
-/// Exchange an authorization code. Validates `iss` first: a mismatched
-/// response must not reach the token endpoint.
 pub async fn redeem(
     http: &Client,
     pending: &Pending,
@@ -593,8 +484,6 @@ pub async fn redeem(
     ))
 }
 
-/// Exchange a refresh token. The response may rotate the refresh token, and
-/// may omit it — the previous one stays valid only in the latter case.
 pub async fn refresh(http: &Client, tokens: &Tokens) -> Result<Tokens, OauthError> {
     let refresh_token = tokens
         .refresh_token
@@ -713,7 +602,6 @@ mod tests {
             challenge_param(challenge, "resource_metadata").as_deref(),
             Some("https://mcp.sentry.dev/.well-known/oauth-protected-resource/mcp")
         );
-        // Stripe sends this one unquoted.
         assert_eq!(
             challenge_param(
                 "Bearer resource_metadata=https://mcp.stripe.com/.well-known/oauth-protected-resource",
@@ -736,7 +624,6 @@ mod tests {
             "https://mcp.example.test/.well-known/oauth-protected-resource"
         );
 
-        // GitHub's issuer has a path and answers only at the inserted form.
         let urls = metadata_urls("https://github.com/login/oauth").unwrap();
         assert_eq!(
             urls[0],
@@ -844,10 +731,8 @@ mod tests {
             check_issuer(&pending, Some("https://evil.test")),
             Err(OauthError::IssuerMismatch { .. })
         ));
-        // Advertised but absent: reject.
         assert!(check_issuer(&pending, None).is_err());
 
-        // Not advertised: a present iss is still compared, an absent one passes.
         pending.iss_expected = false;
         assert!(check_issuer(&pending, None).is_ok());
         assert!(check_issuer(&pending, Some("https://evil.test")).is_err());
@@ -907,9 +792,6 @@ mod tests {
         assert!(expiring.stale(), "refresh before the token actually dies");
     }
 
-    /// Discovery against the real servers. Ignored by default: it needs the
-    /// network, and it is the only check that the metadata locations and
-    /// challenge parsing match what is actually deployed.
     #[tokio::test]
     #[ignore = "network"]
     async fn discovery_resolves_the_servers_people_actually_connect() {
@@ -955,7 +837,6 @@ mod tests {
             "https://mcp.linear.app/mcp",
             "https://mcp.linear.app/mcp"
         ));
-        // GitHub publishes its resource with a trailing slash; still its own.
         assert!(same_origin(
             "https://api.githubcopilot.com/mcp/",
             "https://api.githubcopilot.com/mcp"
