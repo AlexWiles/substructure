@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Changed
+
+- The license is now MIT.
+
 ## [0.8.1] - 2026-08-25
 
 ### Added
