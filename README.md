@@ -399,4 +399,4 @@ Full documentation in [`docs/`](./docs).
 
 ## License
 
-[Functional Source License 1.1](./LICENSE), converting to Apache 2.0.
+[MIT](./LICENSE)

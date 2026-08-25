@@ -28,4 +28,4 @@ Run `subs --help` for the full command list. Cloud management commands (`apps`, 
 
 ## License
 
-[FSL-1.1-ALv2](./LICENSE). Converts to Apache 2.0 two years after each release.
+[MIT](./LICENSE)

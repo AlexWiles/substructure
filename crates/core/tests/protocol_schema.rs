@@ -198,7 +198,7 @@ fn worker_openapi() -> serde_json::Value {
             "title": "Substructure worker",
             "version": env!("CARGO_PKG_VERSION"),
             "description": "The decision protocol, from the worker's side: the engine POSTs a decision request describing what just happened; the worker replies with a decision — the actions to take and the conversation as it should now read. One request, one response, once per decision.",
-            "license": { "name": "FSL-1.1-ALv2", "url": "https://fsl.software" },
+            "license": { "name": "MIT", "url": "https://opensource.org/license/mit" },
         },
         "servers": [
             {

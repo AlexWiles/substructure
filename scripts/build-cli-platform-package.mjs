@@ -66,7 +66,7 @@ const pkg = {
   name: `@substructure.ai/cli-${meta.platform}`,
   version: args.version,
   description: `${meta.platform} binary for @substructure.ai/cli`,
-  license: "FSL-1.1-ALv2",
+  license: "MIT",
   homepage: "https://github.com/substructureai/substructure#readme",
   repository: {
     type: "git",

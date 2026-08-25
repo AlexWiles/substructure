@@ -3,7 +3,7 @@ name = "substructure-core"
 version = "0.8.1"
 edition = "2021"
 description = "Core runtime for Substructure"
-license-file = "LICENSE"
+license = "MIT"
 
 [[bin]]
 name = "subs"

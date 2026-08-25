@@ -2,7 +2,7 @@
   "name": "@substructure.ai/cli",
   "version": "0.8.1",
   "description": "CLI for Substructure",
-  "license": "FSL-1.1-ALv2",
+  "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/substructureai/substructure#readme",
   "repository": {
