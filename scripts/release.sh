@@ -89,19 +89,6 @@ cargo set-version --package substructure-core "$VERSION"
 # Fails (and aborts the release) if there are no unreleased entries.
 node scripts/promote-changelog.mjs "$VERSION" "$(date +%F)" "$CURRENT"
 
-# Keep the CLI's optionalDependencies aligned with the new version.
-node -e "
-  const fs = require('fs');
-  const f = 'packages/cli/package.json';
-  const j = JSON.parse(fs.readFileSync(f, 'utf8'));
-  if (j.optionalDependencies) {
-    for (const k of Object.keys(j.optionalDependencies)) {
-      if (k.startsWith('@substructure.ai/')) j.optionalDependencies[k] = process.argv[1];
-    }
-  }
-  fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\n');
-" "$VERSION"
-
 echo "Regenerating committed schemas (a stale one fails this run and is rewritten)"
 cargo test --test protocol_schema || true
 echo "Running tests"

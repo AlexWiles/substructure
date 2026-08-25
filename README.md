@@ -1,17 +1,14 @@
 # substructure.ai
 [substructure.ai](https://substructure.ai)
 
-The agent harness for the cloud.
-
-[![cli](https://img.shields.io/npm/v/@substructure.ai/cli?label=cli)](https://www.npmjs.com/package/@substructure.ai/cli)
-
 > Pre-1.0: APIs and the wire protocol might change between releases.
 
-Subs an agent harness for the cloud. It runs an unprivileged agent loop. You use MCP servers for tools. You can use it locally or remotely. You can customize everything.
+Subs is an agent harness for the cloud.
 
-You declare your agents in a config file. When you need control of the loop, point
-the agent at an HTTP endpoint that you own. Everything is HTTP, so you can write
-that endpoint in any language. There is no SDK to install.
+It runs an unprivileged agent loop with no system access. It uses MCP servers for tools. It can run locally or as a client and server.
+
+Declare your agents in a config file. If you need full customization, point
+the agent at an HTTP endpoint and implement a webhook that drives the agent loop.
 
 Subs handles durability, retries, timeouts, MCP connection management, session state, session branching, AG-UI, Slack connections, LLM calls, Sub agents, interrupts and more.
 

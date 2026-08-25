@@ -2,7 +2,7 @@ import { platform, arch } from "os";
 import { createRequire } from "module";
 import { join } from "path";
 
-const PLATFORMS = {
+export const PLATFORMS = {
   "darwin-arm64": "@substructure.ai/cli-darwin-arm64",
   "darwin-x64": "@substructure.ai/cli-darwin-x64",
   "linux-arm64": "@substructure.ai/cli-linux-arm64",

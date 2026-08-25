@@ -190,6 +190,9 @@ jobs:
             (cd "$d" && npm publish --access public)
           done
 
+      - name: Inject CLI optionalDependencies
+        run: node scripts/inject-cli-optional-deps.mjs "${{ steps.version.outputs.version }}"
+
       - name: Publish CLI main wrapper
         working-directory: packages/cli
         env:
