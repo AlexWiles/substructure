@@ -80,27 +80,30 @@ fn announce_servers(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext>
 }
 
 fn announce_unavailable(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
+    let Some(config) = at.resolve_agent_for() else {
+        return Vec::new();
+    };
     let said = at.context_ids_on_path(call_id);
-    at.unavailable_connectors()
-        .into_iter()
-        .map(|(path, auth)| {
-            let reason = crate::copy::unavailable_reason(auth);
-            (format!("mcp-unavailable:{path}:{reason}"), path, reason)
+    let mut owed = Vec::new();
+    for (path, auth) in at.unavailable_connectors(&config) {
+        let reason = crate::copy::unavailable_reason(auth);
+        let id = format!("mcp-unavailable:{path}:{reason}");
+        if said.contains(&id) {
+            continue;
+        }
+        let content = serde_json::to_string(&Unavailable {
+            mcp_server: &path,
+            unavailable: true,
+            reason,
         })
-        .filter(|(id, _, _)| !said.contains(id))
-        .filter_map(|(id, path, reason)| {
-            Some(PromptContext {
-                id,
-                placement: Placement::System,
-                content: serde_json::to_string(&Unavailable {
-                    mcp_server: &path,
-                    unavailable: true,
-                    reason,
-                })
-                .ok()?,
-            })
-        })
-        .collect()
+        .unwrap_or_default();
+        owed.push(PromptContext {
+            id,
+            placement: Placement::System,
+            content,
+        });
+    }
+    owed
 }
 
 #[derive(serde::Serialize)]
@@ -442,8 +445,9 @@ mod tests {
     fn a_silent_connection_is_not_named() {
         let state = failed_state(McpToolSyncFailure::Silent, None);
         assert!(owed_ids(&state).is_empty());
+        let config = state.at(None).resolve_agent_for().expect("config");
         assert!(
-            state.at(None).unavailable_connector_ids().is_empty(),
+            state.at(None).unavailable_connector_ids(&config).is_empty(),
             "silent covers the search answer too"
         );
     }

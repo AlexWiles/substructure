@@ -1,4 +1,4 @@
-use crate::connectors::filter::TOOL_SEARCH;
+use crate::protocol::{AuthNeed, TOOL_SEARCH};
 
 pub const NOTHING_MATCHED: &str =
     "Nothing matched. Search again with an empty query for every tool.";
@@ -15,18 +15,25 @@ pub fn matches_truncated(shown: usize, matched: usize) -> String {
     )
 }
 
-pub fn no_such_tool(named: &str) -> String {
-    format!(
-        "no tool `{named}` for this agent. Call `{TOOL_SEARCH}` with an empty query for every tool."
-    )
-}
-
-pub fn no_such_tool_near(named: &str, near: &[&str]) -> String {
-    format!(
-        "no tool `{named}` for this agent. The closest are: {}. Call `{TOOL_SEARCH}` for the \
-         schema of one.",
-        near.join(", ")
-    )
+pub fn no_such_tool(named: &str, near: &[&str], unavailable: &[String]) -> String {
+    let mut said = if near.is_empty() {
+        format!(
+            "no tool `{named}` for this agent. Call `{TOOL_SEARCH}` with an empty query for \
+             every tool."
+        )
+    } else {
+        format!(
+            "no tool `{named}` for this agent. The closest are: {}. Call `{TOOL_SEARCH}` for \
+             the schema of one.",
+            near.join(", ")
+        )
+    };
+    for connection in unavailable {
+        said.push_str(&format!(
+            " `{connection}` is unavailable, so its tools are not listed."
+        ));
+    }
+    said
 }
 
 pub fn bad_arguments(named: &str, error: &str, schema: Option<&serde_json::Value>) -> String {
@@ -36,26 +43,22 @@ pub fn bad_arguments(named: &str, error: &str, schema: Option<&serde_json::Value
     }
 }
 
-pub fn unavailable_reason(auth: Option<crate::connectors::AuthNeed>) -> &'static str {
+pub fn unavailable_reason(auth: Option<AuthNeed>) -> &'static str {
     match auth {
         Some(_) => "needs_authorization",
         None => "unreachable",
     }
 }
 
-pub fn unavailable_note(connection: &str) -> String {
-    format!("`{connection}` is unavailable, so its tools are not listed.")
-}
-
-pub fn needs_authorization(connection: &str, need: crate::connectors::AuthNeed) -> String {
+pub fn needs_authorization(connection: &str, need: AuthNeed) -> String {
     match need {
-        crate::connectors::AuthNeed::NeverAuthorized => {
+        AuthNeed::NeverAuthorized => {
             format!("`{connection}` is not authorized yet, so I cannot use it.")
         }
-        crate::connectors::AuthNeed::Reauthorize => {
+        AuthNeed::Reauthorize => {
             format!("`{connection}` needs to be authorized again. Its access expired.")
         }
-        crate::connectors::AuthNeed::TokenRejected => format!(
+        AuthNeed::TokenRejected => format!(
             "`{connection}` rejected its token. An operator must set a new one \
              with `subs auth {connection}`."
         ),

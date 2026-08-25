@@ -2175,12 +2175,12 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         .ok()
     }
 
-    pub fn unavailable_connectors(&self) -> Vec<(ConnectionPath, Option<AuthNeed>)> {
-        let Some(config) = self.resolve_agent_for() else {
-            return Vec::new();
-        };
+    pub fn unavailable_connectors(
+        &self,
+        config: &AgentConfig,
+    ) -> Vec<(ConnectionPath, Option<AuthNeed>)> {
         self.state
-            .servers_for(&config)
+            .servers_for(config)
             .into_iter()
             .filter(|c| c.tool_sync_failure.warns())
             .filter_map(|c| {
@@ -2195,8 +2195,8 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .collect()
     }
 
-    pub fn unavailable_connector_ids(&self) -> Vec<String> {
-        self.unavailable_connectors()
+    pub fn unavailable_connector_ids(&self, config: &AgentConfig) -> Vec<String> {
+        self.unavailable_connectors(config)
             .into_iter()
             .map(|(path, _)| path.to_string())
             .collect()
@@ -2266,10 +2266,11 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         let Some(target) = self.call_tool_target(&named) else {
             // The name is the query: a wrong name is usually a near miss, and
             // the same search the model should have run ranks the neighbours.
+            let config = self.resolve_agent_for();
             let tools = self.searchable_tools();
-            let cap = self
-                .resolve_agent_for()
-                .map(|c| c.defer_settings())
+            let cap = config
+                .as_ref()
+                .map(AgentConfig::defer_settings)
                 .unwrap_or_default()
                 .max_matches
                 .get();
@@ -2278,16 +2279,11 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
                 .take(cap)
                 .map(|t| t.name.as_str())
                 .collect();
-            let mut fault = if near.is_empty() {
-                crate::copy::no_such_tool(&named)
-            } else {
-                crate::copy::no_such_tool_near(&named, &near)
-            };
-            for path in self.unavailable_connector_ids() {
-                fault.push(' ');
-                fault.push_str(&crate::copy::unavailable_note(&path));
-            }
-            return Some(fault);
+            let unavailable = config
+                .as_ref()
+                .map(|c| self.unavailable_connector_ids(c))
+                .unwrap_or_default();
+            return Some(crate::copy::no_such_tool(&named, &near, &unavailable));
         };
         // The provider never received this tool's schema, so it checked
         // nothing. The engine holds one, so the engine checks it — and hands it

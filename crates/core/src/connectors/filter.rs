@@ -146,9 +146,7 @@ pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a
         .collect()
 }
 
-pub const TOOL_SEARCH: &str = "tool_search";
-pub const CALL_TOOL: &str = "call_tool";
-pub const SKILL: &str = "skill";
+pub use crate::protocol::{CALL_TOOL, SKILL, TOOL_SEARCH};
 
 /// Offered whenever the agent has plugins.
 pub fn skill_tool() -> ConnectorTool {

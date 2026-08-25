@@ -5,7 +5,7 @@
 use super::state::SessionStateAtNode;
 use crate::connectors::filter;
 use crate::plugins::{PluginBundle, Skill};
-use crate::protocol::{ConnectorToolKind, StoredContent, StoredResult};
+use crate::protocol::{AgentConfig, ConnectorToolKind, StoredContent, StoredResult};
 
 /// `None` hands the call to its target.
 pub fn answer(
@@ -24,14 +24,19 @@ pub fn answer(
 
 /// BM25 over every tool the agent can reach.
 fn find(at: SessionStateAtNode, arguments: &str) -> StoredResult {
+    let config = at.resolve_agent_for();
     StoredResult::text(filter::find_answer(
         &at.searchable_tools(),
         &argument(arguments, "query"),
-        at.resolve_agent_for()
-            .map(|c| c.defer_settings())
+        config
+            .as_ref()
+            .map(AgentConfig::defer_settings)
             .unwrap_or_default()
             .max_matches,
-        &at.unavailable_connector_ids(),
+        &config
+            .as_ref()
+            .map(|c| at.unavailable_connector_ids(c))
+            .unwrap_or_default(),
     ))
 }
 

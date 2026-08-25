@@ -12,6 +12,21 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// What a person must do before a connection operates again. The refresh path
+/// corrects everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthNeed {
+    NeverAuthorized,
+    Reauthorize,
+    /// No consent flow can replace a static token. An operator sets a new one.
+    TokenRejected,
+}
+
+pub const TOOL_SEARCH: &str = "tool_search";
+pub const CALL_TOOL: &str = "call_tool";
+pub const SKILL: &str = "skill";
+
 /// Where a connection is declared, which is what a file, the CLI, and the wire
 /// name it by.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

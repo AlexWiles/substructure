@@ -12,7 +12,7 @@ pub mod mcp;
 pub mod oauth;
 pub mod registry;
 
-pub use crate::protocol::{Issuer, Requester, Subject, Visibility};
+pub use crate::protocol::{AuthNeed, Issuer, Requester, Subject, Visibility};
 
 /// Which credential a call reads: the deployment's one, or one person's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,17 +70,6 @@ pub struct ToolAnnotations {
 #[async_trait::async_trait]
 pub trait CredentialSource: Send + Sync {
     async fn headers(&self) -> Result<reqwest::header::HeaderMap, ConnectorError>;
-}
-
-/// What a person must do before a connection operates again. The refresh path
-/// corrects everything else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthNeed {
-    NeverAuthorized,
-    Reauthorize,
-    /// No consent flow can replace a static token. An operator sets a new one.
-    TokenRejected,
 }
 
 #[derive(Debug, Clone, PartialEq)]
