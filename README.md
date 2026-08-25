@@ -7,13 +7,13 @@ The agent harness for the cloud.
 
 > Pre-1.0: APIs and the wire protocol might change between releases.
 
-Subs an agent harness for the cloud. It runs an unprivileged agent loop and expects you to use MCP servers for executing tools. You can use it locally or remotely. You can customize everything.
+Subs an agent harness for the cloud. It runs an unprivileged agent loop. You use MCP servers for tools. You can use it locally or remotely. You can customize everything.
 
 You declare your agents in a config file. When you need control of the loop, point
 the agent at an HTTP endpoint that you own. Everything is HTTP, so you can write
 that endpoint in any language. There is no SDK to install.
 
-Subs handles durability, retries, timeouts, MCP connection management, tree-based session state, AG-UI, Slack connections, LLM calls, Sub agents, interrupts and more.
+Subs handles durability, retries, timeouts, MCP connection management, session state, session branching, AG-UI, Slack connections, LLM calls, Sub agents, interrupts and more.
 
 Need a quick way to turn a sanbox into and MCP server? Check out [mcpd](https://github.com/substructureai/mcpd).
 
