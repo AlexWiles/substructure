@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Changed
+
+- Move to per agent slack manifest install
+
 ## [0.8.2] - 2026-08-25
 
 ### Changed
