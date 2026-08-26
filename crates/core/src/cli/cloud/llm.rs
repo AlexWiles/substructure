@@ -8,7 +8,7 @@
 //! An engine here holds no key. The file names the variable each block reads,
 //! and this machine holds it.
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{bail, Result};
 use serde::Serialize;
 
 use crate::api::v1::{LlmBlockView, LlmKeyRequest};
@@ -30,14 +30,10 @@ struct KeyResult<'a> {
     key_bound: bool,
 }
 
-pub(crate) async fn set_key_at(
-    block: String,
-    env: Option<String>,
-    scope: ProjectScope,
-) -> Result<()> {
+pub(crate) async fn set_key_at(block: String, scope: ProjectScope) -> Result<()> {
     match target(&scope.globals)?.here() {
         Some(config) => key_is_a_variable(&block, &config, "set"),
-        None => set_key(block, env, scope).await,
+        None => set_key(block, scope).await,
     }
 }
 
@@ -134,16 +130,10 @@ fn key_is_a_variable(block: &str, config: &ProjectConfig, verb: &str) -> Result<
     }
 }
 
-async fn set_key(block: String, env: Option<String>, scope: ProjectScope) -> Result<()> {
-    let key = match &env {
-        Some(var) => std::env::var(var)
-            .with_context(|| format!("${var} is not set"))?
-            .trim()
-            .to_string(),
-        None => pickers::read_secret(&scope.globals, "Paste the key")?,
-    };
+async fn set_key(block: String, scope: ProjectScope) -> Result<()> {
+    let key = pickers::read_secret(&scope.globals, "Paste the key")?;
     if key.is_empty() {
-        bail!("no key given. Pipe it in, or pass --env <VAR>.");
+        bail!("no key given. Pipe it in.");
     }
 
     let (ctx, project) = Context::from_project(&scope).await?;

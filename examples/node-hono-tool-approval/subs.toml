@@ -9,6 +9,5 @@ worker = "http://localhost:4444"
 [serve]
 auth = false
 
-[slack]
-dm = "my-agent"
-mentions = "my-agent"
+[agent.my-agent.slack]
+name = "My Agent"

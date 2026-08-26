@@ -20,6 +20,7 @@ together at the same version.
 ### Added
 
 - Better MCP connection failure handling.
+- Per-agent Slack manifest based installs
 
 ### Changed
 

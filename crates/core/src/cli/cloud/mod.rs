@@ -16,7 +16,6 @@ pub(crate) mod plugins;
 pub(crate) mod print;
 pub(crate) mod project_config;
 pub mod projects;
-pub mod slack;
 pub mod telemetry;
 pub mod whoami;
 

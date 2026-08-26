@@ -8,9 +8,8 @@ llm = "openrouter"
 model = "qwen/qwen3.7-flash"
 system = """You are a helpful assistant."""
 
-[slack]
-dm = "assistant"
-mentions = "assistant"
+[agent.assistant.slack]
+name = "Assistant"
 
 [serve]
 auth = false

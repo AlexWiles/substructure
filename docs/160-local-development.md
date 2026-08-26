@@ -118,13 +118,19 @@ Leave it off while you develop.
 
 ## Connect Slack locally
 
-A local engine uses a Slack app you own, over Socket Mode. See
+Declare an app for the agent, create it in Slack, and give the engine its two
+tokens. The variables are named after the agent. See
 [Self-hosting](./180-self-hosting.md#slack).
 
+```toml title="subs.toml"
+[agent.oncall.slack]
+name = "On-call"
+```
+
 ```sh
-export SLACK_APP_TOKEN=xapp-...
-export SLACK_BOT_TOKEN=xoxb-...
-subs serve --no-auth --slack-agent my-agent
+export SLACK_APP_TOKEN_ONCALL=xapp-...
+export SLACK_BOT_TOKEN_ONCALL=xoxb-...
+subs serve --no-auth
 ```
 
 ## Connect MCP servers locally

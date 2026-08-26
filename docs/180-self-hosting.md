@@ -33,7 +33,7 @@ worker decides for it.
 | Provider keys | The environment. `api_key_env` on each `[llm.<id>]` block names the variable. |
 | Signing secrets | The environment. `signing_secret_env` on each `[agent.<id>]` names the variable. |
 | Connector credentials | The `db` file, written by `subs auth`. |
-| Slack tokens | The environment. `$SLACK_APP_TOKEN` and `$SLACK_BOT_TOKEN`. |
+| Slack tokens | The environment. `$SLACK_APP_TOKEN_<AGENT>` and `$SLACK_BOT_TOKEN_<AGENT>`. |
 | Client token secret | `$CLIENT_TOKEN_HS256_SECRET`. |
 
 ## Storage
@@ -91,19 +91,25 @@ engine runs. See [Connectors](./40-connectors.md).
 
 ## Slack
 
-A self-hosted engine talks to Slack over
-[Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), with a
-Slack app you own. Socket Mode is an outbound WebSocket, so you need no public
-URL.
+An engine you run talks to Slack over
+[Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), which
+is an outbound WebSocket. You need no public URL and no inbound firewall rule.
 
-Create a Slack app with this manifest.
+Declare an app for each agent that should have one.
+
+```toml title="subs.toml"
+[agent.support.slack]
+name = "Support"
+```
+
+Create a Slack app for it with this manifest, replacing the two names.
 
 ```yaml
 display_information:
-  name: substructure.ai
+  name: Support
 features:
   bot_user:
-    display_name: substructure.ai
+    display_name: Support
     always_online: true
   agent_view: {}
   app_home:
@@ -140,24 +146,26 @@ settings:
 this app has been turned off" and a person cannot DM the bot, whatever the
 scopes say.
 
-Then get the app token and the bot token, and run the server.
+Install the app, then set two variables named after the agent. Uppercase the
+agent ID and replace anything that is not a letter or a digit with an
+underscore.
 
 ```sh
-export SLACK_APP_TOKEN=xapp-...
-export SLACK_BOT_TOKEN=xoxb-...
-subs serve --slack-agent my-agent
+export SLACK_APP_TOKEN_SUPPORT=xapp-...
+export SLACK_BOT_TOKEN_SUPPORT=xoxb-...
+subs serve
 ```
 
-`--slack-agent` names the agent that answers DMs and any channel the file does
-not name. Put the routing in the file instead.
+The app token is under Basic Information, App-Level Tokens. Create one with the
+`connections:write` scope. The bot token is under OAuth & Permissions.
 
-```toml title="subs.toml"
-[slack]
-dm = "my-agent"
-mentions = "my-agent"
-```
+`subs serve` opens one connection per declared app and names any variable it
+cannot find. `subs doctor` lists them without starting the server.
 
-See [Slack](./130-slack.md) for the routing rules.
+Repeat for each agent. Two agents need two Slack apps and two pairs of
+variables.
+
+See [Slack](./130-slack.md) for where the bot answers and what it can do.
 
 ## Administer a self-hosted deployment
 

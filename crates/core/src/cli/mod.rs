@@ -11,6 +11,7 @@ mod resume_hint;
 pub mod run;
 mod run_remote;
 pub mod sessions;
+mod slack_app;
 pub mod target;
 mod turns;
 
@@ -160,12 +161,6 @@ pub enum Command {
     /// whether each one holds what it needs.
     #[command(name = "list", visible_alias = "ls", after_help = GLOBAL_FLAGS_HELP)]
     List(authorize::ListCommand),
-    /// Connect a Slack workspace to the deployment that answers for it.
-    #[command(after_help = GLOBAL_FLAGS_HELP)]
-    Slack {
-        #[command(subcommand)]
-        command: cloud::slack::SlackCommand,
-    },
     /// Show what this project still needs before it works: the keys, the
     /// consents, and the workspaces nobody has set up yet.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
@@ -208,7 +203,6 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         Command::Auth(cmd) => authorize::auth(cmd).await,
         Command::Revoke(cmd) => authorize::revoke(cmd).await,
         Command::List(cmd) => authorize::list(cmd).await,
-        Command::Slack { command } => cloud::slack::run(command).await,
         Command::Doctor { scope } => doctor::run(scope).await,
     }
 }
@@ -236,9 +230,6 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Auth(_) => "auth",
         Command::Revoke(_) => "revoke",
         Command::List(_) => "list",
-        Command::Slack { command } => match command {
-            cloud::slack::SlackCommand::Connect { .. } => "slack connect",
-        },
         Command::Doctor { .. } => "doctor",
         Command::Orgs { command } => match command {
             OrgsCommand::List { .. } => "orgs list",

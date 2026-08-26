@@ -110,49 +110,50 @@ pub struct McpGrantRequest {
     pub project_id: String,
 }
 
-/// The Slack workspaces an org has connected, and whether the deployment
-/// connects any at all. A deployment holding no Slack app answers
-/// `configured: false` rather than an empty list, which is a different thing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SlackStatus {
+pub struct SlackApp {
+    pub agent_id: String,
     #[serde(default)]
-    pub configured: bool,
+    pub name: String,
     #[serde(default)]
-    pub connections: Vec<SlackConnection>,
+    pub answers: crate::manifest::SlackAudience,
+    /// Absent until both secrets are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed: Option<SlackInstall>,
 }
 
-/// One connected workspace. Only what identifies it: the routing a deployment
-/// keeps beside it is applied from the file, not read from here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SlackConnection {
-    pub id: String,
+pub struct SlackInstall {
     #[serde(default)]
     pub team_id: String,
     #[serde(default)]
     pub team_name: String,
-    #[serde(default)]
-    pub status: String,
 }
 
-impl SlackConnection {
-    /// The workspace as a reader knows it. A deployment that sends no name
-    /// leaves the id, which is still the workspace.
+impl SlackApp {
     pub fn label(&self) -> String {
-        match self.team_name.trim() {
-            "" => self.team_id.clone(),
-            name => format!("{name} ({})", self.team_id),
+        match &self.installed {
+            None => "not set".to_string(),
+            Some(install) if install.team_name.is_empty() => install.team_id.clone(),
+            Some(install) => format!("{} in {}", self.name, install.team_name),
         }
     }
 }
 
-/// Slack's own consent page, built by the deployment that holds the app
-/// credentials and the redirect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SlackInstallUrl {
-    pub url: String,
+pub struct SlackManifest {
+    pub agent_id: String,
+    pub manifest: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlackCredentials {
+    pub bot_token: String,
+    pub signing_secret: String,
 }
 
 /// A project's configuration as the deployment holds it: the manifest it was
@@ -494,5 +495,45 @@ impl ApiError {
                 message: Some(message.into()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::SlackAudience;
+
+    /// The bytes a deployment sends. Field names and nullability are the
+    /// contract, so this is written out rather than round-tripped.
+    #[test]
+    fn a_slack_app_reads_back_from_what_a_deployment_sends() {
+        let waiting: SlackApp =
+            serde_json::from_str(r#"{ "agentId": "support", "name": "Support", "answers": "dm" }"#)
+                .unwrap();
+        assert_eq!(waiting.answers, SlackAudience::Dm);
+        assert!(waiting.installed.is_none());
+        assert_eq!(waiting.label(), "not set");
+
+        let installed: SlackApp = serde_json::from_str(
+            r#"{
+                "agentId": "support",
+                "name": "Support",
+                "answers": "both",
+                "installed": { "teamId": "T1", "teamName": "Acme" }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(installed.answers, SlackAudience::Both);
+        assert_eq!(installed.label(), "Support in Acme");
+
+        // A deployment that sends the key as null means the same as omitting it.
+        let null: SlackApp =
+            serde_json::from_str(r#"{ "agentId": "support", "installed": null }"#).unwrap();
+        assert!(null.installed.is_none());
+        assert_eq!(
+            null.answers,
+            SlackAudience::Both,
+            "the widest is the default"
+        );
     }
 }

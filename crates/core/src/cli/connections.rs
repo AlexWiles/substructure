@@ -263,22 +263,15 @@ pub(super) async fn login_local(
 /// where a shell history would keep it.
 pub(super) async fn set_token_local(
     spec: &ConnectionSpec,
-    env: Option<String>,
     globals: &CloudGlobals,
     cfg: &ProjectConfig,
 ) -> Result<()> {
     let id = &spec.path.to_string();
     let subject = local_slot(spec);
 
-    let token = match &env {
-        Some(var) => super::env_value(var)
-            .with_context(|| format!("${var} is not set"))?
-            .trim()
-            .to_string(),
-        None => pickers::read_secret(globals, "Paste the token")?,
-    };
+    let token = pickers::read_secret(globals, "Paste the token")?;
     if token.is_empty() {
-        bail!("no token given. Pipe it in, or pass --env <VAR>.");
+        bail!("no token given. Pipe it in.");
     }
 
     store_credential(cfg, id, &subject, Credential::Static { token }).await?;
@@ -545,21 +538,11 @@ fn declare(id: &str, spec: &ConnectionSpec, project: &str) -> McpDeclareRequest 
 /// The deployment holds the token and the engine there sends it; nothing is
 /// written on this machine. Declaring first is idempotent, so a token may be
 /// set before the first `subs apply`.
-pub(super) async fn set_token_remote(
-    spec: &ConnectionSpec,
-    env: Option<String>,
-    scope: ProjectScope,
-) -> Result<()> {
+pub(super) async fn set_token_remote(spec: &ConnectionSpec, scope: ProjectScope) -> Result<()> {
     let id = &spec.path.to_string();
-    let token = match &env {
-        Some(var) => super::env_value(var)
-            .with_context(|| format!("${var} is not set"))?
-            .trim()
-            .to_string(),
-        None => pickers::read_secret(&scope.globals, "Paste the token")?,
-    };
+    let token = pickers::read_secret(&scope.globals, "Paste the token")?;
     if token.is_empty() {
-        bail!("no token given. Pipe it in, or pass --env <VAR>.");
+        bail!("no token given. Pipe it in.");
     }
 
     let (ctx, org, project) = remote_target(&scope).await?;
@@ -767,13 +750,6 @@ mod tests {
         .at(path, ConnectorProtocol::Mcp)
     }
 
-    fn globals() -> CloudGlobals {
-        CloudGlobals {
-            no_interaction: true,
-            ..Default::default()
-        }
-    }
-
     fn tmpdir() -> PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
@@ -857,15 +833,21 @@ mod tests {
         ))
         .unwrap();
 
-        std::env::set_var("SUBS_TEST_MCP_TOKEN", "ghp_written");
         let spec = pick(
             &cfg.resolved_connections().unwrap(),
             ConnectionPath::parse("mcp.github"),
         )
         .unwrap();
-        set_token_local(&spec, Some("SUBS_TEST_MCP_TOKEN".into()), &globals(), &cfg)
-            .await
-            .unwrap();
+        store_credential(
+            &cfg,
+            &spec.path.to_string(),
+            &local_slot(&spec),
+            Credential::Static {
+                token: "ghp_written".into(),
+            },
+        )
+        .await
+        .unwrap();
 
         let store = open_store(open_db(&cfg).unwrap()).unwrap();
         assert_eq!(

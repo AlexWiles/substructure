@@ -13,6 +13,7 @@ use super::{
     Inbound, ReplyMeta, SlackFile, AUTHORIZE_ACTION, MAX_FALLBACK, MAX_MARKDOWN, REPLY_EVENT_TYPE,
 };
 use crate::event_store::Seq;
+use crate::manifest::SlackAudience;
 use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorError};
 use crate::protocol::{
     ClientInput, Content, Issuer, Requester, Role, SessionOwner, StoredContent, Subject, Visibility,
@@ -58,112 +59,40 @@ fn audience_of(channel: &str) -> Visibility {
     }
 }
 
-/// Which agent answers where. Three separate questions, so three settings:
-/// who takes DMs, who takes a mention in a channel nobody named, and who takes
-/// each channel that is named. Silence is the default for all three — nothing
-/// answers anywhere until something says so.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct Routing {
-    dm: Option<String>,
-    mentions: Option<String>,
-    /// The agent for each named channel, or `None` where the bot stays out.
-    channels: HashMap<String, Option<String>>,
-}
-
-impl Routing {
-    /// Routes nothing. Build it up with [`Routing::dm`],
-    /// [`Routing::mentions`], and [`Routing::channel`].
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// `agent` answers direct messages.
-    pub fn dm(mut self, agent: Option<String>) -> Self {
-        self.dm = agent;
-        self
-    }
-
-    /// `agent` answers a mention in any channel that `channel` does not name —
-    /// a mention being the only way a channel reaches the bot at all. Absent,
-    /// an unnamed channel is not served, which is what makes the channel table
-    /// an allowlist.
-    pub fn mentions(mut self, agent: Option<String>) -> Self {
-        self.mentions = agent;
-        self
-    }
-
-    /// `agent` answers in `id`; `None` keeps the bot out of it, even when
-    /// `mentions` is set.
-    pub fn channel(mut self, id: impl Into<String>, agent: Option<String>) -> Self {
-        self.channels.insert(id.into(), agent);
-        self
-    }
-
-    /// The agent that answers in `channel`, or `None` where the bot is silent.
-    ///
-    /// A DM (`D…`) resolves only against `dm`: `mentions` is about channels,
-    /// and a DM reaches the bot without anybody mentioning it.
-    pub fn agent_for(&self, channel: &str) -> Option<&str> {
-        if channel.starts_with('D') {
-            return self.dm.as_deref();
-        }
-        match self.channels.get(channel) {
-            Some(entry) => entry.as_deref(),
-            None => self.mentions.as_deref(),
-        }
-    }
-
-    /// Whether this routes anything at all.
-    pub fn is_empty(&self) -> bool {
-        self.dm.is_none() && self.mentions.is_none() && self.channels.is_empty()
-    }
-}
-
-/// The line the server logs at startup, so a misrouted channel is visible
-/// without the file.
-impl std::fmt::Display for Routing {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(agent) = &self.dm {
-            parts.push(format!("dm→{agent}"));
-        }
-        if let Some(agent) = &self.mentions {
-            parts.push(format!("mentions→{agent}"));
-        }
-        let mut channels: Vec<_> = self.channels.iter().collect();
-        channels.sort_by(|a, b| a.0.cmp(b.0));
-        for (id, agent) in channels {
-            parts.push(match agent {
-                Some(agent) => format!("{id}→{agent}"),
-                None => format!("{id} off"),
-            });
-        }
-        match parts.is_empty() {
-            true => write!(f, "nothing"),
-            false => write!(f, "{}", parts.join(", ")),
-        }
-    }
-}
-
 /// One Slack install.
 pub struct Workspace {
     pub bot_token: String,
-    /// Must be unique for each install, not for each team: session ids carry
-    /// only the channel and thread, so two of our apps in one workspace share
-    /// a tenant's sessions and stream rows.
     pub tenant_id: String,
-    pub routing: Routing,
+    pub agent_id: String,
+    pub answers: SlackAudience,
     identity: tokio::sync::OnceCell<Identity>,
 }
 
 impl Workspace {
-    pub fn new(bot_token: String, tenant_id: String, routing: Routing) -> Self {
+    pub fn new(bot_token: String, tenant_id: String, agent_id: String) -> Self {
         Self {
             bot_token,
             tenant_id,
-            routing,
+            agent_id,
+            answers: SlackAudience::Both,
             identity: tokio::sync::OnceCell::new(),
         }
+    }
+
+    pub fn answering(mut self, answers: SlackAudience) -> Self {
+        self.answers = answers;
+        self
+    }
+
+    fn serves(&self, channel: &str) -> bool {
+        match channel.starts_with('D') {
+            true => self.answers.dms(),
+            false => self.answers.channels(),
+        }
+    }
+
+    fn session_id(&self, channel: &str, thread_ts: &str) -> String {
+        format!("slack:{}:{}:{}", self.agent_id, channel, thread_ts)
     }
 }
 
@@ -174,21 +103,11 @@ struct Identity {
     team: Option<String>,
 }
 
-/// Maps an event to its install; `None` for an unknown install.
-/// `by_tenant` must return the same workspace that `by_install` supplies.
+/// Finds the workspace an outbound event goes out over. Inbound needs no
+/// lookup: whoever received the delivery already knows which app it was for.
 #[async_trait::async_trait]
 pub trait WorkspaceResolver: Send + Sync {
-    /// An install is a team and an app: one workspace can hold more than one
-    /// of our apps, so the team alone is ambiguous. `app_id` is the event's
-    /// `api_app_id`. `channel` is the event's channel, so one install can
-    /// serve a different tenant per channel.
-    async fn by_install(
-        &self,
-        team_id: Option<&str>,
-        app_id: Option<&str>,
-        channel: &str,
-    ) -> Option<Arc<Workspace>>;
-    async fn by_tenant(&self, tenant_id: &str) -> Option<Arc<Workspace>>;
+    async fn by_tenant(&self, tenant_id: &str, agent_id: &str) -> Option<Arc<Workspace>>;
 }
 
 /// One turn's stream. A queued turn takes its slot while the turn before it
@@ -199,14 +118,20 @@ struct StreamKey {
     tenant_id: String,
     session_id: String,
     turn_id: String,
+    agent_id: String,
 }
 
 impl StreamKey {
-    fn new(tenant_id: &str, session_id: &str, turn_id: &str) -> Self {
+    fn new(ws: &Workspace, session_id: &str, turn_id: &str) -> Self {
+        Self::parts(&ws.tenant_id, session_id, turn_id, &ws.agent_id)
+    }
+
+    fn parts(tenant_id: &str, session_id: &str, turn_id: &str, agent_id: &str) -> Self {
         Self {
             tenant_id: tenant_id.to_string(),
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
+            agent_id: agent_id.to_string(),
         }
     }
 }
@@ -235,6 +160,7 @@ struct Stream {
     tenant_id: String,
     session_id: String,
     turn_id: String,
+    agent_id: String,
     /// Where the session's messages go.
     thread: Thread,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -252,7 +178,12 @@ struct Stream {
 
 impl Stream {
     fn key(&self) -> StreamKey {
-        StreamKey::new(&self.tenant_id, &self.session_id, &self.turn_id)
+        StreamKey::parts(
+            &self.tenant_id,
+            &self.session_id,
+            &self.turn_id,
+            &self.agent_id,
+        )
     }
 }
 
@@ -584,11 +515,10 @@ impl Streams {
     }
 }
 
-/// The bot behavior, resolved to a workspace for each event. A transport
-/// (Socket Mode, webhooks) parses its deliveries and calls
+/// The bot behavior. A transport parses its deliveries and calls
 /// [`handle_event`](Self::handle_event) or
-/// [`handle_interaction`](Self::handle_interaction). Call
-/// [`start`](Self::start) first.
+/// [`handle_interaction`](Self::handle_interaction) with the workspace it
+/// received them for. Call [`start`](Self::start) first.
 #[derive(Clone)]
 pub struct SlackBot {
     resolver: Arc<dyn WorkspaceResolver>,
@@ -686,8 +616,9 @@ impl SlackBot {
         Ok(())
     }
 
-    /// Handle an `events_api` payload (an `event_callback` body).
-    pub async fn handle_event(&self, payload: &Value) {
+    /// The caller knows the install: it authenticated the request against
+    /// that app's own secret, or it holds the one app it serves.
+    pub async fn handle_event(&self, ws: &Workspace, payload: &Value) {
         let Some(inbound) = app_mention(payload).or_else(|| dm_message(payload)) else {
             return;
         };
@@ -695,26 +626,12 @@ impl SlackBot {
             tracing::warn!("slack: event before start; dropped");
             return;
         };
-        // The delivered workspace, not the asker's team.
-        let team = payload["team_id"].as_str();
-        let app = payload["api_app_id"].as_str();
-        let Some(ws) = self.resolver.by_install(team, app, &inbound.channel).await else {
-            tracing::warn!(
-                team = %team.unwrap_or(""),
-                app = %app.unwrap_or(""),
-                channel = %inbound.channel,
-                "slack: event for unknown workspace"
-            );
-            return;
-        };
-        self.submit(&ctx, &ws, inbound).await;
+        self.submit(&ctx, ws, inbound).await;
     }
 
-    /// Handle an `interactive` payload (a `block_actions` body).
-    ///
-    /// Each click goes into the session as a `client.action` decision. What
-    /// it means is decided there.
-    pub async fn handle_interaction(&self, payload: &Value) {
+    /// A click goes into the session as a `client.action` decision. What it
+    /// means is decided there.
+    pub async fn handle_interaction(&self, ws: &Workspace, payload: &Value) {
         let Some(ctx) = self.ctx.get().cloned() else {
             tracing::warn!("slack: interaction before start; dropped");
             return;
@@ -722,35 +639,18 @@ impl SlackBot {
         let Some(click) = block_action(payload) else {
             return;
         };
-        // Slack reports a click on a link button too. It answers nothing.
         if click.action_id == AUTHORIZE_ACTION {
             return;
         }
-        let team = payload["team"]["id"]
-            .as_str()
-            .or_else(|| payload["user"]["team_id"].as_str());
-        let app = payload["api_app_id"].as_str();
-        let Some(ws) = self.resolver.by_install(team, app, &click.channel).await else {
-            tracing::warn!(
-                team = %team.unwrap_or(""),
-                app = %app.unwrap_or(""),
-                channel = %click.channel,
-                "slack: click for unknown workspace"
-            );
-            return;
-        };
-        self.submit_click(&ctx, &ws, click).await;
+        self.submit_click(&ctx, ws, click).await;
     }
 
     async fn submit_click(&self, ctx: &ChannelContext, ws: &Workspace, click: Click) {
-        let Some(agent_id) = ws.routing.agent_for(&click.channel) else {
-            tracing::warn!(channel = %click.channel, "slack: click in a channel no agent serves");
-            return;
-        };
+        let agent_id = ws.agent_id.as_str();
         let session_id = click
             .session
             .clone()
-            .unwrap_or_else(|| format!("slack:{}:{}", click.channel, click.thread_ts));
+            .unwrap_or_else(|| ws.session_id(&click.channel, &click.thread_ts));
         let clicked = self
             .requester(ws, None, &click.user, audience_of(&click.channel))
             .await;
@@ -765,11 +665,15 @@ impl SlackBot {
                 owner: SessionOwner {
                     tenant_id: ws.tenant_id.clone(),
                     requester: clicked,
-                    metadata: HashMap::from_iter([
-                        ("slack_channel".to_string(), click.channel.clone()),
-                        ("slack_thread_ts".to_string(), click.thread_ts.clone()),
-                        ("slack_user".to_string(), click.user.clone()),
-                    ]),
+                    metadata: HashMap::from_iter(
+                        [
+                            Some(("slack_channel".to_string(), click.channel.clone())),
+                            Some(("slack_thread_ts".to_string(), click.thread_ts.clone())),
+                            Some(("slack_user".to_string(), click.user.clone())),
+                        ]
+                        .into_iter()
+                        .flatten(),
+                    ),
                 },
                 input: ClientInput::Action {
                     agent_id: agent_id.to_string(),
@@ -1117,16 +1021,16 @@ impl SlackBot {
     }
 
     async fn submit(&self, ctx: &ChannelContext, ws: &Workspace, inbound: Inbound) {
+        if !ws.serves(&inbound.channel) {
+            tracing::debug!(channel = %inbound.channel, "slack: outside what this app answers");
+            return;
+        }
         // Before the thread fetch: a channel nobody answers in costs no API
         // calls. A click is deliberately not gated the same way — a prompt
         // already posted has to stay answerable after its channel goes off.
-        let Some(agent_id) = ws.routing.agent_for(&inbound.channel) else {
-            tracing::debug!(channel = %inbound.channel, "slack: no agent for channel; ignored");
-            return;
-        };
-        let agent_id = agent_id.to_string();
+        let agent_id = ws.agent_id.clone();
         let thread = Thread::new(&inbound.channel, &inbound.thread_ts);
-        let session_id = format!("slack:{}:{}", inbound.channel, inbound.thread_ts);
+        let session_id = ws.session_id(&inbound.channel, &inbound.thread_ts);
         // Deterministic for each message: a redelivery dedupes.
         let turn_id = Some(format!("slack:{}:{}", inbound.channel, inbound.ts));
 
@@ -1488,7 +1392,10 @@ impl EventProcessor for SlackBot {
         let Some(thread) = owner_thread(&event.meta) else {
             return Ok(());
         };
-        let Some(ws) = self.resolver.by_tenant(&event.tenant_id).await else {
+        let Some(agent_id) = event.meta.agent_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(ws) = self.resolver.by_tenant(&event.tenant_id, agent_id).await else {
             return Ok(());
         };
         // The row lands before the checkpoint commits: a lost write replays.
@@ -1594,7 +1501,7 @@ impl SlackBot {
             self.update(ws, channel, ts, text, blocks, &meta).await?;
         }
         if let Some(turn_id) = event.meta.turn_id.as_deref() {
-            let key = StreamKey::new(&event.tenant_id, &event.session_id, turn_id);
+            let key = StreamKey::new(ws, &event.session_id, turn_id);
             if let Some(view) = slack.get("view").and_then(View::parse) {
                 // `complete_turn` posts the finished message.
                 if c.finishes_turn {
@@ -1622,7 +1529,7 @@ impl SlackBot {
         at: chrono::DateTime<chrono::Utc>,
         seq: u64,
     ) -> Result<(), Error> {
-        let key = StreamKey::new(&ws.tenant_id, session_id, &t.turn_id);
+        let key = StreamKey::new(ws, session_id, &t.turn_id);
         let live = match self.streams.take(&key) {
             Some(live) => Some(live),
             None => self.recover(ws, &key, seq).await,
@@ -1823,7 +1730,7 @@ impl SlackBot {
             ..Default::default()
         };
         // The decision that interrupted can write the prompt itself.
-        let key = turn_id.map(|t| StreamKey::new(&ws.tenant_id, session_id, t));
+        let key = turn_id.map(|t| StreamKey::new(ws, session_id, t));
         let authored = key.as_ref().and_then(|k| self.streams.take_prompt(k));
         let (text, blocks) = match authored {
             Some(view) => (view.text, view.blocks),
@@ -1945,6 +1852,7 @@ impl SlackBot {
                     tenant_id: event.tenant_id.clone(),
                     session_id: event.session_id.clone(),
                     turn_id: t.turn_id.clone(),
+                    agent_id: ws.agent_id.clone(),
                     thread: thread.clone(),
                     started_at: event.occurred_at,
                     recipient,
@@ -2001,11 +1909,8 @@ impl SlackBot {
         }
         // An event outside any turn renders nothing.
         if let Some(turn_id) = turn_id {
-            self.streams.mark_dirty(StreamKey::new(
-                &event.tenant_id,
-                &event.session_id,
-                &turn_id,
-            ));
+            self.streams
+                .mark_dirty(StreamKey::new(ws, &event.session_id, &turn_id));
         }
         Ok(())
     }
@@ -2020,7 +1925,7 @@ impl SlackBot {
                 }
                 continue;
             };
-            let Some(ws) = self.resolver.by_tenant(&key.tenant_id).await else {
+            let Some(ws) = self.resolver.by_tenant(&key.tenant_id, &key.agent_id).await else {
                 continue;
             };
             self.stream_turn(&ws, &key).await;
@@ -2321,6 +2226,7 @@ impl SlackBot {
         let mut stream = Stream {
             tenant_id: key.tenant_id.clone(),
             session_id: key.session_id.clone(),
+            agent_id: key.agent_id.clone(),
             thread,
             turn_id: row.turn_id,
             started_at: row.started_at,
@@ -2638,15 +2544,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WorkspaceResolver for OneWorkspace {
-        async fn by_install(
-            &self,
-            _: Option<&str>,
-            _: Option<&str>,
-            _: &str,
-        ) -> Option<Arc<Workspace>> {
-            Some(self.0.clone())
-        }
-        async fn by_tenant(&self, _: &str) -> Option<Arc<Workspace>> {
+        async fn by_tenant(&self, _: &str, _: &str) -> Option<Arc<Workspace>> {
             Some(self.0.clone())
         }
     }
@@ -2698,7 +2596,7 @@ mod tests {
                 Arc::new(super::OneWorkspace(Arc::new(super::Workspace::new(
                     "xoxb-test".into(),
                     "t".into(),
-                    super::Routing::new().dm(Some("a".into())),
+                    "a".into(),
                 )))),
                 "http://127.0.0.1:1".into(),
                 None,
@@ -2831,11 +2729,7 @@ mod tests {
 
     /// The bot, its workspace, and the Slack it talks to.
     fn bot_for(api_base: String) -> (SlackBot, Arc<Workspace>) {
-        let ws = Arc::new(Workspace::new(
-            "xoxb-test".into(),
-            "t".into(),
-            Routing::new().dm(Some("a".into())),
-        ));
+        let ws = Arc::new(Workspace::new("xoxb-test".into(), "t".into(), "a".into()));
         let bot = SlackBot::new(Arc::new(OneWorkspace(ws.clone())), api_base, None, None);
         (bot, ws)
     }
@@ -2845,11 +2739,7 @@ mod tests {
         api_base: String,
         dir: &std::path::Path,
     ) -> (SlackBot, Arc<Workspace>, Arc<dyn BlobStore>) {
-        let ws = Arc::new(Workspace::new(
-            "xoxb-test".into(),
-            "t".into(),
-            Routing::new().dm(Some("a".into())),
-        ));
+        let ws = Arc::new(Workspace::new("xoxb-test".into(), "t".into(), "a".into()));
         let db = crate::providers::sqlite::SqliteDb::open(
             dir.join("test.db").to_str().unwrap(),
             std::time::Duration::from_secs(5),
@@ -3319,11 +3209,7 @@ mod tests {
             .await
             .expect("the message is recorded");
 
-        let ws = Arc::new(Workspace::new(
-            "xoxb-test".into(),
-            "t".into(),
-            Routing::new().dm(Some("a".into())),
-        ));
+        let ws = Arc::new(Workspace::new("xoxb-test".into(), "t".into(), "a".into()));
         let bot = SlackBot::new(
             Arc::new(OneWorkspace(ws.clone())),
             api_base,
@@ -3649,7 +3535,7 @@ mod tests {
                 ]
                 .into(),
             }),
-            agent_id: None,
+            agent_id: Some("a".into()),
             ancestry: Vec::new(),
             turn_id: turn_id.map(str::to_string),
             cost: Default::default(),
@@ -3672,64 +3558,12 @@ mod tests {
         }
     }
 
-    /// A channel with nothing of its own is the default's, so declaring one
-    /// channel does not take the bot out of every other.
-    #[test]
-    fn a_channel_falls_to_the_default() {
-        let routing = Routing::new()
-            .dm(Some("support".into()))
-            .mentions(Some("support".into()))
-            .channel("C0ENG", Some("oncall".into()));
-        assert_eq!(routing.agent_for("C0ENG"), Some("oncall"));
-        assert_eq!(routing.agent_for("C0SALES"), Some("support"));
-        // A DM is a channel, and resolves the same way.
-        assert_eq!(routing.agent_for("D0USER"), Some("support"));
-    }
-
-    /// No default is the allowlist: the bot is in the channels the file names
-    /// and nowhere else, without a second setting saying so.
-    #[test]
-    fn without_a_default_only_the_named_channels_are_served() {
-        let routing = Routing::new().channel("C0ENG", Some("oncall".into()));
-        assert_eq!(routing.agent_for("C0ENG"), Some("oncall"));
-        assert_eq!(routing.agent_for("C0SALES"), None);
-        assert_eq!(routing.agent_for("D0USER"), None);
-    }
-
-    /// And with a default, `off` is how one channel is carved back out.
-    #[test]
-    fn an_off_channel_is_silent_under_a_default() {
-        let routing = Routing::new()
-            .mentions(Some("support".into()))
-            .channel("C0RANDOM", None);
-        assert_eq!(routing.agent_for("C0RANDOM"), None);
-        assert_eq!(routing.agent_for("C0SALES"), Some("support"));
-    }
-
-    #[test]
-    fn routing_reads_back_for_the_startup_line() {
-        let routing = Routing::new()
-            .dm(Some("support".into()))
-            .mentions(Some("helper".into()))
-            .channel("C0RANDOM", None)
-            .channel("C0ENG", Some("oncall".into()));
-        // The line reads back in the file's own words, so a misrouted channel
-        // can be checked against the section that set it.
-        assert_eq!(
-            routing.to_string(),
-            "dm→support, mentions→helper, C0ENG→oncall, C0RANDOM off"
-        );
-
-        assert!(Routing::default().is_empty());
-        assert_eq!(Routing::default().to_string(), "nothing");
-        assert!(!Routing::new().channel("C0ENG", None).is_empty());
-    }
-
     fn stream(turn_id: &str, ts: Option<&str>) -> Stream {
         Stream {
             tenant_id: "t".into(),
             session_id: SESSION.into(),
             turn_id: turn_id.into(),
+            agent_id: "a".into(),
             thread: thread(),
             started_at: chrono::Utc::now(),
             recipient: None,
@@ -3742,7 +3576,7 @@ mod tests {
     }
 
     fn key(turn_id: &str) -> StreamKey {
-        StreamKey::new("t", SESSION, turn_id)
+        StreamKey::parts("t", SESSION, turn_id, "a")
     }
 
     /// Any session whose owner records a thread is Slack's, whatever its id.

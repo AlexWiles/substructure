@@ -5,7 +5,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use super::bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
+use super::bot::{SlackBot, Workspace, WorkspaceResolver};
+use crate::manifest::SlackAudience;
 use crate::runtime::blob::BlobStore;
 use crate::transport::channel::{Channel, ChannelContext, ChannelKind};
 
@@ -13,7 +14,7 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
 /// Required environment variables that were not set, and what they are for.
 #[derive(Debug)]
-pub struct MissingEnv(Vec<(&'static str, &'static str)>);
+pub struct MissingEnv(Vec<(String, &'static str)>);
 
 impl std::fmt::Display for MissingEnv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,10 +32,30 @@ impl std::fmt::Display for MissingEnv {
 
 impl std::error::Error for MissingEnv {}
 
-/// Socket Mode transport: one workspace from env, behavior in [`SlackBot`].
+/// The two an app hands out, both from its own settings page.
+pub struct SlackTokens {
+    /// App-level, for the socket. `xapp-…`
+    pub app: String,
+    /// Bot, for the API. `xoxb-…`
+    pub bot: String,
+}
+
+pub fn env_var(prefix: &str, agent_id: &str) -> String {
+    let suffix: String = agent_id
+        .chars()
+        .map(|c| match c.is_ascii_alphanumeric() {
+            true => c.to_ascii_uppercase(),
+            false => '_',
+        })
+        .collect();
+    format!("{prefix}_{suffix}")
+}
+
+/// Socket Mode transport: one agent's app, behavior in [`SlackBot`].
 #[derive(Clone)]
 pub struct SlackChannel {
-    routing: Routing,
+    agent_id: String,
+    workspace: Arc<Workspace>,
     app_token: String,
     api_base: String,
     http: reqwest::Client,
@@ -45,17 +66,8 @@ struct StaticResolver(Arc<Workspace>);
 
 #[async_trait::async_trait]
 impl WorkspaceResolver for StaticResolver {
-    async fn by_install(
-        &self,
-        _team_id: Option<&str>,
-        _app_id: Option<&str>,
-        _channel: &str,
-    ) -> Option<Arc<Workspace>> {
-        Some(self.0.clone())
-    }
-
-    async fn by_tenant(&self, tenant_id: &str) -> Option<Arc<Workspace>> {
-        (tenant_id == self.0.tenant_id).then(|| self.0.clone())
+    async fn by_tenant(&self, tenant_id: &str, agent_id: &str) -> Option<Arc<Workspace>> {
+        (tenant_id == self.0.tenant_id && agent_id == self.0.agent_id).then(|| self.0.clone())
     }
 }
 
@@ -63,18 +75,20 @@ impl SlackChannel {
     /// `store` holds durable stream state so a restart resumes open
     /// streaming messages. `blobs` holds uploaded images.
     pub fn new(
-        routing: Routing,
-        app_token: String,
-        bot_token: String,
+        agent_id: String,
+        answers: SlackAudience,
+        tokens: SlackTokens,
         tenant_id: String,
         api_base: String,
         store: Option<super::StreamStore>,
         blobs: Option<Arc<dyn BlobStore>>,
     ) -> Self {
-        let workspace = Arc::new(Workspace::new(bot_token, tenant_id, routing.clone()));
+        let workspace =
+            Arc::new(Workspace::new(tokens.bot, tenant_id, agent_id.clone()).answering(answers));
         Self {
-            routing,
-            app_token,
+            agent_id,
+            workspace: workspace.clone(),
+            app_token: tokens.app,
             api_base: api_base.clone(),
             http: reqwest::Client::new(),
             bot: SlackBot::new(Arc::new(StaticResolver(workspace)), api_base, store, blobs),
@@ -87,31 +101,32 @@ impl SlackChannel {
         self
     }
 
-    pub fn routing(&self) -> &Routing {
-        &self.routing
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
     }
 
-    /// Reads SLACK_APP_TOKEN and SLACK_BOT_TOKEN. SLACK_API_BASE overrides
-    /// the API origin (tests).
+    /// Reads SLACK_APP_TOKEN_<AGENT> and SLACK_BOT_TOKEN_<AGENT>.
+    /// SLACK_API_BASE overrides the API origin (tests).
     pub fn from_env(
-        routing: Routing,
+        agent_id: String,
+        answers: SlackAudience,
         tenant_id: String,
         store: Option<super::StreamStore>,
         blobs: Option<Arc<dyn BlobStore>>,
     ) -> Result<Self, MissingEnv> {
         let mut missing = Vec::new();
-        let mut var = |name: &'static str, desc: &'static str| {
-            std::env::var(name).unwrap_or_else(|_| {
+        let mut var = |name: String, desc: &'static str| {
+            std::env::var(&name).unwrap_or_else(|_| {
                 missing.push((name, desc));
                 String::new()
             })
         };
         let app_token = var(
-            "SLACK_APP_TOKEN",
+            env_var("SLACK_APP_TOKEN", &agent_id),
             "App-level token with connections:write, for Socket Mode (xapp-…)",
         );
         let bot_token = var(
-            "SLACK_BOT_TOKEN",
+            env_var("SLACK_BOT_TOKEN", &agent_id),
             "Bot token with app_mentions:read, chat:write, channels:history, im:history, files:read, files:write (xoxb-…)",
         );
         if !missing.is_empty() {
@@ -120,7 +135,16 @@ impl SlackChannel {
         let api_base =
             std::env::var("SLACK_API_BASE").unwrap_or_else(|_| "https://slack.com/api".to_string());
         Ok(Self::new(
-            routing, app_token, bot_token, tenant_id, api_base, store, blobs,
+            agent_id,
+            answers,
+            SlackTokens {
+                app: app_token,
+                bot: bot_token,
+            },
+            tenant_id,
+            api_base,
+            store,
+            blobs,
         ))
     }
 
@@ -156,10 +180,14 @@ impl SlackChannel {
                         Err(_) => continue,
                     };
                     if envelope["type"].as_str() == Some("events_api") {
-                        self.bot.handle_event(&envelope["payload"]).await;
+                        self.bot
+                            .handle_event(&self.workspace, &envelope["payload"])
+                            .await;
                     }
                     if envelope["type"].as_str() == Some("interactive") {
-                        self.bot.handle_interaction(&envelope["payload"]).await;
+                        self.bot
+                            .handle_interaction(&self.workspace, &envelope["payload"])
+                            .await;
                     }
                     // Ack after the submit; Slack sends an unacked event again.
                     if let Some(id) = envelope["envelope_id"].as_str() {

@@ -9,9 +9,7 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::cli::env::{ProviderBinding, ProviderKind};
 use crate::connectors::registry::{ConnectionDecl, ConnectionPath, ConnectionSpec};
-use crate::manifest::{
-    AgentSection, Manifest, PluginSpec, ProviderSpec, ResolvedPlugins, SlackConfig,
-};
+use crate::manifest::{AgentSection, Manifest, PluginSpec, ProviderSpec, ResolvedPlugins};
 use crate::runtime::llm::LlmBlocks;
 use crate::runtime::worker::AgentEntry;
 
@@ -24,7 +22,7 @@ pub const DEFAULT_DB: &str = "subs.db";
 ///
 /// A file carries two roles, either or both: **an engine you run** (`db`, `log`,
 /// `[run]`, `[serve]`) and **a remote you administer** (`[remote]`). What the
-/// project *is* — `name`, `[agent.<id>]`, `[llm.<id>]`, `[slack]`, `[mcp.<id>]`
+/// project *is* — `name`, `[agent.<id>]`, `[llm.<id>]`, `[mcp.<id>]`
 /// — is one declaration whichever role reads it, and it is exactly
 /// [`Manifest`], so a self-hosted system is served and administered from the
 /// same file rather than two that have to agree.
@@ -81,8 +79,6 @@ pub struct ProjectConfig {
     pub agent: BTreeMap<String, AgentSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serve: Option<ServeConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub slack: Option<SlackConfig>,
     /// MCP servers this project may reach, keyed by the id an agent names. An
     /// engine here dials them itself; a remote is told the id and URL and
     /// holds the credential, so `auth` is the engine's half alone.
@@ -142,7 +138,6 @@ impl ProjectConfig {
             agent: self.agent.clone(),
             mcp: self.mcp.clone(),
             plugin: self.plugin.clone(),
-            slack: self.slack.clone(),
         }
     }
 
@@ -178,10 +173,6 @@ impl ProjectConfig {
             Some(dir) if !dir.as_os_str().is_empty() => dir.join(named).display().to_string(),
             _ => named,
         }
-    }
-
-    pub fn slack_dm_agent(&self) -> Option<String> {
-        self.slack.as_ref()?.dm.clone()
     }
 
     /// The declared blocks as the engine reads them: venue and wire shape,
@@ -862,15 +853,6 @@ mod tests {
             port = 9000
             auth = false
 
-            [slack]
-            dm = "support"
-
-            [slack.channel.C0ENGOPS]
-            agent = "researcher"
-
-            [slack.channel.C0RANDOM]
-            off = true
-
             [mcp.sentry]
             url = "https://mcp.sentry.dev/mcp"
             prefix_tools = false
@@ -911,117 +893,6 @@ mod tests {
         let cfg = ok("[remote]\norg = \"acme\"\n");
         let out = toml::to_string_pretty(&cfg).unwrap();
         assert_eq!(out.trim(), "[remote]\norg = \"acme\"", "got {out}");
-    }
-
-    #[test]
-    fn an_empty_slack_section_is_not_a_configured_bot() {
-        assert_eq!(ok("[slack]\n").slack_dm_agent(), None);
-        assert_eq!(ProjectConfig::default().slack_dm_agent(), None);
-        assert!(!ok("[slack]\n").slack.unwrap().is_configured());
-
-        // The old bare key is gone, and says so rather than doing nothing.
-        let err = parse("slack_agent = \"helper\"\n").unwrap_err().to_string();
-        assert!(err.contains("slack_agent"), "got {err}");
-    }
-
-    fn agents() -> String {
-        "[llm.claude]\ntype = \"anthropic\"\n\n\
-         [agent.support]\nllm = \"claude\"\nmodel = \"m\"\n\n\
-         [agent.oncall]\nllm = \"claude\"\nmodel = \"m\"\n\n"
-            .to_string()
-    }
-
-    fn slack(s: &str) -> Result<ProjectConfig> {
-        parse(&(agents() + s))
-    }
-
-    /// A channel names an agent rather than restating a prompt or a tool list:
-    /// `[agent.<id>]` already is that bundle.
-    #[test]
-    fn a_channel_names_the_agent_that_answers_there() {
-        let cfg = slack(
-            "[slack]\ndm = \"support\"\nmentions = \"support\"\n\n\
-             [slack.channel.C0ENGOPS]\nagent = \"oncall\"\n\n\
-             [slack.channel.C0RANDOM]\noff = true\n",
-        )
-        .unwrap();
-        let s = cfg.slack.unwrap();
-        assert_eq!(s.dm.as_deref(), Some("support"));
-        assert_eq!(s.mentions.as_deref(), Some("support"));
-        assert_eq!(s.channel["C0ENGOPS"].agent(), Some("oncall"));
-        // `off` is the absence of an agent, however the section spelled it.
-        assert_eq!(s.channel["C0RANDOM"].agent(), None);
-        assert!(s.is_configured());
-    }
-
-    /// Naming channels alone is the allowlist: without `mentions` the bot
-    /// can be invited anywhere and still answers only where it was named.
-    #[test]
-    fn channels_without_mentions_are_a_complete_section() {
-        let cfg = slack("[slack.channel.C0ENGOPS]\nagent = \"oncall\"\n").unwrap();
-        let s = cfg.slack.unwrap();
-        assert_eq!(s.dm, None);
-        assert_eq!(s.mentions, None);
-        assert!(s.is_configured(), "the bot is on, in one channel");
-    }
-
-    /// The old key answered two questions at once, so it is named rather than
-    /// reported as an unknown field.
-    #[test]
-    fn the_old_slack_agent_key_says_what_it_became() {
-        let err = slack("[slack]\nagent = \"support\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("`dm`"), "got {err}");
-        assert!(err.contains("`mentions`"), "got {err}");
-    }
-
-    /// Every name the bot routes to is declared in this same file, so a typo
-    /// is caught here rather than as a bot that answers nowhere.
-    #[test]
-    fn a_channels_agent_is_checked_against_the_file() {
-        let err = slack("[slack]\ndm = \"suport\"\n").unwrap_err().to_string();
-        assert!(err.contains("names no agent"), "got {err}");
-        assert!(err.contains("oncall, support"), "and says which; got {err}");
-
-        let err = slack("[slack.channel.C0ENGOPS]\nagent = \"on-call\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("[slack.channel.C0ENGOPS]"), "got {err}");
-        assert!(err.contains("names no agent"), "got {err}");
-    }
-
-    /// The likeliest mistake, and one that would otherwise match no event and
-    /// report nothing.
-    #[test]
-    fn a_channel_name_is_not_a_channel_id() {
-        let err = slack("[slack.channel.\"#eng-oncall\"]\nagent = \"oncall\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("is a name, not a channel id"), "got {err}");
-        assert!(err.contains("About tab"), "and where to get one; got {err}");
-    }
-
-    /// A channel says one of two things. Both, or neither, is a setting with
-    /// no meaning rather than one to resolve by precedence.
-    #[test]
-    fn a_channel_that_says_both_or_neither_is_an_error() {
-        let err = slack("[slack.channel.C0RANDOM]\nagent = \"oncall\"\noff = true\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("contradict"), "got {err}");
-
-        let err = slack("[slack.channel.C0RANDOM]\n").unwrap_err().to_string();
-        assert!(err.contains("declares nothing"), "got {err}");
-    }
-
-    /// A bot that connects, listens, and can answer nowhere.
-    #[test]
-    fn a_section_that_serves_nowhere_is_an_error() {
-        let err = slack("[slack.channel.C0RANDOM]\noff = true\n")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("nothing to answer with"), "got {err}");
     }
 
     #[test]

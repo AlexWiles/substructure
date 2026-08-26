@@ -8,9 +8,8 @@ llm = "openrouter"
 model = "deepseek/deepseek-v4-flash-0731"
 worker = "http://localhost:4444"
 
-[slack]
-dm = "oncall"
-mentions = "oncall"
+[agent.oncall.slack]
+name = "Oncall"
 
 [serve]
 auth = false

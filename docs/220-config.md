@@ -35,9 +35,8 @@ model = "claude-haiku-4-5"
 [mcp.sentry]
 url = "https://mcp.sentry.dev/mcp"
 
-[slack]
-dm = "support"
-mentions = "support"
+[agent.support.slack]
+name = "Support"
 
 [serve]
 host = "127.0.0.1"
@@ -59,7 +58,7 @@ A file has two roles. It can have one or both.
 | A deployment you administer | `[remote]` | `subs apply`, `subs keys`, `subs sessions` |
 
 The project itself stays the same for both roles: `name`, `[llm.<id>]`,
-`[agent.<id>]`, `[mcp.<id>]`, `[plugin.<id>]`, and `[slack]`.
+`[agent.<id>]`, `[mcp.<id>]`, and `[plugin.<id>]`.
 
 A second environment is a second file. `subs apply -c subs.staging.toml`
 deploys a separate project.
@@ -264,31 +263,28 @@ url = "https://pdf.staging.example.com/mcp"
 
 Authorize it by its path: `subs auth plugin.pdf.mcp.renderer`.
 
-## `[slack]`
+## `[agent.<id>.slack]`
 
-Where the bot answers. Every key defaults to silence.
+Gives one agent its own Slack app. The block being there is the whole
+declaration.
 
 ```toml
-[slack]
-dm = "support"
-mentions = "support"
-
-[slack.channel.C0ENGOPS]
-agent = "oncall"
-
-[slack.channel.C0RANDOM]
-off = true
+[agent.support.slack]
+name = "Support"
+description = "Answers customer questions"
+answers = "both"
 ```
 
-| Key | Type | Meaning |
-| --- | --- | --- |
-| `dm` | agent ID | Answers direct messages. |
-| `mentions` | agent ID | Answers mentions in any channel `channel` does not name. |
-| `channel.<id>.agent` | agent ID | Answers in that channel. |
-| `channel.<id>.off` | bool | The bot stays out of that channel. |
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | the agent ID | The bot's name in Slack. Up to 35 characters. |
+| `description` | string | none | The app's About text. Up to 140 characters. |
+| `answers` | `both`, `dm`, `channels` | `both` | Where the bot answers. |
 
-Name a channel by ID, never by name. A `#name` is a parse error. See
-[Slack](./130-slack.md).
+Every agent with this block is a separate Slack app. Which channels it answers
+in is decided in Slack, by who invites it.
+
+Run `subs auth agent.<id>.slack` to set it up. See [Slack](./130-slack.md).
 
 ## `[serve]`
 
@@ -333,7 +329,7 @@ The file names secrets. It never holds them.
 | Provider key | `api_key_env` on the LLM block, for an engine you run. `subs auth` for a deployment. |
 | Signing secret | `signing_secret_env` on the agent, for an engine you run. The deployment creates its own. |
 | Connector token | `subs auth <path>`. |
-| Slack tokens | `$SLACK_APP_TOKEN` and `$SLACK_BOT_TOKEN`, or `subs slack connect`. |
+| Slack tokens | `$SLACK_APP_TOKEN_<AGENT>` and `$SLACK_BOT_TOKEN_<AGENT>`, or `subs auth agent.<id>.slack`. |
 
 `subs apply` strips `api_key_env` and `signing_secret_env` before it sends.
 

@@ -13,15 +13,11 @@ llm = "openrouter"
 model = "anthropic/claude-sonnet-4.5"
 system = "You are the on-call assistant. Say what is broken, what you checked, and what to do next."
 
-[slack]
-dm = "support"
-mentions = "support"
+[agent.support.slack]
+name = "Support"
 
-[slack.channel.C01ABCD2EFG]      # #eng-oncall
-agent = "oncall"
-
-[slack.channel.C03HIJK4LMN]      # #random
-off = true
+[agent.oncall.slack]
+name = "On-call"
 
 [remote]
 url = "https://api.substructure.ai"

@@ -13,6 +13,5 @@ mcp = [{ id = "mcp.issues", approve = "destructive" }]
 url = "http://127.0.0.1:4500/mcp"
 auth = "none"
 
-[slack]
-dm = "ops"
-mentions = "ops"
+[agent.ops.slack]
+name = "Ops"

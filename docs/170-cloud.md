@@ -66,8 +66,8 @@ run on every merge.
 Calls run on your key. A block the engine calls needs one.
 
 ```sh
-subs auth llm.claude              # reads the key from stdin
-subs auth llm.claude --env MY_KEY # or from an environment variable
+subs auth llm.claude          # prompts for the key
+echo "$MY_KEY" | subs auth llm.claude
 subs list
 ```
 
@@ -88,7 +88,7 @@ carries one.
 | Signing secret | Your worker verifies the engine's decision requests with it. | The deployment creates one per agent, on the first apply that gives it a `worker`. Read it with `subs agents secret <id>`. |
 | Client API key | The bearer token your clients send. | `subs keys create <label>`. Printed once. |
 | Provider key | Authenticates to Anthropic, OpenAI, or OpenRouter. | `subs auth llm.<block>`. |
-| Slack bot token | The bot reads and posts as your app. | `subs slack connect`. The token stays in the deployment. |
+| Slack bot token and signing secret | The bot reads and posts as your app, and the deployment checks that requests come from Slack. | `subs auth agent.<id>.slack`. Both stay in the deployment. |
 
 The signing secret belongs to the deployment. It is never written in the file.
 Any member of the organization can read or rotate it, because whoever can deploy

@@ -50,11 +50,11 @@ subs list
 ```
 
 One command covers every kind. `subs auth` reads what the connection declares
-and does what that needs: consent in a browser, or a token you type at a prompt,
-pipe in, or name a variable for. A token never appears in the command line.
+and does what that needs: consent in a browser, or a token you type at a prompt
+or pipe in. A token never appears in the command line.
 
 ```sh
-subs auth mcp.github --env GITHUB_TOKEN
+subs auth mcp.github
 gh auth token | subs auth mcp.github
 ```
 

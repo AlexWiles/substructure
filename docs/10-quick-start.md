@@ -38,18 +38,17 @@ llm = "openrouter"
 model = "anthropic/claude-sonnet-4-5"
 system = "You are the on-call assistant."
 
-[slack]
-dm = "oncall"
-mentions = "oncall"
+[agent.oncall.slack]
+name = "On-call"
 
 [remote]
 url = "https://api.substructure.ai"
 ```
 
 `[llm.openrouter]` sets which provider to call. `[agent.oncall]` sets who calls
-it. `[slack]` sets where the agent answers. `[remote]` makes the file describe a
-deployment, so every command on this page acts on the cloud. The file holds no
-keys.
+it. `[agent.oncall.slack]` gives that agent a Slack app. `[remote]` makes the
+file describe a deployment, so every command on this page acts on the cloud. The
+file holds no keys.
 
 ## Create the project
 
@@ -68,18 +67,26 @@ subs auth llm.openrouter
 
 The command reads the key from stdin. Model calls run on your key.
 
-## Connect Slack
+## Set up the Slack app
 
 ```sh
-subs slack connect
+subs auth agent.oncall.slack
 ```
 
-This opens Slack's consent page. The token goes to the deployment.
+The command prints an app manifest. Go to
+[api.slack.com/apps](https://api.slack.com/apps), choose Create New App, then
+From a manifest, and paste it in. Create the app and install it to your
+workspace.
+
+Slack then shows you two values. Paste them back when the command asks.
+
+- The Bot User OAuth Token, under OAuth & Permissions.
+- The Signing Secret, under Basic Information.
 
 ## Talk to the agent
 
-Mention the bot in a channel and it answers in the thread. Send it a DM and it
-answers every message.
+Invite the bot to a channel and mention it, and it answers in the thread. Send
+it a DM and it answers every message.
 
 The thread is the session. Later mentions continue the conversation.
 

@@ -12,9 +12,8 @@ mcp = ["mcp.deepwiki"]
 [mcp.deepwiki]
 url = "https://mcp.deepwiki.com/mcp"
 
-[slack]
-dm = "docs"
-mentions = "docs"
+[agent.docs.slack]
+name = "Docs"
 
 [remote]
 url = "https://api.substructure.ai"

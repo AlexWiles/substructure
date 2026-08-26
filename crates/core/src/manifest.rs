@@ -31,8 +31,6 @@ pub struct Manifest {
     pub mcp: BTreeMap<String, ConnectionDecl>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin: BTreeMap<String, PluginSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub slack: Option<SlackConfig>,
 }
 
 impl Manifest {
@@ -51,9 +49,6 @@ impl Manifest {
         }
         for (id, section) in &self.agent {
             check_agent(id, section, self).map_err(|e| anyhow::anyhow!("[agent.{id}]: {e}"))?;
-        }
-        if let Some(slack) = &self.slack {
-            check_slack(slack, self)?;
         }
         Ok(())
     }
@@ -190,8 +185,11 @@ impl Manifest {
         self.agent.keys().cloned().collect()
     }
 
-    pub fn slack_dm_agent(&self) -> Option<String> {
-        self.slack.as_ref()?.dm.clone()
+    pub fn slack_apps(&self) -> Vec<(&str, &AgentSlackConfig)> {
+        self.agent
+            .iter()
+            .filter_map(|(id, section)| Some((id.as_str(), section.slack.as_ref()?)))
+            .collect()
     }
 
     pub fn scope_notices(&self) -> Vec<String> {
@@ -201,12 +199,15 @@ impl Manifest {
             .filter(|spec| spec.effective_scope() == CredentialScope::User)
             .map(|spec| &spec.path)
             .collect();
-        let Some(slack) = self.slack.as_ref().filter(|_| !personal.is_empty()) else {
+        if personal.is_empty() {
             return Vec::new();
-        };
+        }
 
         let mut notices = Vec::new();
         for (agent_id, section) in &self.agent {
+            if !section.slack.as_ref().is_some_and(|s| s.answers.channels()) {
+                continue;
+            }
             let mut reached: Vec<ConnectionPath> = section
                 .mcp
                 .iter()
@@ -231,27 +232,13 @@ impl Manifest {
                     }
                 }
             }
-            if reached.is_empty() {
-                continue;
-            }
-            let mut bindings = Vec::new();
-            if slack.mentions.as_deref() == Some(agent_id) {
-                bindings.push("the [slack] `mentions` binding".to_string());
-            }
-            for (channel_id, channel) in &slack.channel {
-                if channel.agent() == Some(agent_id) {
-                    bindings.push(format!("the channel binding [slack.channel.{channel_id}]"));
-                }
-            }
-            for binding in bindings {
-                for connection in &reached {
-                    notices.push(format!(
-                        "▎ [agent.{agent_id}] reaches [{connection}], which is \
-                         credential = \"user\".\n\
-                         ▎ Those tools do not work on {binding}.\n\
-                         ▎ They work in direct messages."
-                    ));
-                }
+            for connection in &reached {
+                notices.push(format!(
+                    "\u{258e} [agent.{agent_id}] reaches [{connection}], which is \
+                     credential = \"user\".\n\
+                     \u{258e} Those tools do not work when it is mentioned in a channel.\n\
+                     \u{258e} They work in direct messages."
+                ));
             }
         }
         notices
@@ -327,6 +314,8 @@ pub struct AgentSection {
     pub worker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack: Option<AgentSlackConfig>,
 }
 
 impl AgentSection {
@@ -747,35 +736,62 @@ impl<'de> Deserialize<'de> for McpRef {
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct SlackConfig {
+pub struct AgentSlackConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub dm: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mentions: Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub channel: BTreeMap<String, SlackChannelConfig>,
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "SlackAudience::is_default")]
+    pub answers: SlackAudience,
 }
 
-impl SlackConfig {
-    pub fn is_configured(&self) -> bool {
-        self.dm.is_some() || self.mentions.is_some() || !self.channel.is_empty()
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlackAudience {
+    #[default]
+    Both,
+    Dm,
+    Channels,
+}
+
+impl SlackAudience {
+    fn is_default(&self) -> bool {
+        *self == Self::Both
+    }
+
+    pub const ALL: [Self; 3] = [Self::Both, Self::Dm, Self::Channels];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Dm => "dm",
+            Self::Channels => "channels",
+        }
+    }
+
+    pub fn parse(v: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.as_str() == v)
+    }
+
+    pub fn dms(self) -> bool {
+        matches!(self, Self::Both | Self::Dm)
+    }
+
+    pub fn channels(self) -> bool {
+        matches!(self, Self::Both | Self::Channels)
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SlackChannelConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub off: bool,
-}
-
-impl SlackChannelConfig {
-    pub fn agent(&self) -> Option<&str> {
-        match self.off {
-            true => None,
-            false => self.agent.as_deref(),
+impl AgentSlackConfig {
+    pub fn name(&self, agent_id: &str) -> String {
+        match self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            Some(name) => name.to_string(),
+            None => agent_id.to_string(),
         }
     }
 }
@@ -837,6 +853,10 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
         bail!(
             "`signing_secret_env` signs decision requests, and there is no `worker` to send any to"
         );
+    }
+
+    if let Some(slack) = &section.slack {
+        check_agent_slack(id, slack).map_err(|e| anyhow::anyhow!("`slack`: {e}"))?;
     }
 
     if !section.declares_config() {
@@ -960,61 +980,23 @@ fn check_sub_agent(sub: &str, section: &AgentSection, manifest: &Manifest) -> Re
     Ok(())
 }
 
-pub fn check_slack(slack: &SlackConfig, manifest: &Manifest) -> Result<()> {
-    for (key, agent) in [("dm", &slack.dm), ("mentions", &slack.mentions)] {
-        if let Some(agent) = agent {
-            check_slack_agent(agent, manifest)
-                .map_err(|e| anyhow::anyhow!("[slack]: `{key}`: {e}"))?;
+const SLACK_APP_NAME_MAX: usize = 35;
+const SLACK_APP_DESCRIPTION_MAX: usize = 140;
+
+pub fn check_agent_slack(id: &str, slack: &AgentSlackConfig) -> Result<()> {
+    let name = slack.name(id);
+    if name.chars().count() > SLACK_APP_NAME_MAX {
+        bail!("`name` is longer than the {SLACK_APP_NAME_MAX} characters Slack allows");
+    }
+    if let Some(description) = &slack.description {
+        if description.chars().count() > SLACK_APP_DESCRIPTION_MAX {
+            bail!(
+                "`description` is longer than the {SLACK_APP_DESCRIPTION_MAX} characters Slack \
+                 allows"
+            );
         }
     }
-    for (id, channel) in &slack.channel {
-        check_channel(id, channel, manifest)
-            .map_err(|e| anyhow::anyhow!("[slack.channel.{id}]: {e}"))?;
-    }
-    if slack.is_configured()
-        && slack.dm.is_none()
-        && slack.mentions.is_none()
-        && !slack.channel.values().any(|c| !c.off)
-    {
-        bail!(
-            "[slack]: nothing to answer with. Set `dm`, set `mentions`, or name an agent \
-             in a `[slack.channel.<id>]`."
-        );
-    }
     Ok(())
-}
-
-pub fn check_slack_agent(agent: &str, manifest: &Manifest) -> Result<()> {
-    if manifest.agent.contains_key(agent) {
-        return Ok(());
-    }
-    bail!(
-        "`agent = \"{agent}\"` names no agent. Declared: {}",
-        declared(manifest.agent.keys())
-    )
-}
-
-fn check_channel(id: &str, channel: &SlackChannelConfig, manifest: &Manifest) -> Result<()> {
-    if id.is_empty() {
-        bail!("the id is empty");
-    }
-    if id.starts_with('#') || id.starts_with('@') {
-        bail!(
-            "`{id}` is a name, not a channel id. A rename re-points a name; use the id from the \
-             channel's About tab (`C…`)."
-        );
-    }
-    match (&channel.agent, channel.off) {
-        (Some(_), true) => bail!(
-            "`off` and `agent` contradict: a channel the bot stays out of has nobody to answer in it"
-        ),
-        (None, false) => bail!(
-            "declares nothing. Name the `agent` that answers here, or set `off = true` to keep \
-             the bot out."
-        ),
-        (Some(agent), false) => check_slack_agent(agent, manifest),
-        (None, true) => Ok(()),
-    }
 }
 
 fn list(connections: &BTreeMap<ConnectionPath, ConnectionSpec>) -> String {
@@ -1661,7 +1643,7 @@ defer_tools = { strategy = "sometimes" }
     }
 
     #[test]
-    fn a_personal_connection_on_a_shared_binding_is_reported_as_a_route() {
+    fn a_personal_connection_an_agents_own_app_reaches_is_reported() {
         let m = manifest(
             r#"
             [llm.claude]
@@ -1672,18 +1654,14 @@ defer_tools = { strategy = "sometimes" }
             model = "m"
             mcp = ["mcp.gmail", "mcp.sentry"]
 
+            [agent.assistant.slack]
+
             [mcp.gmail]
             url = "https://mcp.example.test/mcp"
             credential = "user"
 
             [mcp.sentry]
             url = "https://mcp.sentry.dev/mcp"
-
-            [slack]
-            dm = "assistant"
-
-            [slack.channel.C0SUPPORT]
-            agent = "assistant"
             "#,
         );
         m.validate().unwrap();
@@ -1692,38 +1670,98 @@ defer_tools = { strategy = "sometimes" }
         assert!(notices[0].contains("[agent.assistant]"), "{}", notices[0]);
         assert!(notices[0].contains("[mcp.gmail]"), "{}", notices[0]);
         assert!(
-            notices[0].contains("[slack.channel.C0SUPPORT]"),
-            "the binding, not the agent: {}",
-            notices[0]
-        );
-        assert!(
             !notices[0].contains("sentry"),
             "a shared connection works anywhere: {}",
             notices[0]
         );
 
-        let mut dm_only = m.clone();
-        dm_only.slack.as_mut().unwrap().channel.clear();
-        assert!(dm_only.scope_notices().is_empty());
+        let mut no_app = m.clone();
+        no_app.agent.get_mut("assistant").unwrap().slack = None;
+        assert!(no_app.scope_notices().is_empty());
     }
 
     #[test]
-    fn slack_routes_only_to_declared_agents() {
-        let bad = manifest(
+    fn an_agent_declares_its_own_app_by_the_blocks_presence() {
+        let m = manifest(
             r#"
+            [llm.claude]
+            type = "anthropic"
+
             [agent.support]
             llm = "claude"
             model = "m"
 
+            [agent.support.slack]
+
+            [agent.triage]
+            llm = "claude"
+            model = "m"
+            "#,
+        );
+        m.validate().unwrap();
+        let apps = m.slack_apps();
+        assert_eq!(apps.len(), 1, "only the agent that declared one");
+        assert_eq!(apps[0].0, "support");
+        assert_eq!(apps[0].1.name("support"), "support");
+    }
+
+    #[test]
+    fn an_audience_round_trips_through_its_name() {
+        for answers in SlackAudience::ALL {
+            assert_eq!(SlackAudience::parse(answers.as_str()), Some(answers));
+        }
+        assert_eq!(SlackAudience::parse("channel"), None);
+        assert_eq!(SlackAudience::parse(""), None);
+    }
+
+    #[test]
+    fn an_agent_can_say_it_only_answers_in_one_place() {
+        let m = manifest(
+            r#"
             [llm.claude]
             type = "anthropic"
 
-            [slack]
-            dm = "typo"
+            [agent.assistant]
+            llm = "claude"
+            model = "m"
+            mcp = ["mcp.gmail"]
+
+            [agent.assistant.slack]
+            answers = "dm"
+
+            [mcp.gmail]
+            url = "https://mcp.example.test/mcp"
+            credential = "user"
             "#,
         );
-        let err = bad.validate().unwrap_err().to_string();
-        assert!(err.contains("names no agent"), "{err}");
+        m.validate().unwrap();
+        let answers = m.slack_apps()[0].1.answers;
+        assert!(answers.dms());
+        assert!(!answers.channels());
+        assert!(
+            m.scope_notices().is_empty(),
+            "a personal credential in a DM is the case it is for"
+        );
+    }
+
+    #[test]
+    fn a_slack_app_name_slack_would_refuse_is_refused_here() {
+        let long = manifest(&format!(
+            r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.support]
+            llm = "claude"
+            model = "m"
+
+            [agent.support.slack]
+            name = "{}"
+            "#,
+            "n".repeat(SLACK_APP_NAME_MAX + 1)
+        ));
+        let err = long.validate().unwrap_err().to_string();
+        assert!(err.contains("characters Slack allows"), "{err}");
     }
 
     #[test]

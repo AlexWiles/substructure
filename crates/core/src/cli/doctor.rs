@@ -14,12 +14,13 @@ use crate::cli::connections::Needs;
 
 use super::cloud::context::Context as CloudContext;
 use super::cloud::project_config::{self, Found};
-use super::cloud::{notices, print, slack, ProjectScope};
+use super::cloud::{notices, print, ProjectScope};
+use super::slack_app;
 use super::target::target;
 use super::{connections, env_value};
 
-/// The two variables a bot answering over Socket Mode reads, with an example of
-/// what each holds.
+/// The two variables an agent's own Slack app reads over Socket Mode, with an
+/// example of what each holds.
 const SLACK_TOKENS: [(&str, &str); 2] = [
     ("SLACK_APP_TOKEN", "xapp-..."),
     ("SLACK_BOT_TOKEN", "xoxb-..."),
@@ -103,17 +104,20 @@ async fn here(found: &Found, env: impl Fn(&str) -> Option<String>) -> Result<Vec
         });
     }
 
-    // Socket Mode is the engine's own Slack app, so its two tokens are this
-    // machine's to hold. Nothing routes anywhere without them.
-    if config.slack.as_ref().is_some_and(|s| s.is_configured()) {
-        for (var, example) in SLACK_TOKENS {
-            if env(var).is_some() {
+    // An agent's own Slack app answers over Socket Mode here, so its two
+    // tokens are this machine's to hold. It answers nowhere without them.
+    for (agent_id, _) in config.manifest().slack_apps() {
+        for (prefix, example) in SLACK_TOKENS {
+            let var = crate::transport::slack::env_var(prefix, agent_id);
+            if env(&var).is_some() {
                 continue;
             }
             out.push(
-                Notice::action(format!("Set ${var}, which the bot answers Slack with"))
-                    .with_command(format!("export {var}={example}"))
-                    .with_url(slack::SLACK_DOCS),
+                Notice::action(format!(
+                    "Set ${var}, which [agent.{agent_id}] answers Slack with"
+                ))
+                .with_command(format!("export {var}={example}"))
+                .with_url(slack_app::SLACK_DOCS),
             );
         }
     }
@@ -180,7 +184,7 @@ mod tests {
              worker = \"https://w.test\"\nsigning_secret_env = \"NOT_SET_SECRET\"\n\
              [mcp.github]\nurl = \"https://api.github.test/mcp\"\nauth = \"token\"\n\
              [mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n\
-             [slack]\ndm = \"support\"\n",
+             [agent.support.slack]\n",
         );
 
         let notices = here(&file, empty).await.unwrap();
@@ -195,8 +199,8 @@ mod tests {
             said.contains("Authorize the [mcp.linear] connection"),
             "{said}"
         );
-        assert!(said.contains("$SLACK_APP_TOKEN"), "{said}");
-        assert!(said.contains("$SLACK_BOT_TOKEN"), "{said}");
+        assert!(said.contains("$SLACK_APP_TOKEN_SUPPORT"), "{said}");
+        assert!(said.contains("$SLACK_BOT_TOKEN_SUPPORT"), "{said}");
         assert!(said.contains("$NOT_SET_SECRET"), "{said}");
 
         // Each connection is offered the command its declared method takes;
@@ -229,13 +233,13 @@ mod tests {
         assert!(here(&file, empty).await.unwrap().is_empty());
     }
 
-    /// Slack tokens are only this machine's business when something routes to
-    /// the bot: an empty `[slack]` asks for nothing.
+    /// Slack tokens are only this machine's business for an agent that
+    /// declares its own app; one that does not asks for nothing.
     #[tokio::test]
-    async fn slack_tokens_are_asked_for_only_when_the_bot_answers_somewhere() {
+    async fn slack_tokens_are_asked_for_only_by_an_agent_with_its_own_app() {
         let file = found(
             "[llm.byo]\ntype = \"worker\"\n\
-             [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n[slack]\n",
+             [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n",
         );
         assert!(here(&file, empty).await.unwrap().is_empty());
     }

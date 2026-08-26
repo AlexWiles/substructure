@@ -10,73 +10,104 @@ The thread is the session. Later mentions continue the conversation.
 
 ## Set up the bot
 
-Setting up takes two steps: say who answers, then connect the workspace.
+Each agent gets its own Slack app. Declare it, create it in Slack, then give
+the deployment the two values Slack hands back.
 
 ```toml title="subs.toml"
-[slack]
-dm = "support"
-mentions = "support"
+[agent.support.slack]
+name = "Support"
 ```
 
 ```sh
 subs apply
-subs slack connect
+subs auth agent.support.slack
 ```
 
-`subs slack connect` opens Slack's consent page and installs the app for you.
-The token goes to the deployment. The command waits for the workspace, then
-prints its name.
+`subs auth` prints an app manifest. Go to
+[api.slack.com/apps](https://api.slack.com/apps), choose Create New App, then
+From a manifest, and paste it in. Create the app and install it to your
+workspace.
 
-You need both steps. A connected workspace with no `[slack]` is a bot that never
-answers.
+Slack then shows you two values. Paste them back when the command asks for
+them.
 
-A Slack app installs once per workspace. Run the command again and it refreshes
-the token.
+| Value | Where Slack shows it |
+| --- | --- |
+| Bot User OAuth Token, starting `xoxb-` | OAuth & Permissions |
+| Signing Secret | Basic Information |
 
-An engine you run needs a Slack app you own. See
-[Self-hosting](./180-self-hosting.md#slack).
+The bot answers as soon as both are in. Run `subs list` to see which agents
+still need theirs.
 
-## Route channels to agents
+To replace the two values later, run `subs auth` again. To remove them, run
+`subs revoke agent.support.slack`. The app itself stays in Slack, and the same
+manifest still works, so you can put new values in without creating it again.
+
+An engine you run yourself uses the same block and a different pair of values.
+See [Self-hosting](./180-self-hosting.md#slack).
+
+## Where the bot answers
+
+Invite the app to a channel and it answers mentions there. Remove it and it
+stops. There is no channel list in `subs.toml`.
+
+DMs work as soon as the app is installed.
+
+To keep an agent to one or the other, set `answers`.
 
 ```toml title="subs.toml"
-[slack]
-dm = "support"               # direct messages
-mentions = "support"         # @mentions, in any channel the table omits
-
-[slack.channel.C0ENGOPS]     # eng-oncall
-agent = "oncall"
-
-[slack.channel.C0RANDOM]     # random
-off = true
+[agent.support.slack]
+name = "Support"
+answers = "dm"
 ```
 
-| Where | Answered by |
+| Value | The bot answers |
 | --- | --- |
-| A DM | `dm` |
-| A channel with a `[slack.channel.<id>]` | its own `agent`, or nobody when `off` |
-| A mention in any other channel | `mentions` |
+| `both` | DMs, and mentions in any channel it is in. This is the default. |
+| `dm` | DMs only. |
+| `channels` | Mentions only. |
 
-Each key defaults to off. The bot answers only where you tell it to.
+`answers` decides which permissions the app asks Slack for. An app set to `dm`
+is never given permission to read channels, so a mention does not reach it even
+if someone invites it to one.
 
-Leave `mentions` off and the channel table becomes an allowlist. Invite the bot
-anywhere and it answers only in the channels you named.
+Changing `answers` changes the manifest. Apply the file, then update the app in
+Slack from the new manifest that `subs auth` prints.
 
-DMs have their own key. An allowlist does not stop them.
+## Naming the app
 
-A channel names an agent, not a prompt or a tool list.
-[`[agent.<id>]`](./30-agents.md) already holds those. Point a channel at another
-agent and you change its prompt, its model, and its tools together.
+```toml title="subs.toml"
+[agent.support.slack]
+name = "Support"
+description = "Answers customer questions"
+```
 
-Name a channel by **ID**, never by name. Get the ID from the channel's About
-tab, from the channel link (`…/C0ENGOPS`), or from `conversations.list`. A
-`#name` is a parse error. The engine checks every `agent` against the file's
-sections at startup.
+`name` is what the bot is called in Slack, up to 35 characters. Without it the
+agent ID is used. `description` is the app's About text, up to 140 characters.
+
+Both come from the manifest, so changing them means updating the app in Slack.
+
+## Several bots in one workspace
+
+Every agent with an `[agent.<id>.slack]` block is a separate Slack app, with
+its own name, icon, and DMs. Run `subs auth` once for each.
+
+```toml title="subs.toml"
+[agent.support.slack]
+name = "Support"
+
+[agent.oncall.slack]
+name = "On-call"
+```
+
+Two of your bots can sit in the same channel. Each answers only when it is
+mentioned by name, and each keeps its own conversation in a thread.
 
 ## How Slack maps to the engine
 
 | Slack | Engine |
 | --- | --- |
-| A thread, in a channel or a DM | Session `slack:{channel}:{thread_ts}` |
+| A thread, in a channel or a DM | Session `slack:{agent}:{channel}:{thread_ts}` |
 | A mention or a DM message | One turn |
 | A task card | A tool call or a sub-agent run |
 | A reply | The turn's result |
@@ -247,4 +278,4 @@ its session ID.
 
 - [Interrupts](./100-interrupts.md): the pause behind a prompt.
 - [Conversations](./120-conversations.md): the session behind a thread.
-- [Self-hosting](./180-self-hosting.md#slack): run the bot with your own Slack app.
+- [Self-hosting](./180-self-hosting.md#slack): run the bot on your own engine.

@@ -4,14 +4,12 @@ mod proposer;
 mod render;
 mod socket;
 mod state;
-mod webhook;
 
-pub use bot::{Routing, SlackBot, Workspace, WorkspaceResolver};
+pub use bot::{SlackBot, Workspace, WorkspaceResolver};
 pub use proposer::SlackProposer;
 pub use render::{context_block, section_block, PromptOption, PromptView, Rendered};
-pub use socket::{MissingEnv, SlackChannel};
+pub use socket::{env_var, MissingEnv, SlackChannel, SlackTokens};
 pub use state::StreamStore;
-pub use webhook::webhook_router;
 
 use std::collections::HashMap;
 
