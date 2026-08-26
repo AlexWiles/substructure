@@ -9,6 +9,8 @@ together at the same version.
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-08-26
+
 ### Changed
 
 - Move to per agent slack manifest install
@@ -157,7 +159,8 @@ together at the same version.
 - The changelog starts again at this release. For the changes before it, refer
   to the git history.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/substructureai/substructure/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/substructureai/substructure/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/substructureai/substructure/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/substructureai/substructure/compare/v0.7.2...v0.8.0
