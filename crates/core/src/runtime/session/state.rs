@@ -11,7 +11,8 @@ use super::tool_contract::classify_arguments;
 use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{
-    AgentTool, ConnectorTool, DeferToolsStrategy, Handler, McpServer, StoredResult,
+    AgentTool, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, Handler, McpServer,
+    StoredResult, SubagentToolsStrategy,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,12 +34,13 @@ struct Summary<'a> {
 pub enum CallTarget {
     Connector(ConnectorTool),
     Declared(AgentTool),
+    Subagent(ConnectorTool),
 }
 
 impl CallTarget {
     pub fn input(&self) -> Option<serde_json::Value> {
         match self {
-            CallTarget::Connector(t) => t.input.clone(),
+            CallTarget::Connector(t) | CallTarget::Subagent(t) => t.input.clone(),
             CallTarget::Declared(t) => t.input.clone(),
         }
     }
@@ -255,6 +257,10 @@ impl EffectTracking {
         self.is_queued() || self.is_in_flight()
     }
 
+    pub fn is_unsettled(&self) -> bool {
+        self.is_open() || self.status == EffectStatus::Running
+    }
+
     pub fn earliest_wake(&self) -> Option<DateTime<Utc>> {
         match self.status {
             EffectStatus::Pending | EffectStatus::Running => self.expiry(),
@@ -278,7 +284,7 @@ pub struct EffectState {
 pub enum EffectPayload {
     LlmCall(LlmCallState),
     ToolCall(ToolCallState),
-    SubAgent(SubAgentCallState),
+    Subagent(SubagentCallState),
     ConnectorSync(ConnectorSyncState),
     Decision(WorkerDecisionState),
 }
@@ -288,7 +294,7 @@ impl EffectPayload {
         match self {
             EffectPayload::LlmCall(_) => EffectKind::LlmCall,
             EffectPayload::ToolCall(_) => EffectKind::ToolCall,
-            EffectPayload::SubAgent(_) => EffectKind::SubAgent,
+            EffectPayload::Subagent(_) => EffectKind::Subagent,
             EffectPayload::ConnectorSync(_) => EffectKind::ConnectorSync,
             EffectPayload::Decision(_) => EffectKind::Decision,
         }
@@ -339,7 +345,7 @@ impl EffectState {
 payload_views! {
     llm, llm_mut => LlmCall(LlmCallState),
     tool, tool_mut => ToolCall(ToolCallState),
-    sub_agent, sub_agent_mut => SubAgent(SubAgentCallState),
+    subagent, subagent_mut => Subagent(SubagentCallState),
     connector, connector_mut => ConnectorSync(ConnectorSyncState),
     decision, decision_mut => Decision(WorkerDecisionState),
 }
@@ -419,10 +425,10 @@ pub struct ToolCallState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubAgentCallState {
+pub struct SubagentCallState {
     pub agent_id: String,
     #[serde(default)]
-    pub tool_call_id: String,
+    pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<DraftMessage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -590,7 +596,7 @@ pub struct EventMeta {
     #[serde(default)]
     pub cost: Decimal,
     #[serde(default)]
-    pub sub_agent_cost: Decimal,
+    pub subagent_cost: Decimal,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -616,7 +622,7 @@ impl EventMeta {
             .calls
             .iter()
             .filter(|e| {
-                matches!(e.kind, EffectKind::ToolCall | EffectKind::SubAgent)
+                matches!(e.kind, EffectKind::ToolCall | EffectKind::Subagent)
                     && matches!(
                         e.status,
                         EffectStatus::Queued
@@ -688,7 +694,7 @@ pub struct SessionState {
     pub cost: Decimal,
 
     #[serde(default)]
-    pub sub_agent_cost: Decimal,
+    pub subagent_cost: Decimal,
 
     #[serde(default)]
     pub turn_cost: Decimal,
@@ -697,7 +703,7 @@ pub struct SessionState {
     pub turn_token_usage: Usage,
 
     #[serde(default)]
-    pub sub_agent_token_usage: Usage,
+    pub subagent_token_usage: Usage,
 
     #[serde(default)]
     pub state_versions: Vec<Logged<StateVersion>>,
@@ -751,10 +757,10 @@ impl SessionState {
             owner: None,
             token_usage: Usage::default(),
             cost: Decimal::ZERO,
-            sub_agent_cost: Decimal::ZERO,
+            subagent_cost: Decimal::ZERO,
             turn_cost: Decimal::ZERO,
             turn_token_usage: Usage::default(),
-            sub_agent_token_usage: Usage::default(),
+            subagent_token_usage: Usage::default(),
             state_versions: Vec::new(),
             agent_versions: Vec::new(),
             ancestry: Vec::new(),
@@ -819,9 +825,23 @@ impl SessionState {
         self.effect(EffectKind::ToolCall, id).and_then(|e| e.tool())
     }
 
-    pub fn sub_agent(&self, id: &str) -> Option<&SubAgentCallState> {
-        self.effect(EffectKind::SubAgent, id)
-            .and_then(|e| e.sub_agent())
+    pub fn subagent(&self, id: &str) -> Option<&SubagentCallState> {
+        self.effect(EffectKind::Subagent, id)
+            .and_then(|e| e.subagent())
+    }
+
+    pub fn subagent_awaiting(&self, session_id: &str) -> Option<(&str, &SubagentCallState)> {
+        self.effects_of(EffectKind::Subagent)
+            .filter(|e| e.tracking.is_unsettled())
+            .find_map(|e| {
+                let sa = e.subagent()?;
+                (sa.session_id == session_id).then_some((e.id.as_str(), sa))
+            })
+    }
+
+    pub fn subagent_session(&self, session_id: &str) -> Option<&SubagentCallState> {
+        self.effects_of(EffectKind::Subagent)
+            .find_map(|e| e.subagent().filter(|sa| sa.session_id == session_id))
     }
 
     pub fn connector_sync(&self, path: &ConnectionPath) -> Option<&ConnectorSyncState> {
@@ -962,23 +982,23 @@ impl SessionState {
         self.enqueue(ctx.sequence, EffectKind::ToolCall, &payload.id);
     }
 
-    fn apply_sub_agent_requested(&mut self, payload: &SubAgentRequested, ctx: &ApplyContext) {
-        if let Some(existing) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+    fn apply_subagent_requested(&mut self, payload: &SubagentRequested, ctx: &ApplyContext) {
+        if let Some(existing) = self.effect_mut(EffectKind::Subagent, &payload.id) {
             existing.tracking.requeue();
         } else {
             self.insert_effect(
                 &payload.id,
                 EffectTracking::new_queued(payload.retry.clone()),
-                EffectPayload::SubAgent(SubAgentCallState {
+                EffectPayload::Subagent(SubagentCallState {
                     agent_id: payload.agent_id.clone(),
-                    tool_call_id: payload.tool_call_id.clone(),
+                    session_id: payload.session_id.clone(),
                     message: payload.message.clone(),
                     result: None,
                     is_error: false,
                 }),
             );
         }
-        self.enqueue(ctx.sequence, EffectKind::SubAgent, &payload.id);
+        self.enqueue(ctx.sequence, EffectKind::Subagent, &payload.id);
     }
 
     fn apply_interrupted(&mut self, payload: &SessionInterrupted) {
@@ -1127,25 +1147,23 @@ impl SessionState {
                     }
                 }
             }
-            EventPayload::SubAgentRequested(payload) => {
-                self.apply_sub_agent_requested(payload, ctx)
-            }
-            EventPayload::SubAgentDispatched(payload) => {
-                if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+            EventPayload::SubagentRequested(payload) => self.apply_subagent_requested(payload, ctx),
+            EventPayload::SubagentDispatched(payload) => {
+                if let Some(e) = self.effect_mut(EffectKind::Subagent, &payload.id) {
                     e.tracking.dispatch(now);
                 }
-                self.dequeue(EffectKind::SubAgent, &payload.id);
+                self.dequeue(EffectKind::Subagent, &payload.id);
             }
-            EventPayload::SubAgentStarted(payload) => {
-                if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+            EventPayload::SubagentStarted(payload) => {
+                if let Some(e) = self.effect_mut(EffectKind::Subagent, &payload.id) {
                     e.tracking.run();
                 }
             }
-            EventPayload::SubAgentErrored(payload) => {
-                if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
+            EventPayload::SubagentErrored(payload) => {
+                if let Some(e) = self.effect_mut(EffectKind::Subagent, &payload.id) {
                     e.tracking.record_error(payload.retryable, now);
                     let failed = e.tracking.status == EffectStatus::Failed;
-                    if let Some(sa) = e.sub_agent_mut().filter(|_| failed) {
+                    if let Some(sa) = e.subagent_mut().filter(|_| failed) {
                         sa.result = Some(payload.error.message.clone());
                         sa.is_error = true;
                     }
@@ -1258,13 +1276,13 @@ impl SessionState {
                 self.schedule_queue
                     .retain(|e| e.kind != EffectKind::TurnEnd);
             }
-            EventPayload::SubAgentTurnCompleted(payload) => {
-                self.sub_agent_cost += payload.cost;
+            EventPayload::SubagentTurnCompleted(payload) => {
+                self.subagent_cost += payload.cost;
                 self.turn_cost += payload.cost;
-                self.sub_agent_token_usage.add(&payload.token_usage);
+                self.subagent_token_usage.add(&payload.token_usage);
                 self.turn_token_usage.add(&payload.token_usage);
-                if let Some(e) = self.effect_mut(EffectKind::SubAgent, &payload.id) {
-                    if let Some(sa) = e.sub_agent_mut() {
+                if let Some(e) = self.effect_mut(EffectKind::Subagent, &payload.id) {
+                    if let Some(sa) = e.subagent_mut() {
                         sa.result = Some(json_to_string(&payload.data));
                         sa.is_error = false;
                     }
@@ -1358,9 +1376,7 @@ impl SessionState {
             Trigger::ToolFinished { id, .. } | Trigger::ToolExecute { id, .. } => {
                 self.effect(EffectKind::ToolCall, id)
             }
-            Trigger::SubAgentFinished { session_id, .. } => {
-                self.effect(EffectKind::SubAgent, session_id)
-            }
+            Trigger::SubagentFinished { id, .. } => self.effect(EffectKind::Subagent, id),
             Trigger::LlmFinished { id, .. } | Trigger::LlmExecute { id, .. } => {
                 self.effect(EffectKind::LlmCall, id)
             }
@@ -1455,9 +1471,13 @@ impl SessionState {
 
     pub fn tool_handler_for(&self, name: &str) -> ToolHandler {
         let config = self.at_head().resolve_agent_for();
+        let connector = || {
+            self.connector_tool_for(name)
+                .is_some_and(|t| t.kind != ConnectorToolKind::Subagent)
+        };
         match config.as_ref().and_then(|c| c.tool(name)) {
             Some(t) => ToolHandler::declared(t.handler),
-            None if self.connector_tool_for(name).is_some() => ToolHandler::Server,
+            None if connector() => ToolHandler::Server,
             None => ToolHandler::Worker,
         }
     }
@@ -1466,8 +1486,7 @@ impl SessionState {
         self.effects
             .values()
             .filter_map(|e| match e.kind() {
-                EffectKind::ToolCall => Some(e.id.clone()),
-                EffectKind::SubAgent => e.sub_agent().map(|s| s.tool_call_id.clone()),
+                EffectKind::ToolCall | EffectKind::Subagent => Some(e.id.clone()),
                 _ => None,
             })
             .collect()
@@ -1483,23 +1502,32 @@ impl SessionState {
 
     pub fn connector_tools_for_config(&self, config: &AgentConfig) -> filter::Merged {
         let servers = self.servers_for(config);
-        let mut resolutions: Vec<filter::Resolution> = servers
-            .iter()
-            .filter_map(|connector| {
-                let effect = self.effect(EffectKind::ConnectorSync, &connector.path.to_string())?;
-                let sync = effect.connector()?;
-                effect.tracking.is_ready().then(|| {
-                    filter::resolve(
-                        connector,
-                        &sync.tools,
-                        sync.prefix.as_deref(),
-                        filter::defers(connector, config.defers_tools()),
-                    )
-                })
+        let may_spawn = config.may_spawn_subagent(self.depth());
+        let mut resolutions: Vec<filter::Resolution> = Vec::new();
+        if may_spawn {
+            resolutions.push(filter::subagent_tools(
+                &config.subagents,
+                config.defers_tools(),
+                config.subagent_strategy(),
+            ));
+        }
+        resolutions.extend(servers.iter().filter_map(|connector| {
+            let effect = self.effect(EffectKind::ConnectorSync, &connector.path.to_string())?;
+            let sync = effect.connector()?;
+            effect.tracking.is_ready().then(|| {
+                filter::resolve(
+                    connector,
+                    &sync.tools,
+                    sync.prefix.as_deref(),
+                    filter::defers(connector, config.defers_tools()),
+                )
             })
-            .collect();
+        }));
         let defers = config.defers_tools()
             || config.tools.iter().any(|t| t.defer == Some(true))
+            || (may_spawn
+                && config.subagent_strategy() == SubagentToolsStrategy::PerAgent
+                && config.subagents.iter().any(|s| s.defer == Some(true)))
             || config.mcp.iter().any(|c| filter::defers(c, false))
             || config.plugins.iter().any(|p| {
                 p.servers
@@ -1514,12 +1542,7 @@ impl SessionState {
         if !config.plugins.is_empty() {
             resolutions.push(filter::Resolution::of(vec![filter::skill_tool()]));
         }
-        let taken: Vec<&str> = config
-            .tools
-            .iter()
-            .map(|t| t.name.as_str())
-            .chain(config.sub_agents.iter().map(|s| s.id.as_str()))
-            .collect();
+        let taken: Vec<&str> = config.tools.iter().map(|t| t.name.as_str()).collect();
         filter::merge(resolutions, taken)
     }
 
@@ -1553,6 +1576,10 @@ impl SessionState {
             .resolve_agent_for()
             .and_then(|c| c.retry)
             .map(|b| *b)
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.ancestry.len() as u32
     }
 
     pub fn servers_for(&self, config: &AgentConfig) -> Vec<McpServer> {
@@ -1601,7 +1628,7 @@ impl SessionState {
                     handler: None,
                     stream: None,
                     agent_id: None,
-                    tool_call_id: None,
+                    session_id: None,
                 };
                 match &e.payload {
                     EffectPayload::ToolCall(c) => {
@@ -1609,9 +1636,9 @@ impl SessionState {
                         wire.arguments = Some(c.arguments.clone());
                         wire.handler = Some(c.handler.into());
                     }
-                    EffectPayload::SubAgent(c) => {
+                    EffectPayload::Subagent(c) => {
                         wire.agent_id = Some(c.agent_id.clone());
-                        wire.tool_call_id = Some(c.tool_call_id.clone());
+                        wire.session_id = Some(c.session_id.clone());
                     }
                     EffectPayload::LlmCall(c) => {
                         wire.handler = Some(c.handler.into());
@@ -1643,7 +1670,7 @@ impl SessionState {
                     status: e.tracking.status(),
                     finished: matches!(
                         d.trigger,
-                        Trigger::ToolFinished { .. } | Trigger::SubAgentFinished { .. }
+                        Trigger::ToolFinished { .. } | Trigger::SubagentFinished { .. }
                     ),
                     attempts: e.tracking.retry.attempts,
                     deadline: e.tracking.deadline,
@@ -1662,7 +1689,7 @@ impl SessionState {
             ancestry: self.ancestry.clone(),
             turn_id: self.turn_id().map(str::to_string),
             cost: self.cost,
-            sub_agent_cost: self.sub_agent_cost,
+            subagent_cost: self.subagent_cost,
             head_id: self.head_id.clone(),
             calls: self.effects(),
             decisions,
@@ -1792,7 +1819,12 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
             .connector_tools_for_config(&config)
             .tools
             .into_iter()
-            .filter(|t| t.kind.is_remote())
+            .filter(|t| {
+                matches!(
+                    t.kind,
+                    ConnectorToolKind::Remote | ConnectorToolKind::Subagent
+                )
+            })
             .map(|t| t.to_llm_tool())
             .collect::<Vec<_>>();
         declared.chain(connector).collect()
@@ -1866,8 +1898,11 @@ impl<'a, 'n> SessionStateAtNode<'a, 'n> {
         }
         self.state
             .connector_tool_for(named)
-            .filter(|t| t.kind.is_remote())
-            .map(CallTarget::Connector)
+            .and_then(|t| match t.kind {
+                ConnectorToolKind::Remote => Some(CallTarget::Connector(t)),
+                ConnectorToolKind::Subagent => Some(CallTarget::Subagent(t)),
+                _ => None,
+            })
     }
 
     pub fn call_tool_fault(&self, arguments: &str) -> Option<String> {
@@ -2252,15 +2287,7 @@ mod agent_version_tests {
         AgentConfig {
             llm: Some("claude".to_string()),
             model: model.to_string(),
-            system: None,
-            retry: None,
-            tools: Vec::new(),
-            sub_agents: Vec::new(),
-            mcp: Vec::new(),
-            defer_tools: None,
-            mcp_announce: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
+            ..Default::default()
         }
     }
 
@@ -2407,7 +2434,7 @@ mod effect_tests {
             handler: Some(crate::protocol::Handler::Worker),
             stream: None,
             agent_id: None,
-            tool_call_id: None,
+            session_id: None,
         };
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["id"], "call_1");

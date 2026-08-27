@@ -196,7 +196,6 @@ async fn local_page(cmd: &ListCommand, db: &str) -> Result<Page> {
         tenant_id: Some(DEFAULT_TENANT.to_string()),
         session_id: cmd.session_id.clone(),
         agent_id: cmd.agent_id.clone(),
-        // A sub-agent session is part of its parent, so the list omits it.
         top_level: true,
         sort: SessionSort::LastEventDesc,
         limit: Some(cmd.limit as usize),
@@ -526,7 +525,7 @@ mod tests {
             top_level: true,
             agent_id: Some("assistant".into()),
             cost: Default::default(),
-            sub_agent_cost: Default::default(),
+            subagent_cost: Default::default(),
             status: crate::session::state::SessionStatus::Done,
             turn_id: None,
         };
@@ -563,7 +562,7 @@ mod tests {
             top_level,
             agent_id: Some(agent_id.into()),
             cost: Default::default(),
-            sub_agent_cost: Default::default(),
+            subagent_cost: Default::default(),
             status: crate::session::state::SessionStatus::Done,
             turn_id: None,
         }
@@ -578,7 +577,6 @@ mod tests {
             .upsert_session_index(indexed("sess-1", "assistant", true))
             .await
             .unwrap();
-        // A sub-agent session is part of its parent, so the list omits it.
         index
             .upsert_session_index(indexed("sess-2", "researcher", false))
             .await
@@ -648,7 +646,7 @@ mod tests {
                 ancestry: Vec::new(),
                 turn_id: turn_id.map(str::to_string),
                 cost: Default::default(),
-                sub_agent_cost: Default::default(),
+                subagent_cost: Default::default(),
                 head_id: None,
                 calls: Vec::new(),
                 decisions: Vec::new(),

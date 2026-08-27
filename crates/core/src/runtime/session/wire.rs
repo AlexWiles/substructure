@@ -290,6 +290,7 @@ pub async fn resolve_response(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn lower_actions(
     actions: Vec<DecisionAction>,
     view: &[DraftMessage],
@@ -438,13 +439,13 @@ async fn lower_actions(
                         retryable,
                     }
                 }
-                DecisionAction::SpawnSubAgent {
+                DecisionAction::SpawnSubagent {
                     session_id,
                     agent_id,
                     tool_call_id,
                     message,
                     retry,
-                } => Action::SpawnSubAgent {
+                } => Action::SpawnSubagent {
                     session_id,
                     agent_id,
                     tool_call_id,
@@ -452,7 +453,7 @@ async fn lower_actions(
                     retry: RetryPolicy::resolve(
                         retry.as_ref(),
                         config_retry,
-                        RetryTarget::SubAgent,
+                        RetryTarget::Subagent,
                     ),
                 },
                 DecisionAction::SendMessage {
@@ -597,14 +598,14 @@ pub async fn to_wire_trigger(
             result,
             error,
         },
-        Trigger::SubAgentFinished {
+        Trigger::SubagentFinished {
             id,
             ok,
             session_id,
             agent_id,
             result,
             error,
-        } => DecisionTrigger::SubAgentFinished {
+        } => DecisionTrigger::SubagentFinished {
             id,
             ok,
             session_id,
@@ -1103,14 +1104,7 @@ mod tests {
             llm: Some(llm.to_string()),
             model: model.to_string(),
             system: system.map(str::to_string),
-            retry: None,
-            tools: Vec::new(),
-            sub_agents: Vec::new(),
-            mcp: Vec::new(),
-            defer_tools: None,
-            mcp_announce: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
+            ..Default::default()
         }
     }
 

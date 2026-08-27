@@ -74,6 +74,10 @@ pub fn declared_tool<'a>(
     }
 }
 
+pub fn violates(value: &serde_json::Value, schema: Option<&serde_json::Value>) -> bool {
+    !value.is_object() || schema.and_then(|s| schema_violations(s, value)).is_some()
+}
+
 pub fn output_violation(schema: &serde_json::Value, result: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(result)
         .unwrap_or_else(|_| serde_json::Value::String(result.to_string()));

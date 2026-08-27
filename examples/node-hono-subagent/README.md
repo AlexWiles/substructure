@@ -1,6 +1,6 @@
 # node-hono-subagent
 
-A chattable agent that delegates weather questions to a sub-agent, served with
+A chattable agent that delegates weather questions to a subagent, served with
 [Hono](https://hono.dev).
 
 ## Run

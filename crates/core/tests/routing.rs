@@ -9,8 +9,8 @@ use substructure_core::llm::{
 };
 use substructure_core::protocol::{
     AgentConfig, ChannelKind, ClientInput, Content, DecisionResponse, DraftMessage, ErrorCode,
-    LlmResponse, PromptContent, PromptRequest, Role, SessionOwner, SubAgent, ToolCall,
-    ToolCallFunction,
+    LlmResponse, PromptContent, PromptRequest, Role, SessionOwner, Subagent, SubagentTools,
+    ToolCall, ToolCallFunction,
 };
 use substructure_core::protocol::{Issuer, Requester, Subject};
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
@@ -22,7 +22,7 @@ use substructure_core::runtime::connector::ConnectorTask;
 use substructure_core::session::events::{DecisionErrored, EventPayload};
 use substructure_core::session::subscriptions::{SessionSubscriptionSpec, SubscriptionScope};
 use substructure_core::span::SpanContext;
-use substructure_core::sub_agent::SubAgentTask;
+use substructure_core::subagent::SubagentTask;
 use substructure_core::transport::ag_ui::events::AgUiEvent;
 use substructure_core::transport::ag_ui::run as ag_ui_run;
 use substructure_core::transport::ag_ui::translator::run_ag_ui_translation;
@@ -41,6 +41,15 @@ const TENANT: &str = "default";
 struct StubModel {
     reply: String,
     seen: Mutex<Vec<PromptRequest>>,
+    script: Mutex<Vec<ToolCall>>,
+    follow_up: Mutex<Option<String>>,
+}
+
+fn answered_session(request: &PromptRequest) -> Option<String> {
+    let answer = request.messages.iter().rfind(|m| m.role == Role::Tool)?;
+    let text = answer.content.as_ref().map(PromptContent::text_owned)?;
+    let answer: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(answer.get("session")?.as_str()?.to_string())
 }
 
 #[async_trait]
@@ -51,7 +60,47 @@ impl LlmCallable for StubModel {
         _ctx: &CallContext<'_>,
     ) -> Result<LlmResponse, LlmCallError> {
         self.seen.lock().unwrap().push(request.clone());
-        let answered = request.messages.iter().any(|m| m.role == Role::Tool);
+        if let Some(scripted) = self.script.lock().unwrap().pop() {
+            return Ok(LlmResponse {
+                model: request.model.clone(),
+                content: None,
+                tool_calls: vec![scripted],
+                finish_reason: Some("tool_calls".to_string()),
+                usage: None,
+                cost: None,
+                images: vec![],
+                reasoning: None,
+            });
+        }
+        let answers = request
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .count();
+        let follow_up = self.follow_up.lock().unwrap().clone();
+        if let (Some(name), 1, Some(session)) = (follow_up, answers, answered_session(request)) {
+            let arguments = match name.as_str() {
+                "subagent" => {
+                    format!(r#"{{"agent":"helper","message":"again","session":"{session}"}}"#)
+                }
+                _ => format!(r#"{{"message":"again","session":"{session}"}}"#),
+            };
+            return Ok(LlmResponse {
+                model: request.model.clone(),
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "tc-2".to_string(),
+                    call_type: "function".to_string(),
+                    function: ToolCallFunction { name, arguments },
+                }],
+                finish_reason: Some("tool_calls".to_string()),
+                usage: None,
+                cost: None,
+                images: vec![],
+                reasoning: None,
+            });
+        }
+        let answered = answers > 0;
         if let (false, Some(tool)) = (answered, request.tools.as_ref().and_then(|t| t.first())) {
             return Ok(LlmResponse {
                 model: request.model.clone(),
@@ -110,14 +159,7 @@ fn config(llm: &str) -> AgentConfig {
         llm: Some(llm.to_string()),
         model: "stub-model".to_string(),
         system: Some("Be brief.".to_string()),
-        retry: None,
-        tools: Vec::new(),
-        sub_agents: Vec::new(),
-        mcp: Vec::new(),
-        defer_tools: None,
-        mcp_announce: Default::default(),
-        plugins: Vec::new(),
-        effort: None,
+        ..Default::default()
     }
 }
 
@@ -138,7 +180,37 @@ fn worker_hosted(llm: &str, url: &str) -> AgentEntry {
     }
 }
 
-fn delegating(url: &str) -> AgentEntry {
+fn team(boss: AgentConfig) -> BTreeMap<String, AgentEntry> {
+    BTreeMap::from([
+        (
+            "boss".to_string(),
+            AgentEntry {
+                config: Some(boss),
+                hosting: Hosting::Engine,
+            },
+        ),
+        ("helper".to_string(), engine_hosted("claude")),
+    ])
+}
+
+fn helper(defer: Option<bool>) -> Subagent {
+    Subagent {
+        id: "helper".to_string(),
+        description: "Does the work.".to_string(),
+        defer,
+        prefix: None,
+    }
+}
+
+fn delegating(subagent_tools: Option<SubagentTools>) -> AgentConfig {
+    AgentConfig {
+        subagents: vec![helper(None)],
+        subagent_tools,
+        ..config("claude")
+    }
+}
+
+fn unconfigured_worker(url: &str) -> AgentEntry {
     AgentEntry {
         config: None,
         hosting: Hosting::Http(WorkerEndpoint {
@@ -196,6 +268,8 @@ async fn start_with(
     let model = Arc::new(StubModel {
         reply: "hello from the engine".to_string(),
         seen: Mutex::new(Vec::new()),
+        script: Mutex::new(Vec::new()),
+        follow_up: Mutex::new(None),
     });
     let providers = LlmProviderRegistry::new(BTreeMap::from([(
         "claude".to_string(),
@@ -221,9 +295,9 @@ async fn start_with(
             llm_task_queue: Arc::new(ShardedInMemoryQueue::new(
                 config.llm_executor_workers as u32,
             )) as Arc<dyn TaskQueue<LlmTask>>,
-            sub_agent_task_queue: Arc::new(ShardedInMemoryQueue::new(
-                config.sub_agent_executor_workers as u32,
-            )) as Arc<dyn TaskQueue<SubAgentTask>>,
+            subagent_task_queue: Arc::new(ShardedInMemoryQueue::new(
+                config.subagent_executor_workers as u32,
+            )) as Arc<dyn TaskQueue<SubagentTask>>,
             connections: None,
             plugins: std::sync::Arc::new(substructure_core::plugins::StaticPlugins::default()),
             connector_task_queue: Arc::new(ShardedInMemoryQueue::new(
@@ -685,7 +759,7 @@ async fn an_agent_that_delegates_everything_gets_no_seeded_config() {
 
     let h = start(BTreeMap::from([(
         "reggu".to_string(),
-        delegating(&format!("http://{addr}/agent")),
+        unconfigured_worker(&format!("http://{addr}/agent")),
     )]))
     .await;
     let events = turn(&h, "reggu", "hi").await;
@@ -739,37 +813,22 @@ async fn a_worker_sees_the_declared_config_as_its_start_proposal() {
 }
 
 #[tokio::test]
-async fn a_delegation_opens_its_child_with_the_message() {
-    let mut boss = config("claude");
-    boss.sub_agents = vec![SubAgent {
-        id: "helper".to_string(),
-        description: "Does the work.".to_string(),
-    }];
-    let h = start(BTreeMap::from([
-        (
-            "boss".to_string(),
-            AgentEntry {
-                config: Some(boss),
-                hosting: Hosting::Engine,
-            },
-        ),
-        ("helper".to_string(), engine_hosted("claude")),
-    ]))
-    .await;
+async fn a_subagent_call_opens_its_child_with_the_message() {
+    let h = start(team(delegating(None))).await;
 
     let events = turn(&h, "boss", "hi").await;
 
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, EventPayload::SubAgentStarted(_))),
+            .any(|e| matches!(e, EventPayload::SubagentStarted(_))),
         "the child session starts: {events:#?}"
     );
     assert!(
         events
             .iter()
             .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
-        "the delegation folds back and the turn completes: {events:#?}"
+        "the subagent folds back and the turn completes: {events:#?}"
     );
     assert!(
         h.model
@@ -785,6 +844,379 @@ async fn a_delegation_opens_its_child_with_the_message() {
                 == Some("do it"))),
         "the child is prompted with the delegating message"
     );
+}
+
+#[tokio::test]
+async fn a_deferred_subagent_is_delegated_through_call_tool() {
+    let boss = AgentConfig {
+        subagents: vec![helper(Some(true))],
+        ..delegating(None)
+    };
+    let h = start(team(boss)).await;
+    h.model.script.lock().unwrap().push(ToolCall {
+        id: "tc-1".to_string(),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: "call_tool".to_string(),
+            arguments: r#"{"name":"helper","arguments":{"message":"do it"}}"#.to_string(),
+        },
+    });
+
+    let events = turn(&h, "boss", "hi").await;
+
+    {
+        let seen = h.model.seen.lock().unwrap();
+        let offered: Vec<&str> = seen[0]
+            .tools
+            .as_ref()
+            .expect("tools offered")
+            .iter()
+            .filter(|t| !t.defer)
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(
+            offered,
+            ["tool_search", "call_tool"],
+            "the deferred subagent tool stays out of the request"
+        );
+        assert!(
+            seen.iter().any(|r| r.messages.iter().any(|m| m
+                .content
+                .as_ref()
+                .map(PromptContent::text_owned)
+                .as_deref()
+                == Some("do it"))),
+            "the child is prompted with the inner message"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentStarted(_))),
+        "the call_tool becomes a subagent call: {events:#?}"
+    );
+    let folded = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::NewMessage(n)
+                if n.message.tool_call_id.as_deref() == Some("tc-1")
+                    && n.message.role == Role::Tool =>
+            {
+                Some(&n.message)
+            }
+            _ => None,
+        })
+        .expect("the subagent folds back under the model's call id");
+    assert_eq!(
+        folded.name.as_deref(),
+        Some("helper"),
+        "the record reads as a direct subagent call's"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completes: {events:#?}"
+    );
+}
+
+fn spawns(events: &[EventPayload]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            EventPayload::SubagentRequested(r) => Some((r.id.clone(), r.session_id.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn subagent_answers(events: &[EventPayload]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            EventPayload::NewMessage(n) if n.message.role == Role::Tool => n
+                .message
+                .content
+                .as_ref()
+                .and_then(Content::text)
+                .map(str::to_string),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_subagent_call_continues_the_session_its_answer_named() {
+    let h = start(team(delegating(None))).await;
+    *h.model.follow_up.lock().unwrap() = Some("helper".to_string());
+
+    let events = turn(&h, "boss", "hi").await;
+
+    let spawned = spawns(&events);
+    assert_eq!(spawned.len(), 2, "two calls: {events:#?}");
+    assert_ne!(spawned[0].0, spawned[1].0, "each call is its own effect");
+    assert_eq!(
+        spawned[0].1, spawned[1].1,
+        "the second call reaches the session the first answer named"
+    );
+
+    let answers = subagent_answers(&events);
+    assert_eq!(answers.len(), 2, "both calls answer: {answers:#?}");
+    for answer in &answers {
+        let value: serde_json::Value = serde_json::from_str(answer)
+            .unwrap_or_else(|e| panic!("the answer is a JSON object: {answer} ({e})"));
+        assert_eq!(value["session"], spawned[0].1);
+        assert_eq!(value["result"], "hello from the engine");
+    }
+
+    let seen = h.model.seen.lock().unwrap();
+    let both = seen.iter().any(|r| {
+        let said: Vec<String> = r
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .filter_map(|m| m.content.as_ref().map(PromptContent::text_owned))
+            .collect();
+        said.iter().any(|t| t == "do it") && said.iter().any(|t| t == "again")
+    });
+    assert!(both, "the child's second turn sees the first exchange");
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completes: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_this_agent_never_delegated_to_is_a_tool_error() {
+    let h = start(team(delegating(None))).await;
+    h.model.script.lock().unwrap().push(ToolCall {
+        id: "tc-1".to_string(),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: "helper".to_string(),
+            arguments: r#"{"message":"do it","session":"not-my-child"}"#.to_string(),
+        },
+    });
+
+    let events = turn(&h, "boss", "hi").await;
+
+    let answers = subagent_answers(&events);
+    assert!(
+        answers
+            .iter()
+            .any(|a| a.contains("names no session this agent delegated to")),
+        "the resume is refused as the call's result: {answers:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completes: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_of_another_agent_is_a_tool_error() {
+    let mut boss = delegating(None);
+    boss.subagents.push(Subagent {
+        id: "other".to_string(),
+        description: "Does other work.".to_string(),
+        defer: None,
+        prefix: None,
+    });
+    let mut agents = team(boss);
+    agents.insert("other".to_string(), engine_hosted("claude"));
+    let h = start(agents).await;
+    *h.model.follow_up.lock().unwrap() = Some("other".to_string());
+
+    let events = turn(&h, "boss", "hi").await;
+
+    let answers = subagent_answers(&events);
+    assert!(
+        answers
+            .iter()
+            .any(|a| a.contains("is a session of `helper`, not of `other`")),
+        "a session answers only as its own agent: {answers:#?}"
+    );
+}
+
+fn single() -> Option<SubagentTools> {
+    Some(SubagentTools {
+        strategy: substructure_core::protocol::SubagentToolsStrategy::Single,
+    })
+}
+
+fn offered(h: &Harness) -> Vec<String> {
+    h.model.seen.lock().unwrap()[0]
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter(|t| !t.defer)
+                .map(|t| t.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn the_single_strategy_offers_one_subagent_tool_that_delegates() {
+    let h = start(team(delegating(single()))).await;
+    h.model.script.lock().unwrap().push(ToolCall {
+        id: "tc-1".to_string(),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: "subagent".to_string(),
+            arguments: r#"{"agent":"helper","message":"do it"}"#.to_string(),
+        },
+    });
+
+    let events = turn(&h, "boss", "hi").await;
+
+    assert_eq!(
+        offered(&h),
+        ["subagent"],
+        "one tool stands for every subagent"
+    );
+    assert_eq!(spawns(&events).len(), 1, "the call delegates: {events:#?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentStarted(_))),
+        "the child session starts: {events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completes: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn the_single_tool_continues_the_session_it_named() {
+    let h = start(team(delegating(single()))).await;
+    *h.model.follow_up.lock().unwrap() = Some("subagent".to_string());
+    h.model.script.lock().unwrap().push(ToolCall {
+        id: "tc-1".to_string(),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: "subagent".to_string(),
+            arguments: r#"{"agent":"helper","message":"do it"}"#.to_string(),
+        },
+    });
+
+    let events = turn(&h, "boss", "hi").await;
+
+    let spawned = spawns(&events);
+    assert_eq!(spawned.len(), 2, "two calls: {events:#?}");
+    assert_eq!(
+        spawned[0].1, spawned[1].1,
+        "the second call reaches the same child"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_agent_answers_with_the_tools_schema() {
+    let h = start(team(delegating(single()))).await;
+    h.model.script.lock().unwrap().push(ToolCall {
+        id: "tc-1".to_string(),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: "subagent".to_string(),
+            arguments: r#"{"agent":"nobody","message":"do it"}"#.to_string(),
+        },
+    });
+
+    let events = turn(&h, "boss", "hi").await;
+
+    assert!(spawns(&events).is_empty(), "nothing delegates: {events:#?}");
+    let answers = subagent_answers(&events);
+    assert!(
+        answers.iter().any(|a| a.contains("helper")),
+        "the fault lists the agents it offers: {answers:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completes: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_deferred_single_tool_is_delegated_through_call_tool() {
+    let mut boss = delegating(single());
+    boss.defer_tools = Some(Default::default());
+    let h = start(team(boss)).await;
+    h.model.script.lock().unwrap().push(ToolCall {
+        id: "tc-1".to_string(),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: "call_tool".to_string(),
+            arguments: r#"{"name":"subagent","arguments":{"agent":"helper","message":"do it"}}"#
+                .to_string(),
+        },
+    });
+
+    let events = turn(&h, "boss", "hi").await;
+
+    assert_eq!(
+        offered(&h),
+        ["tool_search", "call_tool"],
+        "the deferred subagent tool stays out of the request"
+    );
+    assert_eq!(
+        spawns(&events).len(),
+        1,
+        "the call_tool becomes a subagent call: {events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the turn completes: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_depth_limit_of_zero_keeps_the_subagent_tool_off_the_list() {
+    for tools in [None, single()] {
+        let boss = AgentConfig {
+            max_subagent_depth: Some(0),
+            ..delegating(tools)
+        };
+        let h = start(team(boss)).await;
+
+        let events = turn(&h, "boss", "hi").await;
+
+        assert!(
+            h.model
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| r.tools.is_none()),
+            "the model is never offered the subagent tool"
+        );
+        assert!(spawns(&events).is_empty(), "no child spawns: {events:#?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, EventPayload::SubagentStarted(_))),
+            "no child starts: {events:#?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+            "the turn completes without delegating: {events:#?}"
+        );
+    }
 }
 
 fn client_message(agent_id: &str, text: &str) -> ClientInput {

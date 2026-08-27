@@ -228,7 +228,7 @@ export interface DecisionRequest {
     message_tree: MessageTree;
     messages: Message[];
     /**
-     * Count of in-flight `tool_call`/`sub_agent` calls.
+     * Count of in-flight `tool_call`/`subagent` calls.
      */
     pending_calls: number;
     /**
@@ -284,10 +284,10 @@ export interface AgentConfig {
      */
     retry?: RetryConfig | null;
     /**
-     * Sub-agents the model can delegate to. The model sees them as tools.
+     * Subagents the model can delegate to. The model sees them as tools.
      * Each call starts a child session.
      */
-    sub_agents?: SubAgent[];
+    subagents?: Subagent[];
     system?: null | string;
     /**
      * Worker- or client-executed tools the model can call.
@@ -446,7 +446,7 @@ export interface RetryConfig {
     connector?: RetryOverride | null;
     default?: RetryOverride | null;
     llm?: RetryOverride | null;
-    sub_agent?: RetryOverride | null;
+    subagent?: RetryOverride | null;
     tool?: RetryOverride | null;
 }
 
@@ -464,10 +464,10 @@ export interface RetryOverride {
 }
 
 /**
- * A sub-agent the model can delegate to. `id` is both the child agent and the
+ * A subagent the model can delegate to. `id` is both the child agent and the
  * tool name the model calls. Its input is one `message`.
  */
-export interface SubAgent {
+export interface Subagent {
     description?: string;
     id: string;
 }
@@ -511,7 +511,7 @@ export interface Effect {
  * The turn's completion, which waits for the `turn.finished` decision to
  * settle. Carries the turn id. Never swept, because it has no deadline.
  */
-export type EffectKind = "tool_call" | "sub_agent" | "llm_call" | "connector_sync" | "decision" | "turn_end";
+export type EffectKind = "tool_call" | "subagent" | "llm_call" | "connector_sync" | "decision" | "turn_end";
 
 /**
  * Running, waiting for its result. Off the deadline clock. A delegation
@@ -647,7 +647,7 @@ export interface DecisionAction {
      * Layered over the agent config's policy for this kind, or over the
      * engine's default for where the tool runs.
      *
-     * Layered over the agent config's `sub_agent` policy, or over the
+     * Layered over the agent config's `subagent` policy, or over the
      * engine's default.
      */
     retry?: RetryOverride | null;
@@ -759,7 +759,7 @@ export type DecisionActionType =
     | "llm.result"
     | "tool.error"
     | "llm.error"
-    | "sub_agent.spawn"
+    | "subagent.spawn"
     | "message.send"
     | "interrupt"
     | "interrupt.resolve"
@@ -900,7 +900,7 @@ export type DecisionTriggerType =
     | "tool.finished"
     | "llm.execute"
     | "llm.finished"
-    | "sub_agent.finished"
+    | "subagent.finished"
     | "interrupt.resumed"
     | "turn.finished";
 
@@ -1031,7 +1031,7 @@ export interface TokenDelta {
      */
     seq: number;
     /**
-     * May be a sub-agent of root.
+     * May be a subagent of root.
      */
     session_id: string;
     /**

@@ -4,7 +4,7 @@ group: Running it
 ---
 
 Every effect the engine runs has a retry policy. An effect is a model call, a
-tool call, a sub-agent start, a connector fetch, or a worker decision.
+tool call, a subagent start, a connector fetch, or a worker decision.
 
 When an effect fails and can be retried, the engine waits, then sends it again.
 It stops when the attempts run out or when a failure cannot be retried.
@@ -17,7 +17,7 @@ It stops when the attempts run out or when a failure cannot be retried.
 | Tool call (worker) | none | 120s | 600s | **1** |
 | Tool call (client) | none | none | none | 1 |
 | Tool call (connector) | 60s | 60s | 600s | 2 |
-| Sub-agent start | 30s | 10s | 3600s | 3 |
+| Subagent start | 30s | 10s | 3600s | 3 |
 | Connector fetch | 10s | 5s | 30s | 2 |
 | Worker decision | none | 20s | 300s | 10 |
 
@@ -27,7 +27,7 @@ know whether your tool is safe to run twice. You decide when to retry.
 A client tool has no limit, because a call can wait for a person. See
 [Async tools](./110-async-tools.md).
 
-The engine does retry a sub-agent start. A second attempt cannot create a second
+The engine does retry a subagent start. A second attempt cannot create a second
 child.
 
 ## The three timeouts
@@ -62,7 +62,7 @@ attempt.
 `total_timeout_secs` limits the whole effect, from the first attempt. It covers
 every attempt and every wait between them. A retry does not restart this clock.
 
-Some work outlives its attempt. A sub-agent start finishes as soon as the child
+Some work outlives its attempt. A subagent start finishes as soon as the child
 session exists, and the child can then run for much longer. Only the total
 timeout ends a parent whose child stopped answering.
 
@@ -79,7 +79,7 @@ tool = { max_attempts = 3 }
 That worker tool now has three attempts. It keeps the 120s attempt timeout and
 the 600s total. An override names only the fields it changes.
 
-The keys are `default`, `llm`, `tool`, `sub_agent`, and `connector`. They stack.
+The keys are `default`, `llm`, `tool`, `subagent`, and `connector`. They stack.
 `default` sets the base, and each kind changes it.
 
 ```toml

@@ -14,12 +14,6 @@ pub struct SessionSubscriptions {
     store: Arc<dyn EventStore>,
 }
 
-/// Selects one session's events. Streams are strictly single-session — a
-/// sub-agent runs as its own session with its own stream, and the parent's
-/// log carries only the `sub_agent.*` boundary events. A client that wants
-/// child detail opens a second stream with the child's session id (carried
-/// by `sub_agent.requested`). This keeps `seq` unique and monotonic per
-/// stream, so it doubles as the SSE frame id and resume cursor.
 #[derive(Debug, Clone)]
 pub struct SessionSubscriptionSpec {
     pub session_id: String,

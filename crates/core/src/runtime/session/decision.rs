@@ -156,8 +156,8 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<ErrorInfo>,
     },
-    #[serde(rename = "sub_agent.finished")]
-    SubAgentFinished {
+    #[serde(rename = "subagent.finished")]
+    SubagentFinished {
         id: String,
         ok: bool,
         session_id: String,
@@ -326,9 +326,10 @@ pub enum Action {
         error: ErrorInfo,
         retryable: bool,
     },
-    #[serde(rename = "sub_agent.spawn")]
-    SpawnSubAgent {
-        session_id: String,
+    #[serde(rename = "subagent.spawn")]
+    SpawnSubagent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         agent_id: String,
         tool_call_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

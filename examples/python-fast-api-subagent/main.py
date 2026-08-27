@@ -1,4 +1,4 @@
-# A chat agent that delegates to a weather sub-agent, served with FastAPI.
+# A chat agent that delegates to a weather subagent, served with FastAPI.
 from fastapi import FastAPI, Request
 
 
@@ -8,7 +8,7 @@ def assistant(req):
             "agent": {
                 **req["proposed"]["agent"],
                 "system": "Delegate weather questions to the weather agent.",
-                "sub_agents": [
+                "subagents": [
                     {
                         "id": "weather",
                         "description": "Answers weather questions for a city.",

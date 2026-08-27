@@ -64,8 +64,9 @@ A search gives each tool one name. `call_tool` takes that name back, exactly as
 the search gave it. It is the same name that the model calls directly when the
 tool is not deferred.
 
-A search covers every tool of the agent: from your worker or from a connection,
-deferred or not. So an empty answer means the agent has no tools.
+A search covers every tool of the agent: from your worker, from a connection,
+or a subagent, deferred or not. So an empty answer means the agent has no
+tools.
 
 ## Set defer from any source
 
@@ -75,11 +76,13 @@ Deferral is a property of a tool. Each source sets the flag its own way.
 | --- | --- |
 | A tool your worker declares | `defer: true` on the definition |
 | One connection | `tools = { defer = true }` on the entry |
+| One subagent | `defer = true` on the entry |
 | Every tool of an agent | `defer_tools = true` |
 
-`defer_tools` is the agent's default. A tool or a connection that states its own
-`defer` overrides it. See
-[Connectors](./40-connectors.md#defer-a-connection).
+`defer_tools` is the agent's default. A tool, a connection, or a subagent that
+states its own `defer` overrides it. See
+[Connectors](./40-connectors.md#defer-a-connection) and
+[Subagents](./80-subagents.md#how-the-tool-is-offered).
 
 An agent can mix the two. A tool that does not defer stays in the request,
 beside `tool_search` and `call_tool`.
@@ -148,5 +151,5 @@ cache.
 
 - [Tool calls](./60-tools.md): the rules a deferred tool still follows.
 - [Connectors](./40-connectors.md): a connection that defers its tools.
-- [Sub-agents](./80-sub-agents.md): a third answer to a large tool set.
+- [Subagents](./80-subagents.md): a third answer to a large tool set.
 - [Async tools](./110-async-tools.md): answer a call later. A separate idea.

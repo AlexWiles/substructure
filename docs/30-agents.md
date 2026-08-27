@@ -30,7 +30,7 @@ submits to it. A parent agent calls it.
 | `description` | What this agent does, for a parent that calls it. |
 | `mcp` | Connections whose tools the model can call. See [Connectors](./40-connectors.md). |
 | `plugins` | Plugins whose skills and servers this agent gets. See [Plugins](./45-plugins.md). |
-| `sub_agents` | Other agents this one can call. See [Sub-agents](./80-sub-agents.md). |
+| `subagents` | Other agents this one can call. See [Subagents](./80-subagents.md). |
 | `tools` | Tools the browser runs. See [Client-side tools](./150-client-tools.md). |
 | `worker` | Where decisions go. See [Workers](./50-workers.md). |
 | `retry` | Timeouts and attempts. See [Retries](./210-retries.md). |
@@ -54,7 +54,7 @@ type = "openai"
 llm = "claude"
 model = "claude-sonnet-4-5"
 system = "Delegate research to the researcher, then answer."
-sub_agents = ["researcher"]
+subagents = ["agent.researcher"]
 
 [agent.researcher]
 description = "Finds and reads sources."
@@ -122,5 +122,5 @@ code.
 - [Connectors](./40-connectors.md): tools from Sentry, GitHub, and any MCP server.
 - [Plugins](./45-plugins.md): skills and servers from a plugin directory.
 - [Workers](./50-workers.md): decide with your own code.
-- [Sub-agents](./80-sub-agents.md): agents that call agents.
+- [Subagents](./80-subagents.md): agents that call agents.
 - [Config](./220-config.md): every key in the file.

@@ -111,11 +111,11 @@ type DecisionRequest = {
 | `proposed` | What the engine plans to do. Return it unchanged to accept it. Empty when only your worker knows what to do. |
 | `state` | Your agent state, stored exactly as you wrote it. `null` when the session has none. |
 | `agent` | The config resolved for the active path. `null` when nothing has set one. |
-| `calls` | Tool, model, sub-agent, and connector calls in flight. |
-| `pending_calls` | How many tool and sub-agent calls are in flight. |
+| `calls` | Tool, model, subagent, and connector calls in flight. |
+| `pending_calls` | How many tool and subagent calls are in flight. |
 | `messages` | The active conversation, root to head. This is what the model sees. |
 | `message_tree` | Every branch. See [Conversations](./120-conversations.md). |
-| `ancestry` | Parent session IDs, for a sub-agent. Empty for a root session. |
+| `ancestry` | Parent session IDs, for a subagent. Empty for a root session. |
 | `attempts` | How many times the engine has delivered this decision. |
 | `deadline` | When this attempt expires. |
 | `turn_id` | The turn this decision belongs to. |
@@ -133,8 +133,8 @@ type WorkerIdentity = {
 }
 
 type Call = {
-    id: string                  // sub-agents: the child session. connectors: the connection
-    kind: "tool_call" | "llm_call" | "sub_agent" | "connector_sync"
+    id: string                  // subagents: the call this child answers. connectors: the connection
+    kind: "tool_call" | "llm_call" | "subagent" | "connector_sync"
     status: "pending" | "completed" | "failed" | "retry_scheduled" | "queued"
     attempt: number
     deadline?: string
@@ -144,7 +144,7 @@ type Call = {
     handler?: "server" | "worker" | "client"
     stream?: boolean
     agent_id?: string
-    tool_call_id?: string       // sub-agents: the call this child answers
+    session_id?: string         // subagents: the child session the turn runs in
 }
 ```
 
@@ -186,7 +186,7 @@ What fires, what the engine proposes, and what you return.
 | `tool.finished` | A tool call ended, after retries. | Record the result, then call the model. Waits when other calls are in flight. | `proposed` |
 | `llm.execute` | The agent's LLM block is `type = "worker"`. | Empty. | `llm.result` or `llm.error`, or a stream. |
 | `llm.finished` | A model call ended. | Record the reply, then start its tool calls or end the turn. | `proposed` |
-| `sub_agent.finished` | A child session's turn ended. | Record the child's result as the tool result, then call the model. | `proposed` |
+| `subagent.finished` | A child session's turn ended. | Record the child's result as the tool result, then call the model. | `proposed` |
 | `interrupt.resumed` | Someone resumed a paused branch. | Call the model again over the transcript. | `proposed` |
 | `turn.finished` | A turn completed. Carries its cost and output. | `done`. | `proposed` |
 
@@ -237,7 +237,7 @@ type Trigger =
           error?: ErrorInfo
       }
     | {
-          type: "sub_agent.finished"
+          type: "subagent.finished"
           id: string                // the tool call
           ok: boolean
           session_id: string        // the child
@@ -277,7 +277,7 @@ type ClientContext = {
 | `tool.error` | End a tool call with a failure. | `tool.execute` |
 | `llm.result` | End a model call your worker made. | `llm.execute` |
 | `llm.error` | End a model call with a failure. | `llm.execute` |
-| `sub_agent.spawn` | Start a child session. | Any trigger. |
+| `subagent.spawn` | Start a child session. | Any trigger. |
 | `message.send` | Write a message into a session. | Any trigger. |
 | `interrupt` | Pause the active branch. | Any trigger. |
 | `interrupt.resolve` | Clear an open interrupt and resume. | Any trigger. |
@@ -340,8 +340,8 @@ type Action =
           detail?: unknown
       }
     | {
-          type: "sub_agent.spawn"
-          session_id: string
+          type: "subagent.spawn"
+          session_id?: string     // omitted: start a child. named: continue that one
           agent_id: string
           tool_call_id: string    // the model's tool call this child answers
           message?: DraftMessage  // the child's first message
@@ -402,7 +402,10 @@ type AgentConfig = {
     effort?: "xhigh" | "high" | "medium" | "low" | "minimal" | "none"
     retry?: RetryConfig
     tools?: AgentTool[]
-    sub_agents?: SubAgent[]
+    subagents?: Subagent[]
+    subagent_tools?: {              // what shape the subagents take as tools.
+        strategy?: "per_agent" | "single"  //   omitted: "per_agent"
+    }
     mcp?: McpServer[]
     plugins?: AgentPlugin[]
     defer_tools?: boolean | {   // the default for every tool of this agent.
@@ -422,9 +425,11 @@ type AgentTool = {
                                 // omitted: the agent's defer_tools
 }
 
-type SubAgent = {
+type Subagent = {
     id: string                  // the agent to start, and the tool name the model sees
     description?: string
+    defer?: boolean             // keep the tool out of the request. omitted: the agent's defer_tools
+    prefix?: boolean            // offer the tool as "agent__<id>". omitted: the bare id
 }
 
 type McpServer = {
@@ -493,7 +498,7 @@ type RetryConfig = {            // one override per kind. they stack
     default?: RetryOverride
     llm?: RetryOverride
     tool?: RetryOverride
-    sub_agent?: RetryOverride
+    subagent?: RetryOverride
     connector?: RetryOverride
 }
 ```

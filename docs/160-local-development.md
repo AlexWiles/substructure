@@ -7,7 +7,7 @@ Run the engine on your machine and iterate on an agent before it goes live. The
 [local quick start](./15-quick-start-local.md) is the five-minute version of the
 first two sections.
 
-Everything works locally: Slack, MCP connections, workers, and sub-agents. The
+Everything works locally: Slack, MCP connections, workers, and subagents. The
 engine keeps its state in a SQLite file.
 
 ## Write the config file

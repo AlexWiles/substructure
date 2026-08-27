@@ -34,6 +34,15 @@
               "null"
             ]
           },
+          "max_subagent_depth": {
+            "description": "How deep this agent's subagents may nest. A session whose depth\nreaches it may not delegate. `0` never delegates.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "mcp": {
             "description": "MCP servers this agent draws tools from.",
             "items": {
@@ -66,10 +75,21 @@
             ],
             "description": "Boxed. Five per-kind overrides are too many bytes to carry inline."
           },
-          "sub_agents": {
-            "description": "Sub-agents the model can delegate to. The model sees them as tools.\nEach call starts a child session.",
+          "subagent_tools": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SubagentTools"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What shape the subagents take as tools. Absent ⇒ one tool per agent."
+          },
+          "subagents": {
+            "description": "Subagents the model can delegate to. The model sees them as tools.\nEach call starts a child session.",
             "items": {
-              "$ref": "#/components/schemas/SubAgent"
+              "$ref": "#/components/schemas/Subagent"
             },
             "type": "array"
           },
@@ -561,23 +581,25 @@
                     "type": "null"
                   }
                 ],
-                "description": "Layered over the agent config's `sub_agent` policy, or over the\nengine's default."
+                "description": "Layered over the agent config's `subagent` policy, or over the\nengine's default."
               },
               "session_id": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "tool_call_id": {
-                "description": "The model tool call this delegation answers. Required.",
+                "description": "The model tool call this subagent answers. Required.",
                 "type": "string"
               },
               "type": {
-                "const": "sub_agent.spawn",
+                "const": "subagent.spawn",
                 "type": "string"
               }
             },
             "required": [
               "type",
-              "session_id",
               "agent_id",
               "tool_call_id"
             ],
@@ -740,7 +762,7 @@
             "type": "array"
           },
           "pending_calls": {
-            "description": "Count of in-flight `tool_call`/`sub_agent` calls.",
+            "description": "Count of in-flight `tool_call`/`subagent` calls.",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
@@ -1132,7 +1154,7 @@
                 "type": "string"
               },
               "type": {
-                "const": "sub_agent.finished",
+                "const": "subagent.finished",
                 "type": "string"
               }
             },
@@ -1357,19 +1379,19 @@
               "null"
             ]
           },
+          "session_id": {
+            "description": "The child session a subagent runs in. Its `id` is the model tool call\nthe subagent answers.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "$ref": "#/components/schemas/EffectStatus"
           },
           "stream": {
             "type": [
               "boolean",
-              "null"
-            ]
-          },
-          "tool_call_id": {
-            "description": "The model tool call a delegation answers. Its `id` is the child\nsession.",
-            "type": [
-              "string",
               "null"
             ]
           }
@@ -1389,7 +1411,7 @@
           {
             "enum": [
               "tool_call",
-              "sub_agent",
+              "subagent",
               "llm_call"
             ],
             "type": "string"
@@ -1426,7 +1448,7 @@
           },
           {
             "const": "running",
-            "description": "Running, waiting for its result. Off the deadline clock. A delegation\nstays here for as long as its child turn takes.",
+            "description": "Running, waiting for its result. Off the deadline clock. A subagent\nstays here for as long as its child turn takes.",
             "type": "string"
           }
         ],
@@ -1915,7 +1937,7 @@
               }
             ]
           },
-          "sub_agent": {
+          "subagent": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/RetryOverride"
@@ -2107,22 +2129,65 @@
         "title": "StoredResult",
         "type": "object"
       },
-      "SubAgent": {
+      "Subagent": {
         "additionalProperties": false,
-        "description": "A sub-agent the model can delegate to. `id` is both the child agent and the\ntool name the model calls. Its input is one `message`.",
+        "description": "A subagent the model can delegate to. `id` names the child agent; the model\ncalls the tool [`Subagent::offered_name`] gives. Its input is one `message`.",
         "properties": {
+          "defer": {
+            "description": "Keep this tool out of the request. See [`LlmTool::defer`]. Absent ⇒\nthe agent's `defer_tools`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "description": {
             "type": "string"
           },
           "id": {
             "type": "string"
+          },
+          "prefix": {
+            "description": "Offer the tool as `agent__<id>` instead of `<id>`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
           "id"
         ],
-        "title": "SubAgent",
+        "title": "Subagent",
         "type": "object"
+      },
+      "SubagentTools": {
+        "additionalProperties": {
+          "not": {}
+        },
+        "description": "What shape an agent's subagents take as tools.",
+        "properties": {
+          "strategy": {
+            "$ref": "#/components/schemas/SubagentToolsStrategy"
+          }
+        },
+        "title": "SubagentTools",
+        "type": "object"
+      },
+      "SubagentToolsStrategy": {
+        "description": "How the model reaches an agent's subagents.",
+        "oneOf": [
+          {
+            "const": "per_agent",
+            "description": "One tool per subagent, named by the agent.",
+            "type": "string"
+          },
+          {
+            "const": "single",
+            "description": "One `subagent` tool for all of them. The call names the agent.",
+            "type": "string"
+          }
+        ],
+        "title": "SubagentToolsStrategy"
       },
       "Subject": {
         "additionalProperties": false,

@@ -1,4 +1,4 @@
-// A chat agent that delegates to a weather sub-agent, served with Hono.
+// A chat agent that delegates to a weather subagent, served with Hono.
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 
@@ -9,7 +9,7 @@ function assistant({ trigger, proposed }) {
                 agent: {
                     ...proposed.agent,
                     system: "Delegate weather questions to the weather agent.",
-                    sub_agents: [{ id: "weather", description: "Answers weather questions for a city." }]
+                    subagents: [{ id: "weather", description: "Answers weather questions for a city." }]
                 }
             };
 

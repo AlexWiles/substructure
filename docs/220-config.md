@@ -25,7 +25,7 @@ llm = "claude"
 model = "claude-sonnet-4-5"
 system = "You are a support agent."
 mcp = ["mcp.sentry"]
-sub_agents = ["researcher"]
+subagents = ["agent.researcher"]
 
 [agent.researcher]
 description = "Finds and reads sources."
@@ -68,6 +68,7 @@ deploys a separate project.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `name` | string | none | The project's name. `subs apply` creates the project from it and renames it when it changes. |
+| `max_subagent_depth` | integer | `5` | How deep subagents may nest, for every agent. An agent's own value wins. See [Subagents](./80-subagents.md#how-deep-subagents-nest). |
 | `db` | path | `~/.config/subs/subs.db` | The SQLite file holding events, sessions, and connector credentials. A relative path resolves against the file. |
 | `log` | string | `error` for `run`, `info` for `serve` | A `RUST_LOG` filter. `$RUST_LOG` wins over it. |
 
@@ -117,7 +118,7 @@ llm = "claude"
 model = "claude-sonnet-4-5"
 system = "You are a support agent."
 mcp = ["mcp.sentry"]
-sub_agents = ["researcher"]
+subagents = ["agent.researcher"]
 tools = [{ name = "confirm", description = "Ask a person", handler = "client" }]
 worker = "https://bot.example.com/agent"
 signing_secret_env = "SUPPORT_SIGNING_SECRET"
@@ -139,7 +140,9 @@ tool = { max_attempts = 3 }
 | `mcp_announce` | `auto`, `never` | `auto` | Whether the engine tells the model that a connection is available. See [Tell the model a connection exists](./40-connectors.md#tell-the-model-a-connection-exists). |
 | `mcp_auth_failure` | `interrupt`, `degrade` | `interrupt` | The default for every connection this agent reaches, including each plugin's. A connection overrides it with its own `auth_failure`. |
 | `mcp_tool_sync_failure` | `warn`, `silent` | `warn` | The default for every connection this agent reaches, including each plugin's. A connection overrides it with its own `tool_sync_failure`. |
-| `sub_agents` | list of IDs | none | Agents this one can call. |
+| `subagents` | list | none | Agents this one can call. Each entry is an `agent.<id>` path, or a table with `id`, `defer`, and `prefix`. See [Subagents](./80-subagents.md#how-the-tool-is-offered). |
+| `subagent_tools` | table | `{ strategy = "per_agent" }` | What shape the subagents take as tools. `per_agent` offers one tool per agent; `single` offers one `subagent` tool for all of them. See [Subagents](./80-subagents.md#one-tool-for-every-subagent). |
+| `max_subagent_depth` | integer | `5` | How deep this agent's subagents may nest. A session that deep may not delegate; `0` never delegates. See [Subagents](./80-subagents.md#how-deep-subagents-nest). |
 | `tools` | list | none | Browser tools. Each needs `handler = "client"`. |
 | `worker` | url | none | Where decisions go. Leave it off and the engine decides. |
 | `signing_secret_env` | string | none | The variable holding the signing secret. For an engine you run. |

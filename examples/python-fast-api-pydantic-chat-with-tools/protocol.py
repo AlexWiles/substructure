@@ -180,7 +180,7 @@ class DeferToolsStrategy(Enum):
 
 class EffectKind1(Enum):
     tool_call = 'tool_call'
-    sub_agent = 'sub_agent'
+    subagent = 'subagent'
     llm_call = 'llm_call'
 
 
@@ -507,7 +507,7 @@ class StoredResult(BaseModel):
     structuredContent: Any | None = None
 
 
-class SubAgent(BaseModel):
+class Subagent(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
@@ -881,7 +881,7 @@ class DecisionTrigger8(BaseModel):
     ok: bool
     result: str | None = None
     session_id: str
-    type: Literal['sub_agent.finished']
+    type: Literal['subagent.finished']
 
 
 class DecisionTrigger10(BaseModel):
@@ -991,7 +991,7 @@ class RetryConfig(BaseModel):
     connector: RetryOverride | None = None
     default: RetryOverride | None = None
     llm: RetryOverride | None = None
-    sub_agent: RetryOverride | None = None
+    subagent: RetryOverride | None = None
     tool: RetryOverride | None = None
 
 
@@ -1018,7 +1018,7 @@ class TokenDelta(BaseModel):
     seq: conint(ge=0) = Field(
         ..., description='Per-call counter, distinct from event-store sequence.'
     )
-    session_id: str = Field(..., description='May be a sub-agent of root.')
+    session_id: str = Field(..., description='May be a subagent of root.')
     tenant_id: str = Field(
         ..., description='Tenant isolation key — subscribers must match.'
     )
@@ -1066,9 +1066,9 @@ class AgentConfig(BaseModel):
         None,
         description='Boxed. Five per-kind overrides are too many bytes to carry inline.',
     )
-    sub_agents: list[SubAgent] | None = Field(
+    subagents: list[Subagent] | None = Field(
         None,
-        description='Sub-agents the model can delegate to. The model sees them as tools.\nEach call starts a child session.',
+        description='Subagents the model can delegate to. The model sees them as tools.\nEach call starts a child session.',
     )
     system: str | None = None
     tools: list[AgentTool] | None = Field(
@@ -1291,13 +1291,13 @@ class DecisionAction7(BaseModel):
     )
     retry: RetryOverride | None = Field(
         None,
-        description="Layered over the agent config's `sub_agent` policy, or over the\nengine's default.",
+        description="Layered over the agent config's `subagent` policy, or over the\nengine's default.",
     )
     session_id: str
     tool_call_id: str = Field(
         ..., description='The model tool call this delegation answers. Required.'
     )
-    type: Literal['sub_agent.spawn']
+    type: Literal['subagent.spawn']
 
 
 class DecisionAction8(BaseModel):
@@ -1445,7 +1445,7 @@ class DecisionRequest(BaseModel):
     message_tree: MessageTree
     messages: list[Message]
     pending_calls: conint(ge=0) = Field(
-        ..., description='Count of in-flight `tool_call`/`sub_agent` calls.'
+        ..., description='Count of in-flight `tool_call`/`subagent` calls.'
     )
     proposed: DecisionResponse = Field(
         ...,

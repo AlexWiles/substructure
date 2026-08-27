@@ -1,6 +1,6 @@
 # python-fast-api-subagent
 
-A chattable agent that delegates weather questions to a sub-agent, served with
+A chattable agent that delegates weather questions to a subagent, served with
 [FastAPI](https://fastapi.tiangolo.com).
 
 ## Run

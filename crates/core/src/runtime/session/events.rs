@@ -46,14 +46,14 @@ pub enum EventPayload {
     ConnectorSyncErrored(ConnectorSyncErrored),
     #[serde(rename = "connector.auth.failed")]
     ConnectorAuthFailed(ConnectorAuthFailed),
-    #[serde(rename = "sub_agent.requested")]
-    SubAgentRequested(SubAgentRequested),
-    #[serde(rename = "sub_agent.dispatched")]
-    SubAgentDispatched(SubAgentDispatched),
-    #[serde(rename = "sub_agent.started")]
-    SubAgentStarted(SubAgentStarted),
-    #[serde(rename = "sub_agent.errored")]
-    SubAgentErrored(SubAgentErrored),
+    #[serde(rename = "subagent.requested")]
+    SubagentRequested(SubagentRequested),
+    #[serde(rename = "subagent.dispatched")]
+    SubagentDispatched(SubagentDispatched),
+    #[serde(rename = "subagent.started")]
+    SubagentStarted(SubagentStarted),
+    #[serde(rename = "subagent.errored")]
+    SubagentErrored(SubagentErrored),
     #[serde(rename = "session.interrupted")]
     SessionInterrupted(SessionInterrupted),
     #[serde(rename = "session.interrupt_resumed")]
@@ -70,8 +70,8 @@ pub enum EventPayload {
     WorkerStateUpdated(WorkerStateUpdated),
     #[serde(rename = "agent.updated")]
     AgentConfigUpdated(AgentConfigUpdated),
-    #[serde(rename = "sub_agent.turn_completed")]
-    SubAgentTurnCompleted(SubAgentTurnCompleted),
+    #[serde(rename = "subagent.turn_completed")]
+    SubagentTurnCompleted(SubagentTurnCompleted),
     #[serde(rename = "decision.queued")]
     DecisionQueued(DecisionQueued),
     #[serde(rename = "decision.dropped")]
@@ -157,7 +157,7 @@ pub struct ToolCallDispatched {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubAgentDispatched {
+pub struct SubagentDispatched {
     pub id: String,
 }
 
@@ -217,23 +217,23 @@ pub struct ConnectorAuthFailed {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubAgentRequested {
+pub struct SubagentRequested {
     pub id: String,
     pub agent_id: String,
     #[serde(default)]
-    pub tool_call_id: String,
+    pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<DraftMessage>,
     pub retry: RetryPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubAgentStarted {
+pub struct SubagentStarted {
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubAgentErrored {
+pub struct SubagentErrored {
     pub id: String,
     pub error: ErrorInfo,
     #[serde(default)]
@@ -404,7 +404,7 @@ pub struct CallVoided {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubAgentTurnCompleted {
+pub struct SubagentTurnCompleted {
     pub id: String,
     #[serde(default)]
     pub cost: Decimal,

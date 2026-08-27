@@ -53,7 +53,7 @@ An interrupt raised before any message exists pauses every branch. System
 pauses, such as a budget stop, work this way.
 
 The engine cancels the model calls in flight on the paused branch. Calls on
-other branches keep running, and so do tools and sub-agents that already
+other branches keep running, and so do tools and subagents that already
 started.
 
 ## Resume a branch

@@ -1,4 +1,4 @@
-# no-code-sub-agents
+# no-code-subagents
 
 A team of agents in one file. There is no worker and no code.
 
@@ -8,7 +8,7 @@ parent gets the answer and not the work.
 
 ```toml
 [agent.assistant]
-sub_agents = ["writer", "critic"]
+subagents = ["agent.writer", "agent.critic"]
 
 [agent.writer]
 description = "Drafts short copy from a brief"

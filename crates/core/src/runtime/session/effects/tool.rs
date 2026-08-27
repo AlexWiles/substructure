@@ -172,7 +172,9 @@ pub(in crate::runtime::session) fn request(
     caller: &Caller,
 ) -> Result<Vec<EventPayload>, SessionError> {
     SessionState::ensure_internal(caller)?;
-    let engine_tool = state.connector_tool_for(&name);
+    let engine_tool = state
+        .connector_tool_for(&name)
+        .filter(|t| t.kind != ConnectorToolKind::Subagent);
     let (name, arguments, handler, target) = match engine_tool {
         Some(tool) if tool.kind == ConnectorToolKind::Call => unwrap_call(state, name, arguments),
         Some(tool) if tool.kind == ConnectorToolKind::Skill => {
@@ -252,6 +254,12 @@ fn unwrap_call(
             ),
         },
         CallTarget::Declared(tool) => (tool.name, inner, ToolHandler::declared(tool.handler), None),
+        CallTarget::Subagent(_) => (
+            name,
+            arguments,
+            ToolHandler::Server,
+            Some(ConnectorTarget::Call),
+        ),
     }
 }
 

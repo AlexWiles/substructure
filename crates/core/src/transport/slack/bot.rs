@@ -1887,9 +1887,9 @@ impl SlackBot {
             EventPayload::ToolCallRequested(_)
             | EventPayload::ToolCallCompleted(_)
             | EventPayload::ToolCallErrored(_)
-            | EventPayload::SubAgentRequested(_)
-            | EventPayload::SubAgentTurnCompleted(_)
-            | EventPayload::SubAgentErrored(_) => {}
+            | EventPayload::SubagentRequested(_)
+            | EventPayload::SubagentTurnCompleted(_)
+            | EventPayload::SubagentErrored(_) => {}
             // A cancel ends every turn of the session.
             EventPayload::SessionCancelled => {
                 let open = self
@@ -3117,7 +3117,7 @@ mod tests {
             ancestry: Vec::new(),
             turn_id: Some("turn-1".into()),
             cost: Default::default(),
-            sub_agent_cost: Default::default(),
+            subagent_cost: Default::default(),
             head_id: None,
             calls: Vec::new(),
             decisions: Vec::new(),
@@ -3539,7 +3539,7 @@ mod tests {
             ancestry: Vec::new(),
             turn_id: turn_id.map(str::to_string),
             cost: Default::default(),
-            sub_agent_cost: Default::default(),
+            subagent_cost: Default::default(),
             head_id: None,
             calls: Vec::new(),
             decisions: Vec::new(),
@@ -3597,7 +3597,7 @@ mod tests {
             ancestry: Vec::new(),
             turn_id: None,
             cost: Default::default(),
-            sub_agent_cost: Default::default(),
+            subagent_cost: Default::default(),
             head_id: None,
             calls: Vec::new(),
             decisions: Vec::new(),

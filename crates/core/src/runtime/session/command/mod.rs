@@ -61,20 +61,22 @@ pub enum CommandPayload {
         arguments: String,
         retry: Option<RetryOverride>,
     },
-    RequestSubAgent {
-        session_id: String,
+    RequestSubagent {
+        session_id: Option<String>,
         agent_id: String,
         tool_call_id: String,
         message: Option<DraftMessage>,
         retry: RetryPolicy,
+        decision_id: String,
     },
-    CompleteSubAgentTurn {
+    CompleteSubagentTurn {
         session_id: String,
         agent_id: String,
         turn_id: String,
         data: serde_json::Value,
         cost: Decimal,
         token_usage: Usage,
+        error: Option<ErrorInfo>,
     },
     Interrupt {
         interrupt_id: String,
@@ -158,7 +160,7 @@ pub enum SessionError {
 }
 
 impl Action {
-    fn into_command(self) -> Option<CommandPayload> {
+    fn into_command(self, decision_id: &str) -> Option<CommandPayload> {
         match self {
             Action::CallLlm {
                 id,
@@ -188,18 +190,19 @@ impl Action {
                 arguments,
                 retry,
             }),
-            Action::SpawnSubAgent {
+            Action::SpawnSubagent {
                 session_id,
                 agent_id,
                 tool_call_id,
                 message,
                 retry,
-            } => Some(CommandPayload::RequestSubAgent {
+            } => Some(CommandPayload::RequestSubagent {
                 session_id,
                 agent_id,
                 tool_call_id,
                 message,
                 retry,
+                decision_id: decision_id.to_string(),
             }),
             Action::ToolResult {
                 id,
@@ -267,17 +270,17 @@ impl SessionState {
 
     pub(in crate::runtime::session) fn void_effects(
         &self,
-        stranded: impl Fn(&EffectTracking, Option<&str>) -> bool,
+        stranded: impl Fn(EffectKind, &EffectTracking, Option<&str>) -> bool,
     ) -> Vec<EventPayload> {
         self.effects
             .values()
             .filter(|e| {
                 matches!(
                     e.kind(),
-                    EffectKind::ToolCall | EffectKind::LlmCall | EffectKind::SubAgent
+                    EffectKind::ToolCall | EffectKind::LlmCall | EffectKind::Subagent
                 )
             })
-            .filter(|e| stranded(&e.tracking, e.anchor.as_deref()))
+            .filter(|e| stranded(e.kind(), &e.tracking, e.anchor.as_deref()))
             .map(|e| {
                 EventPayload::CallVoided(CallVoided {
                     kind: e.kind(),
@@ -289,7 +292,7 @@ impl SessionState {
 
     fn void_stranded_work(&self, node: Option<&str>) -> Vec<EventPayload> {
         let at = self.at(node);
-        let mut events = self.void_effects(|tracking, anchor| {
+        let mut events = self.void_effects(|_, tracking, anchor| {
             matches!(
                 tracking.status(),
                 EffectStatus::Queued | EffectStatus::Pending | EffectStatus::RetryScheduled
@@ -628,7 +631,7 @@ impl Working {
         }
     }
 
-    fn apply_actions(&mut self, actions: Vec<Action>) {
+    fn apply_actions(&mut self, actions: Vec<Action>, decision_id: &str) {
         let system = Caller::System {
             tenant_id: self
                 .owner
@@ -719,7 +722,7 @@ impl Working {
                     };
                     self.run_active(cmd, &system)
                 }
-                other => match other.into_command() {
+                other => match other.into_command(decision_id) {
                     Some(cmd) => self.run_active(cmd, &system),
                     None => Ok(()),
                 },
@@ -840,44 +843,65 @@ impl Working {
                 })
                 .map(|_| ()),
 
-            CommandPayload::RequestSubAgent {
+            CommandPayload::RequestSubagent {
                 session_id,
                 agent_id,
                 tool_call_id,
                 message,
                 retry,
+                decision_id,
             } => self
                 .try_then(|s| {
-                    effects::sub_agent::request(
+                    effects::subagent::request(
                         s,
-                        session_id,
-                        agent_id,
-                        tool_call_id,
-                        message,
-                        retry,
+                        effects::subagent::Spawn {
+                            tool_call_id,
+                            agent_id,
+                            session_id,
+                            message,
+                            retry,
+                            decision_id,
+                        },
                         caller,
                     )
                 })
                 .map(|_| ()),
 
-            CommandPayload::CompleteSubAgentTurn {
+            CommandPayload::CompleteSubagentTurn {
                 session_id,
                 data,
                 cost,
                 token_usage,
+                error,
                 ..
-            } => self
-                .try_then(|s| {
-                    effects::sub_agent::complete_turn(
-                        s,
-                        session_id,
-                        data,
-                        cost,
-                        token_usage,
+            } => {
+                SessionState::ensure_internal(caller)?;
+                let Some((id, sa)) = self.state.subagent_awaiting(&session_id) else {
+                    return Ok(());
+                };
+                let (id, agent_id) = (id.to_string(), sa.agent_id.clone());
+                match error {
+                    Some(error) => self.settle_effect(
+                        EffectKind::Subagent,
+                        id,
+                        None,
+                        SettleError::new(error, false).into(),
                         caller,
-                    )
-                })
-                .map(|_| ()),
+                    ),
+                    None => {
+                        let events = effects::subagent::complete_turn(
+                            id,
+                            session_id,
+                            agent_id,
+                            data,
+                            cost,
+                            token_usage,
+                        );
+                        self.then(|_| events);
+                        Ok(())
+                    }
+                }
+            }
 
             CommandPayload::Interrupt {
                 interrupt_id,
@@ -953,7 +977,7 @@ impl Working {
                         a,
                         Action::CallLlm { .. }
                             | Action::CallTool { .. }
-                            | Action::SpawnSubAgent { .. }
+                            | Action::SpawnSubagent { .. }
                     )
                 });
                 if is_action && starts_work && !matches!(self.phase, TurnPhase::Active { .. }) {
@@ -973,7 +997,7 @@ impl Working {
                     }));
                 }
 
-                self.apply_actions(actions);
+                self.apply_actions(actions, &decision_id);
                 Ok(())
             }
 
@@ -984,13 +1008,10 @@ impl Working {
                 }
                 self.then(|_| vec![EventPayload::SessionCancelled])
                     .then(|s| {
-                        s.void_effects(|tracking, _| {
-                            matches!(
-                                tracking.status(),
-                                EffectStatus::Queued
-                                    | EffectStatus::Pending
-                                    | EffectStatus::RetryScheduled
-                            )
+                        s.void_effects(|kind, tracking, _| {
+                            tracking.is_open()
+                                || (tracking.status() == EffectStatus::Running
+                                    && kind.spec().voids_when_running())
                         })
                     });
                 Ok(())

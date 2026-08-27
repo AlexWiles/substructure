@@ -9,9 +9,20 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Add `max_subagent_depth` with a default of 5.
+- A subagent call can continue an earlier child session.
+- Add a `single` strategy that offers one `subagent` tool for all subagents.
+
 ### Changed
 
 - Secret prompts now mask each character, to show that a paste arrived.
+- A subagent result now contains the child session id.
+- `defer_tools` now covers subagent tools.
+- Subagent references in the manifest use the `agent.<id>` form.
+- Session cancel now stops running subagents.
+- Rename `sub_agents` to `subagents` in the manifest.
 
 ## [0.8.3] - 2026-08-26
 

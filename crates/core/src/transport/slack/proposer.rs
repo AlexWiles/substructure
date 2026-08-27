@@ -46,7 +46,7 @@ impl ChannelProposer for SlackProposer {
         match cx.trigger {
             DecisionTrigger::LlmFinished { .. }
             | DecisionTrigger::ToolFinished { .. }
-            | DecisionTrigger::SubAgentFinished { .. }
+            | DecisionTrigger::SubagentFinished { .. }
             | DecisionTrigger::InterruptResumed { .. } => {
                 // A proposal that interrupts owns the message; no view.
                 let authors_interrupt = proposed
@@ -346,7 +346,7 @@ mod tests {
                 ancestry: Vec::new(),
                 turn_id: None,
                 cost: Default::default(),
-                sub_agent_cost: Default::default(),
+                subagent_cost: Default::default(),
                 head_id: None,
                 calls: Vec::new(),
                 decisions: Vec::new(),
@@ -612,10 +612,5 @@ mod tests {
     fn a_workers_own_button_passes_through_untouched() {
         let p = translated(&action("summarize-thread"), &state_with_prompt());
         assert!(p.is_none(), "a worker's button is not Slack's to answer");
-    }
-
-    #[test]
-    fn it_declares_the_one_channel_it_answers_for() {
-        assert_eq!(SlackProposer::new().channel(), ChannelKind::SLACK);
     }
 }

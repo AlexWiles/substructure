@@ -282,5 +282,5 @@ The model reads `error` as the tool's result. Write it for the model to read.
 - [Client-side tools](./150-client-tools.md): tools that run in the browser.
 - [Async tools](./110-async-tools.md): answer a call later.
 - [Connectors](./40-connectors.md): tools the engine runs on a service.
-- [Sub-agents](./80-sub-agents.md): a tool call that starts another agent.
+- [Subagents](./80-subagents.md): a tool call that starts another agent.
 - [Retries](./210-retries.md): timeouts and backoff.

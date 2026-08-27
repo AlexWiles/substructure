@@ -87,7 +87,7 @@ The trigger says why the engine is asking.
 | `tool.finished` | A tool call ended. |
 | `llm.execute` | Your worker makes this model call. |
 | `llm.finished` | A model call ended. |
-| `sub_agent.finished` | A child session completed. |
+| `subagent.finished` | A child session completed. |
 | `interrupt.resumed` | Someone resumed a paused branch. |
 | `turn.finished` | A turn completed. It carries the turn's cost and output. |
 
@@ -101,7 +101,7 @@ The actions in a decision tell the engine what to do.
 | `tool.call` | Start a tool call. |
 | `tool.result` / `tool.error` | End a tool call. |
 | `llm.result` / `llm.error` | End a model call the worker made. |
-| `sub_agent.spawn` | Start a child session. |
+| `subagent.spawn` | Start a child session. |
 | `message.send` | Write a message into a session. |
 | `interrupt` | Pause the branch until someone resumes it. |
 | `interrupt.resolve` | Clear an open interrupt and resume. |

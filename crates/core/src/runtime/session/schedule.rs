@@ -144,7 +144,7 @@ const SWEEP_ORDER: [EffectKind; 5] = [
     EffectKind::LlmCall,
     EffectKind::ToolCall,
     EffectKind::ConnectorSync,
-    EffectKind::SubAgent,
+    EffectKind::Subagent,
     EffectKind::Decision,
 ];
 
@@ -255,7 +255,7 @@ mod tests {
     use crate::runtime::retry::RetryTarget;
     use crate::runtime::session::state::{
         AgentVersion, ConnectorSyncState, EffectPayload, EffectState, EffectTracking, LlmCallSpec,
-        LlmCallState, Logged, OpenInterrupt, QueueEntry, SubAgentCallState, ToolCallState,
+        LlmCallState, Logged, OpenInterrupt, QueueEntry, SubagentCallState, ToolCallState,
         TurnPhase, WorkerDecisionState,
     };
 
@@ -351,7 +351,7 @@ mod tests {
         ));
     }
 
-    fn add_running_sub_agent(s: &mut SessionState, id: &str, total: Option<u32>) {
+    fn add_running_subagent(s: &mut SessionState, id: &str, total: Option<u32>) {
         let mut t = EffectTracking::new_queued(RetryPolicy {
             queue_timeout_secs: None,
             run_timeout_secs: None,
@@ -365,9 +365,9 @@ mod tests {
         s.put_effect(EffectState::new(
             id,
             t,
-            EffectPayload::SubAgent(SubAgentCallState {
+            EffectPayload::Subagent(SubagentCallState {
                 agent_id: "child".to_string(),
-                tool_call_id: "tc-1".to_string(),
+                session_id: "child-1".to_string(),
                 message: None,
                 result: None,
                 is_error: false,
@@ -399,10 +399,6 @@ mod tests {
         AgentConfig {
             llm: Some("claude".to_string()),
             model: "m".to_string(),
-            system: None,
-            retry: None,
-            tools: Vec::new(),
-            sub_agents: Vec::new(),
             mcp: vec![McpServer {
                 path: ConnectionPath::Mcp(connection.to_string()),
                 tools: None,
@@ -410,10 +406,7 @@ mod tests {
                 tool_sync_failure: Default::default(),
                 approve: Default::default(),
             }],
-            defer_tools: None,
-            mcp_announce: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
+            ..Default::default()
         }
     }
 
@@ -699,9 +692,9 @@ mod tests {
     }
 
     #[test]
-    fn a_running_delegation_is_swept_once_its_total_lapses() {
+    fn a_running_subagent_is_swept_once_its_total_lapses() {
         let mut s = state();
-        add_running_sub_agent(&mut s, "child-1", Some(60));
+        add_running_subagent(&mut s, "child-1", Some(60));
         let due = epoch() + chrono::Duration::seconds(60);
 
         assert_eq!(
@@ -712,7 +705,7 @@ mod tests {
         assert_eq!(
             plan(&s, due),
             vec![ScheduleStep::TimeOut {
-                kind: EffectKind::SubAgent,
+                kind: EffectKind::Subagent,
                 id: "child-1".to_string(),
             }],
             "the whole-effect bound is the only thing that recovers a dead child"
@@ -720,9 +713,9 @@ mod tests {
     }
 
     #[test]
-    fn a_running_delegation_wakes_at_its_total() {
+    fn a_running_subagent_wakes_at_its_total() {
         let mut s = state();
-        add_running_sub_agent(&mut s, "child-1", Some(60));
+        add_running_subagent(&mut s, "child-1", Some(60));
         assert_eq!(
             wake_at(&s, epoch()),
             Some(epoch() + chrono::Duration::seconds(60)),
@@ -731,9 +724,9 @@ mod tests {
     }
 
     #[test]
-    fn a_running_delegation_with_no_total_is_never_swept() {
+    fn a_running_subagent_with_no_total_is_never_swept() {
         let mut s = state();
-        add_running_sub_agent(&mut s, "child-1", None);
+        add_running_subagent(&mut s, "child-1", None);
         let far = epoch() + chrono::Duration::days(365);
         assert_eq!(plan(&s, far), vec![], "unbounded by declaration");
         assert_eq!(wake_at(&s, far), None);
@@ -742,10 +735,10 @@ mod tests {
     #[test]
     fn the_total_deadline_is_not_pushed_out_by_a_retry() {
         let mut s = state();
-        add_running_sub_agent(&mut s, "child-1", Some(60));
+        add_running_subagent(&mut s, "child-1", Some(60));
         let started = epoch();
         let t = &mut s
-            .effect_mut(EffectKind::SubAgent, "child-1")
+            .effect_mut(EffectKind::Subagent, "child-1")
             .unwrap()
             .tracking;
         t.requeue();

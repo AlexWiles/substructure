@@ -84,7 +84,7 @@ type ClientContext = {
 
 Each of these tools gets `handler: "client"`.
 
-The engine only adds tools. It ignores a name that a worker tool or a sub-agent
+The engine only adds tools. It ignores a name that a worker tool or a subagent
 already uses. Use this for browser features that the worker does not know about.
 See [AG-UI](./140-ag-ui.md).
 

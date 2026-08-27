@@ -9,16 +9,16 @@ use crate::runtime::session::state::EffectKind;
 use crate::runtime::span::SpanContext;
 
 #[derive(Debug, Clone)]
-pub enum SubAgentTask {
-    SpawnSubAgent {
+pub enum SubagentTask {
+    SpawnSubagent {
         source_event_id: Uuid,
         parent_session_id: String,
         tenant_id: String,
+        tool_call_id: String,
         child_session_id: String,
         agent_id: String,
         owner: SessionOwner,
         ancestry: Vec<String>,
-        /// The child's opening message, sent right after its session exists.
         message: Option<DraftMessage>,
         retry: RetryPolicy,
         enqueued_at: DateTime<Utc>,
@@ -31,7 +31,7 @@ pub enum SubAgentTask {
         message: DraftMessage,
         span: SpanContext,
     },
-    CompleteSubAgentTurn {
+    CompleteSubagentTurn {
         source_event_id: Uuid,
         parent_session_id: String,
         tenant_id: String,
@@ -41,12 +41,10 @@ pub enum SubAgentTask {
         data: serde_json::Value,
         cost: Decimal,
         token_usage: Usage,
-        /// Set when the child's turn ended as a failed run; settles the parent's
-        /// delegation as an error instead of an empty result.
         error: Option<ErrorInfo>,
         span: SpanContext,
     },
-    CancelSubAgent {
+    CancelSubagent {
         source_event_id: Uuid,
         tenant_id: String,
         child_session_id: String,
@@ -54,12 +52,12 @@ pub enum SubAgentTask {
     },
 }
 
-impl BoundedTask for SubAgentTask {
+impl BoundedTask for SubagentTask {
     fn bound(&self) -> Option<TaskBound> {
-        let SubAgentTask::SpawnSubAgent {
+        let SubagentTask::SpawnSubagent {
             parent_session_id,
             tenant_id,
-            child_session_id,
+            tool_call_id,
             retry,
             enqueued_at,
             span,
@@ -71,8 +69,8 @@ impl BoundedTask for SubAgentTask {
         Some(TaskBound {
             tenant_id: tenant_id.clone(),
             session_id: parent_session_id.clone(),
-            kind: EffectKind::SubAgent,
-            id: child_session_id.clone(),
+            kind: EffectKind::Subagent,
+            id: tool_call_id.clone(),
             attempt: None,
             enqueued_at: *enqueued_at,
             queue_timeout: retry.queue_timeout(),
@@ -82,23 +80,21 @@ impl BoundedTask for SubAgentTask {
     }
 }
 
-impl SubAgentTask {
+impl SubagentTask {
     pub fn dedupe_key(&self) -> String {
         match self {
-            SubAgentTask::SpawnSubAgent {
+            SubagentTask::SpawnSubagent {
                 source_event_id,
                 parent_session_id,
-                child_session_id,
+                tool_call_id,
                 ..
-            } => format!(
-                "subagent:spawn:{parent_session_id}:{child_session_id}:{source_event_id}"
-            ),
-            SubAgentTask::SendSessionMessage {
+            } => format!("subagent:spawn:{parent_session_id}:{tool_call_id}:{source_event_id}"),
+            SubagentTask::SendSessionMessage {
                 source_event_id,
                 target_session_id,
                 ..
             } => format!("subagent:send_message:{target_session_id}:{source_event_id}"),
-            SubAgentTask::CompleteSubAgentTurn {
+            SubagentTask::CompleteSubagentTurn {
                 source_event_id,
                 parent_session_id,
                 child_session_id,
@@ -107,7 +103,7 @@ impl SubAgentTask {
             } => format!(
                 "subagent:complete_turn:{parent_session_id}:{child_session_id}:{turn_id}:{source_event_id}"
             ),
-            SubAgentTask::CancelSubAgent {
+            SubagentTask::CancelSubagent {
                 source_event_id,
                 child_session_id,
                 ..

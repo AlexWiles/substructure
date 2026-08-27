@@ -33,7 +33,7 @@ use session::state::EffectKind;
 use session::subscriptions::SessionSubscriptionSpec;
 use session::{execute, ConflictRetry, ExecuteError, ExecuteInput, SessionAggregate, SessionEvent};
 use span::SpanContext;
-use sub_agent::{spawn_sub_agent_dispatch_processor, spawn_sub_agent_task_executor, SubAgentTask};
+use subagent::{spawn_subagent_dispatch_processor, spawn_subagent_task_executor, SubagentTask};
 use wake::{spawn_boot_reconciler, spawn_wake_dispatcher, spawn_wake_processor, WakeScheduleStore};
 use worker::spawn_worker_processor;
 use worker::{
@@ -51,7 +51,7 @@ pub mod retry;
 pub mod secret;
 pub mod session;
 pub mod span;
-pub mod sub_agent;
+pub mod subagent;
 pub mod wake;
 pub mod worker;
 
@@ -59,7 +59,7 @@ pub use caller::Caller;
 
 pub struct RuntimeConfig {
     pub llm_executor_workers: usize,
-    pub sub_agent_executor_workers: usize,
+    pub subagent_executor_workers: usize,
     pub connector_executor_workers: usize,
     pub executor_concurrency: usize,
     pub wake_poll_interval: std::time::Duration,
@@ -71,7 +71,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             llm_executor_workers: 32,
-            sub_agent_executor_workers: 32,
+            subagent_executor_workers: 32,
             connector_executor_workers: 64,
             executor_concurrency: 32,
             wake_poll_interval: std::time::Duration::from_secs(30),
@@ -829,7 +829,7 @@ pub struct RuntimeDeps {
     /// The client for an engine-run llm block, resolved per call.
     pub llm: Arc<dyn LlmResolver>,
     pub llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
-    pub sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>>,
+    pub subagent_task_queue: Arc<dyn TaskQueue<SubagentTask>>,
     pub connections: Option<Arc<Connections>>,
     /// Where this deployment reads plugin bundles from.
     pub plugins: Arc<dyn crate::plugins::PluginResolver>,
@@ -849,7 +849,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         agents,
         llm,
         llm_task_queue,
-        sub_agent_task_queue,
+        subagent_task_queue,
         connections,
         plugins,
         connector_task_queue,
@@ -885,36 +885,32 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         ));
     }
 
-    // Connector work needs connections or plugins. With neither, nothing can
-    // queue it, so the subsystem is skipped.
     let mut connector_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    if connections.is_some() || plugins.serves_any() {
-        connector_handles.push(spawn_connector_dispatch_processor(
-            store.clone(),
-            cursor_store.clone(),
-            connector_task_queue.clone(),
-            cancel.clone(),
-        ));
-        connector_handles.extend(spawn_connector_task_executor(
-            store.clone(),
-            connections,
-            plugins,
-            connector_task_queue,
-            config.pool(config.connector_executor_workers),
-            cancel.clone(),
-        ));
-    }
-
-    let sub_agent_processor_handle = spawn_sub_agent_dispatch_processor(
+    connector_handles.push(spawn_connector_dispatch_processor(
         store.clone(),
         cursor_store.clone(),
-        sub_agent_task_queue.clone(),
+        connector_task_queue.clone(),
+        cancel.clone(),
+    ));
+    connector_handles.extend(spawn_connector_task_executor(
+        store.clone(),
+        connections,
+        plugins,
+        connector_task_queue,
+        config.pool(config.connector_executor_workers),
+        cancel.clone(),
+    ));
+
+    let subagent_processor_handle = spawn_subagent_dispatch_processor(
+        store.clone(),
+        cursor_store.clone(),
+        subagent_task_queue.clone(),
         cancel.clone(),
     );
-    let sub_agent_executor_handles = spawn_sub_agent_task_executor(
+    let subagent_executor_handles = spawn_subagent_task_executor(
         store.clone(),
-        sub_agent_task_queue,
-        config.pool(config.sub_agent_executor_workers),
+        subagent_task_queue,
+        config.pool(config.subagent_executor_workers),
         cancel.clone(),
     );
 
@@ -955,7 +951,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     let session_subscriptions = session::subscriptions::SessionSubscriptions::new(store.clone());
 
     let mut handles = vec![
-        sub_agent_processor_handle,
+        subagent_processor_handle,
         worker_handle,
         session_index_processor_handle,
         wake_processor_handle,
@@ -964,7 +960,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     ];
     handles.extend(llm_handles);
     handles.extend(connector_handles);
-    handles.extend(sub_agent_executor_handles);
+    handles.extend(subagent_executor_handles);
 
     Arc::new(Runtime {
         store,
@@ -1004,7 +1000,7 @@ mod tests {
         let config = RuntimeConfig::default();
         for workers in [
             config.llm_executor_workers,
-            config.sub_agent_executor_workers,
+            config.subagent_executor_workers,
             config.connector_executor_workers,
         ] {
             assert!(workers >= 1, "a subsystem with no worker drains nothing");
