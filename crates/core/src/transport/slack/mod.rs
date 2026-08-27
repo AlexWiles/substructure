@@ -1,5 +1,6 @@
 mod activity;
 mod bot;
+pub mod manifest;
 mod proposer;
 mod render;
 mod socket;

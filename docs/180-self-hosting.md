@@ -102,53 +102,18 @@ Declare an app for each agent that should have one.
 name = "Support"
 ```
 
-Create a Slack app for it with this manifest, replacing the two names.
+Then ask for the app.
 
-```yaml
-display_information:
-  name: Support
-features:
-  bot_user:
-    display_name: Support
-    always_online: true
-  agent_view: {}
-  app_home:
-    messages_tab_enabled: true
-    messages_tab_read_only_enabled: false
-oauth_config:
-  scopes:
-    bot:
-      - im:history
-      - app_mentions:read
-      - channels:history
-      - chat:write
-      - assistant:write
-      - files:read
-      - files:write
-  pkce_enabled: false
-settings:
-  event_subscriptions:
-    bot_events:
-      - app_mention
-      - message.im
-  interactivity:
-    is_enabled: true
-  org_deploy_enabled: false
-  socket_mode_enabled: true
-  token_rotation_enabled: false
-  is_mcp_enabled: false
+```sh
+subs auth agent.support.slack
 ```
 
-`agent_view` turns on the Agents tab in app settings. That adds
-`assistant:write`, which the bot needs to stream a turn's progress.
+It prints a manifest for that agent. Paste it into
+[api.slack.com/apps](https://api.slack.com/apps), under Create New App, From a
+manifest. The manifest matches what the agent declares, so an agent set to
+`answers = "dm"` asks Slack for less than one that also answers in channels.
 
-`app_home` opens the Messages tab. Without it Slack says "Sending messages to
-this app has been turned off" and a person cannot DM the bot, whatever the
-scopes say.
-
-Install the app, then set two variables named after the agent. Uppercase the
-agent ID and replace anything that is not a letter or a digit with an
-underscore.
+Install the app, then set the two variables the command names.
 
 ```sh
 export SLACK_APP_TOKEN_SUPPORT=xapp-...
@@ -158,6 +123,9 @@ subs serve
 
 The app token is under Basic Information, App-Level Tokens. Create one with the
 `connections:write` scope. The bot token is under OAuth & Permissions.
+
+The variables are named after the agent. Uppercase the agent ID and replace
+anything that is not a letter or a digit with an underscore.
 
 `subs serve` opens one connection per declared app and names any variable it
 cannot find. `subs doctor` lists them without starting the server.

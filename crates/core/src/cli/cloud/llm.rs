@@ -75,7 +75,7 @@ pub(crate) async fn rows(
         .collect())
 }
 
-const WORKER_RUNS_IT: &str = "n/a (your worker runs it)";
+const WORKER_RUNS_IT: &str = "n/a (your worker holds it)";
 
 fn key_cell(kind: &str, bound: bool) -> &'static str {
     match (kind, bound) {
@@ -113,21 +113,19 @@ fn key_is_a_variable(block: &str, config: &ProjectConfig, verb: &str) -> Result<
         );
     };
     if spec.kind == ProviderKind::Worker {
-        bail!("[llm.{block}] is a worker block: your worker runs its calls and holds its key.");
+        bail!(
+            "[llm.{block}] does not use a key. Your own worker makes the model calls, so it \
+             holds the key."
+        );
     }
     let var = spec
         .api_key_env()
         .unwrap_or_else(|| "the block's variable".to_string());
-    match verb {
-        "delete" => bail!(
-            "an engine here reads the key for [llm.{block}] from ${var}, so there is none to \
-             delete.\n  unset {var}"
-        ),
-        _ => bail!(
-            "an engine here reads the key for [llm.{block}] from ${var}, so there is none to \
-             set.\n  export {var}=..."
-        ),
-    }
+    let how = match verb {
+        "delete" => format!("Remove it there:\n\n  unset {var}"),
+        _ => format!("Set it there:\n\n  export {var}=..."),
+    };
+    bail!("This project runs locally and reads the key from the environment. {how}")
 }
 
 async fn set_key(block: String, scope: ProjectScope) -> Result<()> {
@@ -200,7 +198,7 @@ mod tests {
         let row = declared("byo", &config).unwrap();
         let (kind, key) = (row.what, row.credential);
         assert_eq!(kind, "worker");
-        assert!(key.contains("your worker runs it"), "{key}");
+        assert!(key.contains("your worker holds it"), "{key}");
     }
 
     #[test]
@@ -219,6 +217,6 @@ mod tests {
         let err = key_is_a_variable("byo", &config, "set")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("worker block"), "{err}");
+        assert!(err.contains("does not use a key"), "{err}");
     }
 }

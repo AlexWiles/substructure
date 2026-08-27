@@ -39,7 +39,7 @@ pub fn target(globals: &CloudGlobals) -> Result<Target> {
 
 pub fn no_deployment(what: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "{what} acts on a deployment, and this project names no `[remote]`.\n\
+        "{what} acts on a deployment, and subs.toml has no [remote].\n\
          Point it at one:\n  \
          subs link                    pin an org and project in the file\n  \
          --url <url>                  target a deployment for this command"
@@ -115,7 +115,7 @@ mod tests {
         let err = require_deployment(&wrote(ENGINE_HERE), "subs keys")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("names no `[remote]`"), "{err}");
+        assert!(err.contains("subs.toml has no [remote]"), "{err}");
         assert!(err.contains("subs link"), "{err}");
         assert!(err.contains("--url"), "{err}");
     }
