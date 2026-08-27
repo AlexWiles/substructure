@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Changed
+
+- Secret prompts now mask each character, to show that a paste arrived.
+
 ## [0.8.3] - 2026-08-26
 
 ### Changed

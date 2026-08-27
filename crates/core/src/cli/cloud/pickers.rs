@@ -1,7 +1,9 @@
 use std::io::IsTerminal;
 
-use anyhow::{bail, Context as _, Result};
-use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
+use anyhow::{anyhow, bail, Context as _, Result};
+use dialoguer::{theme::ColorfulTheme, Input, Select};
+use inquire::ui::{Attributes, Color, RenderConfig, StyleSheet, Styled};
+use inquire::InquireError;
 use serde::{Deserialize, Serialize};
 
 use crate::api::v1::{Org, Project};
@@ -166,11 +168,6 @@ pub async fn pick_api_key(ctx: &Context, project_id: &str) -> Result<String> {
     Ok(keys[pick].key_id.clone())
 }
 
-/// A secret typed at the terminal: not echoed, and ended by Enter like every
-/// other prompt.
-/// A secret, typed or piped. A person gets one prompt that ends at Enter and
-/// does not echo it; a pipe is read to its end, since that is where the secret
-/// ends. Trailing whitespace is the shell's, not the secret's.
 pub fn read_secret(globals: &CloudGlobals, prompt: &str) -> Result<String> {
     use std::io::Read as _;
 
@@ -188,10 +185,26 @@ pub fn read_secret(globals: &CloudGlobals, prompt: &str) -> Result<String> {
 }
 
 pub fn prompt_secret(prompt: &str) -> Result<String> {
-    Password::with_theme(&ColorfulTheme::default())
-        .with_prompt(prompt)
-        .interact()
-        .context("secret prompt")
+    inquire::Password::new(prompt)
+        .with_display_mode(inquire::PasswordDisplayMode::Masked)
+        .without_confirmation()
+        .with_render_config(secret_theme())
+        .prompt()
+        .map_err(|err| match err {
+            InquireError::OperationCanceled | InquireError::OperationInterrupted => {
+                anyhow!("canceled.")
+            }
+            err => anyhow::Error::new(err).context("secret prompt"),
+        })
+}
+
+fn secret_theme() -> RenderConfig<'static> {
+    let mut theme = RenderConfig::default_colored()
+        .with_prompt_prefix(Styled::new("?").with_fg(Color::LightYellow))
+        .with_answered_prompt_prefix(Styled::new("✔").with_fg(Color::LightGreen))
+        .with_answer(StyleSheet::new().with_fg(Color::LightGreen));
+    theme.prompt = StyleSheet::new().with_attr(Attributes::BOLD);
+    theme
 }
 
 pub fn prompt_text(prompt: &str) -> Result<String> {

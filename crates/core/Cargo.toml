@@ -60,6 +60,7 @@ rmcp = { version = "3.1.2", default-features = false, features = ["client", "tra
 aes-gcm = "0.10"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 console = "0.16.4"
+inquire = { version = "0.9", default-features = false, features = ["console"] }
 
 [dev-dependencies]
 proptest = "1.11.0"
