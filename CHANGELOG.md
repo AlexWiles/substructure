@@ -9,6 +9,8 @@ together at the same version.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-28
+
 ### Added
 
 - Better plugin path expansion.
@@ -180,7 +182,8 @@ together at the same version.
 - The changelog starts again at this release. For the changes before it, refer
   to the git history.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/substructureai/substructure/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/substructureai/substructure/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/substructureai/substructure/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/substructureai/substructure/compare/v0.8.1...v0.8.2
