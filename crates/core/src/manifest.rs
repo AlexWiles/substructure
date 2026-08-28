@@ -151,7 +151,8 @@ impl Manifest {
             let Some(path) = &spec.path else {
                 continue;
             };
-            let loaded = crate::plugins::load_dir(&base.join(path))
+            let loaded = plugin_dir(base, path)
+                .and_then(|dir| crate::plugins::load_dir(&dir))
                 .map_err(|e| anyhow::anyhow!("[plugin.{id}]: {e}"))?;
             spec.hash = Some(loaded.hash());
             resolved.notices.extend(
@@ -407,6 +408,13 @@ impl AgentSection {
             },
         }
     }
+}
+
+/// A plugin's directory: `~` and `$VAR` expand, an absolute path stands alone,
+/// and the rest is read against the file that names it.
+fn plugin_dir(base: &std::path::Path, path: &str) -> Result<std::path::PathBuf> {
+    let expanded = shellexpand::full(path).with_context(|| format!("`path = {path:?}`"))?;
+    Ok(base.join(&*expanded))
 }
 
 #[derive(Debug, Default)]
@@ -2635,5 +2643,25 @@ defer_tools = { strategy = "sometimes" }
     fn a_bare_id_is_told_which_path_it_meant() {
         let err = connected(r#"["sentry"]"#).unwrap().validate().unwrap_err();
         assert!(err.to_string().contains("Write `mcp.sentry`"), "{err}");
+    }
+
+    #[test]
+    fn a_plugin_path_reads_against_the_file() {
+        let base = std::path::Path::new("/proj");
+        let dir = |p| plugin_dir(base, p).unwrap();
+        assert_eq!(dir("./pdf"), std::path::Path::new("/proj/./pdf"));
+        assert_eq!(dir("/opt/pdf"), std::path::Path::new("/opt/pdf"));
+    }
+
+    #[test]
+    fn a_plugin_path_expands_a_home_directory_and_a_variable() {
+        let home = dirs::home_dir().expect("a home directory");
+        let base = std::path::Path::new("/proj");
+        let dir = |p| plugin_dir(base, p).unwrap();
+        assert_eq!(dir("~/plugins/pdf"), home.join("plugins/pdf"));
+        assert_eq!(dir("~"), home);
+        assert_eq!(dir("$HOME/plugins/pdf"), home.join("plugins/pdf"));
+        let err = plugin_dir(base, "$SUBS_NO_SUCH_VAR/pdf").unwrap_err();
+        assert!(err.to_string().contains("path ="), "{err}");
     }
 }

@@ -232,7 +232,7 @@ auth = "none"
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `path` | path | required | The plugin directory. A relative path resolves against the file. |
+| `path` | path | required | The plugin directory. |
 | `mcp.<server>` | table | the plugin's own | What this deployment says about one of the plugin's servers. See [`[plugin.<id>.mcp.<server>]`](#pluginidmcpserver). |
 
 The CLI resolves the directory to data, at startup for a local engine and at

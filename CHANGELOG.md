@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Better plugin path expansion.
+
 ## [0.9.0] - 2026-08-28
 
 ### Added
