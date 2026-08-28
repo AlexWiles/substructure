@@ -109,7 +109,7 @@ mentioned by name, and each keeps its own conversation in a thread.
 | --- | --- |
 | A thread, in a channel or a DM | Session `slack:{agent}:{channel}:{thread_ts}` |
 | A mention or a DM message | One turn |
-| A task card | A tool call or a sub-agent run |
+| A task card | A tool call or a subagent run |
 | A reply | The turn's result |
 
 A turn is one Slack message. The message opens with the first task card. More
@@ -118,7 +118,7 @@ cards stream in as the turn makes tool calls. The result completes the message.
 A thread shows one open message at a time. A queued turn waits for the turn
 ahead of it.
 
-Each tool call and sub-agent run shows as a
+Each tool call and subagent run shows as a
 [task card](https://docs.slack.dev/reference/block-kit/blocks/task-card-block/).
 Cards are collapsed by default. After the turn finishes, each card shows its
 arguments and its result.

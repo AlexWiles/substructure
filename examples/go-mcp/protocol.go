@@ -197,7 +197,7 @@ type DecisionRequest struct {
 	Identity                                                               WorkerIdentity   `json:"identity"`
 	MessageTree                                                            MessageTree      `json:"message_tree"`
 	Messages                                                               []Message        `json:"messages"`
-	// Count of in-flight `tool_call`/`sub_agent` calls.                                    
+	// Count of in-flight `tool_call`/`subagent` calls.                                    
 	PendingCalls                                                           int64            `json:"pending_calls"`
 	// The engine's default continuation for `trigger`. Empty when only the                 
 	// worker can decide. Accept it by echoing it back.                                     
@@ -233,9 +233,9 @@ type AgentConfig struct {
 	Plugins                                                                    []AgentPlugin     `json:"plugins,omitempty"`
 	// Boxed. Five per-kind overrides are too many bytes to carry inline.                        
 	Retry                                                                      *RetryConfig      `json:"retry"`
-	// Sub-agents the model can delegate to. The model sees them as tools.                       
+	// Subagents the model can delegate to. The model sees them as tools.                       
 	// Each call starts a child session.                                                         
-	SubAgents                                                                  []SubAgentElement `json:"sub_agents,omitempty"`
+	Subagents                                                                  []SubagentElement `json:"subagents,omitempty"`
 	System                                                                     *string           `json:"system"`
 	// Worker- or client-executed tools the model can call.                                      
 	Tools                                                                      []AgentTool       `json:"tools,omitempty"`
@@ -311,7 +311,7 @@ type RetryConfig struct {
 	Connector *RetryOverride `json:"connector"`
 	Default   *RetryOverride `json:"default"`
 	Llm       *RetryOverride `json:"llm"`
-	SubAgent  *RetryOverride `json:"sub_agent"`
+	Subagent  *RetryOverride `json:"subagent"`
 	Tool      *RetryOverride `json:"tool"`
 }
 
@@ -326,9 +326,9 @@ type RetryOverride struct {
 	TotalTimeoutSecs *int64 `json:"total_timeout_secs"`
 }
 
-// A sub-agent the model can delegate to. `id` is both the child agent and the
+// A subagent the model can delegate to. `id` is both the child agent and the
 // tool name the model calls. Its input is one `message`.
-type SubAgentElement struct {
+type SubagentElement struct {
 	Description *string `json:"description,omitempty"`
 	ID          string  `json:"id"`
 }
@@ -454,7 +454,7 @@ type DecisionAction struct {
 	// Layered over the agent config's policy for this kind, or over the                    
 	// engine's default for where the tool runs.                                            
 	//                                                                                      
-	// Layered over the agent config's `sub_agent` policy, or over the                      
+	// Layered over the agent config's `subagent` policy, or over the                      
 	// engine's default.                                                                    
 	Retry                                                                *RetryOverride     `json:"retry"`
 	Stream                                                               *bool              `json:"stream"`
@@ -698,7 +698,7 @@ type TokenDelta struct {
 	RootSessionID                                           string          `json:"root_session_id"`
 	// Per-call counter, distinct from event-store sequence.                
 	Seq                                                     int64           `json:"seq"`
-	// May be a sub-agent of root.                                          
+	// May be a subagent of root.                                          
 	SessionID                                               string          `json:"session_id"`
 	// Tenant isolation key — subscribers must match.                       
 	TenantID                                                string          `json:"tenant_id"`
@@ -875,7 +875,7 @@ const (
 	ConnectorSync EffectKind = "connector_sync"
 	Decision      EffectKind = "decision"
 	LlmCall       EffectKind = "llm_call"
-	SubAgent      EffectKind = "sub_agent"
+	Subagent      EffectKind = "subagent"
 	ToolCall      EffectKind = "tool_call"
 	TurnEnd       EffectKind = "turn_end"
 )
@@ -941,7 +941,7 @@ const (
 	LlmError          DecisionActionType = "llm.error"
 	LlmResult         DecisionActionType = "llm.result"
 	MessageSend       DecisionActionType = "message.send"
-	SubAgentSpawn     DecisionActionType = "sub_agent.spawn"
+	SubagentSpawn     DecisionActionType = "subagent.spawn"
 	TypeConnectorSync DecisionActionType = "connector.sync"
 	TypeInterrupt     DecisionActionType = "interrupt"
 	TypeLlmCall       DecisionActionType = "llm.call"
@@ -973,7 +973,7 @@ const (
 	LlmExecute              DecisionTriggerType = "llm.execute"
 	LlmFinished             DecisionTriggerType = "llm.finished"
 	SessionStart            DecisionTriggerType = "session.start"
-	SubAgentFinished        DecisionTriggerType = "sub_agent.finished"
+	SubagentFinished        DecisionTriggerType = "subagent.finished"
 	TentacledClientAction   DecisionTriggerType = "client.action"
 	TentacledClientMessages DecisionTriggerType = "client.messages"
 	ToolExecute             DecisionTriggerType = "tool.execute"

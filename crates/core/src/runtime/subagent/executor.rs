@@ -14,12 +14,12 @@ use crate::runtime::session::{execute, ConflictRetry, ExecuteError, ExecuteInput
 use crate::runtime::span::SpanContext;
 use crate::runtime::Caller;
 
-use super::SubAgentTask;
+use super::SubagentTask;
 use crate::protocol::ErrorInfo;
 
-pub fn spawn_sub_agent_task_executor(
+pub fn spawn_subagent_task_executor(
     store: Arc<dyn EventStore>,
-    queue: Arc<dyn TaskQueue<SubAgentTask>>,
+    queue: Arc<dyn TaskQueue<SubagentTask>>,
     pool: ExecutorPool,
     cancel: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
@@ -30,21 +30,24 @@ pub fn spawn_sub_agent_task_executor(
     })
 }
 
-/// Deliver a freshly created child's opening message. Nothing to do when the
-/// delegation carries none — a worker may open the child its own way.
-async fn open_child(
+async fn open(
     store: &dyn EventStore,
     tenant_id: &str,
     child_session_id: &str,
     message: Option<DraftMessage>,
     span: &SpanContext,
-) -> Result<(), ExecuteError> {
+) -> Outcome {
     let Some(message) = message else {
-        return Ok(());
+        return Outcome::SubagentStarted;
     };
-    send_message(store, tenant_id, child_session_id, message, span)
-        .await
-        .map(|_| ())
+    match send_message(store, tenant_id, child_session_id, message, span).await {
+        Ok(_) => Outcome::SubagentStarted,
+        Err(err) => SettleError::new(
+            ErrorInfo::internal(format!("failed to send the child's opening message: {err}")),
+            false,
+        )
+        .into(),
+    }
 }
 
 async fn send_message(
@@ -75,11 +78,12 @@ async fn send_message(
     .map(|_| ())
 }
 
-async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
+async fn handle_task(store: &dyn EventStore, task: SubagentTask) {
     match task {
-        SubAgentTask::SpawnSubAgent {
+        SubagentTask::SpawnSubagent {
             parent_session_id,
             tenant_id,
+            tool_call_id,
             child_session_id,
             agent_id,
             owner,
@@ -89,7 +93,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             span,
             ..
         } => {
-            let create_result = execute(
+            let created = execute(
                 store,
                 ExecuteInput {
                     session_id: child_session_id.clone(),
@@ -102,41 +106,26 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                         ancestry,
                         worker_retry: retry,
                     },
-                    span: span.child("create_sub_agent"),
+                    span: span.child("create_subagent"),
                 },
                 &ConflictRetry::default(),
             )
-            .await;
-
-            // The opening message rides with the spawn, so it lands on a
-            // session that exists. A delegation whose message never arrives
-            // would leave the child idle and the parent waiting forever, so a
-            // failed send fails the delegation.
-            let outcome = match create_result {
-                Ok(_) | Err(ExecuteError::Command(SessionError::SessionAlreadyCreated)) => {
-                    match open_child(store, &tenant_id, &child_session_id, message, &span).await {
-                        Ok(()) => Outcome::SubAgentStarted,
-                        Err(err) => SettleError::new(
-                            ErrorInfo::internal(format!(
-                                "failed to send the child's opening message: {err}"
-                            )),
-                            false,
-                        )
-                        .into(),
-                    }
-                }
+            .await
+            .map(|_| ())
+            .or_else(|created| match created {
+                ExecuteError::Command(SessionError::SessionAlreadyCreated) => Ok(()),
+                err => Err(err),
+            });
+            let outcome = match created {
+                Ok(()) => open(store, &tenant_id, &child_session_id, message, &span).await,
                 Err(err) => SettleError::new(
                     ErrorInfo::internal(format!("failed to create child session: {err}")),
                     false,
                 )
                 .into(),
             };
-            let parent_command = CommandPayload::settle(
-                EffectKind::SubAgent,
-                child_session_id.clone(),
-                None,
-                outcome,
-            );
+            let parent_command =
+                CommandPayload::settle(EffectKind::Subagent, tool_call_id.clone(), None, outcome);
 
             let result = execute(
                 store,
@@ -146,7 +135,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                         tenant_id: tenant_id.clone(),
                     },
                     command: parent_command,
-                    span: span.child("sub_agent_parent_update"),
+                    span: span.child("subagent_parent_update"),
                 },
                 &ConflictRetry::default(),
             )
@@ -157,11 +146,11 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                     parent_session_id = %parent_session_id,
                     child_session_id = %child_session_id,
                     error = %err,
-                    "failed to submit sub-agent parent command"
+                    "failed to submit subagent parent command"
                 );
             }
         }
-        SubAgentTask::SendSessionMessage {
+        SubagentTask::SendSessionMessage {
             tenant_id,
             target_session_id,
             message,
@@ -178,7 +167,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 );
             }
         }
-        SubAgentTask::CompleteSubAgentTurn {
+        SubagentTask::CompleteSubagentTurn {
             parent_session_id,
             tenant_id,
             child_session_id,
@@ -191,23 +180,14 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
             span,
             ..
         } => {
-            // A child whose run failed settles the delegation as an error; its
-            // empty output is not an answer.
-            let command = match error {
-                Some(error) => CommandPayload::settle(
-                    EffectKind::SubAgent,
-                    child_session_id,
-                    None,
-                    SettleError::new(error, false),
-                ),
-                None => CommandPayload::CompleteSubAgentTurn {
-                    session_id: child_session_id,
-                    agent_id,
-                    turn_id,
-                    data,
-                    cost,
-                    token_usage,
-                },
+            let command = CommandPayload::CompleteSubagentTurn {
+                session_id: child_session_id,
+                agent_id,
+                turn_id,
+                data,
+                cost,
+                token_usage,
+                error,
             };
             let result = execute(
                 store,
@@ -215,7 +195,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                     session_id: parent_session_id.clone(),
                     caller: Caller::System { tenant_id },
                     command,
-                    span: span.child("sub_agent_turn_complete"),
+                    span: span.child("subagent_turn_complete"),
                 },
                 &ConflictRetry::default(),
             )
@@ -225,11 +205,11 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                 tracing::error!(
                     parent_session_id = %parent_session_id,
                     error = %err,
-                    "failed to submit sub-agent turn completion"
+                    "failed to submit subagent turn completion"
                 );
             }
         }
-        SubAgentTask::CancelSubAgent {
+        SubagentTask::CancelSubagent {
             tenant_id,
             child_session_id,
             span,
@@ -241,7 +221,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                     session_id: child_session_id.clone(),
                     caller: Caller::System { tenant_id },
                     command: CommandPayload::CancelSession,
-                    span: span.child("cancel_sub_agent"),
+                    span: span.child("cancel_subagent"),
                 },
                 &ConflictRetry::default(),
             )
@@ -257,7 +237,7 @@ async fn handle_task(store: &dyn EventStore, task: SubAgentTask) {
                     tracing::error!(
                         child_session_id = %child_session_id,
                         error = %err,
-                        "failed to cancel sub-agent session"
+                        "failed to cancel subagent session"
                     );
                 }
             }

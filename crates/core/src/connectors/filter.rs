@@ -3,12 +3,12 @@ use std::num::NonZeroUsize;
 use crate::connectors::RemoteTool;
 use crate::protocol::{
     Approve, ConnectionPath, ConnectorProtocol, ConnectorTool, ConnectorToolKind,
-    DeferToolsStrategy, LlmTool, McpServer, McpTools,
+    DeferToolsStrategy, LlmTool, McpServer, McpTools, Subagent, SubagentToolsStrategy,
 };
 
 const SEPARATOR: &str = "__";
 
-const MAX_NAME: usize = 64;
+pub const MAX_NAME: usize = 64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolution {
@@ -103,7 +103,101 @@ pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a
         .collect()
 }
 
-pub use crate::protocol::{CALL_TOOL, SKILL, TOOL_SEARCH};
+pub use crate::protocol::{CALL_TOOL, SKILL, SUBAGENT, TOOL_SEARCH};
+
+const SESSION_DESCRIPTION: &str =
+    "Session id of an earlier call to this agent, to continue that conversation";
+
+pub fn subagent_input() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "message": { "type": "string", "description": "The message to send to the agent" },
+            "session": { "type": "string", "description": SESSION_DESCRIPTION }
+        },
+        "required": ["message"]
+    })
+}
+
+pub fn subagent_tools(
+    subagents: &[Subagent],
+    default_defer: bool,
+    strategy: SubagentToolsStrategy,
+) -> Resolution {
+    match strategy {
+        SubagentToolsStrategy::PerAgent => per_agent_subagent_tools(subagents, default_defer),
+        SubagentToolsStrategy::Single => Resolution::of(match subagents.is_empty() {
+            true => Vec::new(),
+            false => vec![subagent_switch(subagents, default_defer)],
+        }),
+    }
+}
+
+fn subagent_switch(subagents: &[Subagent], defer: bool) -> ConnectorTool {
+    let listed = subagents
+        .iter()
+        .map(|s| match s.description.is_empty() {
+            true => format!("- {}", s.id),
+            false => format!("- {} — {}", s.id, s.description),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ids: Vec<&str> = subagents.iter().map(|s| s.id.as_str()).collect();
+    let mut input = subagent_input();
+    input["properties"]["agent"] = serde_json::json!({
+        "type": "string",
+        "enum": ids,
+        "description": "The agent to delegate to."
+    });
+    input["required"] = serde_json::json!(["agent", "message"]);
+    ConnectorTool {
+        defer,
+        via: ConnectorProtocol::Agent,
+        ..engine_tool(
+            SUBAGENT,
+            format!(
+                "Delegate a turn to one of this agent's subagents. The call runs in the named \
+                 agent's own session and answers with its result and that session's id. Pass \
+                 the id back as `session` to continue where it left off. Agents:\n{listed}"
+            ),
+            input,
+            ConnectorToolKind::Subagent,
+        )
+    }
+}
+
+fn per_agent_subagent_tools(subagents: &[Subagent], default_defer: bool) -> Resolution {
+    let mut tools = Vec::with_capacity(subagents.len());
+    let mut oversized = Vec::new();
+    for sub in subagents {
+        let name = sub.offered_name();
+        let defer = sub.defers(default_defer);
+        if !defer && name.len() > MAX_NAME {
+            oversized.push(name);
+            continue;
+        }
+        let description = match sub.description.is_empty() {
+            true => format!("Delegate to {}", sub.id),
+            false => sub.description.clone(),
+        };
+        tools.push(ConnectorTool {
+            name,
+            description,
+            input: Some(subagent_input()),
+            output: None,
+            connector: Some(ConnectionPath::Agent(sub.id.clone())),
+            via: ConnectorProtocol::Agent,
+            remote_name: sub.id.clone(),
+            kind: ConnectorToolKind::Subagent,
+            defer,
+            approve: false,
+        });
+    }
+    Resolution {
+        oversized,
+        ..Resolution::of(tools)
+    }
+}
 
 pub fn skill_tool() -> ConnectorTool {
     engine_tool(
@@ -1121,6 +1215,150 @@ mod tests {
             vec!["sentry__search_issues"],
             "deferral re-presents what the filter kept; it never reaches past it"
         );
+    }
+
+    fn subagent(id: &str, defer: Option<bool>, prefix: Option<bool>) -> Subagent {
+        Subagent {
+            id: id.to_string(),
+            description: String::new(),
+            defer,
+            prefix,
+        }
+    }
+
+    #[test]
+    fn a_subagent_becomes_a_subagent_tool_with_the_message_schema() {
+        let r = subagent_tools(
+            &[subagent("researcher", None, None)],
+            false,
+            SubagentToolsStrategy::PerAgent,
+        );
+        let tool = &r.tools[0];
+        assert_eq!(tool.name, "researcher");
+        assert_eq!(tool.description, "Delegate to researcher");
+        assert_eq!(tool.kind, ConnectorToolKind::Subagent);
+        assert_eq!(tool.via, ConnectorProtocol::Agent);
+        assert_eq!(
+            tool.connector,
+            Some(ConnectionPath::Agent("researcher".into()))
+        );
+        assert_eq!(tool.remote_name, "researcher");
+        assert!(!tool.defer && !tool.approve);
+        let input = tool.input.as_ref().expect("subagent input schema");
+        assert_eq!(input["required"], serde_json::json!(["message"]));
+        assert_eq!(input["properties"]["message"]["type"], "string");
+    }
+
+    #[test]
+    fn a_subagent_description_overrides_the_default() {
+        let mut sub = subagent("researcher", None, None);
+        sub.description = "Find sources".to_string();
+        assert_eq!(
+            subagent_tools(&[sub], false, SubagentToolsStrategy::PerAgent).tools[0].description,
+            "Find sources"
+        );
+    }
+
+    #[test]
+    fn prefix_offers_the_tool_under_the_agent_prefix() {
+        let r = subagent_tools(
+            &[subagent("researcher", None, Some(true))],
+            false,
+            SubagentToolsStrategy::PerAgent,
+        );
+        assert_eq!(r.tools[0].name, "agent__researcher");
+        assert_eq!(
+            r.tools[0].remote_name, "researcher",
+            "the spawn still keys on the agent id"
+        );
+    }
+
+    #[test]
+    fn a_subagent_defers_by_the_agent_default_and_overrides_it() {
+        let subs = [
+            subagent("a", None, None),
+            subagent("b", Some(false), None),
+            subagent("c", Some(true), None),
+        ];
+        let defaulted: Vec<bool> = subagent_tools(&subs, true, SubagentToolsStrategy::PerAgent)
+            .tools
+            .iter()
+            .map(|t| t.defer)
+            .collect();
+        assert_eq!(defaulted, [true, false, true]);
+        let bare: Vec<bool> = subagent_tools(&subs, false, SubagentToolsStrategy::PerAgent)
+            .tools
+            .iter()
+            .map(|t| t.defer)
+            .collect();
+        assert_eq!(bare, [false, false, true]);
+    }
+
+    #[test]
+    fn an_over_long_subagent_name_is_dropped_unless_it_defers() {
+        let long = "a".repeat(70);
+        let listed = subagent_tools(
+            &[subagent(&long, None, None)],
+            false,
+            SubagentToolsStrategy::PerAgent,
+        );
+        assert!(listed.tools.is_empty());
+        assert_eq!(listed.oversized, vec![long.clone()]);
+        let deferred = subagent_tools(
+            &[subagent(&long, Some(true), None)],
+            false,
+            SubagentToolsStrategy::PerAgent,
+        );
+        assert_eq!(deferred.tools.len(), 1);
+        assert!(deferred.oversized.is_empty());
+    }
+
+    #[test]
+    fn the_single_strategy_offers_one_tool_naming_every_agent() {
+        let mut helper = subagent("helper", None, None);
+        helper.description = "Does the work.".to_string();
+        let r = subagent_tools(
+            &[helper, subagent("scribe", None, None)],
+            false,
+            SubagentToolsStrategy::Single,
+        );
+
+        assert_eq!(r.tools.len(), 1, "one tool for all of them");
+        let tool = &r.tools[0];
+        assert_eq!(tool.name, SUBAGENT);
+        assert_eq!(tool.kind, ConnectorToolKind::Subagent);
+        assert!(
+            tool.connector.is_none() && tool.remote_name.is_empty(),
+            "the tool names no agent of its own; the call does"
+        );
+        assert_eq!(tool.via, ConnectorProtocol::Agent);
+        assert!(
+            tool.description.contains("- helper — Does the work.")
+                && tool.description.contains("- scribe"),
+            "the roster rides in the description: {}",
+            tool.description
+        );
+        let input = tool.input.as_ref().expect("input schema");
+        assert_eq!(
+            input["properties"]["agent"]["enum"],
+            serde_json::json!(["helper", "scribe"])
+        );
+        assert_eq!(input["required"], serde_json::json!(["agent", "message"]));
+        assert_eq!(input["properties"]["session"]["type"], "string");
+    }
+
+    #[test]
+    fn the_single_tool_defers_with_the_agent() {
+        let subs = [subagent("helper", None, None)];
+        assert!(subagent_tools(&subs, true, SubagentToolsStrategy::Single).tools[0].defer);
+        assert!(!subagent_tools(&subs, false, SubagentToolsStrategy::Single).tools[0].defer);
+    }
+
+    #[test]
+    fn the_single_strategy_offers_nothing_without_subagents() {
+        assert!(subagent_tools(&[], false, SubagentToolsStrategy::Single)
+            .tools
+            .is_empty());
     }
 
     #[test]

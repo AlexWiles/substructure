@@ -80,7 +80,7 @@ fn protocol_schema() -> serde_json::Value {
         p::WorkerState,
         p::AgentConfig,
         p::AgentTool,
-        p::SubAgent,
+        p::Subagent,
         p::LlmTool,
         p::LlmRequest,
         p::ReasoningConfig,

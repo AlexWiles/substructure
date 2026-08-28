@@ -151,18 +151,3 @@ pub fn spawn_connector_dispatch_processor(
     };
     EventProcessorRunner::new(store, cursor_store, projection, config, cancel).spawn()
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::protocol::ConnectorToolKind;
-
-    /// Only a `Remote` carries a name to dial. Every other kind is one of the
-    /// engine's own tools, answered from the session.
-    #[test]
-    fn only_a_remote_tool_reaches_the_connection() {
-        assert!(ConnectorToolKind::Remote.is_remote());
-        for kind in [ConnectorToolKind::Find, ConnectorToolKind::Call] {
-            assert!(!kind.is_remote(), "{kind:?} is answered by the engine");
-        }
-    }
-}

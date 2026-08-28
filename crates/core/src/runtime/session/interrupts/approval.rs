@@ -34,7 +34,6 @@ impl InterruptKind for Approval {
         let connector_tools = p.state.connector_tools().tools;
         let connector_tools = connector_tools.as_slice();
         let pending_calls = p.pending_calls;
-        let decision_id = p.decision_id;
         let Some((at, call)) = asked_about(tail, transcript, dispatched) else {
             return Some(match config {
                 Some(c) => resumed(transcript, c),
@@ -51,7 +50,7 @@ impl InterruptKind for Approval {
             false => vec![refusal(call)],
         };
         let mut actions = match approved {
-            true => route_tool_call(call, config, decision_id),
+            true => route_tool_call(call, connector_tools),
             false => Vec::new(),
         };
 
@@ -66,7 +65,7 @@ impl InterruptKind for Approval {
             None => actions.extend(
                 waiting
                     .iter()
-                    .flat_map(|c| route_tool_call(c, config, decision_id)),
+                    .flat_map(|c| route_tool_call(c, connector_tools)),
             ),
         }
 

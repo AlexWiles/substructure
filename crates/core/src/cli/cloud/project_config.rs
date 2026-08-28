@@ -68,6 +68,8 @@ pub struct ProjectConfig {
     /// directives (`substructure_core=debug,warn`). `$RUST_LOG` still wins.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_subagent_depth: Option<u32>,
     /// The LLM blocks this project declares, keyed by the name an agent names.
     /// The declaration travels with the project; the credential binds per
     /// environment.
@@ -134,6 +136,7 @@ impl ProjectConfig {
     pub fn manifest(&self) -> Manifest {
         Manifest {
             name: self.name.clone(),
+            max_subagent_depth: self.max_subagent_depth,
             llm: self.llm.clone(),
             agent: self.agent.clone(),
             mcp: self.mcp.clone(),
@@ -840,7 +843,7 @@ mod tests {
             worker = "http://localhost:4444"
             signing_secret_env = "S"
             mcp = ["mcp.sentry"]
-            sub_agents = ["researcher"]
+            subagents = ["agent.researcher"]
             tools = [{ name = "confirm", description = "Ask", handler = "client" }]
 
             [agent.researcher]

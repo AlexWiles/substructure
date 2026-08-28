@@ -459,7 +459,7 @@ Deferral is a property of a tool, not of MCP. A tool that your worker declares
 sets `defer` on its own definition, and the same two tools find it and run it.
 See [Deferred tools](./65-deferred-tools.md).
 
-A third answer is [Sub-agents](./80-sub-agents.md): give the connection to a
+A third answer is [Subagents](./80-subagents.md): give the connection to a
 child agent, and the parent pays one tool.
 
 ## Tool names
@@ -470,7 +470,7 @@ Set `prefix_tools = false` to use their own names.
 The engine resolves each name against everything else the model can call. If two
 names match, it drops one.
 
-- A tool that you declared, or a sub-agent ID, keeps its name.
+- A tool that you declared, or a subagent ID, keeps its name.
 - If two connectors offer the same tool name, both lose it.
 
 The engine reports every name it drops.
@@ -540,4 +540,4 @@ what the `Retry` button proposes. See [Protocol](./230-protocol.md#actions).
 - [Deferred tools](./65-deferred-tools.md): what `defer` turns on.
 - [Plugins](./45-plugins.md): a directory that brings its own MCP servers.
 - [Agents](./30-agents.md): the section that names a connection.
-- [Sub-agents](./80-sub-agents.md): put a large connector behind a child agent.
+- [Subagents](./80-subagents.md): put a large connector behind a child agent.

@@ -238,14 +238,7 @@ mod tests {
             1,
             EventPayload::AgentConfigUpdated(AgentConfigUpdated {
                 config: AgentConfig {
-                    llm: None,
                     model: "m1".to_string(),
-                    system: None,
-                    effort: None,
-                    retry: None,
-                    tools: vec![],
-                    sub_agents: vec![],
-                    mcp: vec![],
                     plugins: vec![AgentPlugin {
                         id: "pdf".to_string(),
                         description: "PDF work.".to_string(),
@@ -268,8 +261,7 @@ mod tests {
                         tool_sync_failure: Default::default(),
                         approve: Default::default(),
                     }],
-                    defer_tools: None,
-                    mcp_announce: Default::default(),
+                    ..Default::default()
                 },
                 anchor: None,
             }),
@@ -330,13 +322,7 @@ mod tests {
             1,
             EventPayload::AgentConfigUpdated(AgentConfigUpdated {
                 config: AgentConfig {
-                    llm: None,
                     model: "m1".to_string(),
-                    system: None,
-                    effort: None,
-                    retry: None,
-                    tools: vec![],
-                    sub_agents: vec![],
                     mcp: vec![McpServer {
                         path: sentry(),
                         tools: None,
@@ -344,9 +330,7 @@ mod tests {
                         tool_sync_failure: policy,
                         approve: Default::default(),
                     }],
-                    plugins: vec![],
-                    defer_tools: None,
-                    mcp_announce: Default::default(),
+                    ..Default::default()
                 },
                 anchor: None,
             }),
@@ -488,17 +472,8 @@ mod tests {
             4,
             EventPayload::AgentConfigUpdated(AgentConfigUpdated {
                 config: AgentConfig {
-                    llm: None,
                     model: "m1".to_string(),
-                    system: None,
-                    effort: None,
-                    retry: None,
-                    tools: vec![],
-                    sub_agents: vec![],
-                    mcp: vec![],
-                    plugins: vec![],
-                    defer_tools: None,
-                    mcp_announce: Default::default(),
+                    ..Default::default()
                 },
                 anchor: None,
             }),

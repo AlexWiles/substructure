@@ -7,7 +7,7 @@ type = "openrouter"
 llm = "openrouter"
 model = "anthropic/claude-haiku-4.5"
 system = "You run a small copy desk. Give the brief to the writer, then give the draft to the critic, then answer with the final text."
-sub_agents = ["writer", "critic"]
+subagents = ["agent.writer", "agent.critic"]
 
 [agent.writer]
 description = "Drafts short copy from a brief"

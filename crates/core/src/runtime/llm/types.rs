@@ -102,21 +102,15 @@ pub struct CallContext<'a> {
     pub call_id: &'a str,
     pub attempt: u32,
     pub owner: &'a SessionOwner,
-    /// Parent chain, root-last. Empty for top-level sessions.
     pub ancestry: &'a [String],
     /// How this call lowers a deferred tool.
     pub defer_tools_strategy: DeferToolsStrategy,
 }
 
 impl CallContext<'_> {
-    /// The root of this session's chain, or this session where it is the root.
-    ///
-    /// A router that pins a session to one endpoint forgets it once it goes
-    /// quiet, and a parent makes no calls while its delegation runs. One name
-    /// for the whole tree holds the endpoint for all of it.
     pub fn root_session_id(&self) -> &str {
         self.ancestry
-            .last()
+            .first()
             .map(String::as_str)
             .unwrap_or(self.session_id)
     }
@@ -170,5 +164,39 @@ impl From<crate::json::JsonParseError> for LlmCallError {
             error: ErrorInfo::from(e),
             retryable: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{Issuer, Requester, Subject};
+
+    fn ctx<'a>(owner: &'a SessionOwner, ancestry: &'a [String]) -> CallContext<'a> {
+        CallContext {
+            session_id: "grandchild",
+            tenant_id: "t1",
+            agent_id: "a1",
+            call_id: "c1",
+            attempt: 0,
+            owner,
+            ancestry,
+            defer_tools_strategy: Default::default(),
+        }
+    }
+
+    #[test]
+    fn root_session_id_is_the_first_ancestor_or_the_session_itself() {
+        let owner = SessionOwner {
+            tenant_id: "t1".to_string(),
+            requester: Requester::new(
+                Subject::new(Issuer::app(), "user-1".to_string()),
+                Default::default(),
+            ),
+            metadata: Default::default(),
+        };
+        let ancestry = vec!["root".to_string(), "child".to_string()];
+        assert_eq!(ctx(&owner, &ancestry).root_session_id(), "root");
+        assert_eq!(ctx(&owner, &[]).root_session_id(), "grandchild");
     }
 }

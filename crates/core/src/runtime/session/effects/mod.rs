@@ -12,7 +12,7 @@ use crate::runtime::Caller;
 pub mod connector;
 pub mod decision;
 pub mod llm;
-pub mod sub_agent;
+pub mod subagent;
 pub mod tool;
 pub mod turn_end;
 
@@ -22,7 +22,7 @@ pub enum Outcome {
     Tool {
         result: StoredResult,
     },
-    SubAgentStarted,
+    SubagentStarted,
     Connector {
         prefix: Option<String>,
         server: Option<String>,
@@ -121,6 +121,10 @@ pub trait KindSpec: Sync {
         true
     }
 
+    fn voids_when_running(&self) -> bool {
+        false
+    }
+
     fn park(&self, _state: &SessionState, _id: &str) -> Option<Dep> {
         None
     }
@@ -135,7 +139,7 @@ impl EffectKind {
         match self {
             EffectKind::LlmCall => &llm::LlmSpec,
             EffectKind::ToolCall => &tool::ToolSpec,
-            EffectKind::SubAgent => &sub_agent::SubAgentSpec,
+            EffectKind::Subagent => &subagent::SubagentSpec,
             EffectKind::ConnectorSync => &connector::ConnectorSpec,
             EffectKind::Decision => &decision::DecisionSpec,
             EffectKind::TurnEnd => &turn_end::TurnEndSpec,

@@ -24,7 +24,7 @@ use crate::providers::sqlite::{
 use crate::runtime::blob::{BlobResolvingLlm, BlobStore};
 use crate::runtime::connector::ConnectorTask;
 use crate::runtime::secret::SecretCipher;
-use crate::sub_agent::SubAgentTask;
+use crate::subagent::SubagentTask;
 use crate::transport::admin_http::{self, AdminHttpState};
 use crate::transport::ag_ui::channel::AgUiChannel;
 use crate::transport::channel::{start_channels, Channel, ChannelContext};
@@ -326,8 +326,8 @@ pub(crate) async fn start_engine(
     let llm_task_queue: Arc<dyn TaskQueue<LlmTask>> = Arc::new(ShardedInMemoryQueue::new(
         config.llm_executor_workers as u32,
     ));
-    let sub_agent_task_queue: Arc<dyn TaskQueue<SubAgentTask>> = Arc::new(
-        ShardedInMemoryQueue::new(config.sub_agent_executor_workers as u32),
+    let subagent_task_queue: Arc<dyn TaskQueue<SubagentTask>> = Arc::new(
+        ShardedInMemoryQueue::new(config.subagent_executor_workers as u32),
     );
     let connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>> = Arc::new(
         ShardedInMemoryQueue::new(config.connector_executor_workers as u32),
@@ -394,7 +394,7 @@ pub(crate) async fn start_engine(
             agents: agents.clone(),
             llm: llm_providers,
             llm_task_queue,
-            sub_agent_task_queue,
+            subagent_task_queue,
             connections,
             plugins,
             connector_task_queue,

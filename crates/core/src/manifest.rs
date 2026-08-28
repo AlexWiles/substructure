@@ -11,7 +11,7 @@ use crate::protocol::ReasoningEffort;
 use crate::protocol::{
     AgentConfig, AgentPlugin, AgentTool, Approve, ConnectorProtocol, DeferTools, Handler,
     LlmFormat, McpAnnounce, McpAuthFailure, McpServer, McpToolSyncFailure, McpTools, RetryConfig,
-    SubAgent,
+    Subagent, SubagentTools, SubagentToolsStrategy, SUBAGENT,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, Hosting, WorkerEndpoint};
@@ -23,6 +23,8 @@ pub use crate::cli::env::ProviderKind;
 pub struct Manifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_subagent_depth: Option<u32>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub llm: BTreeMap<String, ProviderSpec>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -293,7 +295,11 @@ pub struct AgentSection {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sub_agents: Vec<String>,
+    pub subagents: Vec<SubagentRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_tools: Option<SubagentTools>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_subagent_depth: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -325,7 +331,7 @@ impl AgentSection {
             || self.system.is_some()
             || self.retry.is_some()
             || !self.tools.is_empty()
-            || !self.sub_agents.is_empty()
+            || !self.subagents.is_empty()
             || !self.mcp.is_empty()
             || !self.plugins.is_empty()
     }
@@ -338,7 +344,9 @@ impl AgentSection {
             effort: self.effort,
             retry: self.retry.clone().map(Box::new),
             tools: self.tools.clone(),
-            sub_agents: self.to_sub_agents(manifest),
+            subagents: self.to_subagents(manifest),
+            subagent_tools: self.subagent_tools,
+            max_subagent_depth: self.max_subagent_depth.or(manifest.max_subagent_depth),
             mcp: self
                 .mcp
                 .iter()
@@ -361,16 +369,25 @@ impl AgentSection {
         }
     }
 
-    fn to_sub_agents(&self, manifest: &Manifest) -> Vec<SubAgent> {
-        self.sub_agents
+    fn to_subagents(&self, manifest: &Manifest) -> Vec<Subagent> {
+        self.subagents
             .iter()
-            .map(|id| SubAgent {
-                id: id.clone(),
-                description: manifest
-                    .agent
-                    .get(id)
-                    .and_then(|s| s.description.clone())
-                    .unwrap_or_default(),
+            .map(|sub| {
+                let path = sub.id();
+                let id = match ConnectionPath::parse(path) {
+                    Some(ConnectionPath::Agent(id)) => id,
+                    _ => path.to_string(),
+                };
+                Subagent {
+                    description: manifest
+                        .agent
+                        .get(&id)
+                        .and_then(|s| s.description.clone())
+                        .unwrap_or_default(),
+                    id,
+                    defer: sub.defer(),
+                    prefix: sub.prefix(),
+                }
             })
             .collect()
     }
@@ -513,6 +530,45 @@ fn check_tool_prefixes(manifest: &Manifest) -> Result<()> {
 pub enum McpRef {
     All(String),
     Filtered(McpEntry),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubagentRef {
+    Id(String),
+    Configured(SubagentEntry),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentEntry {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<bool>,
+}
+
+impl SubagentRef {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Id(id) => id,
+            Self::Configured(entry) => &entry.id,
+        }
+    }
+
+    fn defer(&self) -> Option<bool> {
+        match self {
+            Self::Id(_) => None,
+            Self::Configured(entry) => entry.defer,
+        }
+    }
+
+    fn prefix(&self) -> Option<bool> {
+        match self {
+            Self::Id(_) => None,
+            Self::Configured(entry) => entry.prefix,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -734,6 +790,43 @@ impl<'de> Deserialize<'de> for McpRef {
     }
 }
 
+impl Serialize for SubagentRef {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Id(id) => s.serialize_str(id),
+            Self::Configured(entry) => entry.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SubagentRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = SubagentRef;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an `agent.<id>` path, or a table with `id`, `defer`, and `prefix`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<SubagentRef, E> {
+                Ok(SubagentRef::Id(id.to_string()))
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<SubagentRef, M::Error> {
+                SubagentEntry::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(SubagentRef::Configured)
+            }
+        }
+
+        d.deserialize_any(V)
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentSlackConfig {
@@ -940,9 +1033,15 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
         }
     }
 
-    for sub in &section.sub_agents {
-        check_sub_agent(sub, section, manifest)
-            .map_err(|e| anyhow::anyhow!("`sub_agents`: {e}"))?;
+    for sub in &section.subagents {
+        check_subagent(sub, section, manifest).map_err(|e| anyhow::anyhow!("`subagents`: {e}"))?;
+    }
+
+    if !section.subagents.is_empty()
+        && SubagentTools::strategy_of(section.subagent_tools) == SubagentToolsStrategy::Single
+        && section.tools.iter().any(|t| t.name == SUBAGENT)
+    {
+        return Err(reserved_by_single(SUBAGENT));
     }
 
     for tool in &section.tools {
@@ -961,23 +1060,86 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
     Ok(())
 }
 
-fn check_sub_agent(sub: &str, section: &AgentSection, manifest: &Manifest) -> Result<()> {
-    let Some(child) = manifest.agent.get(sub) else {
+fn check_subagent(sub: &SubagentRef, section: &AgentSection, manifest: &Manifest) -> Result<()> {
+    let written = sub.id();
+    let id = match ConnectionPath::parse(written) {
+        Some(ConnectionPath::Agent(id)) => id,
+        _ => {
+            if manifest.agent.contains_key(written) {
+                bail!(
+                    "`{written}` names an agent, and an agent is named by where it is declared. \
+                     Write `agent.{written}`."
+                );
+            }
+            bail!(
+                "`{written}` names no agent. Declared: {}",
+                agent_paths(manifest)
+            );
+        }
+    };
+    let Some(child) = manifest.agent.get(&id) else {
         bail!(
-            "`{sub}` names no agent. Declared: {}",
-            declared(manifest.agent.keys())
+            "`{written}` names no agent. Declared: {}",
+            agent_paths(manifest)
         );
     };
-    if section.tools.iter().any(|t| t.name == sub) {
-        bail!("`{sub}` is also a tool name, and the model sees one namespace for both");
+    let single =
+        SubagentTools::strategy_of(section.subagent_tools) == SubagentToolsStrategy::Single;
+    if single {
+        if sub.prefix().is_some() {
+            bail!("`prefix` shapes a per-agent tool, and the strategy is `single`");
+        }
+        if sub.defer().is_some() {
+            bail!(
+                "`defer` hides a per-agent tool, and the strategy is `single`. Set \
+                 `defer_tools` on the agent to hide `{SUBAGENT}`."
+            );
+        }
+    }
+    let wire = Subagent {
+        id: id.clone(),
+        description: String::new(),
+        defer: sub.defer(),
+        prefix: sub.prefix(),
+    };
+    let offered = wire.offered_name();
+    if section.tools.iter().any(|t| t.name == offered) {
+        bail!("`{offered}` is also a tool name, and the model sees one namespace for both");
+    }
+    if single && offered == SUBAGENT {
+        return Err(reserved_by_single(&offered));
+    }
+    let defers = wire.defers(section.defer_tools.is_some());
+    if !single && !defers && offered.len() > crate::connectors::filter::MAX_NAME {
+        bail!(
+            "`{offered}` is longer than the {} characters a provider accepts; shorten the id, \
+             or set `defer = true`",
+            crate::connectors::filter::MAX_NAME
+        );
     }
     if child.description.is_none() && section.worker.is_none() {
         bail!(
-            "`{sub}` has no description, and there is no `worker` to supply one. Set \
-             `description` on [agent.{sub}]."
+            "`{id}` has no description, and there is no `worker` to supply one. Set \
+             `description` on [agent.{id}]."
         );
     }
     Ok(())
+}
+
+fn reserved_by_single(offered: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "`{offered}` is the tool the `single` strategy offers, and the model sees one \
+         namespace for both"
+    )
+}
+
+fn agent_paths(manifest: &Manifest) -> String {
+    let paths: Vec<String> = manifest
+        .agent
+        .keys()
+        .map(|id| format!("agent.{id}"))
+        .collect();
+    declared(paths.iter())
 }
 
 const SLACK_APP_NAME_MAX: usize = 35;
@@ -1213,9 +1375,9 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_agent_takes_its_description_from_the_agent_it_names() {
+    fn a_subagent_takes_its_description_from_the_agent_it_names() {
         let m = team(
-            r#"sub_agents = ["poet"]"#,
+            r#"subagents = ["agent.poet"]"#,
             r#"description = "Writes a haiku.""#,
         );
         m.validate().unwrap();
@@ -1224,10 +1386,12 @@ mod tests {
             .config
             .as_ref()
             .expect("seeded")
-            .sub_agents;
+            .subagents;
         assert_eq!(
             subs,
-            &[SubAgent {
+            &[Subagent {
+                defer: None,
+                prefix: None,
                 id: "poet".to_string(),
                 description: "Writes a haiku.".to_string(),
             }],
@@ -1236,17 +1400,77 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_agent_names_a_declared_agent() {
-        let bad = team(r#"sub_agents = ["potet"]"#, r#"description = "d""#);
-        let err = bad.validate().unwrap_err().to_string();
-        assert!(err.contains("[agent.assistant]"), "{err}");
-        assert!(err.contains("names no agent"), "{err}");
+    fn max_subagent_depth_folds_into_the_config_and_the_agent_s_own_wins() {
+        let m = manifest(
+            r#"
+            max_subagent_depth = 1
+
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.assistant]
+            llm = "claude"
+            model = "m"
+
+            [agent.poet]
+            llm = "claude"
+            model = "m"
+            max_subagent_depth = 5
+            "#,
+        );
+        let agents = m.agents();
+        let depth = |id: &str| {
+            agents[id]
+                .config
+                .as_ref()
+                .expect("seeded")
+                .max_subagent_depth
+        };
+        assert_eq!(depth("assistant"), Some(1), "the top level fills in");
+        assert_eq!(depth("poet"), Some(5), "the agent's own value wins");
     }
 
     #[test]
-    fn a_sub_agent_cannot_take_a_tool_s_name() {
+    fn an_unset_max_subagent_depth_stays_unset() {
+        let m = team("", "");
+        assert_eq!(
+            m.agents()["assistant"]
+                .config
+                .as_ref()
+                .expect("seeded")
+                .max_subagent_depth,
+            None,
+            "the engine default applies at run time, not in the file"
+        );
+    }
+
+    #[test]
+    fn a_subagent_names_a_declared_agent() {
+        let bad = team(r#"subagents = ["agent.potet"]"#, r#"description = "d""#);
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("[agent.assistant]"), "{err}");
+        assert!(err.contains("names no agent"), "{err}");
+        assert!(err.contains("agent.poet"), "{err}");
+    }
+
+    #[test]
+    fn a_bare_id_points_at_the_agent_path() {
+        let bad = team(r#"subagents = ["poet"]"#, r#"description = "d""#);
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("Write `agent.poet`"), "{err}");
+    }
+
+    #[test]
+    fn a_connection_path_is_not_an_agent() {
+        let bad = team(r#"subagents = ["mcp.poet"]"#, r#"description = "d""#);
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("`mcp.poet` names no agent"), "{err}");
+    }
+
+    #[test]
+    fn a_subagent_cannot_take_a_tool_s_name() {
         let bad = team(
-            r#"sub_agents = ["poet"]
+            r#"subagents = ["agent.poet"]
                tools = [{ name = "poet", description = "d", handler = "client" }]"#,
             r#"description = "d""#,
         );
@@ -1255,13 +1479,231 @@ mod tests {
     }
 
     #[test]
+    fn a_subagent_entry_takes_a_map_with_defer_and_prefix() {
+        let m = team(
+            r#"subagents = [{ id = "agent.poet", defer = true, prefix = true }]"#,
+            r#"description = "Writes a haiku.""#,
+        );
+        m.validate().unwrap();
+        let agents = m.agents();
+        let subs = &agents["assistant"]
+            .config
+            .as_ref()
+            .expect("seeded")
+            .subagents;
+        assert_eq!(
+            subs,
+            &[Subagent {
+                id: "poet".to_string(),
+                description: "Writes a haiku.".to_string(),
+                defer: Some(true),
+                prefix: Some(true),
+            }]
+        );
+    }
+
+    #[test]
+    fn subagent_tools_reads_the_strategy_from_the_agent() {
+        let m = team(
+            r#"subagents = ["agent.poet"]
+               subagent_tools = { strategy = "single" }"#,
+            r#"description = "Writes a haiku.""#,
+        );
+        m.validate().unwrap();
+        let agents = m.agents();
+        let config = agents["assistant"].config.as_ref().expect("seeded");
+        assert_eq!(
+            config.subagent_tools,
+            Some(SubagentTools {
+                strategy: SubagentToolsStrategy::Single
+            })
+        );
+        assert_eq!(config.subagent_strategy(), SubagentToolsStrategy::Single);
+    }
+
+    #[test]
+    fn an_absent_subagent_tools_offers_one_tool_per_agent() {
+        let m = team(
+            r#"subagents = ["agent.poet"]"#,
+            r#"description = "Writes a haiku.""#,
+        );
+        let agents = m.agents();
+        let config = agents["assistant"].config.as_ref().expect("seeded");
+        assert_eq!(config.subagent_tools, None);
+        assert_eq!(config.subagent_strategy(), SubagentToolsStrategy::PerAgent);
+    }
+
+    #[test]
+    fn an_unknown_subagent_tools_key_is_rejected() {
+        let raw = r#"
+            [agent.a]
+            subagent_tools = { strategy = "single", extra = true }
+            "#;
+        let err = toml::from_str::<Manifest>(raw).unwrap_err().to_string();
+        assert!(err.contains("extra"), "{err}");
+    }
+
+    #[test]
+    fn the_single_strategy_rejects_a_per_agent_shape() {
+        for (sub, said) in [
+            (
+                r#"{ id = "agent.poet", prefix = true }"#,
+                "`prefix` shapes a per-agent tool",
+            ),
+            (
+                r#"{ id = "agent.poet", defer = true }"#,
+                "`defer` hides a per-agent tool",
+            ),
+        ] {
+            let bad = team(
+                &format!(
+                    r#"subagents = [{sub}]
+                       subagent_tools = {{ strategy = "single" }}"#
+                ),
+                r#"description = "d""#,
+            );
+            let err = bad.validate().unwrap_err().to_string();
+            assert!(err.contains(said), "{sub}: {err}");
+            assert!(err.contains("the strategy is `single`"), "{sub}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_single_strategy_keeps_the_subagent_name_for_itself() {
+        let bad = team(
+            r#"subagents = ["agent.poet"]
+               subagent_tools = { strategy = "single" }
+               tools = [{ name = "subagent", description = "d", handler = "client" }]"#,
+            r#"description = "d""#,
+        );
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("one namespace"), "{err}");
+        assert!(err.contains("subagent"), "{err}");
+
+        team(
+            r#"subagents = ["agent.poet"]
+               tools = [{ name = "subagent", description = "d", handler = "client" }]"#,
+            r#"description = "d""#,
+        )
+        .validate()
+        .expect("per_agent offers no `subagent` tool, so the name is free");
+    }
+
+    #[test]
+    fn a_subagent_named_subagent_collides_with_the_single_tool() {
+        let raw = r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.assistant]
+            llm = "claude"
+            model = "m"
+            subagents = ["agent.subagent"]
+            subagent_tools = { strategy = "single" }
+
+            [agent.subagent]
+            llm = "claude"
+            model = "m"
+            description = "d"
+            "#;
+        let err = manifest(raw).validate().unwrap_err().to_string();
+        assert!(err.contains("one namespace"), "{err}");
+    }
+
+    #[test]
+    fn the_single_strategy_ignores_the_offered_name_length() {
+        let long = "p".repeat(70);
+        let raw = format!(
+            r#"
+            [llm.claude]
+            type = "anthropic"
+
+            [agent.assistant]
+            llm = "claude"
+            model = "m"
+            subagents = ["agent.{long}"]
+            subagent_tools = {{ strategy = "single" }}
+
+            [agent.{long}]
+            llm = "claude"
+            model = "m"
+            description = "d"
+            "#
+        );
+        manifest(&raw)
+            .validate()
+            .expect("no tool is named after the agent, so its id may be long");
+    }
+
+    #[test]
+    fn an_unknown_subagent_key_is_rejected() {
+        let raw = r#"
+            [agent.a]
+            subagents = [{ id = "agent.b", approve = true }]
+            "#;
+        let err = toml::from_str::<Manifest>(raw).unwrap_err().to_string();
+        assert!(err.contains("approve"), "{err}");
+    }
+
+    #[test]
+    fn a_prefixed_subagent_frees_the_bare_name_and_claims_the_prefixed_one() {
+        team(
+            r#"subagents = [{ id = "agent.poet", prefix = true }]
+               tools = [{ name = "poet", description = "d", handler = "client" }]"#,
+            r#"description = "d""#,
+        )
+        .validate()
+        .expect("the offered name is `agent__poet`, so `poet` is free");
+
+        let bad = team(
+            r#"subagents = [{ id = "agent.poet", prefix = true }]
+               tools = [{ name = "agent__poet", description = "d", handler = "client" }]"#,
+            r#"description = "d""#,
+        );
+        let err = bad.validate().unwrap_err().to_string();
+        assert!(err.contains("agent__poet"), "{err}");
+        assert!(err.contains("one namespace"), "{err}");
+    }
+
+    #[test]
+    fn an_over_long_offered_name_is_an_error_unless_it_defers() {
+        let long = "p".repeat(70);
+        let manifest_with = |sub: &str| {
+            manifest(&format!(
+                r#"
+                [llm.claude]
+                type = "anthropic"
+
+                [agent.assistant]
+                llm = "claude"
+                model = "m"
+                subagents = [{sub}]
+
+                [agent.{long}]
+                llm = "claude"
+                model = "m"
+                description = "d"
+                "#
+            ))
+        };
+        let err = manifest_with(&format!(r#""agent.{long}""#))
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("64 characters"), "{err}");
+        manifest_with(&format!(r#"{{ id = "agent.{long}", defer = true }}"#))
+            .validate()
+            .expect("a name that never reaches the request has nothing to fit");
+    }
+
+    #[test]
     fn an_engine_hosted_parent_needs_its_teammate_described() {
-        let bad = team(r#"sub_agents = ["poet"]"#, "");
+        let bad = team(r#"subagents = ["agent.poet"]"#, "");
         let err = bad.validate().unwrap_err().to_string();
         assert!(err.contains("no description"), "{err}");
 
         team(
-            r#"sub_agents = ["poet"]
+            r#"subagents = ["agent.poet"]
                worker = "https://bot.example.com/agent""#,
             "",
         )

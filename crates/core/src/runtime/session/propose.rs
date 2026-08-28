@@ -1,20 +1,18 @@
 use std::collections::HashMap;
 
-use uuid::Uuid;
-
 use super::interrupts::{self, approval, auth};
-use super::state::{EffectState, SessionStateAtNode};
-use super::tool_contract::{declared_tool, DeclaredTool};
+use super::state::{inner_arguments, EffectState, SessionStateAtNode};
+use super::tool_contract::{declared_tool, violates, DeclaredTool};
 use crate::protocol::StoredContent;
 use crate::protocol::{
-    AgentConfig, ClientContext, ConnectorTool, Content, DecisionAction, DecisionResponse,
-    DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, StoredResult, ToolCall,
+    AgentConfig, ClientContext, ConnectorTool, ConnectorToolKind, Content, DecisionAction,
+    DecisionResponse, DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, StoredResult,
+    ToolCall,
 };
 
 pub struct Proposing<'a> {
     pub state: SessionStateAtNode<'a, 'a>,
     pub pending_calls: usize,
-    pub decision_id: &'a str,
 }
 
 pub fn propose(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionResponse> {
@@ -40,7 +38,7 @@ fn stopped_for_auth(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<Deci
         DecisionTrigger::ClientTranscript { .. }
         | DecisionTrigger::LlmFinished { .. }
         | DecisionTrigger::ToolFinished { .. }
-        | DecisionTrigger::SubAgentFinished { .. } => true,
+        | DecisionTrigger::SubagentFinished { .. } => true,
         DecisionTrigger::InterruptResumed { resumption } => {
             !resumption.interrupt_id.starts_with(auth::PREFIX)
         }
@@ -58,7 +56,6 @@ fn derive(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionRespon
     let connector_tools = p.state.connector_tools().tools;
     let connector_tools = connector_tools.as_slice();
     let pending_calls = p.pending_calls;
-    let decision_id = p.decision_id;
     match trigger {
         DecisionTrigger::ClientTranscript {
             messages, client, ..
@@ -72,13 +69,7 @@ fn derive(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionRespon
             truncated: false,
             refused: false,
             ..
-        } => Some(llm_finished(
-            message,
-            transcript,
-            config,
-            connector_tools,
-            decision_id,
-        )),
+        } => Some(llm_finished(message, transcript, connector_tools)),
         DecisionTrigger::LlmFinished {
             id,
             ok,
@@ -107,17 +98,17 @@ fn derive(trigger: &DecisionTrigger, p: &Proposing<'_>) -> Option<DecisionRespon
             llm_calls,
             pending_calls,
         ),
-        DecisionTrigger::SubAgentFinished {
+        DecisionTrigger::SubagentFinished {
             id,
             ok,
             agent_id,
+            session_id,
             result,
             error,
-            ..
         } => tool_finished(
             id,
             agent_id,
-            Content::Text(settled_text(*ok, result, error)),
+            Content::Text(subagent_text(*ok, session_id, result, error)),
             transcript,
             llm_calls,
             pending_calls,
@@ -178,9 +169,7 @@ pub(super) fn resumed(transcript: &[Message], config: &AgentConfig) -> DecisionR
 fn llm_finished(
     message: &DraftMessage,
     transcript: &[Message],
-    config: Option<&AgentConfig>,
     connector_tools: &[ConnectorTool],
-    decision_id: &str,
 ) -> DecisionResponse {
     let tool_calls = message.tool_calls.as_deref().unwrap_or_default();
     let mut held = tool_calls
@@ -196,7 +185,7 @@ fn llm_finished(
     } else {
         tool_calls
             .iter()
-            .flat_map(|call| route_tool_call(call, config, decision_id))
+            .flat_map(|call| route_tool_call(call, connector_tools))
             .collect()
     };
     DecisionResponse {
@@ -251,15 +240,14 @@ fn answered(tool_call_id: &str, at: usize, transcript: &[Message]) -> bool {
 
 pub(super) fn route_tool_call(
     call: &ToolCall,
-    config: Option<&AgentConfig>,
-    decision_id: &str,
+    connector_tools: &[ConnectorTool],
 ) -> Vec<DecisionAction> {
-    if let Some(sub) = config.and_then(|c| c.sub_agent(&call.function.name)) {
-        return vec![DecisionAction::SpawnSubAgent {
-            session_id: child_session_id(decision_id, &call.id),
-            agent_id: sub.id.clone(),
+    if let Some(delegation) = subagent_call(call, connector_tools) {
+        return vec![DecisionAction::SpawnSubagent {
+            session_id: delegation.session,
+            agent_id: delegation.agent_id,
             tool_call_id: call.id.clone(),
-            message: Some(delegation_message(&call.function.arguments)),
+            message: Some(delegation.message),
             retry: None,
         }];
     }
@@ -271,15 +259,59 @@ pub(super) fn route_tool_call(
     }]
 }
 
-fn delegation_message(arguments: &str) -> DraftMessage {
-    let content = serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .and_then(|v| {
-            v.get("message")
-                .and_then(|m| m.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| arguments.to_string());
+struct Delegation {
+    agent_id: String,
+    message: DraftMessage,
+    session: Option<String>,
+}
+
+fn subagent_call(call: &ToolCall, connector_tools: &[ConnectorTool]) -> Option<Delegation> {
+    if !connector_tools
+        .iter()
+        .any(|t| t.kind == ConnectorToolKind::Subagent)
+    {
+        return None;
+    }
+    let subagent = |name: &str| {
+        connector_tools
+            .iter()
+            .filter(|t| t.kind == ConnectorToolKind::Subagent)
+            .find(|t| t.name == name)
+    };
+    if let Some(tool) = subagent(&call.function.name) {
+        return delegation(tool, &call.function.arguments, false);
+    }
+    if call.function.name != crate::protocol::CALL_TOOL {
+        return None;
+    }
+    let raw: serde_json::Value = serde_json::from_str(&call.function.arguments).ok()?;
+    let tool = subagent(raw.get("name")?.as_str()?)?;
+    delegation(tool, &inner_arguments(&raw), true)
+}
+
+fn delegation(tool: &ConnectorTool, arguments: &str, strict: bool) -> Option<Delegation> {
+    let bound = !tool.remote_name.is_empty();
+    let strict = strict || !bound;
+    let value = match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(value) => value,
+        Err(_) if strict => return None,
+        Err(_) => serde_json::Value::Null,
+    };
+    if strict && violates(&value, tool.input.as_ref()) {
+        return None;
+    }
+    let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    Some(Delegation {
+        agent_id: match bound {
+            true => tool.remote_name.clone(),
+            false => text("agent").filter(|v| !v.is_empty())?,
+        },
+        session: text("session").filter(|v| !v.is_empty()),
+        message: user_message(text("message").unwrap_or_else(|| arguments.to_string())),
+    })
+}
+
+fn user_message(content: String) -> DraftMessage {
     DraftMessage {
         id: None,
         role: Role::User,
@@ -289,16 +321,6 @@ fn delegation_message(arguments: &str) -> DraftMessage {
         name: None,
         reasoning: None,
     }
-}
-
-const SPAWN_NAMESPACE: Uuid = Uuid::from_u128(0x7b5e_1f2a_3c4d_5e6f_8091_a2b3_c4d5_e6f7);
-
-fn child_session_id(decision_id: &str, tool_call_id: &str) -> String {
-    Uuid::new_v5(
-        &SPAWN_NAMESPACE,
-        format!("{decision_id}:{tool_call_id}").as_bytes(),
-    )
-    .to_string()
 }
 
 fn client_turn(
@@ -346,6 +368,22 @@ fn unconfigured(view: &[DraftMessage]) -> DecisionResponse {
         }],
         ..Default::default()
     }
+}
+
+fn subagent_text(
+    ok: bool,
+    session_id: &str,
+    result: &Option<String>,
+    error: &Option<ErrorInfo>,
+) -> String {
+    if !ok {
+        return settled_text(ok, result, error);
+    }
+    serde_json::json!({
+        "session": session_id,
+        "result": result.as_deref().unwrap_or_default(),
+    })
+    .to_string()
 }
 
 fn settled_text(ok: bool, result: &Option<String>, error: &Option<ErrorInfo>) -> String {
@@ -562,8 +600,8 @@ mod tests {
     use crate::connectors::{AuthNeed, RemoteTool, ToolAnnotations};
     use crate::protocol::ErrorCode;
     use crate::protocol::{
-        AgentTool, Approve, Handler, LlmRequest, McpServer, NewMessage, RetryPolicy, SubAgent,
-        ToolCallFunction, ToolInput,
+        AgentTool, Approve, Handler, LlmRequest, McpServer, NewMessage, RetryPolicy, Subagent,
+        ToolCallFunction, ToolInput, SUBAGENT,
     };
     use crate::runtime::session::decision::LlmHandler;
     use crate::runtime::session::state::{
@@ -608,14 +646,12 @@ mod tests {
         trigger: &DecisionTrigger,
         state: &SessionState,
         pending_calls: usize,
-        decision_id: &str,
     ) -> Option<DecisionResponse> {
         super::propose(
             trigger,
             &Proposing {
                 state: state.at_head(),
                 pending_calls,
-                decision_id,
             },
         )
     }
@@ -626,25 +662,15 @@ mod tests {
         llm_calls: &HashMap<String, EffectState>,
         pending_calls: usize,
         config: Option<&AgentConfig>,
-        decision_id: &str,
     ) -> Option<DecisionResponse> {
         let state = state_of(transcript, llm_calls, config);
-        propose_on(trigger, &state, pending_calls, decision_id)
+        propose_on(trigger, &state, pending_calls)
     }
 
     fn minimal_cfg() -> AgentConfig {
         AgentConfig {
-            llm: None,
             model: "m".to_string(),
-            system: None,
-            retry: None,
-            tools: Vec::new(),
-            sub_agents: Vec::new(),
-            mcp: Vec::new(),
-            defer_tools: None,
-            mcp_announce: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
+            ..Default::default()
         }
     }
 
@@ -799,7 +825,6 @@ mod tests {
             &HashMap::new(),
             0,
             None,
-            "d0",
         )
         .expect("proposes");
         match &p.actions[..] {
@@ -888,7 +913,6 @@ mod tests {
             &HashMap::new(),
             0,
             None,
-            "d0",
         )
         .expect("proposes");
 
@@ -927,7 +951,6 @@ mod tests {
             &HashMap::new(),
             0,
             None,
-            "d0",
         )
         .expect("proposes");
 
@@ -950,7 +973,6 @@ mod tests {
             &HashMap::new(),
             0,
             None,
-            "d0",
         )
         .expect("proposes");
 
@@ -982,8 +1004,7 @@ mod tests {
                 "llm call truncated",
             ),
         ] {
-            let p =
-                propose(&trigger, &transcript, &HashMap::new(), 0, None, "d0").expect("proposes");
+            let p = propose(&trigger, &transcript, &HashMap::new(), 0, None).expect("proposes");
             assert_eq!(p.messages.len(), 1, "nothing recorded, not even a partial");
             match &p.actions[..] {
                 [DecisionAction::Interrupt {
@@ -1010,7 +1031,7 @@ mod tests {
             cost: None,
             error: Some(ErrorInfo::new(ErrorCode::RateLimited, "rate limited")),
         };
-        let p = propose(&trigger, &[], &HashMap::new(), 0, None, "d0").expect("proposes");
+        let p = propose(&trigger, &[], &HashMap::new(), 0, None).expect("proposes");
         match &p.actions[..] {
             [DecisionAction::Interrupt {
                 reason, payload, ..
@@ -1024,13 +1045,13 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_finished_folds_like_a_tool_and_reissues() {
+    fn subagent_finished_folds_like_a_tool_and_reissues() {
         let transcript = vec![
             msg("u1", Role::User, "hi"),
             assistant_with_calls("call-1", &[("tc-1", "researcher")]),
         ];
         let llm_calls = HashMap::from([("call-1".to_string(), call_state("call-1", vec![]))]);
-        let trigger = DecisionTrigger::SubAgentFinished {
+        let trigger = DecisionTrigger::SubagentFinished {
             id: "tc-1".to_string(),
             ok: true,
             session_id: "child".to_string(),
@@ -1039,7 +1060,7 @@ mod tests {
             error: None,
         };
 
-        let p = propose(&trigger, &transcript, &llm_calls, 0, None, "d0").expect("proposes");
+        let p = propose(&trigger, &transcript, &llm_calls, 0, None).expect("proposes");
 
         let folded = p.messages.last().expect("tool message appended");
         assert!(matches!(folded.role, Role::Tool));
@@ -1047,7 +1068,8 @@ mod tests {
         assert_eq!(folded.name.as_deref(), Some("researcher"));
         assert_eq!(
             folded.content.as_ref().and_then(Content::text),
-            Some("findings")
+            Some(r#"{"result":"findings","session":"child"}"#),
+            "the answer carries the session, so the model can continue it"
         );
         let (request, _, _) = reissued_request(&p);
         assert_eq!(request.model, "test-model");
@@ -1084,7 +1106,7 @@ mod tests {
                 attempt: 0,
                 deadline: None,
             };
-            let p = propose(&trigger, &[], &HashMap::new(), 0, None, "d0").expect("proposes");
+            let p = propose(&trigger, &[], &HashMap::new(), 0, None).expect("proposes");
             let (id, error) = expect_tool_error(&p);
             assert_eq!(id, "tc-1");
             assert_eq!(
@@ -1120,7 +1142,7 @@ mod tests {
             deadline: None,
         };
 
-        let p = propose(&trigger, &transcript, &llm_calls, 0, None, "d0").expect("proposes");
+        let p = propose(&trigger, &transcript, &llm_calls, 0, None).expect("proposes");
         let (id, error) = expect_tool_error(&p);
         assert_eq!(id, "tc-1");
         assert_eq!(error, "unknown tool: hallucinated");
@@ -1139,7 +1161,6 @@ mod tests {
             &HashMap::new(),
             1,
             None,
-            "d0",
         )
         .expect("proposes");
 
@@ -1174,7 +1195,6 @@ mod tests {
             &llm_calls,
             0,
             None,
-            "d0",
         )
         .expect("proposes");
 
@@ -1211,7 +1231,6 @@ mod tests {
             &llm_calls,
             0,
             None,
-            "d0",
         )
         .expect("proposes");
 
@@ -1232,7 +1251,6 @@ mod tests {
             &HashMap::new(),
             0,
             None,
-            "d0",
         )
         .is_none());
     }
@@ -1249,7 +1267,7 @@ mod tests {
             attempt: 0,
             deadline: None,
         };
-        assert!(propose(&trigger, &[], &HashMap::new(), 0, None, "d0").is_none());
+        assert!(propose(&trigger, &[], &HashMap::new(), 0, None).is_none());
     }
 
     #[test]
@@ -1259,8 +1277,7 @@ mod tests {
             &[],
             &HashMap::new(),
             0,
-            None,
-            "d0"
+            None
         )
         .is_none());
     }
@@ -1278,20 +1295,17 @@ mod tests {
             llm: Some("claude".to_string()),
             model: "cfg-model".to_string(),
             system: Some("be terse".to_string()),
-            retry: None,
             tools: vec![
                 tool("confirm", Some(Handler::Client)),
                 tool("get_time", None),
             ],
-            sub_agents: vec![SubAgent {
+            subagents: vec![Subagent {
                 id: "researcher".to_string(),
                 description: String::new(),
+                defer: None,
+                prefix: None,
             }],
-            mcp: Vec::new(),
-            defer_tools: None,
-            mcp_announce: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
+            ..Default::default()
         }
     }
 
@@ -1304,8 +1318,8 @@ mod tests {
             new_from: 0,
             client: ClientContext::default(),
         };
-        let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
-            .expect("config ⇒ a proposal");
+        let p =
+            propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg)).expect("config ⇒ a proposal");
         assert_eq!(p.messages.len(), 1, "records the client view");
         match &p.actions[..] {
             [DecisionAction::CallLlm {
@@ -1319,8 +1333,8 @@ mod tests {
                 assert_eq!(*stream, None, "the resolve seam settles streaming");
                 assert_eq!(
                     tools.as_ref().map(Vec::len),
-                    Some(3),
-                    "config tools offered"
+                    Some(2),
+                    "declared tools offered; the subagent rides with the connector tools"
                 );
                 let roles: Vec<_> = messages
                     .as_ref()
@@ -1349,8 +1363,8 @@ mod tests {
             new_from: 0,
             client: ClientContext::default(),
         };
-        let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
-            .expect("config ⇒ a proposal");
+        let p =
+            propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg)).expect("config ⇒ a proposal");
         assert!(
             p.messages.iter().all(|m| m.role != Role::System),
             "client system message not recorded"
@@ -1384,8 +1398,8 @@ mod tests {
             new_from: 0,
             client: ClientContext::default(),
         };
-        let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
-            .expect("config ⇒ a proposal");
+        let p =
+            propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg)).expect("config ⇒ a proposal");
         match &p.actions[..] {
             [DecisionAction::CallLlm { llm, .. }] => assert_eq!(llm.as_deref(), Some("byo")),
             other => panic!("expected one llm.call; got {other:?}"),
@@ -1412,8 +1426,8 @@ mod tests {
             new_from: 0,
             client,
         };
-        let p = propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg), "d0")
-            .expect("config ⇒ a proposal");
+        let p =
+            propose(&trigger, &[], &HashMap::new(), 0, Some(&cfg)).expect("config ⇒ a proposal");
         let agent = p.agent.as_ref().expect("a new tool ⇒ an agent write");
         assert!(
             agent.tool("get_tz").is_some(),
@@ -1447,8 +1461,7 @@ mod tests {
             new_from: 0,
             client: ClientContext::default(),
         };
-        let p = propose(&trigger, &[], &HashMap::new(), 0, None, "d0")
-            .expect("no config still proposes");
+        let p = propose(&trigger, &[], &HashMap::new(), 0, None).expect("no config still proposes");
         assert!(
             p.messages.iter().all(|m| m.role != Role::System),
             "client system message not recorded"
@@ -1483,11 +1496,10 @@ mod tests {
             &HashMap::new(),
             0,
             Some(&cfg),
-            "dX",
         )
         .expect("proposes");
         match &p.actions[..] {
-            [DecisionAction::SpawnSubAgent {
+            [DecisionAction::SpawnSubagent {
                 agent_id,
                 tool_call_id,
                 session_id,
@@ -1497,7 +1509,7 @@ mod tests {
             {
                 assert_eq!(agent_id.as_str(), "researcher");
                 assert_eq!(tool_call_id.as_str(), "tc-a");
-                assert_eq!(session_id, &child_session_id("dX", "tc-a"));
+                assert_eq!(session_id, &None, "a call naming no session starts one");
                 assert!(
                     message.is_some(),
                     "the delegating message rides with the spawn"
@@ -1510,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_spawn_forwards_the_delegating_message() {
+    fn subagent_spawn_forwards_the_delegating_message() {
         let mut assistant = assistant_with_calls("call-1", &[("tc-a", "researcher")]);
         assistant.tool_calls[0].function.arguments = r#"{"message":"find X"}"#.to_string();
         let p = propose(
@@ -1519,11 +1531,10 @@ mod tests {
             &HashMap::new(),
             0,
             Some(&agent_cfg()),
-            "dX",
         )
         .expect("proposes");
         match &p.actions[..] {
-            [DecisionAction::SpawnSubAgent { message, .. }] => {
+            [DecisionAction::SpawnSubagent { message, .. }] => {
                 let message = message.as_ref().expect("the spawn carries the message");
                 assert_eq!(message.role, Role::User);
                 assert_eq!(
@@ -1536,21 +1547,253 @@ mod tests {
     }
 
     #[test]
-    fn spawn_session_id_is_deterministic_and_distinct() {
-        assert_eq!(child_session_id("d1", "tc1"), child_session_id("d1", "tc1"));
-        assert_ne!(child_session_id("d1", "tc1"), child_session_id("d1", "tc2"));
-        assert_ne!(child_session_id("d1", "tc1"), child_session_id("d2", "tc1"));
+    fn call_tool_naming_a_subagent_spawns_it_with_the_inner_message() {
+        let mut assistant = assistant_with_calls("call-1", &[("tc-a", "call_tool")]);
+        assistant.tool_calls[0].function.arguments =
+            r#"{"name":"researcher","arguments":{"message":"find X"}}"#.to_string();
+        let p = propose(
+            &llm_finished_trigger(DraftMessage::from(assistant), true, false),
+            &[msg("u1", Role::User, "hi")],
+            &HashMap::new(),
+            0,
+            Some(&agent_cfg()),
+        )
+        .expect("proposes");
+        match &p.actions[..] {
+            [DecisionAction::SpawnSubagent {
+                agent_id,
+                tool_call_id,
+                message,
+                ..
+            }] => {
+                assert_eq!(agent_id, "researcher");
+                assert_eq!(tool_call_id, "tc-a");
+                assert_eq!(
+                    message
+                        .as_ref()
+                        .and_then(|m| m.content.as_ref())
+                        .and_then(Content::text),
+                    Some("find X"),
+                    "the inner message rides with the spawn"
+                );
+            }
+            other => panic!("expected a spawn; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_tool_with_bad_subagent_arguments_stays_a_tool_call() {
+        let mut assistant = assistant_with_calls("call-1", &[("tc-a", "call_tool")]);
+        assistant.tool_calls[0].function.arguments =
+            r#"{"name":"researcher","arguments":{"question":"find X"}}"#.to_string();
+        let p = propose(
+            &llm_finished_trigger(DraftMessage::from(assistant), true, false),
+            &[msg("u1", Role::User, "hi")],
+            &HashMap::new(),
+            0,
+            Some(&agent_cfg()),
+        )
+        .expect("proposes");
+        assert!(
+            matches!(
+                &p.actions[..],
+                [DecisionAction::CallTool { name, .. }] if name == "call_tool"
+            ),
+            "the fault path answers it, not a spawn; got {:?}",
+            p.actions
+        );
+    }
+
+    #[test]
+    fn a_prefixed_subagent_routes_by_its_offered_name_only() {
+        let mut cfg = agent_cfg();
+        cfg.subagents[0].prefix = Some(true);
+        let route = |name: &str| {
+            let assistant = DraftMessage::from(assistant_with_calls("call-1", &[("tc-a", name)]));
+            propose(
+                &llm_finished_trigger(assistant, true, false),
+                &[msg("u1", Role::User, "hi")],
+                &HashMap::new(),
+                0,
+                Some(&cfg),
+            )
+            .expect("proposes")
+            .actions
+        };
+        match &route("agent__researcher")[..] {
+            [DecisionAction::SpawnSubagent { agent_id, .. }] => {
+                assert_eq!(agent_id, "researcher", "the spawn keys on the agent id");
+            }
+            other => panic!("expected a spawn; got {other:?}"),
+        }
+        assert!(
+            matches!(&route("researcher")[..], [DecisionAction::CallTool { .. }]),
+            "the bare id is not offered, so it does not delegate"
+        );
+    }
+
+    fn single_cfg() -> AgentConfig {
+        AgentConfig {
+            subagent_tools: Some(crate::protocol::SubagentTools {
+                strategy: crate::protocol::SubagentToolsStrategy::Single,
+            }),
+            ..agent_cfg()
+        }
+    }
+
+    fn route_with(cfg: &AgentConfig, name: &str, arguments: &str) -> Vec<DecisionAction> {
+        let mut assistant = assistant_with_calls("call-1", &[("tc-a", name)]);
+        assistant.tool_calls[0].function.arguments = arguments.to_string();
+        propose(
+            &llm_finished_trigger(DraftMessage::from(assistant), true, false),
+            &[msg("u1", Role::User, "hi")],
+            &HashMap::new(),
+            0,
+            Some(cfg),
+        )
+        .expect("proposes")
+        .actions
+    }
+
+    #[test]
+    fn the_single_tool_routes_by_the_agent_its_call_names() {
+        let actions = route_with(
+            &single_cfg(),
+            SUBAGENT,
+            r#"{"agent":"researcher","message":"find X"}"#,
+        );
+        match &actions[..] {
+            [DecisionAction::SpawnSubagent {
+                agent_id,
+                message,
+                session_id,
+                ..
+            }] => {
+                assert_eq!(agent_id, "researcher");
+                assert_eq!(session_id, &None, "a call naming no session starts one");
+                assert_eq!(
+                    message
+                        .as_ref()
+                        .and_then(|m| m.content.as_ref())
+                        .and_then(Content::text),
+                    Some("find X")
+                );
+            }
+            other => panic!("expected a spawn; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_single_tool_continues_the_session_its_call_names() {
+        let actions = route_with(
+            &single_cfg(),
+            SUBAGENT,
+            r#"{"agent":"researcher","message":"more","session":"child-7"}"#,
+        );
+        match &actions[..] {
+            [DecisionAction::SpawnSubagent { session_id, .. }] => {
+                assert_eq!(
+                    session_id.as_deref(),
+                    Some("child-7"),
+                    "the named session is continued, not created"
+                );
+            }
+            other => panic!("expected a spawn; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_single_tool_leaves_an_unknown_agent_to_the_fault_path() {
+        for arguments in [
+            r#"{"agent":"nobody","message":"find X"}"#,
+            r#"{"message":"find X"}"#,
+        ] {
+            assert!(
+                matches!(
+                    &route_with(&single_cfg(), SUBAGENT, arguments)[..],
+                    [DecisionAction::CallTool { .. }]
+                ),
+                "{arguments}: the engine answers with the fault, not a spawn"
+            );
+        }
+    }
+
+    #[test]
+    fn the_single_tool_delegates_through_call_tool_when_deferred() {
+        let mut cfg = single_cfg();
+        cfg.defer_tools = Some(Default::default());
+        let actions = route_with(
+            &cfg,
+            crate::protocol::CALL_TOOL,
+            r#"{"name":"subagent","arguments":{"agent":"researcher","message":"find X"}}"#,
+        );
+        match &actions[..] {
+            [DecisionAction::SpawnSubagent {
+                agent_id, message, ..
+            }] => {
+                assert_eq!(agent_id, "researcher");
+                assert_eq!(
+                    message
+                        .as_ref()
+                        .and_then(|m| m.content.as_ref())
+                        .and_then(Content::text),
+                    Some("find X")
+                );
+            }
+            other => panic!("expected a spawn; got {other:?}"),
+        }
+        assert!(
+            matches!(
+                &route_with(
+                    &cfg,
+                    crate::protocol::CALL_TOOL,
+                    r#"{"name":"subagent","arguments":{"agent":"nobody","message":"x"}}"#
+                )[..],
+                [DecisionAction::CallTool { .. }]
+            ),
+            "an unknown agent stays a tool call, which answers with the fault"
+        );
+    }
+
+    #[test]
+    fn a_per_agent_subagent_continues_the_session_its_call_names() {
+        let actions = route_with(
+            &agent_cfg(),
+            "researcher",
+            r#"{"message":"more","session":"child-7"}"#,
+        );
+        match &actions[..] {
+            [DecisionAction::SpawnSubagent {
+                session_id,
+                agent_id,
+                ..
+            }] => {
+                assert_eq!(agent_id, "researcher");
+                assert_eq!(session_id.as_deref(), Some("child-7"));
+            }
+            other => panic!("expected a spawn; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_session_starts_a_fresh_child() {
+        let actions = route_with(
+            &agent_cfg(),
+            "researcher",
+            r#"{"message":"go","session":""}"#,
+        );
+        match &actions[..] {
+            [DecisionAction::SpawnSubagent { session_id, .. }] => {
+                assert_eq!(session_id, &None);
+            }
+            other => panic!("expected a spawn; got {other:?}"),
+        }
     }
 
     fn calling(calls: &[(&str, &str)], defer: bool) -> Option<DecisionResponse> {
         let assistant = DraftMessage::from(assistant_with_calls("call-1", calls));
         let state = gated_state(&[msg("u1", Role::User, "hi")], &HashMap::new(), None, defer);
-        propose_on(
-            &llm_finished_trigger(assistant, true, false),
-            &state,
-            0,
-            "d0",
-        )
+        propose_on(&llm_finished_trigger(assistant, true, false), &state, 0)
     }
 
     fn answer_with(
@@ -1570,7 +1813,7 @@ mod tests {
                 payload,
             },
         };
-        propose_on(&trigger, &state, 0, "d1").expect("the resume is answered")
+        propose_on(&trigger, &state, 0).expect("the resume is answered")
     }
 
     fn answer(
@@ -1753,7 +1996,6 @@ mod tests {
             &llm_finished_trigger(DraftMessage::from(assistant), true, false),
             &state,
             0,
-            "d0",
         )
         .expect("proposes");
         let (_, payload) = interrupt(&p.actions[0]);
@@ -1786,7 +2028,6 @@ mod tests {
             &llm_finished_trigger(DraftMessage::from(assistant), true, false),
             &state,
             0,
-            "d0",
         )
         .expect("proposes");
         let (_, payload) = interrupt(&p.actions[0]);
@@ -1943,7 +2184,6 @@ mod tests {
             &tool_finished_trigger("tc-1", "sentry__delete", Ok("done")),
             &state,
             0,
-            "d1",
         )
         .expect("proposes");
         assert!(
@@ -1967,7 +2207,6 @@ mod tests {
             &tool_finished_trigger("tc-1", "sentry__delete", Ok("done")),
             &state,
             0,
-            "d1",
         )
         .expect("proposes");
         assert!(
@@ -1990,7 +2229,7 @@ mod tests {
             },
         };
         let state = gated_state(&settled, &llm_calls, Some(&cfg), false);
-        let p = propose_on(&trigger, &state, 0, "d2").expect("proposes");
+        let p = propose_on(&trigger, &state, 0).expect("proposes");
         assert!(
             !p.actions
                 .iter()
@@ -2107,7 +2346,6 @@ mod tests {
                 &llm_finished_trigger(DraftMessage::from(assistant), true, false),
                 &state,
                 0,
-                "d0",
             )
             .expect("proposes")
         };
@@ -2143,7 +2381,7 @@ mod tests {
         };
         let (transcript, llm_calls) = held();
         let state = gated_state(&transcript, &llm_calls, Some(&cfg), false);
-        let p = propose_on(&trigger, &state, 0, "d1").expect("proposes");
+        let p = propose_on(&trigger, &state, 0).expect("proposes");
         match &p.actions[..] {
             [DecisionAction::CallLlm { model, .. }] => {
                 assert_eq!(model.as_deref(), Some("cfg-model"))
@@ -2175,7 +2413,7 @@ mod tests {
         config: Option<&AgentConfig>,
     ) -> Option<DecisionResponse> {
         let state = needing_auth_state(transcript, config);
-        propose_on(trigger, &state, 0, "d0")
+        propose_on(trigger, &state, 0)
     }
 
     fn is_auth_interrupt(action: &DecisionAction) -> bool {
@@ -2194,8 +2432,7 @@ mod tests {
             client: ClientContext::default(),
         };
 
-        let ran =
-            propose(&asked, &[], &HashMap::new(), 0, Some(&config), "d0").expect("a proposal");
+        let ran = propose(&asked, &[], &HashMap::new(), 0, Some(&config)).expect("a proposal");
         assert!(
             ran.actions
                 .iter()
@@ -2265,7 +2502,6 @@ mod tests {
             &HashMap::new(),
             0,
             Some(&config),
-            "d0",
         )
         .expect("a proposal");
 

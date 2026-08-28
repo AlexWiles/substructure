@@ -38,6 +38,54 @@ fn create_session(session_id: &str, tenant_id: &str, user_id: &str) -> SessionAg
     create_session_with_config(session_id, tenant_id, user_id, None)
 }
 
+const SPAWN_DECISION: &str = "d-spawn";
+
+fn child_of(agg: &SessionAggregate, call: &str) -> String {
+    agg.state
+        .subagent(call)
+        .expect("the spawn recorded a child")
+        .session_id
+        .clone()
+}
+
+fn spawn_as(agent: &str, call: &str) -> CommandPayload {
+    CommandPayload::RequestSubagent {
+        session_id: None,
+        agent_id: agent.to_string(),
+        tool_call_id: call.to_string(),
+        message: None,
+        retry: RetryPolicy::no_retry(),
+        decision_id: SPAWN_DECISION.to_string(),
+    }
+}
+
+fn continue_as(agent: &str, child: &str, call: &str) -> CommandPayload {
+    CommandPayload::RequestSubagent {
+        session_id: Some(child.to_string()),
+        agent_id: agent.to_string(),
+        tool_call_id: call.to_string(),
+        message: None,
+        retry: RetryPolicy::no_retry(),
+        decision_id: SPAWN_DECISION.to_string(),
+    }
+}
+
+fn spawn(call: &str) -> CommandPayload {
+    spawn_as("agent-2", call)
+}
+
+fn answer(child: &str, turn: &str, cost: rust_decimal::Decimal) -> CommandPayload {
+    CommandPayload::CompleteSubagentTurn {
+        session_id: child.to_string(),
+        agent_id: "agent-2".to_string(),
+        turn_id: turn.to_string(),
+        data: serde_json::json!("done"),
+        cost,
+        token_usage: Default::default(),
+        error: None,
+    }
+}
+
 fn create_session_with_config(
     session_id: &str,
     tenant_id: &str,
@@ -2603,18 +2651,12 @@ fn fail_tool_call_emits_errored() {
 }
 
 #[test]
-fn request_sub_agent_emits_requested() {
+fn request_subagent_emits_requested() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
 
     let events = dispatch(
         &mut agg,
-        CommandPayload::RequestSubAgent {
-            session_id: "child-1".to_string(),
-            agent_id: "agent-2".to_string(),
-            tool_call_id: "call-sa".to_string(),
-            message: None,
-            retry: RetryPolicy::no_retry(),
-        },
+        spawn("call-sa"),
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
         },
@@ -2624,27 +2666,27 @@ fn request_sub_agent_emits_requested() {
         matches!(
             events.as_slice(),
             [
-                EventPayload::SubAgentRequested(_),
-                EventPayload::SubAgentDispatched(_),
+                EventPayload::SubagentRequested(_),
+                EventPayload::SubagentDispatched(_),
             ]
         ),
-        "expected [SubAgentRequested, SubAgentDispatched]; got {events:?}"
+        "expected [SubagentRequested, SubagentDispatched]; got {events:?}"
     );
     let sa = agg
         .state
-        .effect(EffectKind::SubAgent, "child-1")
-        .expect("sub-agent recorded");
+        .effect(EffectKind::Subagent, "call-sa")
+        .expect("subagent recorded");
     assert_eq!(sa.tracking.status(), EffectStatus::Pending);
 }
 
 #[test]
-fn request_sub_agent_holds_the_opening_message() {
+fn request_subagent_holds_the_opening_message() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
 
     let events = dispatch(
         &mut agg,
-        CommandPayload::RequestSubAgent {
-            session_id: "child-1".to_string(),
+        CommandPayload::RequestSubagent {
+            session_id: None,
             agent_id: "agent-2".to_string(),
             tool_call_id: "call-sa".to_string(),
             message: Some(DraftMessage {
@@ -2657,6 +2699,7 @@ fn request_sub_agent_holds_the_opening_message() {
                 reasoning: None,
             }),
             retry: RetryPolicy::no_retry(),
+            decision_id: SPAWN_DECISION.to_string(),
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2667,15 +2710,15 @@ fn request_sub_agent_holds_the_opening_message() {
         !events
             .iter()
             .any(|e| matches!(e, EventPayload::SessionMessageRequested(_))),
-        "the delegation sends nothing of its own; got {events:?}"
+        "the subagent sends nothing of its own; got {events:?}"
     );
     let held = agg
         .state
-        .sub_agent("child-1")
-        .expect("sub-agent recorded")
+        .subagent("call-sa")
+        .expect("subagent recorded")
         .message
         .clone()
-        .expect("the delegation holds its opening message");
+        .expect("the subagent holds its opening message");
     assert_eq!(
         held.content.as_ref().and_then(Content::text),
         Some("find X")
@@ -2683,17 +2726,11 @@ fn request_sub_agent_holds_the_opening_message() {
 }
 
 #[test]
-fn start_sub_agent_emits_started() {
+fn start_subagent_emits_started() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     dispatch(
         &mut agg,
-        CommandPayload::RequestSubAgent {
-            session_id: "child-1".to_string(),
-            agent_id: "agent-2".to_string(),
-            tool_call_id: "call-sa".to_string(),
-            message: None,
-            retry: RetryPolicy::no_retry(),
-        },
+        spawn("call-sa"),
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
         },
@@ -2702,10 +2739,10 @@ fn start_sub_agent_emits_started() {
     let events = dispatch(
         &mut agg,
         CommandPayload::settle(
-            EffectKind::SubAgent,
-            "child-1".to_string(),
+            EffectKind::Subagent,
+            "call-sa".to_string(),
             None,
-            Outcome::SubAgentStarted,
+            Outcome::SubagentStarted,
         ),
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2713,23 +2750,17 @@ fn start_sub_agent_emits_started() {
     );
 
     assert!(
-        matches!(events.as_slice(), [EventPayload::SubAgentStarted(_)]),
-        "expected [SubAgentStarted]; got {events:?}"
+        matches!(events.as_slice(), [EventPayload::SubagentStarted(_)]),
+        "expected [SubagentStarted]; got {events:?}"
     );
 }
 
 #[test]
-fn fail_sub_agent_emits_errored() {
+fn fail_subagent_emits_errored() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     dispatch(
         &mut agg,
-        CommandPayload::RequestSubAgent {
-            session_id: "child-1".to_string(),
-            agent_id: "agent-2".to_string(),
-            tool_call_id: "call-sa".to_string(),
-            message: None,
-            retry: RetryPolicy::no_retry(),
-        },
+        spawn("call-sa"),
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
         },
@@ -2738,8 +2769,8 @@ fn fail_sub_agent_emits_errored() {
     let events = dispatch(
         &mut agg,
         CommandPayload::settle(
-            EffectKind::SubAgent,
-            "child-1".to_string(),
+            EffectKind::Subagent,
+            "call-sa".to_string(),
             None,
             SettleError::new(ErrorInfo::internal("child crashed".to_string()), false),
         ),
@@ -2752,50 +2783,180 @@ fn fail_sub_agent_emits_errored() {
         matches!(
             events.as_slice(),
             [
-                EventPayload::SubAgentErrored(_),
+                EventPayload::SubagentErrored(_),
                 EventPayload::DecisionQueued(_),
                 EventPayload::DecisionDispatched(_),
             ]
         ),
-        "expected [SubAgentErrored, DecisionDispatched]; got {events:?}"
+        "expected [SubagentErrored, DecisionDispatched]; got {events:?}"
     );
     assert_eq!(fired_tool_result(&events), vec!["call-sa".to_string()]);
     let sa = agg
         .state
-        .effect(EffectKind::SubAgent, "child-1")
-        .expect("sub-agent present");
+        .effect(EffectKind::Subagent, "call-sa")
+        .expect("subagent present");
     assert_eq!(sa.tracking.status(), EffectStatus::Failed);
-    let sa = sa.sub_agent().unwrap();
+    let sa = sa.subagent().unwrap();
     assert_eq!(sa.result.as_deref(), Some("child crashed"));
     assert!(sa.is_error);
 }
 
 #[test]
-fn complete_sub_agent_turn_emits_completed() {
+fn a_spawn_past_the_depth_limit_settles_as_a_tool_error() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            max_subagent_depth: Some(0),
+            ..agent_config("m1")
+        }),
+    );
+
+    let events = dispatch(&mut agg, spawn("call-sa"), &system());
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentRequested(_))),
+        "the spawn is rejected; got {events:?}"
+    );
+    let trigger = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::DecisionQueued(p) => Some(p.trigger.clone()),
+            _ => None,
+        })
+        .expect("the rejection folds back as the subagent's result");
+    match trigger {
+        Trigger::SubagentFinished {
+            id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(id, "call-sa");
+            assert_eq!(error.code, crate::protocol::ErrorCode::BudgetExceeded);
+            assert!(
+                error
+                    .message
+                    .contains("subagent depth limit reached: max_subagent_depth is 0"),
+                "{}",
+                error.message
+            );
+        }
+        other => panic!("expected a failed subagent.finished; got {other:?}"),
+    }
+    assert!(
+        agg.state.effect(EffectKind::Subagent, "call-sa").is_none(),
+        "no subagent effect, so no child starts"
+    );
+}
+
+#[test]
+fn the_default_depth_limit_stops_a_spawn_five_deep() {
+    let mut agg = SessionAggregate::new(
+        "sess-4".to_string(),
+        "tenant-a".to_string(),
+        SessionState::new("sess-4".to_string()),
+    );
+    dispatch(
+        &mut agg,
+        CommandPayload::CreateSession {
+            agent_id: "agent-1".to_string(),
+            owner: SessionOwner {
+                tenant_id: "tenant-a".to_string(),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
+                metadata: HashMap::new(),
+            },
+            ancestry: vec![
+                "sess-1".to_string(),
+                "sess-2".to_string(),
+                "sess-3".to_string(),
+                "sess-4a".to_string(),
+                "sess-5".to_string(),
+            ],
+            worker_retry: RetryPolicy::no_retry(),
+        },
+        &system(),
+    );
+
+    let events = dispatch(&mut agg, spawn("call-sa"), &system());
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentRequested(_))),
+        "the default limit is 5; got {events:?}"
+    );
+    assert!(
+        agg.state.effect(EffectKind::Subagent, "call-sa").is_none(),
+        "no child starts"
+    );
+}
+
+#[test]
+fn cancelling_voids_a_running_subagent() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    dispatch(&mut agg, spawn("call-sa"), &system());
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::Subagent,
+            "call-sa".to_string(),
+            None,
+            Outcome::SubagentStarted,
+        ),
+        &system(),
+    );
+    assert_eq!(
+        agg.state
+            .effect(EffectKind::Subagent, "call-sa")
+            .expect("subagent present")
+            .tracking
+            .status(),
+        EffectStatus::Running
+    );
+
+    let events = dispatch(&mut agg, CommandPayload::CancelSession, &system());
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EventPayload::CallVoided(v) if v.kind == EffectKind::Subagent && v.id == "call-sa"
+        )),
+        "the void cancels the child session; got {events:?}"
+    );
+    assert!(
+        agg.state.subagent("call-sa").is_some(),
+        "the void names the tool call, so the state still says which child to cancel"
+    );
+}
+
+#[test]
+fn complete_subagent_turn_emits_completed() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     dispatch(
         &mut agg,
-        CommandPayload::RequestSubAgent {
-            session_id: "child-1".to_string(),
-            agent_id: "agent-2".to_string(),
-            tool_call_id: "call-sa".to_string(),
-            message: None,
-            retry: RetryPolicy::no_retry(),
-        },
+        spawn("call-sa"),
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
         },
     );
 
+    let child = child_of(&agg, "call-sa");
     let events = dispatch(
         &mut agg,
-        CommandPayload::CompleteSubAgentTurn {
-            session_id: "child-1".to_string(),
+        CommandPayload::CompleteSubagentTurn {
+            session_id: child,
             agent_id: "agent-2".to_string(),
             turn_id: "turn-x".to_string(),
             data: serde_json::json!("done"),
             cost: rust_decimal::Decimal::ZERO,
             token_usage: Default::default(),
+            error: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2806,46 +2967,221 @@ fn complete_sub_agent_turn_emits_completed() {
         matches!(
             events.as_slice(),
             [
-                EventPayload::SubAgentTurnCompleted(_),
+                EventPayload::SubagentTurnCompleted(_),
                 EventPayload::DecisionQueued(_),
                 EventPayload::DecisionDispatched(_),
             ]
         ),
-        "expected [SubAgentTurnCompleted, DecisionDispatched]; got {events:?}"
+        "expected [SubagentTurnCompleted, DecisionDispatched]; got {events:?}"
     );
     assert_eq!(fired_tool_result(&events), vec!["call-sa".to_string()]);
     let sa = agg
         .state
-        .effect(EffectKind::SubAgent, "child-1")
-        .expect("sub-agent present");
-    let sa = sa.sub_agent().unwrap();
+        .effect(EffectKind::Subagent, "call-sa")
+        .expect("subagent present");
+    let sa = sa.subagent().unwrap();
     assert_eq!(sa.result.as_deref(), Some("done"));
     assert!(!sa.is_error);
 }
 
 #[test]
-fn a_returned_delegation_waits_for_its_running_sibling() {
+fn two_calls_to_one_child_are_two_effects() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    dispatch(&mut agg, spawn("call-a"), &system());
+    let child = child_of(&agg, "call-a");
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::Subagent,
+            "call-a".to_string(),
+            None,
+            Outcome::SubagentStarted,
+        ),
+        &system(),
+    );
+    dispatch(
+        &mut agg,
+        answer(&child, "turn-a", rust_decimal::Decimal::new(2, 0)),
+        &system(),
+    );
+
+    let events = dispatch(
+        &mut agg,
+        continue_as("agent-2", &child, "call-b"),
+        &system(),
+    );
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentRequested(_))),
+        "the finished call does not settle the second one; got {events:?}"
+    );
+    for (call, status) in [
+        ("call-a", EffectStatus::Completed),
+        ("call-b", EffectStatus::Pending),
+    ] {
+        let e = agg
+            .state
+            .effect(EffectKind::Subagent, call)
+            .unwrap_or_else(|| panic!("{call} is its own effect"));
+        assert_eq!(e.tracking.status(), status);
+        assert_eq!(
+            e.subagent().unwrap().session_id,
+            child,
+            "both calls answer one child"
+        );
+    }
+
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::Subagent,
+            "call-b".to_string(),
+            None,
+            Outcome::SubagentStarted,
+        ),
+        &system(),
+    );
+    dispatch(
+        &mut agg,
+        answer(&child, "turn-b", rust_decimal::Decimal::new(3, 0)),
+        &system(),
+    );
+    assert_eq!(
+        agg.state
+            .effect(EffectKind::Subagent, "call-b")
+            .expect("second call present")
+            .tracking
+            .status(),
+        EffectStatus::Completed,
+        "the child's answer settles the call it is answering"
+    );
+    assert_eq!(
+        agg.state.subagent_cost,
+        rust_decimal::Decimal::new(5, 0),
+        "a continued turn rolls its cost up like the first one"
+    );
+}
+
+#[test]
+fn a_second_call_to_a_busy_child_is_a_tool_error() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    dispatch(&mut agg, spawn("call-a"), &system());
+    let child = child_of(&agg, "call-a");
+
+    let events = dispatch(
+        &mut agg,
+        continue_as("agent-2", &child, "call-b"),
+        &system(),
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentRequested(_))),
+        "the child answers one call at a time; got {events:?}"
+    );
+    let trigger = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::DecisionQueued(p) => Some(p.trigger.clone()),
+            _ => None,
+        })
+        .expect("the refusal folds back as the second call's result");
+    match trigger {
+        Trigger::SubagentFinished {
+            id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(id, "call-b");
+            assert!(
+                error.message.contains("is already answering"),
+                "{}",
+                error.message
+            );
+        }
+        other => panic!("expected a failed subagent.finished; got {other:?}"),
+    }
+}
+
+#[test]
+fn a_spawn_naming_a_session_this_parent_never_started_is_a_tool_error() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
 
-    for (child, call) in [("child-1", "call-a"), ("child-2", "call-b")] {
-        dispatch(
-            &mut agg,
-            CommandPayload::RequestSubAgent {
-                session_id: child.to_string(),
-                agent_id: "agent-2".to_string(),
-                tool_call_id: call.to_string(),
-                message: None,
-                retry: RetryPolicy::no_retry(),
-            },
-            &system(),
-        );
+    let events = dispatch(
+        &mut agg,
+        continue_as("agent-2", "another-parents-child", "call-a"),
+        &system(),
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentRequested(_))),
+        "a named session the parent does not hold is never opened; got {events:?}"
+    );
+    let trigger = events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::DecisionQueued(p) => Some(p.trigger.clone()),
+            _ => None,
+        })
+        .expect("the refusal folds back as the call's result");
+    match trigger {
+        Trigger::SubagentFinished {
+            id,
+            ok: false,
+            error: Some(error),
+            ..
+        } => {
+            assert_eq!(id, "call-a");
+            assert!(
+                error.message.contains("names no session this agent"),
+                "{}",
+                error.message
+            );
+        }
+        other => panic!("expected a failed subagent.finished; got {other:?}"),
+    }
+}
+
+#[test]
+fn a_spawn_mints_one_child_per_call_and_repeats_it_on_replay() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    dispatch(&mut agg, spawn("call-a"), &system());
+    dispatch(&mut agg, spawn("call-b"), &system());
+
+    assert_ne!(
+        child_of(&agg, "call-a"),
+        child_of(&agg, "call-b"),
+        "each call gets its own child"
+    );
+
+    let before = child_of(&agg, "call-a");
+    dispatch(&mut agg, spawn("call-a"), &system());
+    assert_eq!(
+        child_of(&agg, "call-a"),
+        before,
+        "a replayed spawn keeps its child"
+    );
+}
+
+#[test]
+fn a_returned_subagent_waits_for_its_running_sibling() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+
+    for call in ["call-a", "call-b"] {
+        dispatch(&mut agg, spawn(call), &system());
         dispatch(
             &mut agg,
             CommandPayload::settle(
-                EffectKind::SubAgent,
-                child.to_string(),
+                EffectKind::Subagent,
+                call.to_string(),
                 None,
-                Outcome::SubAgentStarted,
+                Outcome::SubagentStarted,
             ),
             &system(),
         );
@@ -2856,36 +3192,39 @@ fn a_returned_delegation_waits_for_its_running_sibling() {
         .event_meta(Utc::now())
         .calls
         .iter()
-        .filter(|c| c.kind == EffectKind::SubAgent && c.status == EffectStatus::Running)
+        .filter(|c| c.kind == EffectKind::Subagent && c.status == EffectStatus::Running)
         .count();
-    assert_eq!(running, 2, "both delegations stay in flight once started");
+    assert_eq!(running, 2, "both subagents stay in flight once started");
+    let first = child_of(&agg, "call-a");
+    let second = child_of(&agg, "call-b");
 
-    let complete = |child: &str, turn: &str| CommandPayload::CompleteSubAgentTurn {
+    let complete = |child: &str, turn: &str| CommandPayload::CompleteSubagentTurn {
         session_id: child.to_string(),
         agent_id: "agent-2".to_string(),
         turn_id: turn.to_string(),
         data: serde_json::json!("done"),
         cost: rust_decimal::Decimal::ZERO,
         token_usage: Default::default(),
+        error: None,
     };
 
-    dispatch(&mut agg, complete("child-1", "turn-a"), &system());
+    dispatch(&mut agg, complete(&first, "turn-a"), &system());
     let (decision_id, _) = live_decision(&agg);
     assert_eq!(
         agg.state.event_meta(Utc::now()).pending_work(&decision_id),
         1,
-        "child-2 is still running, so this turn must not re-prompt yet"
+        "call-b is still running, so this turn must not re-prompt yet"
     );
 
-    dispatch(&mut agg, complete("child-2", "turn-b"), &system());
+    dispatch(&mut agg, complete(&second, "turn-b"), &system());
     let still_running = agg
         .state
         .event_meta(Utc::now())
         .calls
         .iter()
-        .filter(|c| c.kind == EffectKind::SubAgent && c.status == EffectStatus::Running)
+        .filter(|c| c.kind == EffectKind::Subagent && c.status == EffectStatus::Running)
         .count();
-    assert_eq!(still_running, 0, "a returned delegation is settled");
+    assert_eq!(still_running, 0, "a returned subagent is settled");
 }
 
 fn machine() -> Caller {
@@ -2979,7 +3318,7 @@ fn fired_tool_result(events: &[EventPayload]) -> Vec<String> {
                 _ => return None,
             };
             let tool_call_id = match trigger {
-                Trigger::ToolFinished { id, .. } | Trigger::SubAgentFinished { id, .. } => id,
+                Trigger::ToolFinished { id, .. } | Trigger::SubagentFinished { id, .. } => id,
                 _ => return None,
             };
             seen.insert(decision_id.clone())
@@ -3097,27 +3436,17 @@ fn worker_tool_fires_tool_result_in_the_completion_commit() {
 }
 
 #[test]
-fn batch_mixes_tool_and_sub_agent() {
+fn batch_mixes_tool_and_subagent() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     request_client_tool(&mut agg, "t1");
-    dispatch(
-        &mut agg,
-        CommandPayload::RequestSubAgent {
-            session_id: "child-1".to_string(),
-            agent_id: "researcher".to_string(),
-            tool_call_id: "s1".to_string(),
-            message: None,
-            retry: RetryPolicy::no_retry(),
-        },
-        &system(),
-    );
+    dispatch(&mut agg, spawn_as("researcher", "s1"), &system());
     dispatch(
         &mut agg,
         CommandPayload::settle(
-            EffectKind::SubAgent,
-            "child-1".to_string(),
+            EffectKind::Subagent,
+            "s1".to_string(),
             None,
-            Outcome::SubAgentStarted,
+            Outcome::SubagentStarted,
         ),
         &system(),
     );
@@ -3129,15 +3458,17 @@ fn batch_mixes_tool_and_sub_agent() {
         Some("TOOL")
     );
 
+    let child = child_of(&agg, "s1");
     let sub_done = dispatch(
         &mut agg,
-        CommandPayload::CompleteSubAgentTurn {
-            session_id: "child-1".to_string(),
+        CommandPayload::CompleteSubagentTurn {
+            session_id: child,
             agent_id: "researcher".to_string(),
             turn_id: "turn-1".to_string(),
             data: serde_json::json!("FINDINGS"),
             cost: rust_decimal::Decimal::ZERO,
             token_usage: Default::default(),
+            error: None,
         },
         &system(),
     );
@@ -3145,16 +3476,15 @@ fn batch_mixes_tool_and_sub_agent() {
     assert_eq!(fired_tool_result(&sub_done), vec!["s1".to_string()]);
     let sa = agg
         .state
-        .effect(EffectKind::SubAgent, "child-1")
-        .expect("sub-agent present");
-    let sa = sa.sub_agent().unwrap();
-    assert_eq!(sa.tool_call_id, "s1");
+        .effect(EffectKind::Subagent, "s1")
+        .expect("subagent present");
+    let sa = sa.subagent().unwrap();
     assert_eq!(sa.agent_id, "researcher");
     assert_eq!(sa.result.as_deref(), Some("FINDINGS"));
 }
 
 #[test]
-fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
+fn tool_and_subagent_from_one_turn_dispatch_concurrently() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let setup = dispatch(
         &mut agg,
@@ -3196,8 +3526,8 @@ fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
                     arguments: "{}".to_string(),
                     retry: None,
                 },
-                Action::SpawnSubAgent {
-                    session_id: "child-1".to_string(),
+                Action::SpawnSubagent {
+                    session_id: None,
                     agent_id: "researcher".to_string(),
                     tool_call_id: "s1".to_string(),
                     message: None,
@@ -3220,8 +3550,8 @@ fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, EventPayload::SubAgentRequested(_))),
-        "sub-agent dispatched; got {events:?}"
+            .any(|e| matches!(e, EventPayload::SubagentRequested(_))),
+        "subagent dispatched; got {events:?}"
     );
     assert!(
         events.iter().any(|e| matches!(
@@ -3240,7 +3570,7 @@ fn tool_and_sub_agent_from_one_turn_dispatch_concurrently() {
     );
     assert_eq!(
         agg.state
-            .tracking(EffectKind::SubAgent, "child-1")
+            .tracking(EffectKind::Subagent, "s1")
             .map(|s| s.status()),
         Some(EffectStatus::Pending)
     );
@@ -4110,17 +4440,7 @@ fn cancel_voids_pending_effects() {
         .expect("user message should request a worker decision");
     request_client_tool(&mut agg, "tc-1");
     request_llm(&mut agg, "llm-1", LlmHandler::Server);
-    dispatch(
-        &mut agg,
-        CommandPayload::RequestSubAgent {
-            session_id: "child-1".to_string(),
-            agent_id: "helper".to_string(),
-            tool_call_id: "call-1".to_string(),
-            message: None,
-            retry: RetryPolicy::no_retry(),
-        },
-        &system(),
-    );
+    dispatch(&mut agg, spawn_as("helper", "call-1"), &system());
 
     let events = dispatch(
         &mut agg,
@@ -4131,14 +4451,14 @@ fn cancel_voids_pending_effects() {
     );
     let mut voided = voided_ids(&events);
     voided.sort_unstable();
-    assert_eq!(voided, vec!["child-1", "llm-1", "tc-1"], "got {events:?}");
+    assert_eq!(voided, vec!["call-1", "llm-1", "tc-1"], "got {events:?}");
     assert!(
         events.iter().any(|e| matches!(
             e,
             EventPayload::CallVoided(v)
-                if v.kind == EffectKind::SubAgent && v.id == "child-1"
+                if v.kind == EffectKind::Subagent && v.id == "call-1"
         )),
-        "the sub-agent void names the child session for the cascade; got {events:?}"
+        "the subagent void names the child session for the cascade; got {events:?}"
     );
     assert!(!agg.state.has_pending_worker_decision());
 
@@ -6247,7 +6567,9 @@ fn agent_config(model: &str) -> AgentConfig {
         system: None,
         retry: None,
         tools: Vec::new(),
-        sub_agents: Vec::new(),
+        subagents: Vec::new(),
+        max_subagent_depth: None,
+        subagent_tools: None,
         mcp: Vec::new(),
         defer_tools: None,
         mcp_announce: Default::default(),
@@ -7312,6 +7634,164 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
         Some(ConnectorTarget::Call),
         "a target naming no connection is what keeps the connection out of it"
     );
+}
+
+fn subagent_cfg(defer: Option<bool>, prefix: Option<bool>) -> AgentConfig {
+    AgentConfig {
+        subagents: vec![crate::protocol::Subagent {
+            id: "helper".to_string(),
+            description: "Does the work.".to_string(),
+            defer,
+            prefix,
+        }],
+        ..agent_config("m1")
+    }
+}
+
+fn subagent_session(defer: Option<bool>, prefix: Option<bool>) -> SessionAggregate {
+    create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(subagent_cfg(defer, prefix)),
+    )
+}
+
+#[test]
+fn a_subagent_is_offered_as_a_connector_tool() {
+    let agg = subagent_session(None, None);
+    assert_eq!(offered(&agg), ["helper"]);
+    let tools = agg.state.at(None).connector_tools().tools;
+    assert_eq!(tools[0].kind, crate::protocol::ConnectorToolKind::Subagent);
+    assert_eq!(
+        tools[0].connector,
+        Some(ConnectionPath::Agent("helper".into()))
+    );
+}
+
+#[test]
+fn a_deferred_subagent_is_held_and_costs_the_same_search_pair() {
+    let agg = subagent_session(Some(true), None);
+    assert_eq!(
+        offered(&agg),
+        ["tool_search", "call_tool"],
+        "a deferred subagent alone brings the pair"
+    );
+    assert!(
+        held(&agg).contains(&"helper".to_string()),
+        "the engine still holds the subagent tool"
+    );
+}
+
+#[test]
+fn a_session_at_the_depth_limit_holds_no_subagent_tools() {
+    let mut agg = subagent_session(None, None);
+    agg.state.ancestry = (0..5).map(|i| format!("p{i}")).collect();
+    assert!(held(&agg).is_empty(), "the default limit is 5");
+
+    let mut deferred = subagent_session(Some(true), None);
+    deferred.state.ancestry = (0..5).map(|i| format!("p{i}")).collect();
+    assert!(
+        held(&deferred).is_empty(),
+        "at depth a deferred subagent brings no search pair either"
+    );
+}
+
+#[test]
+fn tool_search_finds_a_deferred_subagent() {
+    let mut agg = subagent_session(Some(true), None);
+    call(&mut agg, "tc-1", "tool_search", r#"{"query":"work"}"#);
+    let settled = agg
+        .state
+        .local_connector_answer("tc-1")
+        .expect("the engine answers this one");
+    let answer: serde_json::Value = serde_json::from_str(&settled.as_text()).expect("json");
+    assert_eq!(answer["tools"][0]["name"], "helper");
+    assert_eq!(
+        answer["tools"][0]["input"]["required"],
+        serde_json::json!(["message"]),
+        "the schema rides with the match, so the model can call it"
+    );
+}
+
+#[test]
+fn call_tool_faults_read_a_subagents_message_schema() {
+    let agg = subagent_session(Some(true), None);
+    let fault = agg
+        .state
+        .at_head()
+        .call_tool_fault(r#"{"name":"helper","arguments":{"question":"x"}}"#)
+        .expect("bad arguments fault");
+    assert!(
+        fault.contains("message"),
+        "the fault names the schema: {fault}"
+    );
+    assert!(
+        agg.state
+            .at_head()
+            .call_tool_fault(r#"{"name":"helper","arguments":{"message":"go"}}"#)
+            .is_none(),
+        "a valid subagent call is no fault"
+    );
+}
+
+#[test]
+fn a_direct_tool_call_on_a_subagent_name_stays_with_the_worker() {
+    let mut agg = subagent_session(None, None);
+    call(&mut agg, "tc-1", "helper", r#"{"message":"go"}"#);
+    let tc = agg.state.tool_call("tc-1").expect("recorded");
+    assert_eq!(
+        tc.handler,
+        ToolHandler::Worker,
+        "a subagent runs off a spawn, never a tool effect; the name stays the worker's"
+    );
+    assert!(tc.target.is_none());
+}
+
+#[test]
+fn a_subagent_and_an_unprefixed_connector_tool_both_lose_a_shared_name() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            mcp: vec![McpServer {
+                path: ConnectionPath::Mcp("sentry".into()),
+                tools: None,
+                auth_failure: Default::default(),
+                tool_sync_failure: Default::default(),
+                approve: Default::default(),
+            }],
+            ..subagent_cfg(None, None)
+        }),
+    );
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::ConnectorSync,
+            "mcp.sentry".to_string(),
+            None,
+            Outcome::Connector {
+                server: None,
+                prefix: None,
+                tools: vec![remote_tool("helper")],
+                instructions: None,
+            },
+        ),
+        &system(),
+    );
+    let merged = agg.state.at(None).connector_tools();
+    assert!(
+        merged.tools.iter().all(|t| t.name != "helper"),
+        "picking one of the two would route the model arbitrarily"
+    );
+    assert_eq!(merged.collisions, vec!["helper".to_string()]);
+}
+
+#[test]
+fn a_prefixed_subagent_dodges_the_collision() {
+    let agg = subagent_session(None, Some(true));
+    assert_eq!(offered(&agg), ["agent__helper"]);
 }
 
 #[test]
@@ -8974,7 +9454,7 @@ fn settle_decisions(events: &[EventPayload]) -> Vec<&Trigger> {
             matches!(
                 trigger,
                 Trigger::ToolFinished { .. }
-                    | Trigger::SubAgentFinished { .. }
+                    | Trigger::SubagentFinished { .. }
                     | Trigger::LlmFinished { .. }
             )
             .then_some(trigger)
@@ -9378,17 +9858,7 @@ fn void_guard_matches_kind_not_just_id() {
         ],
         None,
     );
-    dispatch(
-        &mut agg,
-        CommandPayload::RequestSubAgent {
-            session_id: "child-x".to_string(),
-            agent_id: "helper".to_string(),
-            tool_call_id: "shared".to_string(),
-            message: None,
-            retry: RetryPolicy::no_retry(),
-        },
-        &system(),
-    );
+    dispatch(&mut agg, spawn_as("helper", "shared"), &system());
 
     let d3 = open_decision(&mut agg, "redo");
     let events = dispatch(
@@ -9410,12 +9880,12 @@ fn void_guard_matches_kind_not_just_id() {
         },
         &machine(),
     );
-    assert_eq!(voided_ids(&events), vec!["child-x"], "got {events:?}");
+    assert_eq!(voided_ids(&events), vec!["shared"], "got {events:?}");
     assert!(
         events
             .iter()
             .any(|e| matches!(e, EventPayload::ToolCallCompleted(_))),
-        "the tool settle lands despite the voided sub-agent sharing its id; got {events:?}"
+        "the tool settle lands despite the voided subagent sharing its id; got {events:?}"
     );
 }
 

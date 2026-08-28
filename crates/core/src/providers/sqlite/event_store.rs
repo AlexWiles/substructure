@@ -599,15 +599,7 @@ mod tests {
         crate::protocol::AgentConfig {
             llm: Some("claude".to_string()),
             model: model.to_string(),
-            system: None,
-            retry: None,
-            tools: Vec::new(),
-            sub_agents: Vec::new(),
-            mcp: Vec::new(),
-            defer_tools: None,
-            mcp_announce: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
+            ..Default::default()
         }
     }
 

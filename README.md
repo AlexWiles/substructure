@@ -11,7 +11,7 @@ for tools. It runs locally or as a client and a server.
 Declare your agents in a config file. To customize the loop, point an agent at
 an HTTP endpoint and answer a webhook.
 
-`subs` handles durability, retries, timeouts, MCP connection management, session state, session branching, AG-UI, Slack connection, LLM calls, sub-agents, interrupts and more.
+`subs` handles durability, retries, timeouts, MCP connection management, session state, session branching, AG-UI, Slack connection, LLM calls, subagents, interrupts and more.
 
 
 To turn a sandbox into an MCP server, see
@@ -336,12 +336,12 @@ Docs: [Agent state](./docs/90-state.md)
 
 Examples: [Node](./examples/node-hono-plan-mode), [Python](./examples/python-fast-api-plan-mode)
 
-### Sub-agents
+### Subagents
 
 An agent can give work to other agents. Each child runs in its own session. The
 parent's totals include each child's cost and token use.
 
-Docs: [Sub-agents](./docs/80-sub-agents.md)
+Docs: [Subagents](./docs/80-subagents.md)
 
 Examples: [Node](./examples/node-hono-subagent), [Python](./examples/python-fast-api-subagent)
 
@@ -369,7 +369,7 @@ Docs: [Self-hosting](./docs/180-self-hosting.md)
 ## Parts of the system
 
 - **Engine.** Runs the agent loop, in Rust. It calls the model, runs tools,
-  saves each step, retries failures, streams events, and supervises sub-agents.
+  saves each step, retries failures, streams events, and supervises subagents.
   Use the hosted version at [app.substructure.ai](https://app.substructure.ai),
   run it from the CLI, or embed it in your process.
 - **Workers.** Your agent code. It receives a trigger and returns actions. It

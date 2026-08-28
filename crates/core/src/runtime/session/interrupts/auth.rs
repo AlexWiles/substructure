@@ -93,12 +93,7 @@ mod tests {
 
     fn config(policy: McpAuthFailure) -> AgentConfig {
         AgentConfig {
-            llm: None,
             model: "m1".to_string(),
-            system: None,
-            retry: None,
-            tools: vec![],
-            sub_agents: vec![],
             mcp: vec![McpServer {
                 path: ConnectionPath::Mcp("sentry".into()),
                 tools: None,
@@ -106,10 +101,7 @@ mod tests {
                 tool_sync_failure: Default::default(),
                 approve: Default::default(),
             }],
-            defer_tools: None,
-            mcp_announce: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
+            ..Default::default()
         }
     }
 

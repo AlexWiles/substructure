@@ -323,8 +323,9 @@ fn agent_rows(
     if !mcp.is_empty() {
         rows.push(("mcp", mcp.join(", ")));
     }
-    if !agent.sub_agents.is_empty() {
-        rows.push(("agents", agent.sub_agents.join(", ")));
+    if !agent.subagents.is_empty() {
+        let subagents: Vec<&str> = agent.subagents.iter().map(|s| s.id()).collect();
+        rows.push(("agents", subagents.join(", ")));
     }
     rows.push(("session", session_id.to_string()));
     rows

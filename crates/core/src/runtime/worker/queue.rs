@@ -29,7 +29,6 @@ pub struct WorkerDecisionRequest {
     pub agent: Option<AgentConfig>,
     #[serde(default)]
     pub calls: Vec<Effect>,
-    /// Count of in-flight `tool_call`/`sub_agent` calls.
     #[serde(default)]
     pub pending_calls: usize,
     /// The active conversation as a flat list. Wire field: `messages`.

@@ -13,6 +13,7 @@ pub fn answer(
         ConnectorToolKind::Find => Some(find(at, arguments)),
         ConnectorToolKind::Call => Some(call(at, arguments)),
         ConnectorToolKind::Skill => None,
+        ConnectorToolKind::Subagent => None,
     }
 }
 
@@ -156,14 +157,7 @@ mod tests {
         s.apply(
             &EventPayload::AgentConfigUpdated(AgentConfigUpdated {
                 config: AgentConfig {
-                    llm: None,
                     model: "m1".to_string(),
-                    system: None,
-                    effort: None,
-                    retry: None,
-                    tools: vec![],
-                    sub_agents: vec![],
-                    mcp: vec![],
                     plugins: vec![AgentPlugin {
                         id: "pdf".to_string(),
                         description: "PDF work.".to_string(),
@@ -177,8 +171,7 @@ mod tests {
                         tool_sync_failure: Default::default(),
                         approve: Default::default(),
                     }],
-                    defer_tools: None,
-                    mcp_announce: Default::default(),
+                    ..Default::default()
                 },
                 anchor: None,
             }),

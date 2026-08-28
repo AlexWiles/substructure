@@ -32,7 +32,7 @@ To resume after a drop, pass `?after_seq=<n>`. `EventSource` does this for you.
 On reconnect the browser sends the last frame ID in a `Last-Event-ID` header,
 which wins over the query parameter.
 
-Each stream covers one session. A sub-agent is its own session with its own
+Each stream covers one session. A subagent is its own session with its own
 stream. Open a second stream with the child's ID to watch it.
 
 ## Event shape
@@ -91,18 +91,19 @@ record them in the log.
 | `tool.call.completed` | The call returned: `{ id, result }`. |
 | `tool.call.errored` | The call failed: `{ id, error }`. |
 
-## Sub-agents
+## Subagents
 
 | Event | Meaning |
 | --- | --- |
-| `sub_agent.requested` | The model called a child agent. |
-| `sub_agent.dispatched` | The spawn went out. |
-| `sub_agent.started` | The child session exists. |
-| `sub_agent.turn_completed` | The child's turn ended. |
-| `sub_agent.errored` | The child failed. |
+| `subagent.requested` | The model called a child agent. |
+| `subagent.dispatched` | The spawn went out. |
+| `subagent.started` | The child session exists. |
+| `subagent.turn_completed` | The child's turn ended. |
+| `subagent.errored` | The child failed. |
 
-The `id` on each of these is the child session. Open a stream with it to watch
-the child.
+The `id` on each of these is the model tool call the child answers.
+`subagent.requested` also carries `session_id`, the child session. Open a
+stream with that to watch the child.
 
 ## Connectors
 

@@ -431,6 +431,11 @@ impl Connections {
                 self.blobs.clone(),
                 tenant_id,
             )),
+            ConnectorProtocol::Agent => {
+                return Err(ConnectorError::permanent(format!(
+                    "`{id}` names an agent, not a connection a client can dial"
+                )))
+            }
         };
 
         let mut clients = self.clients.lock().await;

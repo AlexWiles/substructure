@@ -12,21 +12,33 @@ use crate::runtime::processor::{
 use crate::runtime::session::events::{EffectKind, EventPayload};
 use crate::runtime::session::SessionEvent;
 
-use super::SubAgentTask;
+use super::SubagentTask;
 
-struct SubAgentDispatchProjection {
+struct SubagentDispatchProjection {
     store: Arc<dyn EventStore>,
-    queue: Arc<dyn TaskQueue<SubAgentTask>>,
+    queue: Arc<dyn TaskQueue<SubagentTask>>,
 }
 
-impl SubAgentDispatchProjection {
-    fn new(store: Arc<dyn EventStore>, queue: Arc<dyn TaskQueue<SubAgentTask>>) -> Self {
+impl SubagentDispatchProjection {
+    fn new(store: Arc<dyn EventStore>, queue: Arc<dyn TaskQueue<SubagentTask>>) -> Self {
         Self { store, queue }
+    }
+
+    async fn parent(
+        &self,
+        tenant_id: &str,
+        session_id: &str,
+        what: &str,
+    ) -> Result<crate::runtime::session::SessionAggregate, ProcessorError> {
+        self.store
+            .load(tenant_id, session_id)
+            .await
+            .map_err(|e| ProcessorError::Apply(format!("load session for {what}: {e}")))
     }
 }
 
 #[async_trait::async_trait]
-impl EventProcessor for SubAgentDispatchProjection {
+impl EventProcessor for SubagentDispatchProjection {
     fn name(&self) -> &'static str {
         "sub_agent_dispatch_v1"
     }
@@ -35,35 +47,30 @@ impl EventProcessor for SubAgentDispatchProjection {
         let shard_key = event.session_id.clone();
 
         let task = match &event.payload {
-            // Executors key off the dispatch marker; the delegation is read
-            // from state. A requested spawn is queued, not running.
-            EventPayload::SubAgentDispatched(d) => {
+            EventPayload::SubagentDispatched(d) => {
                 let owner = event.meta.owner.clone().ok_or_else(|| {
                     ProcessorError::Apply("missing owner in event meta".to_string())
                 })?;
 
                 let session = self
-                    .store
-                    .load(&event.tenant_id, &event.session_id)
-                    .await
-                    .map_err(|e| {
-                        ProcessorError::Apply(format!("load session for sub-agent dispatch: {e}"))
-                    })?;
-                let Some(effect) = session.state.effect(EffectKind::SubAgent, &d.id) else {
+                    .parent(&event.tenant_id, &event.session_id, "subagent dispatch")
+                    .await?;
+                let Some(effect) = session.state.effect(EffectKind::Subagent, &d.id) else {
                     return Ok(());
                 };
-                let Some(sa) = effect.sub_agent() else {
+                let Some(sa) = effect.subagent() else {
                     return Ok(());
                 };
 
                 let mut ancestry = event.meta.ancestry.clone();
                 ancestry.push(event.session_id.clone());
 
-                Some(SubAgentTask::SpawnSubAgent {
+                Some(SubagentTask::SpawnSubagent {
                     source_event_id: event.id,
                     parent_session_id: event.session_id,
                     tenant_id: event.tenant_id,
-                    child_session_id: d.id.clone(),
+                    tool_call_id: d.id.clone(),
+                    child_session_id: sa.session_id.clone(),
                     agent_id: sa.agent_id.clone(),
                     owner,
                     ancestry,
@@ -73,19 +80,24 @@ impl EventProcessor for SubAgentDispatchProjection {
                     span: event.span,
                 })
             }
-            EventPayload::SessionMessageRequested(req) => Some(SubAgentTask::SendSessionMessage {
+            EventPayload::SessionMessageRequested(req) => Some(SubagentTask::SendSessionMessage {
                 source_event_id: event.id,
                 tenant_id: event.tenant_id,
                 target_session_id: req.target_session_id.clone(),
                 message: req.message.clone(),
                 span: event.span,
             }),
-            // A voided sub-agent delegation cancels its child session.
-            EventPayload::CallVoided(v) if v.kind == EffectKind::SubAgent => {
-                Some(SubAgentTask::CancelSubAgent {
+            EventPayload::CallVoided(v) if v.kind == EffectKind::Subagent => {
+                let session = self
+                    .parent(&event.tenant_id, &event.session_id, "subagent cancel")
+                    .await?;
+                let Some(sa) = session.state.subagent(&v.id) else {
+                    return Ok(());
+                };
+                Some(SubagentTask::CancelSubagent {
                     source_event_id: event.id,
                     tenant_id: event.tenant_id.clone(),
-                    child_session_id: v.id.clone(),
+                    child_session_id: sa.session_id.clone(),
                     span: event.span,
                 })
             }
@@ -96,7 +108,7 @@ impl EventProcessor for SubAgentDispatchProjection {
                 };
                 let agent_id = event.meta.agent_id.clone().unwrap_or_default();
 
-                Some(SubAgentTask::CompleteSubAgentTurn {
+                Some(SubagentTask::CompleteSubagentTurn {
                     source_event_id: event.id,
                     parent_session_id,
                     tenant_id: event.tenant_id,
@@ -119,7 +131,7 @@ impl EventProcessor for SubAgentDispatchProjection {
 
         tracing::debug!(
             dedupe_key = %task.dedupe_key(),
-            "enqueuing sub-agent task"
+            "enqueuing subagent task"
         );
 
         self.queue
@@ -129,15 +141,15 @@ impl EventProcessor for SubAgentDispatchProjection {
     }
 }
 
-pub fn spawn_sub_agent_dispatch_processor(
+pub fn spawn_subagent_dispatch_processor(
     store: Arc<dyn EventStore>,
     cursor_store: Arc<dyn ProcessorCursorStore>,
-    queue: Arc<dyn TaskQueue<SubAgentTask>>,
+    queue: Arc<dyn TaskQueue<SubagentTask>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let projection = Arc::new(SubAgentDispatchProjection::new(store.clone(), queue));
+    let projection = Arc::new(SubagentDispatchProjection::new(store.clone(), queue));
     let config = EventProcessorRunnerConfig {
-        owner_id: Some("sub_agent_dispatch".to_string()),
+        owner_id: Some("subagent_dispatch".to_string()),
         ..Default::default()
     };
     EventProcessorRunner::new(store, cursor_store, projection, config, cancel).spawn()

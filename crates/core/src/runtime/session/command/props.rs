@@ -51,7 +51,7 @@ fn policy() -> RetryPolicy {
 enum ActOp {
     CallLlm { worker: bool },
     CallTool,
-    SpawnSubAgent,
+    SpawnSubagent,
     Interrupt,
     Done,
 }
@@ -79,7 +79,7 @@ enum Op {
         ok: bool,
         retryable: bool,
     },
-    SettleSubAgent {
+    SettleSubagent {
         index: usize,
         ok: bool,
         retryable: bool,
@@ -104,7 +104,7 @@ fn act_op() -> impl Strategy<Value = ActOp> {
     prop_oneof![
         any::<bool>().prop_map(|worker| ActOp::CallLlm { worker }),
         Just(ActOp::CallTool),
-        Just(ActOp::SpawnSubAgent),
+        Just(ActOp::SpawnSubagent),
         Just(ActOp::Interrupt),
         Just(ActOp::Done),
     ]
@@ -121,7 +121,7 @@ fn op() -> impl Strategy<Value = Op> {
         2 => (any::<usize>(), any::<bool>(), any::<bool>())
             .prop_map(|(index, ok, retryable)| Op::SettleTool { index, ok, retryable }),
         2 => (any::<usize>(), any::<bool>(), any::<bool>())
-            .prop_map(|(index, ok, retryable)| Op::SettleSubAgent { index, ok, retryable }),
+            .prop_map(|(index, ok, retryable)| Op::SettleSubagent { index, ok, retryable }),
         2 => (any::<usize>(), any::<bool>(), any::<bool>())
             .prop_map(|(index, ok, retryable)| Op::SettleConnector { index, ok, retryable }),
         1 => any::<bool>().prop_map(|retryable| Op::FailDecision { retryable }),
@@ -248,11 +248,11 @@ impl World {
         )
     }
 
-    fn pending_sub_agent(&self) -> Vec<String> {
+    fn pending_subagent(&self) -> Vec<String> {
         self.pending(
             self.agg
                 .state
-                .effects_of(EffectKind::SubAgent)
+                .effects_of(EffectKind::Subagent)
                 .filter(|c| c.tracking.status() == EffectStatus::Pending)
                 .map(|c| c.id.as_str()),
         )
@@ -333,17 +333,13 @@ impl World {
                     arguments: "{}".to_string(),
                     retry: Some(policy().as_override()),
                 },
-                ActOp::SpawnSubAgent => {
-                    let session_id = self.mint();
-                    let tool_call_id = self.mint();
-                    Action::SpawnSubAgent {
-                        session_id,
-                        agent_id: "child".to_string(),
-                        tool_call_id,
-                        message: None,
-                        retry: policy(),
-                    }
-                }
+                ActOp::SpawnSubagent => Action::SpawnSubagent {
+                    session_id: None,
+                    agent_id: "child".to_string(),
+                    tool_call_id: self.mint(),
+                    message: None,
+                    retry: policy(),
+                },
                 ActOp::Interrupt => Action::Interrupt {
                     interrupt_id: self.mint(),
                     reason: "pause".to_string(),
@@ -361,10 +357,6 @@ impl World {
         AgentConfig {
             llm: Some("claude".to_string()),
             model,
-            system: None,
-            retry: None,
-            tools: Vec::new(),
-            sub_agents: Vec::new(),
             mcp: vec![McpServer {
                 path: ConnectionPath::Mcp("conn-1".into()),
                 tools: None,
@@ -372,10 +364,7 @@ impl World {
                 tool_sync_failure: Default::default(),
                 approve: Default::default(),
             }],
-            defer_tools: None,
-            mcp_announce: Default::default(),
-            plugins: Vec::new(),
-            effort: None,
+            ..Default::default()
         }
     }
 
@@ -503,27 +492,28 @@ impl World {
                 };
                 self.run(cmd, &system());
             }
-            Op::SettleSubAgent {
+            Op::SettleSubagent {
                 index,
                 ok,
                 retryable,
             } => {
-                let ids = self.pending_sub_agent();
+                let ids = self.pending_subagent();
                 let Some(session_id) = pick(&ids, index) else {
                     return;
                 };
                 let cmd = if ok {
-                    CommandPayload::CompleteSubAgentTurn {
+                    CommandPayload::CompleteSubagentTurn {
                         session_id,
                         agent_id: "child".to_string(),
                         turn_id: "t".to_string(),
                         data: serde_json::json!("done"),
                         cost: Default::default(),
                         token_usage: Default::default(),
+                        error: None,
                     }
                 } else {
                     CommandPayload::settle(
-                        EffectKind::SubAgent,
+                        EffectKind::Subagent,
                         session_id,
                         None,
                         SettleError::new(ErrorInfo::internal("boom"), retryable),

@@ -56,14 +56,14 @@ fn arm(cmd: &CommandPayload) -> &'static str {
             (EffectKind::ToolCall, _) => "CompleteToolCall",
             (EffectKind::ConnectorSync, Outcome::Error(_)) => "FailConnectorSync",
             (EffectKind::ConnectorSync, _) => "CompleteConnectorSync",
-            (EffectKind::SubAgent, Outcome::Error(_)) => "FailSubAgent",
-            (EffectKind::SubAgent, _) => "StartSubAgent",
+            (EffectKind::Subagent, Outcome::Error(_)) => "FailSubagent",
+            (EffectKind::Subagent, _) => "StartSubagent",
             (EffectKind::Decision, _) => "FailWorkerDecision",
             (EffectKind::TurnEnd, _) => "SettleTurnEnd",
         },
         CommandPayload::RequestToolCall { .. } => "RequestToolCall",
-        CommandPayload::RequestSubAgent { .. } => "RequestSubAgent",
-        CommandPayload::CompleteSubAgentTurn { .. } => "CompleteSubAgentTurn",
+        CommandPayload::RequestSubagent { .. } => "RequestSubagent",
+        CommandPayload::CompleteSubagentTurn { .. } => "CompleteSubagentTurn",
         CommandPayload::Interrupt { .. } => "Interrupt",
         CommandPayload::ResumeInterrupt { .. } => "ResumeInterrupt",
         CommandPayload::SubmitWorkerDecision { .. } => "SubmitWorkerDecision",
@@ -126,15 +126,7 @@ fn config() -> AgentConfig {
     AgentConfig {
         llm: Some("claude".to_string()),
         model: "test-model".to_string(),
-        system: None,
-        retry: None,
-        tools: Vec::new(),
-        sub_agents: Vec::new(),
-        mcp: Vec::new(),
-        defer_tools: None,
-        mcp_announce: Default::default(),
-        plugins: Vec::new(),
-        effort: None,
+        ..Default::default()
     }
 }
 
@@ -1048,61 +1040,70 @@ fn trace_fork_voids_stranded_work() {
     ]);
 }
 
-fn flow_sub_agent_delegation() -> Trace {
+fn flow_subagent_call() -> Trace {
     let mut t = Trace::create();
     t.decide(vec![], vec![]);
     t.submit("hi", Some("turn-1"));
 
     t.decide_appending(
         user_message("hi"),
-        vec![Action::SpawnSubAgent {
-            session_id: "child-1".to_string(),
+        vec![Action::SpawnSubagent {
+            session_id: None,
             agent_id: "child".to_string(),
             tool_call_id: "tc-1".to_string(),
             message: None,
             retry: RetryPolicy::no_retry(),
         }],
     );
+    let child = t
+        .agg
+        .state
+        .subagent("tc-1")
+        .expect("the spawn recorded a child")
+        .session_id
+        .clone();
     t.run(
         CommandPayload::settle(
-            EffectKind::SubAgent,
-            "child-1".to_string(),
+            EffectKind::Subagent,
+            "tc-1".to_string(),
             None,
-            Outcome::SubAgentStarted,
+            Outcome::SubagentStarted,
         ),
         &system(),
     );
     t.run(
-        CommandPayload::CompleteSubAgentTurn {
-            session_id: "child-1".to_string(),
+        CommandPayload::CompleteSubagentTurn {
+            session_id: child,
             agent_id: "child".to_string(),
             turn_id: "child-turn".to_string(),
             data: serde_json::json!("answer"),
             cost: Default::default(),
             token_usage: Default::default(),
+            error: None,
         },
         &system(),
     );
 
     assert!(matches!(
         t.live_trigger(),
-        Trigger::SubAgentFinished { ok: true, .. }
+        Trigger::SubagentFinished { ok: true, .. }
     ));
     t.decide(vec![], vec![]);
     t.run(
-        CommandPayload::RequestSubAgent {
-            session_id: "child-2".to_string(),
+        CommandPayload::RequestSubagent {
+            session_id: None,
             agent_id: "child".to_string(),
             tool_call_id: "tc-2".to_string(),
             message: None,
             retry: RetryPolicy::no_retry(),
+            decision_id: "d-2".to_string(),
         },
         &system(),
     );
     t.run(
         CommandPayload::settle(
-            EffectKind::SubAgent,
-            "child-2".to_string(),
+            EffectKind::Subagent,
+            "tc-2".to_string(),
             None,
             SettleError::new(ErrorInfo::internal("spawn failed".to_string()), false),
         ),
@@ -1112,11 +1113,11 @@ fn flow_sub_agent_delegation() -> Trace {
 }
 
 #[test]
-fn trace_sub_agent_delegation() {
-    let t = flow_sub_agent_delegation();
+fn trace_subagent_call() {
+    let t = flow_subagent_call();
     assert!(matches!(
         t.live_trigger(),
-        Trigger::SubAgentFinished { ok: false, .. }
+        Trigger::SubagentFinished { ok: false, .. }
     ));
     t.assert_trace(&[
         "session.created",
@@ -1128,16 +1129,16 @@ fn trace_sub_agent_delegation() {
         "decision.dispatched",
         "decision.completed",
         "message.new",
-        "sub_agent.requested",
-        "sub_agent.dispatched",
-        "sub_agent.started",
-        "sub_agent.turn_completed",
+        "subagent.requested",
+        "subagent.dispatched",
+        "subagent.started",
+        "subagent.turn_completed",
         "decision.queued",
         "decision.dispatched",
         "decision.completed",
-        "sub_agent.requested",
-        "sub_agent.dispatched",
-        "sub_agent.errored",
+        "subagent.requested",
+        "subagent.dispatched",
+        "subagent.errored",
         "decision.queued",
         "decision.dispatched",
     ]);
@@ -1303,24 +1304,24 @@ fn traces_cover_every_command_arm() {
         "CancelSession",
         "CompleteConnectorSync",
         "CompleteLlmCall",
-        "CompleteSubAgentTurn",
+        "CompleteSubagentTurn",
         "CompleteToolCall",
         "CompleteTurn",
         "CreateSession",
         "FailConnectorSync",
         "FailLlmCall",
-        "FailSubAgent",
+        "FailSubagent",
         "FailToolCall",
         "FailWorkerDecision",
         "FinishTurn",
         "Interrupt",
         "ReconcileDispatch",
         "RequestLlmCall",
-        "RequestSubAgent",
+        "RequestSubagent",
         "RequestToolCall",
         "ResumeInterrupt",
         "SendMessage",
-        "StartSubAgent",
+        "StartSubagent",
         "SubmitClientPayload",
         "SubmitWorkerDecision",
         "Wake",
@@ -1336,7 +1337,7 @@ fn traces_cover_every_command_arm() {
         flow_decision_failure(),
         flow_parallel_fan_out(),
         flow_fork_voids_stranded_work(),
-        flow_sub_agent_delegation(),
+        flow_subagent_call(),
         flow_reconcile_dispatch(),
         flow_direct_commands_then_cancel(),
     ];

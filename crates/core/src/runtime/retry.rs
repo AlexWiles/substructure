@@ -18,7 +18,7 @@ pub enum RetryTarget {
     WorkerTool,
     ClientTool,
     ConnectorTool,
-    SubAgent,
+    Subagent,
     ConnectorSync,
     Decision,
 }
@@ -41,7 +41,7 @@ impl RetryPolicy {
             RetryTarget::WorkerTool => (None, Some(120), Some(600), 1, 0, 0),
             RetryTarget::ClientTool => (None, None, None, 1, 0, 0),
             RetryTarget::ConnectorTool => (Some(60), Some(60), Some(600), 2, 1, 10),
-            RetryTarget::SubAgent => (Some(30), Some(10), Some(3600), 3, 2, 15),
+            RetryTarget::Subagent => (Some(30), Some(10), Some(3600), 3, 2, 15),
             RetryTarget::ConnectorSync => (Some(10), Some(5), Some(30), 2, 2, 10),
             RetryTarget::Decision => (None, Some(20), Some(300), 10, 2, 60),
         };
@@ -161,7 +161,7 @@ impl RetryConfig {
             RetryTarget::WorkerTool | RetryTarget::ClientTool | RetryTarget::ConnectorTool => {
                 &self.tool
             }
-            RetryTarget::SubAgent => &self.sub_agent,
+            RetryTarget::Subagent => &self.subagent,
             RetryTarget::ConnectorSync => &self.connector,
             RetryTarget::Decision => return Vec::new(),
         };
@@ -343,7 +343,7 @@ mod tests {
             RetryTarget::Llm,
             RetryTarget::WorkerTool,
             RetryTarget::ConnectorTool,
-            RetryTarget::SubAgent,
+            RetryTarget::Subagent,
             RetryTarget::ConnectorSync,
             RetryTarget::Decision,
         ] {
@@ -458,7 +458,7 @@ mod tests {
             RetryTarget::Llm,
             RetryTarget::ConnectorTool,
             RetryTarget::ConnectorSync,
-            RetryTarget::SubAgent,
+            RetryTarget::Subagent,
         ] {
             let p = RetryPolicy::default_for(target);
             assert!(
@@ -485,7 +485,7 @@ mod tests {
             RetryTarget::Llm,
             RetryTarget::WorkerTool,
             RetryTarget::ConnectorTool,
-            RetryTarget::SubAgent,
+            RetryTarget::Subagent,
             RetryTarget::ConnectorSync,
             RetryTarget::Decision,
         ] {
@@ -509,7 +509,7 @@ mod tests {
         for target in [
             RetryTarget::ConnectorTool,
             RetryTarget::ConnectorSync,
-            RetryTarget::SubAgent,
+            RetryTarget::Subagent,
         ] {
             let p = RetryPolicy::default_for(target);
             assert!(

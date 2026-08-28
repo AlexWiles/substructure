@@ -76,7 +76,7 @@ pub struct SessionItem {
     pub top_level: bool,
     pub agent_id: Option<String>,
     pub cost: Decimal,
-    pub sub_agent_cost: Decimal,
+    pub subagent_cost: Decimal,
     pub status: SessionStatus,
     pub turn_id: Option<String>,
 }
@@ -92,7 +92,7 @@ pub struct SessionIndexRecord {
     pub top_level: bool,
     pub agent_id: Option<String>,
     pub cost: Decimal,
-    pub sub_agent_cost: Decimal,
+    pub subagent_cost: Decimal,
     pub status: SessionStatus,
     pub turn_id: Option<String>,
 }
@@ -133,7 +133,7 @@ impl EventProcessor for SessionIndexProjection {
             top_level: meta.ancestry.is_empty(),
             agent_id: meta.agent_id,
             cost: meta.cost,
-            sub_agent_cost: meta.sub_agent_cost,
+            subagent_cost: meta.subagent_cost,
             status: meta.status,
             turn_id: meta.turn_id,
         };

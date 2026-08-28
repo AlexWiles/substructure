@@ -316,7 +316,7 @@ mod ends_run_tests {
             handler: Some(handler),
             stream: None,
             agent_id: None,
-            tool_call_id: None,
+            session_id: None,
         }
     }
 
@@ -338,7 +338,7 @@ mod ends_run_tests {
                 ancestry: Vec::new(),
                 turn_id: None,
                 cost: Default::default(),
-                sub_agent_cost: Default::default(),
+                subagent_cost: Default::default(),
                 head_id: None,
                 calls,
                 decisions: Vec::new(),
@@ -384,9 +384,9 @@ mod ends_run_tests {
     }
 
     #[test]
-    fn a_sub_agent_names_no_handler_so_it_holds_the_run() {
+    fn a_subagent_names_no_handler_so_it_holds_the_run() {
         let mut sub = call("s", Handler::Client);
-        sub.kind = EffectKind::SubAgent;
+        sub.kind = EffectKind::Subagent;
         sub.handler = None;
         assert!(!queued(vec![call("c", Handler::Client), sub]).ends_run());
     }

@@ -92,7 +92,7 @@ impl SessionState {
         if self.phase.finalizing().is_some() {
             return self.finalize_run(Some(error));
         }
-        let mut events = self.void_effects(|tracking, _| {
+        let mut events = self.void_effects(|_, tracking, _| {
             matches!(
                 tracking.status(),
                 EffectStatus::Queued | EffectStatus::Pending | EffectStatus::RetryScheduled

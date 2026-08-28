@@ -22,7 +22,8 @@ enum SessionIndex {
     TopLevel,
     AgentId,
     Cost,
-    SubAgentCost,
+    #[iden = "sub_agent_cost"]
+    SubagentCost,
     StatusJson,
     TurnId,
 }
@@ -120,7 +121,7 @@ fn do_list_sessions(
             SessionIndex::TopLevel,
             SessionIndex::AgentId,
             SessionIndex::Cost,
-            SessionIndex::SubAgentCost,
+            SessionIndex::SubagentCost,
             SessionIndex::StatusJson,
             SessionIndex::TurnId,
         ])
@@ -192,7 +193,7 @@ fn do_list_sessions(
             top_level,
             agent_id,
             cost,
-            sub_agent_cost,
+            subagent_cost,
             status_json,
             turn_id,
         ) = row.map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -200,7 +201,7 @@ fn do_list_sessions(
         let cost = cost
             .parse()
             .map_err(|e: rust_decimal::Error| StoreError::Internal(e.to_string()))?;
-        let sub_agent_cost = sub_agent_cost
+        let subagent_cost = subagent_cost
             .parse()
             .map_err(|e: rust_decimal::Error| StoreError::Internal(e.to_string()))?;
         let status =
@@ -216,7 +217,7 @@ fn do_list_sessions(
             top_level: top_level != 0,
             agent_id,
             cost,
-            sub_agent_cost,
+            subagent_cost,
             status,
             turn_id,
         });
@@ -312,7 +313,7 @@ fn do_upsert_session_index(
             if record.top_level { 1i64 } else { 0i64 },
             record.agent_id,
             record.cost.to_string(),
-            record.sub_agent_cost.to_string(),
+            record.subagent_cost.to_string(),
             status_json,
             record.turn_id,
             Utc::now().to_rfc3339(),

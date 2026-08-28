@@ -23,18 +23,23 @@ pub enum AuthNeed {
 pub const TOOL_SEARCH: &str = "tool_search";
 pub const CALL_TOOL: &str = "call_tool";
 pub const SKILL: &str = "skill";
+pub const SUBAGENT: &str = "subagent";
 
 /// How a file, the CLI, and the wire name a connection.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConnectionPath {
     Mcp(String),
     PluginServer { plugin: String, server: String },
+    Agent(String),
 }
 
 impl ConnectionPath {
     pub fn parse(path: &str) -> Option<Self> {
         if let Some(id) = path.strip_prefix("mcp.") {
             return (!id.is_empty() && !id.contains('.')).then(|| Self::Mcp(id.to_string()));
+        }
+        if let Some(id) = path.strip_prefix("agent.") {
+            return (!id.is_empty() && !id.contains('.')).then(|| Self::Agent(id.to_string()));
         }
         let rest = path.strip_prefix("plugin.")?;
         let (plugin, server) = rest.split_once(".mcp.")?;
@@ -49,7 +54,7 @@ impl ConnectionPath {
     /// The prefix the model sees. Any character a provider rejects becomes `_`.
     pub fn tool_prefix(&self) -> String {
         let raw = match self {
-            Self::Mcp(id) => id.clone(),
+            Self::Mcp(id) | Self::Agent(id) => id.clone(),
             Self::PluginServer { plugin, server } => format!("{plugin}_{server}"),
         };
         raw.chars()
@@ -69,7 +74,8 @@ impl<'de> Deserialize<'de> for ConnectionPath {
         let written = String::deserialize(d)?;
         Self::parse(&written).ok_or_else(|| {
             serde::de::Error::custom(format!(
-                "`{written}` is not a connection path: `mcp.<id>` or `plugin.<id>.mcp.<server>`"
+                "`{written}` is not a connection path: `mcp.<id>`, `plugin.<id>.mcp.<server>`, \
+                 or `agent.<id>`"
             ))
         })
     }
@@ -95,6 +101,7 @@ impl std::fmt::Display for ConnectionPath {
         match self {
             Self::Mcp(id) => write!(f, "mcp.{id}"),
             Self::PluginServer { plugin, server } => write!(f, "plugin.{plugin}.mcp.{server}"),
+            Self::Agent(id) => write!(f, "agent.{id}"),
         }
     }
 }
@@ -663,7 +670,7 @@ pub struct RetryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<RetryOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sub_agent: Option<RetryOverride>,
+    pub subagent: Option<RetryOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector: Option<RetryOverride>,
 }
@@ -844,7 +851,7 @@ pub struct WorkerState(pub Value);
 /// `llm` names the `[llm.*]` block every call runs on. That block decides where
 /// the call runs and what shape it takes. A config that names no block fails
 /// when the engine resolves a call.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "AgentConfig")]
 pub struct AgentConfig {
     /// The `[llm.*]` block this agent's calls run on.
@@ -862,10 +869,17 @@ pub struct AgentConfig {
     /// Worker- or client-executed tools the model can call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<AgentTool>,
-    /// Sub-agents the model can delegate to. The model sees them as tools.
+    /// Subagents the model can delegate to. The model sees them as tools.
     /// Each call starts a child session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sub_agents: Vec<SubAgent>,
+    pub subagents: Vec<Subagent>,
+    /// What shape the subagents take as tools. Absent ⇒ one tool per agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_tools: Option<SubagentTools>,
+    /// How deep this agent's subagents may nest. A session whose depth
+    /// reaches it may not delegate. `0` never delegates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_subagent_depth: Option<u32>,
     /// MCP servers this agent draws tools from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpServer>,
@@ -933,7 +947,55 @@ impl AgentConfig {
     pub fn defer_strategy(&self) -> DeferToolsStrategy {
         self.defer_settings().strategy
     }
+
+    pub fn depth_limit(&self) -> u32 {
+        self.max_subagent_depth
+            .unwrap_or(DEFAULT_MAX_SUBAGENT_DEPTH)
+    }
+
+    pub fn may_spawn_subagent(&self, depth: u32) -> bool {
+        depth < self.depth_limit()
+    }
+
+    pub fn subagent_strategy(&self) -> SubagentToolsStrategy {
+        SubagentTools::strategy_of(self.subagent_tools)
+    }
 }
+
+/// What shape an agent's subagents take as tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(title = "SubagentTools")]
+pub struct SubagentTools {
+    #[serde(default, skip_serializing_if = "SubagentToolsStrategy::is_default")]
+    pub strategy: SubagentToolsStrategy,
+}
+
+/// How the model reaches an agent's subagents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "SubagentToolsStrategy")]
+pub enum SubagentToolsStrategy {
+    /// One tool per subagent, named by the agent.
+    #[default]
+    PerAgent,
+    /// One `subagent` tool for all of them. The call names the agent.
+    Single,
+}
+
+impl SubagentTools {
+    pub fn strategy_of(tools: Option<Self>) -> SubagentToolsStrategy {
+        tools.unwrap_or_default().strategy
+    }
+}
+
+impl SubagentToolsStrategy {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::PerAgent)
+    }
+}
+
+pub const DEFAULT_MAX_SUBAGENT_DEPTH: u32 = 5;
 
 /// How many tools one search answers with, when the agent does not say.
 ///
@@ -1052,8 +1114,6 @@ pub struct ConnectorTool {
     pub approve: bool,
 }
 
-/// What the engine does with a call. Every value but `Remote` is one of the
-/// engine's own tools, and none of those has a `remote_name`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "ConnectorToolKind")]
@@ -1067,6 +1127,7 @@ pub enum ConnectorToolKind {
     Call,
     /// Load a skill's instructions from a plugin bundle.
     Skill,
+    Subagent,
 }
 
 impl ConnectorToolKind {
@@ -1083,6 +1144,7 @@ impl ConnectorToolKind {
 pub enum ConnectorProtocol {
     #[default]
     Mcp,
+    Agent,
 }
 
 /// An MCP server the agent draws tools from. `path` names a connection the
@@ -1238,14 +1300,34 @@ pub struct SkillMeta {
     pub description: String,
 }
 
-/// A sub-agent the model can delegate to. `id` is both the child agent and the
-/// tool name the model calls. Its input is one `message`.
+/// A subagent the model can delegate to. `id` names the child agent; the model
+/// calls the tool [`Subagent::offered_name`] gives. Its input is one `message`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[schemars(title = "SubAgent")]
-pub struct SubAgent {
+#[schemars(title = "Subagent")]
+pub struct Subagent {
     pub id: String,
     #[serde(default)]
     pub description: String,
+    /// Keep this tool out of the request. See [`LlmTool::defer`]. Absent ⇒
+    /// the agent's `defer_tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer: Option<bool>,
+    /// Offer the tool as `agent__<id>` instead of `<id>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<bool>,
+}
+
+impl Subagent {
+    pub fn offered_name(&self) -> String {
+        match self.prefix {
+            Some(true) => format!("agent__{}", self.id),
+            _ => self.id.clone(),
+        }
+    }
+
+    pub fn defers(&self, default: bool) -> bool {
+        self.defer.unwrap_or(default)
+    }
 }
 
 /// Inputs a client declares on its run, passed to the worker on the
@@ -1292,7 +1374,7 @@ pub struct LlmTool {
     pub defer: bool,
 }
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
@@ -1601,7 +1683,7 @@ pub struct TokenDelta {
     pub tenant_id: String,
     /// Transport routing key.
     pub root_session_id: String,
-    /// May be a sub-agent of root.
+    /// May be a subagent of root.
     pub session_id: String,
     pub agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1624,7 +1706,7 @@ pub struct TokenDelta {
 #[schemars(title = "EffectStatus")]
 pub enum EffectStatus {
     Pending,
-    /// Running, waiting for its result. Off the deadline clock. A delegation
+    /// Running, waiting for its result. Off the deadline clock. A subagent
     /// stays here for as long as its child turn takes.
     Running,
     Completed,
@@ -1643,7 +1725,7 @@ pub enum EffectStatus {
 #[schemars(title = "EffectKind")]
 pub enum EffectKind {
     ToolCall,
-    SubAgent,
+    Subagent,
     LlmCall,
     /// Fetching one connection's tool list. Its `id` is the connection id.
     ConnectorSync,
@@ -1658,7 +1740,7 @@ impl EffectKind {
     pub fn label(self) -> &'static str {
         match self {
             EffectKind::ToolCall => "tool_call",
-            EffectKind::SubAgent => "sub_agent",
+            EffectKind::Subagent => "subagent",
             EffectKind::LlmCall => "llm_call",
             EffectKind::ConnectorSync => "connector_sync",
             EffectKind::Decision => "decision",
@@ -1692,10 +1774,10 @@ pub struct Effect {
     pub stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
-    /// The model tool call a delegation answers. Its `id` is the child
-    /// session.
+    /// The child session a subagent runs in. Its `id` is the model tool call
+    /// the subagent answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
+    pub session_id: Option<String>,
 }
 
 /// What the engine made of a tool call's arguments, sent with the raw
@@ -2027,8 +2109,8 @@ pub enum DecisionTrigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<ErrorInfo>,
     },
-    #[serde(rename = "sub_agent.finished")]
-    SubAgentFinished {
+    #[serde(rename = "subagent.finished")]
+    SubagentFinished {
         id: String,
         ok: bool,
         session_id: String,
@@ -2069,7 +2151,7 @@ impl DecisionTrigger {
             Self::ToolFinished { .. } => "tool.finished",
             Self::LlmExecute { .. } => "llm.execute",
             Self::LlmFinished { .. } => "llm.finished",
-            Self::SubAgentFinished { .. } => "sub_agent.finished",
+            Self::SubagentFinished { .. } => "subagent.finished",
             Self::InterruptResumed { .. } => "interrupt.resumed",
             Self::TurnFinished { .. } => "turn.finished",
         }
@@ -2192,17 +2274,18 @@ pub enum DecisionAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<Value>,
     },
-    #[serde(rename = "sub_agent.spawn")]
-    SpawnSubAgent {
-        session_id: String,
+    #[serde(rename = "subagent.spawn")]
+    SpawnSubagent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         agent_id: String,
-        /// The model tool call this delegation answers. Required.
+        /// The model tool call this subagent answers. Required.
         tool_call_id: String,
         /// The child's opening message. It travels with the spawn, so it
         /// cannot arrive before the session exists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<DraftMessage>,
-        /// Layered over the agent config's `sub_agent` policy, or over the
+        /// Layered over the agent config's `subagent` policy, or over the
         /// engine's default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryOverride>,
@@ -2289,7 +2372,7 @@ pub struct DecisionRequest<'a> {
     /// The agent config for the active path. `null` when none is set.
     pub agent: &'a Option<AgentConfig>,
     pub calls: &'a [Effect],
-    /// Count of in-flight `tool_call`/`sub_agent` calls.
+    /// Count of in-flight `tool_call`/`subagent` calls.
     pub pending_calls: usize,
     pub messages: &'a [Message],
     pub message_tree: &'a MessageTree,

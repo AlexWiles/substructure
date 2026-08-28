@@ -38,7 +38,7 @@ pub struct AgUiTranslator {
     closed_tool_calls: HashSet<String>,
     current_call_id: Option<String>,
     open_tools: HashSet<String>,
-    sub_agent_calls: HashMap<String, String>,
+    subagent_calls: HashSet<String>,
     called: HashMap<String, (String, String)>,
     terminated: bool,
 }
@@ -57,7 +57,7 @@ impl AgUiTranslator {
             closed_tool_calls: HashSet::new(),
             current_call_id: None,
             open_tools: HashSet::new(),
-            sub_agent_calls: HashMap::new(),
+            subagent_calls: HashSet::new(),
             called: HashMap::new(),
             terminated: false,
         }
@@ -238,38 +238,35 @@ impl AgUiTranslator {
                 self.learn_titles(&sync);
                 vec![]
             }
-            EventPayload::SubAgentRequested(s) => {
-                // A delegation surfaces to the client as a tool call named for the
-                // sub-agent; its answer arrives later on `sub_agent.turn_completed`,
-                // keyed by child session id, so remember the mapping.
-                self.sub_agent_calls.insert(s.id, s.tool_call_id.clone());
-                let out = if self.streamed_tool_calls.remove(&s.tool_call_id) {
-                    self.open_tools.remove(&s.tool_call_id);
-                    self.streamed_tool_call_args.remove(&s.tool_call_id);
+            EventPayload::SubagentRequested(s) => {
+                self.subagent_calls.insert(s.id.clone());
+                let out = if self.streamed_tool_calls.remove(&s.id) {
+                    self.open_tools.remove(&s.id);
+                    self.streamed_tool_call_args.remove(&s.id);
                     vec![AgUiEvent::ToolCallEnd {
-                        tool_call_id: s.tool_call_id.clone(),
+                        tool_call_id: s.id.clone(),
                     }]
                 } else {
                     vec![
                         AgUiEvent::ToolCallStart {
                             metadata: None,
-                            tool_call_id: s.tool_call_id.clone(),
+                            tool_call_id: s.id.clone(),
                             tool_call_name: s.agent_id,
                             parent_message_id: self.current_call_id.clone(),
                         },
                         AgUiEvent::ToolCallEnd {
-                            tool_call_id: s.tool_call_id.clone(),
+                            tool_call_id: s.id.clone(),
                         },
                     ]
                 };
-                self.closed_tool_calls.insert(s.tool_call_id.clone());
+                self.closed_tool_calls.insert(s.id);
                 out
             }
-            EventPayload::SubAgentTurnCompleted(s) => {
-                self.settle_sub_agent(&s.id, sub_agent_result(&s.data), false, ends_run)
+            EventPayload::SubagentTurnCompleted(s) => {
+                self.settle_subagent(&s.id, subagent_result(&s.data), false, ends_run)
             }
-            EventPayload::SubAgentErrored(s) => {
-                self.settle_sub_agent(&s.id, s.error.message, true, ends_run)
+            EventPayload::SubagentErrored(s) => {
+                self.settle_subagent(&s.id, s.error.message, true, ends_run)
             }
             EventPayload::LlmCallErrored(e) if !e.retryable => self.run_error(e.error.message),
             EventPayload::SessionCancelled => self.run_error("session cancelled".to_string()),
@@ -375,19 +372,22 @@ impl AgUiTranslator {
         Some(serde_json::json!({ "server": server, "title": title }))
     }
 
-    /// Emit a sub-agent's answer as the result of its delegating tool call,
-    /// then finish the run if it was the last unresolved call in a client batch.
-    fn settle_sub_agent(
+    fn settle_subagent(
         &mut self,
-        session_id: &str,
+        tool_call_id: &str,
         content: String,
         is_error: bool,
         ends_run: bool,
     ) -> Vec<AgUiEvent> {
-        let Some(tool_call_id) = self.sub_agent_calls.remove(session_id) else {
+        if !self.subagent_calls.remove(tool_call_id) {
             return vec![];
-        };
-        let mut out = vec![failed_tool_result(tool_call_id, content, is_error, false)];
+        }
+        let mut out = vec![failed_tool_result(
+            tool_call_id.to_string(),
+            content,
+            is_error,
+            false,
+        )];
         if ends_run {
             out.extend(self.finish_client_yield());
         }
@@ -453,8 +453,7 @@ fn reasoning_id(call_id: &str) -> String {
     format!("{call_id}-reasoning")
 }
 
-/// A sub-agent turn result: a bare string renders verbatim, anything else as JSON.
-fn sub_agent_result(data: &serde_json::Value) -> String {
+fn subagent_result(data: &serde_json::Value) -> String {
     match data {
         serde_json::Value::String(text) => text.clone(),
         other => other.to_string(),
@@ -1241,26 +1240,26 @@ mod tests {
         assert!(t.terminated());
     }
 
-    fn sub_agent_requested(session: &str, agent: &str, tool_id: &str) -> EventPayload {
+    fn subagent_requested(session: &str, agent: &str, tool_id: &str) -> EventPayload {
         ev(json!({
-            "type": "sub_agent.requested",
-            "id": session,
+            "type": "subagent.requested",
+            "id": tool_id,
             "agent_id": agent,
-            "tool_call_id": tool_id,
+            "session_id": session,
             "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
         }))
     }
 
-    fn sub_agent_turn_completed(session: &str, data: Value) -> EventPayload {
+    fn subagent_turn_completed(tool_id: &str, data: Value) -> EventPayload {
         ev(json!({
-            "type": "sub_agent.turn_completed",
-            "id": session,
+            "type": "subagent.turn_completed",
+            "id": tool_id,
             "data": data,
         }))
     }
 
     #[test]
-    fn streamed_sub_agent_call_closes_then_renders_result() {
+    fn streamed_subagent_call_closes_then_renders_result() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         // The delegating tool call streams first, exactly like a normal tool call.
         let a = vals(t.on_delta(tool_args_delta(
@@ -1273,15 +1272,14 @@ mod tests {
         assert_eq!(kinds(&a), ["TOOL_CALL_START", "TOOL_CALL_ARGS"]);
         let _ = t.on_event(llm_completed_with_tools("c1", &["call-1"]), false);
 
-        // `sub_agent.requested` stands in for `tool.call.requested`: it closes the bracket.
-        let req = vals(t.on_event(sub_agent_requested("child-1", "weather", "call-1"), false));
+        let req = vals(t.on_event(subagent_requested("child-1", "weather", "call-1"), false));
         assert_eq!(kinds(&req), ["TOOL_CALL_END"]);
         assert!(t.open_tools.is_empty());
-        assert!(!t.terminated(), "a lone sub-agent must not yield the run");
+        assert!(!t.terminated(), "a lone subagent must not yield the run");
 
         // The child's answer surfaces as the tool result, keyed by the tool call id.
         let done = vals(t.on_event(
-            sub_agent_turn_completed("child-1", json!("Clear, 68F.")),
+            subagent_turn_completed("call-1", json!("Clear, 68F.")),
             false,
         ));
         assert_eq!(kinds(&done), ["TOOL_CALL_RESULT"]);
@@ -1289,7 +1287,6 @@ mod tests {
         assert_eq!(done[0]["content"], "Clear, 68F.");
         assert!(!t.terminated());
 
-        // The turn finishes on the parent's own completion, not the sub-agent's.
         let end = vals(t.on_event(
             ev(json!({"type": "turn.completed", "turn_id": "r1"})),
             false,
@@ -1298,33 +1295,33 @@ mod tests {
     }
 
     #[test]
-    fn non_string_sub_agent_result_is_serialized_as_json() {
+    fn non_string_subagent_result_is_serialized_as_json() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(sub_agent_requested("child-1", "lookup", "call-1"), false);
+        let _ = t.on_event(subagent_requested("child-1", "lookup", "call-1"), false);
         let done = vals(t.on_event(
-            sub_agent_turn_completed("child-1", json!({"tempF": 68})),
+            subagent_turn_completed("call-1", json!({"tempF": 68})),
             true,
         ));
         assert_eq!(done[0]["content"], r#"{"tempF":68}"#);
     }
 
     #[test]
-    fn unstreamed_sub_agent_call_synthesizes_the_bracket() {
+    fn unstreamed_subagent_call_synthesizes_the_bracket() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let req = vals(t.on_event(sub_agent_requested("child-1", "weather", "call-1"), false));
+        let req = vals(t.on_event(subagent_requested("child-1", "weather", "call-1"), false));
         assert_eq!(kinds(&req), ["TOOL_CALL_START", "TOOL_CALL_END"]);
         assert_eq!(req[0]["toolCallName"], "weather");
         assert_eq!(req[0]["toolCallId"], "call-1");
     }
 
     #[test]
-    fn sub_agent_error_surfaces_as_a_result() {
+    fn subagent_error_surfaces_as_a_result() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
-        let _ = t.on_event(sub_agent_requested("child-1", "weather", "call-1"), false);
+        let _ = t.on_event(subagent_requested("child-1", "weather", "call-1"), false);
         let err = vals(t.on_event(
             ev(json!({
-                "type": "sub_agent.errored",
-                "id": "child-1",
+                "type": "subagent.errored",
+                "id": "call-1",
                 "error": {"message": "child boom", "code": "internal"},
             })),
             false,
@@ -1335,11 +1332,11 @@ mod tests {
     }
 
     #[test]
-    fn mixed_batch_waits_for_sub_agent_before_yielding() {
+    fn mixed_batch_waits_for_subagent_before_yielding() {
         let mut t = AgUiTranslator::new("t1".into(), "r1".into());
         let _ = t.on_event(llm_completed_with_tools("c1", &["sub", "c"]), false);
 
-        let after_sub = vals(t.on_event(sub_agent_requested("child-1", "weather", "sub"), false));
+        let after_sub = vals(t.on_event(subagent_requested("child-1", "weather", "sub"), false));
         assert_eq!(kinds(&after_sub), ["TOOL_CALL_START", "TOOL_CALL_END"]);
         assert!(!t.terminated());
 
@@ -1348,11 +1345,11 @@ mod tests {
         assert_eq!(
             kinds(&after_client),
             ["TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END"],
-            "must not yield while the sub-agent in the batch is unresolved"
+            "must not yield while the subagent in the batch is unresolved"
         );
         assert!(!t.terminated());
 
-        let done = vals(t.on_event(sub_agent_turn_completed("child-1", json!("done")), true));
+        let done = vals(t.on_event(subagent_turn_completed("sub", json!("done")), true));
         assert_eq!(kinds(&done), ["TOOL_CALL_RESULT", "RUN_FINISHED"]);
         assert!(t.terminated());
     }

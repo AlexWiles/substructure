@@ -15,7 +15,7 @@ pub mod transport;
 pub use protocol::{DecisionRequest, DecisionResponse};
 pub use runtime::Caller;
 pub use runtime::{
-    event_store, llm, processor, retry, session, span, start, sub_agent, wake, worker,
+    event_store, llm, processor, retry, session, span, start, subagent, wake, worker,
     ClientInputOutput, EffectSettlement, HandleClientInput, InterruptSessionInput,
     ResumeInterruptInput, Runtime, RuntimeConfig, RuntimeDeps, RuntimeError, SettleEffectInput,
     SubmitClientPayload, SubmitClientPayloadOutput,

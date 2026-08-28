@@ -19,7 +19,6 @@ const MILESTONE_EVERY: usize = 25;
 enum Item {
     /// Preamble text before a call.
     Said { id: String, text: String },
-    /// A tool call or a sub-agent run.
     Step {
         id: String,
         name: String,
@@ -74,7 +73,7 @@ impl TurnActivity {
             EventPayload::ToolCallRequested(t) => {
                 self.step(&t.id, &t.name, Some(&t.arguments));
             }
-            EventPayload::SubAgentRequested(s) => {
+            EventPayload::SubagentRequested(s) => {
                 self.step(&s.id, &format!("agent {}", s.agent_id), None);
             }
             _ => {}
@@ -226,7 +225,7 @@ fn flatten(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::events::{SubAgentRequested, ToolCallRequested, TurnStarted};
+    use crate::session::events::{SubagentRequested, ToolCallRequested, TurnStarted};
 
     /// An LLM response saying `content`, with a call to make when `calling`.
     fn said(id: &str, content: &str, calling: bool, seq: u64) -> SessionEvent {
@@ -289,7 +288,7 @@ mod tests {
                 ancestry: Vec::new(),
                 turn_id: None,
                 cost: Default::default(),
-                sub_agent_cost: Default::default(),
+                subagent_cost: Default::default(),
                 head_id: None,
                 calls: Vec::new(),
                 decisions: Vec::new(),
@@ -397,15 +396,15 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_agent_previews_by_name() {
+    fn a_subagent_previews_by_name() {
         let events = vec![
             started("turn-1", 1),
             event(
                 2,
-                EventPayload::SubAgentRequested(SubAgentRequested {
-                    id: "sub-1".into(),
+                EventPayload::SubagentRequested(SubagentRequested {
+                    id: "tc1".into(),
                     agent_id: "researcher".into(),
-                    tool_call_id: "tc1".into(),
+                    session_id: "sub-1".into(),
                     message: None,
                     retry: retry(),
                 }),
