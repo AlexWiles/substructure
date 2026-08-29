@@ -1,4 +1,4 @@
-# substructure.ai
+# subs
 [substructure.ai](https://substructure.ai)
 
 > Pre-1.0: APIs and the wire protocol can change between releases.
