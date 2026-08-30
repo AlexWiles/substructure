@@ -3,7 +3,8 @@ use std::num::NonZeroUsize;
 use crate::connectors::RemoteTool;
 use crate::protocol::{
     Approve, ConnectionPath, ConnectorProtocol, ConnectorTool, ConnectorToolKind,
-    DeferToolsStrategy, LlmTool, McpServer, McpTools, Subagent, SubagentToolsStrategy,
+    DeferToolsStrategy, LlmTool, McpServer, McpTools, SpawnMode, Subagent, SubagentMode,
+    SubagentToolsStrategy, SUBAGENT_WAIT,
 };
 
 const SEPARATOR: &str = "__";
@@ -108,6 +109,13 @@ pub use crate::protocol::{CALL_TOOL, SKILL, SUBAGENT, TOOL_SEARCH};
 const SESSION_DESCRIPTION: &str =
     "Session id of an earlier call to this agent, to continue that conversation";
 
+const MODE_DESCRIPTION: &str = "How the call returns [default: blocking]. `blocking` waits and \
+     answers with the result. `detached` answers at once with the session id; the result \
+     arrives later as a message.";
+
+const DETACHED_NOTE: &str = " Runs detached: the call answers at once with the session id, and \
+     the result arrives as a later message.";
+
 pub fn subagent_input() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -119,31 +127,89 @@ pub fn subagent_input() -> serde_json::Value {
     })
 }
 
+fn subagent_input_with_modes(modes: &[SpawnMode]) -> serde_json::Value {
+    let mut input = subagent_input();
+    if modes.len() > 1 {
+        input["properties"]["mode"] = serde_json::json!({
+            "type": "string",
+            "enum": modes,
+            "description": MODE_DESCRIPTION
+        });
+    }
+    input
+}
+
 pub fn subagent_tools(
     subagents: &[Subagent],
     default_defer: bool,
     strategy: SubagentToolsStrategy,
+    wait: bool,
 ) -> Resolution {
-    match strategy {
+    let can_detach = subagents
+        .iter()
+        .any(|s| s.resolved_mode().offered().contains(&SpawnMode::Detached));
+    let wait = wait && can_detach;
+    let mut r = match strategy {
         SubagentToolsStrategy::PerAgent => per_agent_subagent_tools(subagents, default_defer),
         SubagentToolsStrategy::Single => Resolution::of(match subagents.is_empty() {
             true => Vec::new(),
             false => vec![subagent_switch(subagents, default_defer)],
         }),
+    };
+    if wait {
+        r.tools.push(wait_tool(default_defer));
+    }
+    r
+}
+
+fn wait_tool(defer: bool) -> ConnectorTool {
+    ConnectorTool {
+        defer,
+        via: ConnectorProtocol::Agent,
+        ..engine_tool(
+            SUBAGENT_WAIT,
+            "Wait for the result of an earlier detached subagent call. Pass the `session` that \
+             call answered with. Answers at once when the result is already in, and holds \
+             until the child finishes when it is not."
+                .to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session": { "type": "string", "description": "The detached call's session id" }
+                },
+                "required": ["session"]
+            }),
+            ConnectorToolKind::Subagent,
+        )
     }
 }
 
 fn subagent_switch(subagents: &[Subagent], defer: bool) -> ConnectorTool {
     let listed = subagents
         .iter()
-        .map(|s| match s.description.is_empty() {
-            true => format!("- {}", s.id),
-            false => format!("- {} — {}", s.id, s.description),
+        .map(|s| {
+            let mode = match s.resolved_mode() {
+                SubagentMode::Any => "",
+                SubagentMode::Blocking => " [always blocking]",
+                SubagentMode::Detached => " [always detached]",
+            };
+            match s.description.is_empty() {
+                true => format!("- {}{mode}", s.id),
+                false => format!("- {} — {}{mode}", s.id, s.description),
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");
     let ids: Vec<&str> = subagents.iter().map(|s| s.id.as_str()).collect();
-    let mut input = subagent_input();
+    let modes: Vec<SpawnMode> = [SpawnMode::Blocking, SpawnMode::Detached]
+        .into_iter()
+        .filter(|m| {
+            subagents
+                .iter()
+                .any(|s| s.resolved_mode().offered().contains(m))
+        })
+        .collect();
+    let mut input = subagent_input_with_modes(&modes);
     input["properties"]["agent"] = serde_json::json!({
         "type": "string",
         "enum": ids,
@@ -176,14 +242,18 @@ fn per_agent_subagent_tools(subagents: &[Subagent], default_defer: bool) -> Reso
             oversized.push(name);
             continue;
         }
-        let description = match sub.description.is_empty() {
+        let mut description = match sub.description.is_empty() {
             true => format!("Delegate to {}", sub.id),
             false => sub.description.clone(),
         };
+        let modes = sub.resolved_mode().offered();
+        if modes == [SpawnMode::Detached] {
+            description.push_str(DETACHED_NOTE);
+        }
         tools.push(ConnectorTool {
             name,
             description,
-            input: Some(subagent_input()),
+            input: Some(subagent_input_with_modes(modes)),
             output: None,
             connector: Some(ConnectionPath::Agent(sub.id.clone())),
             via: ConnectorProtocol::Agent,
@@ -1223,6 +1293,7 @@ mod tests {
             description: String::new(),
             defer,
             prefix,
+            mode: None,
         }
     }
 
@@ -1232,6 +1303,7 @@ mod tests {
             &[subagent("researcher", None, None)],
             false,
             SubagentToolsStrategy::PerAgent,
+            false,
         );
         let tool = &r.tools[0];
         assert_eq!(tool.name, "researcher");
@@ -1254,7 +1326,8 @@ mod tests {
         let mut sub = subagent("researcher", None, None);
         sub.description = "Find sources".to_string();
         assert_eq!(
-            subagent_tools(&[sub], false, SubagentToolsStrategy::PerAgent).tools[0].description,
+            subagent_tools(&[sub], false, SubagentToolsStrategy::PerAgent, false).tools[0]
+                .description,
             "Find sources"
         );
     }
@@ -1265,6 +1338,7 @@ mod tests {
             &[subagent("researcher", None, Some(true))],
             false,
             SubagentToolsStrategy::PerAgent,
+            false,
         );
         assert_eq!(r.tools[0].name, "agent__researcher");
         assert_eq!(
@@ -1280,13 +1354,14 @@ mod tests {
             subagent("b", Some(false), None),
             subagent("c", Some(true), None),
         ];
-        let defaulted: Vec<bool> = subagent_tools(&subs, true, SubagentToolsStrategy::PerAgent)
-            .tools
-            .iter()
-            .map(|t| t.defer)
-            .collect();
+        let defaulted: Vec<bool> =
+            subagent_tools(&subs, true, SubagentToolsStrategy::PerAgent, false)
+                .tools
+                .iter()
+                .map(|t| t.defer)
+                .collect();
         assert_eq!(defaulted, [true, false, true]);
-        let bare: Vec<bool> = subagent_tools(&subs, false, SubagentToolsStrategy::PerAgent)
+        let bare: Vec<bool> = subagent_tools(&subs, false, SubagentToolsStrategy::PerAgent, false)
             .tools
             .iter()
             .map(|t| t.defer)
@@ -1301,6 +1376,7 @@ mod tests {
             &[subagent(&long, None, None)],
             false,
             SubagentToolsStrategy::PerAgent,
+            false,
         );
         assert!(listed.tools.is_empty());
         assert_eq!(listed.oversized, vec![long.clone()]);
@@ -1308,6 +1384,7 @@ mod tests {
             &[subagent(&long, Some(true), None)],
             false,
             SubagentToolsStrategy::PerAgent,
+            false,
         );
         assert_eq!(deferred.tools.len(), 1);
         assert!(deferred.oversized.is_empty());
@@ -1321,6 +1398,7 @@ mod tests {
             &[helper, subagent("scribe", None, None)],
             false,
             SubagentToolsStrategy::Single,
+            false,
         );
 
         assert_eq!(r.tools.len(), 1, "one tool for all of them");
@@ -1350,15 +1428,151 @@ mod tests {
     #[test]
     fn the_single_tool_defers_with_the_agent() {
         let subs = [subagent("helper", None, None)];
-        assert!(subagent_tools(&subs, true, SubagentToolsStrategy::Single).tools[0].defer);
-        assert!(!subagent_tools(&subs, false, SubagentToolsStrategy::Single).tools[0].defer);
+        assert!(subagent_tools(&subs, true, SubagentToolsStrategy::Single, false).tools[0].defer);
+        assert!(!subagent_tools(&subs, false, SubagentToolsStrategy::Single, false).tools[0].defer);
+    }
+
+    #[test]
+    fn a_pin_narrows_the_modes_a_tool_offers() {
+        use crate::protocol::SubagentMode;
+        let plain = subagent("plain", None, None);
+        let mut detached = subagent("detached", None, None);
+        detached.mode = Some(SubagentMode::Detached);
+        let mut blocking = subagent("blocking", None, None);
+        blocking.mode = Some(SubagentMode::Blocking);
+
+        let r = subagent_tools(
+            &[plain, detached, blocking],
+            false,
+            SubagentToolsStrategy::PerAgent,
+            false,
+        );
+        let modes = |i: usize| r.tools[i].input.as_ref().unwrap()["properties"]["mode"].clone();
+        assert_eq!(
+            modes(0)["enum"],
+            serde_json::json!(["blocking", "detached"]),
+            "unpinned, the model picks"
+        );
+        assert!(modes(1).is_null(), "one possible mode is no choice at all");
+        assert!(
+            r.tools[1].description.contains("Runs detached"),
+            "the pin rides in the description: {}",
+            r.tools[1].description
+        );
+        assert!(
+            modes(2).is_null(),
+            "pinned blocking is the schema the tool always had"
+        );
+    }
+
+    #[test]
+    fn the_single_tool_offers_the_union_of_its_agents_modes() {
+        use crate::protocol::SubagentMode;
+        let mut detached = subagent("detached", None, None);
+        detached.mode = Some(SubagentMode::Detached);
+        let mut blocking = subagent("blocking", None, None);
+        blocking.mode = Some(SubagentMode::Blocking);
+
+        let r = subagent_tools(
+            &[detached, blocking.clone()],
+            false,
+            SubagentToolsStrategy::Single,
+            false,
+        );
+        assert!(
+            r.tools[0].input.as_ref().unwrap()["properties"]["mode"].is_null(),
+            "no agent grants a choice, so no field"
+        );
+        assert!(
+            r.tools[0]
+                .description
+                .contains("- detached [always detached]"),
+            "the roster says whose mode is whose: {}",
+            r.tools[0].description
+        );
+        assert!(
+            r.tools[0]
+                .description
+                .contains("- blocking [always blocking]"),
+            "{}",
+            r.tools[0].description
+        );
+        let plain = subagent_tools(
+            &[subagent("plain", None, None)],
+            false,
+            SubagentToolsStrategy::Single,
+            false,
+        );
+        assert!(
+            !plain.tools[0].description.contains("- plain ["),
+            "the default carries no annotation: {}",
+            plain.tools[0].description
+        );
+        assert_eq!(
+            plain.tools[0].input.as_ref().unwrap()["properties"]["mode"]["enum"],
+            serde_json::json!(["blocking", "detached"])
+        );
+
+        let bare = subagent_tools(&[blocking], false, SubagentToolsStrategy::Single, false);
+        assert!(
+            bare.tools[0].input.as_ref().unwrap()["properties"]["mode"].is_null(),
+            "an all-blocking roster keeps the schema it always had"
+        );
+    }
+
+    #[test]
+    fn the_wait_tool_rides_along_and_claims_the_wait_mode() {
+        use crate::protocol::SubagentMode;
+        let r = subagent_tools(
+            &[subagent("plain", None, None)],
+            false,
+            SubagentToolsStrategy::PerAgent,
+            true,
+        );
+        assert_eq!(names(&r), vec!["plain", SUBAGENT_WAIT]);
+        assert_eq!(
+            r.tools[0].input.as_ref().unwrap()["properties"]["mode"]["enum"],
+            serde_json::json!(["blocking", "detached"]),
+            "waiting lives on its own tool"
+        );
+        let wait = &r.tools[1];
+        assert_eq!(wait.kind, ConnectorToolKind::Subagent);
+        assert!(wait.connector.is_none() && wait.remote_name.is_empty());
+        assert_eq!(
+            wait.input.as_ref().unwrap()["required"],
+            serde_json::json!(["session"])
+        );
+
+        let mut pinned = subagent("pinned", None, None);
+        pinned.mode = Some(SubagentMode::Detached);
+        let r = subagent_tools(&[pinned], false, SubagentToolsStrategy::PerAgent, true);
+        assert!(
+            r.tools[0].input.as_ref().unwrap()["properties"]["mode"].is_null(),
+            "one possible mode is no choice at all"
+        );
+        assert!(
+            r.tools[0].description.contains("Runs detached"),
+            "the description says what the call will do: {}",
+            r.tools[0].description
+        );
+
+        let mut blocking = subagent("blocking", None, None);
+        blocking.mode = Some(SubagentMode::Blocking);
+        let none = subagent_tools(&[blocking], false, SubagentToolsStrategy::PerAgent, true);
+        assert_eq!(
+            names(&none),
+            vec!["blocking"],
+            "nothing detaches, nothing waits"
+        );
     }
 
     #[test]
     fn the_single_strategy_offers_nothing_without_subagents() {
-        assert!(subagent_tools(&[], false, SubagentToolsStrategy::Single)
-            .tools
-            .is_empty());
+        assert!(
+            subagent_tools(&[], false, SubagentToolsStrategy::Single, false)
+                .tools
+                .is_empty()
+        );
     }
 
     #[test]

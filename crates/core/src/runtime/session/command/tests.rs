@@ -56,6 +56,7 @@ fn spawn_as(agent: &str, call: &str) -> CommandPayload {
         message: None,
         retry: RetryPolicy::no_retry(),
         decision_id: SPAWN_DECISION.to_string(),
+        mode: None,
     }
 }
 
@@ -67,6 +68,7 @@ fn continue_as(agent: &str, child: &str, call: &str) -> CommandPayload {
         message: None,
         retry: RetryPolicy::no_retry(),
         decision_id: SPAWN_DECISION.to_string(),
+        mode: None,
     }
 }
 
@@ -2689,6 +2691,7 @@ fn request_subagent_holds_the_opening_message() {
             session_id: None,
             agent_id: "agent-2".to_string(),
             tool_call_id: "call-sa".to_string(),
+            mode: None,
             message: Some(DraftMessage {
                 id: None,
                 role: Role::User,
@@ -3061,6 +3064,421 @@ fn two_calls_to_one_child_are_two_effects() {
         agg.state.subagent_cost,
         rust_decimal::Decimal::new(5, 0),
         "a continued turn rolls its cost up like the first one"
+    );
+}
+
+fn spawn_detached(call: &str) -> CommandPayload {
+    let CommandPayload::RequestSubagent {
+        session_id,
+        agent_id,
+        tool_call_id,
+        message,
+        retry,
+        decision_id,
+        ..
+    } = spawn(call)
+    else {
+        unreachable!()
+    };
+    CommandPayload::RequestSubagent {
+        session_id,
+        agent_id,
+        tool_call_id,
+        message,
+        retry,
+        decision_id,
+        mode: Some(SpawnMode::Detached),
+    }
+}
+
+fn queued_trigger(events: &[EventPayload]) -> Trigger {
+    events
+        .iter()
+        .find_map(|e| match e {
+            EventPayload::DecisionQueued(p) => Some(p.trigger.clone()),
+            _ => None,
+        })
+        .expect("a decision was queued")
+}
+
+fn start_detached(agg: &mut SessionAggregate, call: &str) -> String {
+    dispatch(agg, spawn_detached(call), &system());
+    let child = child_of(agg, call);
+    dispatch(
+        agg,
+        CommandPayload::settle(
+            EffectKind::Subagent,
+            call.to_string(),
+            None,
+            Outcome::SubagentStarted,
+        ),
+        &system(),
+    );
+    child
+}
+
+#[test]
+fn a_detached_spawn_answers_at_start_and_frees_the_turn() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    dispatch(&mut agg, spawn_detached("call-d"), &system());
+
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::Subagent,
+            "call-d".to_string(),
+            None,
+            Outcome::SubagentStarted,
+        ),
+        &system(),
+    );
+
+    match queued_trigger(&events) {
+        Trigger::SubagentFinished {
+            id,
+            ok: true,
+            result: Some(result),
+            ..
+        } => {
+            assert_eq!(id, "call-d");
+            assert!(result.contains("detached"), "{result}");
+        }
+        other => panic!("expected the started acknowledgement; got {other:?}"),
+    }
+    assert_eq!(
+        agg.state
+            .effect(EffectKind::Subagent, "call-d")
+            .expect("subagent present")
+            .tracking
+            .status(),
+        EffectStatus::Completed,
+        "a settled call holds nothing open"
+    );
+}
+
+#[test]
+fn a_detached_result_arrives_as_a_message_not_a_tool_result() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let child = start_detached(&mut agg, "call-d");
+
+    let events = dispatch(
+        &mut agg,
+        answer(&child, "turn-1", rust_decimal::Decimal::new(2, 0)),
+        &system(),
+    );
+
+    match queued_trigger(&events) {
+        Trigger::SubagentNotice { messages, .. } => {
+            let text = messages[0]
+                .content
+                .as_ref()
+                .and_then(Content::text)
+                .expect("the notice has text");
+            assert!(text.contains("<subagent_result"), "{text}");
+            assert!(text.contains(&child), "{text}");
+            assert!(text.contains("done"), "{text}");
+        }
+        other => panic!("expected an injected message; got {other:?}"),
+    }
+    assert_eq!(
+        agg.state.subagent_cost,
+        rust_decimal::Decimal::new(2, 0),
+        "a detached turn still rolls its cost up"
+    );
+
+    let replayed = dispatch(
+        &mut agg,
+        answer(&child, "turn-1", rust_decimal::Decimal::new(2, 0)),
+        &system(),
+    );
+    assert!(
+        !replayed
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentTurnCompleted(_))),
+        "a redelivered turn is a no-op; got {replayed:?}"
+    );
+}
+
+#[test]
+fn results_landing_mid_turn_share_one_notice() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let first = start_detached(&mut agg, "call-a");
+    let second = start_detached(&mut agg, "call-b");
+    dispatch(
+        &mut agg,
+        CommandPayload::SendMessage {
+            message: DraftMessage {
+                id: None,
+                role: Role::User,
+                content: Some(Content::Text("busy".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning: None,
+            },
+            stream: false,
+            turn_id: Some("turn-p".to_string()),
+            parent_id: None,
+        },
+        &system(),
+    );
+
+    dispatch(
+        &mut agg,
+        answer(&first, "turn-1", rust_decimal::Decimal::ZERO),
+        &system(),
+    );
+    let events = dispatch(
+        &mut agg,
+        answer(&second, "turn-2", rust_decimal::Decimal::ZERO),
+        &system(),
+    );
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::DecisionDropped(_))),
+        "the second result folds into the first notice; got {events:?}"
+    );
+    let notice = agg
+        .state
+        .queued_subagent_notice()
+        .expect("one notice holds while the turn runs");
+    let texts: Vec<&str> = notice
+        .messages
+        .iter()
+        .filter_map(|m| m.content.as_ref().and_then(Content::text))
+        .collect();
+    assert_eq!(texts.len(), 2, "both results ride one wake-up");
+    assert!(texts[0].contains(&first) && texts[1].contains(&second));
+}
+
+#[test]
+fn a_wait_withdraws_that_childs_pending_message_and_keeps_the_rest() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let first = start_detached(&mut agg, "call-a");
+    let second = start_detached(&mut agg, "call-b");
+    dispatch(
+        &mut agg,
+        CommandPayload::SendMessage {
+            message: DraftMessage {
+                id: None,
+                role: Role::User,
+                content: Some(Content::Text("busy".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning: None,
+            },
+            stream: false,
+            turn_id: Some("turn-p".to_string()),
+            parent_id: None,
+        },
+        &system(),
+    );
+    dispatch(
+        &mut agg,
+        answer(&first, "turn-1", rust_decimal::Decimal::ZERO),
+        &system(),
+    );
+    dispatch(
+        &mut agg,
+        answer(&second, "turn-2", rust_decimal::Decimal::ZERO),
+        &system(),
+    );
+
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::RequestSubagent {
+            session_id: Some(first.clone()),
+            agent_id: String::new(),
+            tool_call_id: "call-w".to_string(),
+            message: None,
+            retry: RetryPolicy::no_retry(),
+            decision_id: SPAWN_DECISION.to_string(),
+            mode: Some(SpawnMode::Wait),
+        },
+        &system(),
+    );
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::DecisionDropped(_))),
+        "the answered result leaves the mailbox; got {events:?}"
+    );
+    let notice = agg
+        .state
+        .queued_subagent_notice()
+        .expect("the other child's message still waits");
+    assert_eq!(notice.sessions, std::slice::from_ref(&second));
+    assert!(
+        notice.messages[0]
+            .content
+            .as_ref()
+            .and_then(Content::text)
+            .is_some_and(|t| t.contains(&second) && !t.contains(&first)),
+        "only the unclaimed result is left to deliver"
+    );
+}
+
+#[test]
+fn wait_answers_at_once_when_the_detached_result_is_in() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let child = start_detached(&mut agg, "call-d");
+    dispatch(
+        &mut agg,
+        answer(&child, "turn-1", rust_decimal::Decimal::ZERO),
+        &system(),
+    );
+
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::RequestSubagent {
+            session_id: Some(child.clone()),
+            agent_id: String::new(),
+            tool_call_id: "call-w".to_string(),
+            message: None,
+            retry: RetryPolicy::no_retry(),
+            decision_id: SPAWN_DECISION.to_string(),
+            mode: Some(SpawnMode::Wait),
+        },
+        &system(),
+    );
+
+    match queued_trigger(&events) {
+        Trigger::SubagentFinished {
+            id,
+            ok: true,
+            result: Some(result),
+            session_id,
+            agent_id,
+            ..
+        } => {
+            assert_eq!(id, "call-w");
+            assert_eq!(result, "done");
+            assert_eq!(session_id, child);
+            assert_eq!(agent_id, "agent-2", "the session names the agent");
+        }
+        other => panic!("expected the stored result; got {other:?}"),
+    }
+    assert!(
+        agg.state.effect(EffectKind::Subagent, "call-w").is_none(),
+        "an answered wait opens nothing"
+    );
+}
+
+#[test]
+fn wait_holds_until_the_next_detached_result() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let child = start_detached(&mut agg, "call-d");
+
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::RequestSubagent {
+            session_id: Some(child.clone()),
+            agent_id: "agent-2".to_string(),
+            tool_call_id: "call-w".to_string(),
+            message: None,
+            retry: RetryPolicy::no_retry(),
+            decision_id: SPAWN_DECISION.to_string(),
+            mode: Some(SpawnMode::Wait),
+        },
+        &system(),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentRequested(r) if r.message.is_none())),
+        "the wait opens a call that sends nothing; got {events:?}"
+    );
+    dispatch(
+        &mut agg,
+        CommandPayload::settle(
+            EffectKind::Subagent,
+            "call-w".to_string(),
+            None,
+            Outcome::SubagentStarted,
+        ),
+        &system(),
+    );
+
+    let events = dispatch(
+        &mut agg,
+        answer(&child, "turn-1", rust_decimal::Decimal::ZERO),
+        &system(),
+    );
+
+    match queued_trigger(&events) {
+        Trigger::SubagentFinished {
+            id,
+            ok: true,
+            result: Some(result),
+            ..
+        } => {
+            assert_eq!(id, "call-w", "the child's answer settles the wait");
+            assert_eq!(result, "done");
+        }
+        other => panic!("expected the wait's result; got {other:?}"),
+    }
+}
+
+#[test]
+fn a_busy_detached_child_refuses_another_message() {
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
+    let child = start_detached(&mut agg, "call-d");
+
+    let events = dispatch(
+        &mut agg,
+        continue_as("agent-2", &child, "call-b"),
+        &system(),
+    );
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EventPayload::SubagentRequested(_))),
+        "a working detached child takes no second message; got {events:?}"
+    );
+    match queued_trigger(&events) {
+        Trigger::SubagentFinished {
+            ok: false,
+            error: Some(error),
+            ..
+        } => assert!(
+            error.message.contains("still working detached"),
+            "{}",
+            error.message
+        ),
+        other => panic!("expected a failed subagent.finished; got {other:?}"),
+    }
+}
+
+#[test]
+fn a_configured_mode_overrides_the_requested_one() {
+    let mut agg = create_session_with_config(
+        "sess-1",
+        "tenant-a",
+        "user-1",
+        Some(AgentConfig {
+            subagents: vec![crate::protocol::Subagent {
+                id: "agent-2".to_string(),
+                description: "Does the work.".to_string(),
+                defer: None,
+                prefix: None,
+                mode: Some(crate::protocol::SubagentMode::Detached),
+            }],
+            ..agent_config("m1")
+        }),
+    );
+
+    let events = dispatch(&mut agg, spawn("call-d"), &system());
+
+    assert!(
+        events.iter().any(
+            |e| matches!(e, EventPayload::SubagentRequested(r) if r.mode == SpawnMode::Detached)
+        ),
+        "the pin decides, not the call; got {events:?}"
     );
 }
 
@@ -3532,6 +3950,7 @@ fn tool_and_subagent_from_one_turn_dispatch_concurrently() {
                     tool_call_id: "s1".to_string(),
                     message: None,
                     retry: RetryPolicy::no_retry(),
+                    mode: None,
                 },
             ],
             state: None,
@@ -7643,6 +8062,7 @@ fn subagent_cfg(defer: Option<bool>, prefix: Option<bool>) -> AgentConfig {
             description: "Does the work.".to_string(),
             defer,
             prefix,
+            mode: None,
         }],
         ..agent_config("m1")
     }
@@ -7660,7 +8080,7 @@ fn subagent_session(defer: Option<bool>, prefix: Option<bool>) -> SessionAggrega
 #[test]
 fn a_subagent_is_offered_as_a_connector_tool() {
     let agg = subagent_session(None, None);
-    assert_eq!(offered(&agg), ["helper"]);
+    assert_eq!(offered(&agg), ["helper", "subagent_wait"]);
     let tools = agg.state.at(None).connector_tools().tools;
     assert_eq!(tools[0].kind, crate::protocol::ConnectorToolKind::Subagent);
     assert_eq!(
@@ -7674,7 +8094,7 @@ fn a_deferred_subagent_is_held_and_costs_the_same_search_pair() {
     let agg = subagent_session(Some(true), None);
     assert_eq!(
         offered(&agg),
-        ["tool_search", "call_tool"],
+        ["subagent_wait", "tool_search", "call_tool"],
         "a deferred subagent alone brings the pair"
     );
     assert!(
@@ -7791,7 +8211,7 @@ fn a_subagent_and_an_unprefixed_connector_tool_both_lose_a_shared_name() {
 #[test]
 fn a_prefixed_subagent_dodges_the_collision() {
     let agg = subagent_session(None, Some(true));
-    assert_eq!(offered(&agg), ["agent__helper"]);
+    assert_eq!(offered(&agg), ["agent__helper", "subagent_wait"]);
 }
 
 #[test]

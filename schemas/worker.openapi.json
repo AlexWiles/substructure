@@ -572,6 +572,16 @@
                 ],
                 "description": "The child's opening message. It travels with the spawn, so it\ncannot arrive before the session exists."
               },
+              "mode": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SpawnMode"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "retry": {
                 "anyOf": [
                   {
@@ -2044,6 +2054,16 @@
         "title": "SkillMeta",
         "type": "object"
       },
+      "SpawnMode": {
+        "description": "How one subagent call returns.",
+        "enum": [
+          "blocking",
+          "detached",
+          "wait"
+        ],
+        "title": "SpawnMode",
+        "type": "string"
+      },
       "StoredContent": {
         "oneOf": [
           {
@@ -2146,6 +2166,16 @@
           "id": {
             "type": "string"
           },
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SubagentMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "prefix": {
             "description": "Offer the tool as `agent__<id>` instead of `<id>`.",
             "type": [
@@ -2160,6 +2190,16 @@
         "title": "Subagent",
         "type": "object"
       },
+      "SubagentMode": {
+        "description": "How calls to a subagent return. Configuration; each call carries a\n[`SpawnMode`].",
+        "enum": [
+          "blocking",
+          "detached",
+          "any"
+        ],
+        "title": "SubagentMode",
+        "type": "string"
+      },
       "SubagentTools": {
         "additionalProperties": {
           "not": {}
@@ -2168,6 +2208,12 @@
         "properties": {
           "strategy": {
             "$ref": "#/components/schemas/SubagentToolsStrategy"
+          },
+          "wait": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "title": "SubagentTools",

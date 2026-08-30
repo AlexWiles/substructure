@@ -339,6 +339,7 @@ impl World {
                     tool_call_id: self.mint(),
                     message: None,
                     retry: policy(),
+                    mode: None,
                 },
                 ActOp::Interrupt => Action::Interrupt {
                     interrupt_id: self.mint(),

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::connectors::registry::ConnectionPath;
 use crate::protocol::{
     ClientContext, DeferToolsStrategy, DraftMessage, ErrorInfo, Handler, LlmFormat, LlmRequest,
-    LlmResponse, RetryOverride, RetryPolicy, StoredResult, ToolResult, Usage,
+    LlmResponse, RetryOverride, RetryPolicy, SpawnMode, StoredResult, ToolResult, Usage,
 };
 use crate::runtime::retry::RetryTarget;
 
@@ -123,6 +123,13 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<serde_json::Value>,
     },
+    #[serde(rename = "subagent.notice")]
+    SubagentNotice {
+        messages: Vec<DraftMessage>,
+        #[serde(default)]
+        sessions: Vec<String>,
+        turn_id: String,
+    },
     #[serde(rename = "tool.execute")]
     ToolExecute {
         id: String,
@@ -206,6 +213,7 @@ impl Trigger {
     pub fn deferred_turn_id(&self) -> Option<&str> {
         match self {
             Trigger::ClientMessage { turn_id, .. } => turn_id.as_deref(),
+            Trigger::SubagentNotice { turn_id, .. } => Some(turn_id),
             _ => None,
         }
     }
@@ -336,6 +344,8 @@ pub enum Action {
         message: Option<DraftMessage>,
         #[serde(default = "RetryPolicy::no_retry")]
         retry: RetryPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SpawnMode>,
     },
     #[serde(rename = "message.send")]
     SendMessage {

@@ -95,6 +95,7 @@ mod tests {
             description: description.to_string(),
             defer: None,
             prefix: None,
+            mode: None,
         }
     }
 

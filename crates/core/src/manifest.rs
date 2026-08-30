@@ -11,7 +11,8 @@ use crate::protocol::ReasoningEffort;
 use crate::protocol::{
     AgentConfig, AgentPlugin, AgentTool, Approve, ConnectorProtocol, DeferTools, Handler,
     LlmFormat, McpAnnounce, McpAuthFailure, McpServer, McpToolSyncFailure, McpTools, RetryConfig,
-    Subagent, SubagentTools, SubagentToolsStrategy, SUBAGENT,
+    SpawnMode, Subagent, SubagentMode, SubagentTools, SubagentToolsStrategy, SUBAGENT,
+    SUBAGENT_WAIT,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
 use crate::runtime::worker::{AgentEntry, Hosting, WorkerEndpoint};
@@ -300,6 +301,8 @@ pub struct AgentSection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_tools: Option<SubagentTools>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagent_mode: Option<SubagentMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_subagent_depth: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<McpRef>,
@@ -388,6 +391,7 @@ impl AgentSection {
                     id,
                     defer: sub.defer(),
                     prefix: sub.prefix(),
+                    mode: sub.mode().or(self.subagent_mode),
                 }
             })
             .collect()
@@ -554,6 +558,8 @@ pub struct SubagentEntry {
     pub defer: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SubagentMode>,
 }
 
 impl SubagentRef {
@@ -575,6 +581,13 @@ impl SubagentRef {
         match self {
             Self::Id(_) => None,
             Self::Configured(entry) => entry.prefix,
+        }
+    }
+
+    fn mode(&self) -> Option<SubagentMode> {
+        match self {
+            Self::Id(_) => None,
+            Self::Configured(entry) => entry.mode,
         }
     }
 }
@@ -815,7 +828,9 @@ impl<'de> Deserialize<'de> for SubagentRef {
             type Value = SubagentRef;
 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("an `agent.<id>` path, or a table with `id`, `defer`, and `prefix`")
+                f.write_str(
+                    "an `agent.<id>` path, or a table with `id`, `defer`, `prefix`, and `mode`",
+                )
             }
 
             fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<SubagentRef, E> {
@@ -1052,6 +1067,14 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
         return Err(reserved_by_single(SUBAGENT));
     }
 
+    if offers_wait_tool(section) && section.tools.iter().any(|t| t.name == SUBAGENT_WAIT) {
+        bail!(
+            "`{SUBAGENT_WAIT}` is the tool the engine offers for detached subagents, and the \
+             model sees one namespace for both. Rename the tool, or set \
+             `subagent_tools = {{ wait = false }}`."
+        );
+    }
+
     for tool in &section.tools {
         if tool.handler != Some(Handler::Client) {
             bail!(
@@ -1066,6 +1089,17 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
         bail!("`llm = \"{llm}\"` is a `worker` block, so this agent needs a `worker` to run its calls");
     }
     Ok(())
+}
+
+fn offers_wait_tool(section: &AgentSection) -> bool {
+    SubagentTools::wait_of(section.subagent_tools)
+        && section.subagents.iter().any(|sub| {
+            sub.mode()
+                .or(section.subagent_mode)
+                .unwrap_or_default()
+                .offered()
+                .contains(&SpawnMode::Detached)
+        })
 }
 
 fn check_subagent(sub: &SubagentRef, section: &AgentSection, manifest: &Manifest) -> Result<()> {
@@ -1109,6 +1143,7 @@ fn check_subagent(sub: &SubagentRef, section: &AgentSection, manifest: &Manifest
         description: String::new(),
         defer: sub.defer(),
         prefix: sub.prefix(),
+        mode: None,
     };
     let offered = wire.offered_name();
     if section.tools.iter().any(|t| t.name == offered) {
@@ -1116,6 +1151,12 @@ fn check_subagent(sub: &SubagentRef, section: &AgentSection, manifest: &Manifest
     }
     if single && offered == SUBAGENT {
         return Err(reserved_by_single(&offered));
+    }
+    if offers_wait_tool(section) && offered == SUBAGENT_WAIT {
+        bail!(
+            "`{offered}` is the tool the engine offers for detached subagents. Set `prefix`, \
+             or `subagent_tools = {{ wait = false }}`."
+        );
     }
     let defers = wire.defers(section.defer_tools.is_some());
     if !single && !defers && offered.len() > crate::connectors::filter::MAX_NAME {
@@ -1400,11 +1441,60 @@ mod tests {
             &[Subagent {
                 defer: None,
                 prefix: None,
+                mode: None,
                 id: "poet".to_string(),
                 description: "Writes a haiku.".to_string(),
             }],
             "declared once, on the agent it describes"
         );
+    }
+
+    #[test]
+    fn a_subagent_mode_comes_from_the_entry_or_the_agent_default() {
+        let m = team(
+            r#"
+            subagent_mode = "detached"
+            subagents = ["agent.poet", { id = "agent.poet2", mode = "any" }]
+            "#
+            .trim(),
+            r#"description = "Writes a haiku.""#,
+        );
+        let m = {
+            let mut m = m;
+            let poet = m.agent["poet"].clone();
+            m.agent.insert("poet2".to_string(), poet);
+            m
+        };
+        m.validate().unwrap();
+        let agents = m.agents();
+        let subs = &agents["assistant"]
+            .config
+            .as_ref()
+            .expect("seeded")
+            .subagents;
+        assert_eq!(
+            subs.iter().map(|s| s.mode).collect::<Vec<_>>(),
+            vec![Some(SubagentMode::Detached), Some(SubagentMode::Any)],
+            "the entry's own mode wins over the agent's default"
+        );
+    }
+
+    #[test]
+    fn a_wait_mode_does_not_parse_as_configuration() {
+        for section in [
+            r#"subagents = [{ id = "agent.poet", mode = "wait" }]"#,
+            r#"subagent_mode = "wait""#,
+        ] {
+            let err = toml::from_str::<Manifest>(&format!(
+                r#"
+                [agent.assistant]
+                {section}
+                "#
+            ))
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("unknown variant `wait`"), "{err}");
+        }
     }
 
     #[test]
@@ -1506,6 +1596,7 @@ mod tests {
                 description: "Writes a haiku.".to_string(),
                 defer: Some(true),
                 prefix: Some(true),
+                mode: None,
             }]
         );
     }
@@ -1523,7 +1614,8 @@ mod tests {
         assert_eq!(
             config.subagent_tools,
             Some(SubagentTools {
-                strategy: SubagentToolsStrategy::Single
+                strategy: SubagentToolsStrategy::Single,
+                wait: None,
             })
         );
         assert_eq!(config.subagent_strategy(), SubagentToolsStrategy::Single);

@@ -407,6 +407,7 @@ mod tests {
                     session_id: "sub-1".into(),
                     message: None,
                     retry: retry(),
+                    mode: Default::default(),
                 }),
             ),
         ];

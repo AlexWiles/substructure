@@ -13,7 +13,8 @@ use super::state::{
 use crate::protocol::ErrorInfo;
 use crate::protocol::{
     AgentConfig, ClientContext, ClientPayload, DraftMessage, EffectStatus, InterruptOrigin,
-    LlmFormat, LlmRequest, RetryOverride, RetryPolicy, Role, SessionOwner, Usage, WorkerState,
+    LlmFormat, LlmRequest, RetryOverride, RetryPolicy, Role, SessionOwner, SpawnMode, Usage,
+    WorkerState,
 };
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::Caller;
@@ -68,6 +69,7 @@ pub enum CommandPayload {
         message: Option<DraftMessage>,
         retry: RetryPolicy,
         decision_id: String,
+        mode: Option<SpawnMode>,
     },
     CompleteSubagentTurn {
         session_id: String,
@@ -196,6 +198,7 @@ impl Action {
                 tool_call_id,
                 message,
                 retry,
+                mode,
             } => Some(CommandPayload::RequestSubagent {
                 session_id,
                 agent_id,
@@ -203,6 +206,7 @@ impl Action {
                 message,
                 retry,
                 decision_id: decision_id.to_string(),
+                mode,
             }),
             Action::ToolResult {
                 id,
@@ -850,6 +854,7 @@ impl Working {
                 message,
                 retry,
                 decision_id,
+                mode,
             } => self
                 .try_then(|s| {
                     effects::subagent::request(
@@ -861,6 +866,7 @@ impl Working {
                             message,
                             retry,
                             decision_id,
+                            mode,
                         },
                         caller,
                     )
@@ -869,6 +875,7 @@ impl Working {
 
             CommandPayload::CompleteSubagentTurn {
                 session_id,
+                turn_id,
                 data,
                 cost,
                 token_usage,
@@ -876,31 +883,72 @@ impl Working {
                 ..
             } => {
                 SessionState::ensure_internal(caller)?;
-                let Some((id, sa)) = self.state.subagent_awaiting(&session_id) else {
+                if let Some((id, sa)) = self.state.subagent_awaiting(&session_id) {
+                    let (id, agent_id) = (id.to_string(), sa.agent_id.clone());
+                    return match error {
+                        Some(error) => self.settle_effect(
+                            EffectKind::Subagent,
+                            id,
+                            None,
+                            SettleError::new(error, false).into(),
+                            caller,
+                        ),
+                        None => {
+                            let events = effects::subagent::complete_turn(
+                                id,
+                                session_id,
+                                agent_id,
+                                data,
+                                cost,
+                                token_usage,
+                            );
+                            self.then(|_| events);
+                            Ok(())
+                        }
+                    };
+                }
+                if self.state.detached_turns.contains(&turn_id) {
+                    return Ok(());
+                }
+                let Some((id, sa)) = self.state.subagent_detached(&session_id) else {
                     return Ok(());
                 };
                 let (id, agent_id) = (id.to_string(), sa.agent_id.clone());
-                match error {
-                    Some(error) => self.settle_effect(
-                        EffectKind::Subagent,
-                        id,
-                        None,
-                        SettleError::new(error, false).into(),
-                        caller,
-                    ),
-                    None => {
-                        let events = effects::subagent::complete_turn(
-                            id,
-                            session_id,
-                            agent_id,
-                            data,
-                            cost,
-                            token_usage,
-                        );
-                        self.then(|_| events);
-                        Ok(())
-                    }
-                }
+                let completed = SubagentTurnCompleted {
+                    id,
+                    cost,
+                    token_usage,
+                    data,
+                    turn_id: Some(turn_id),
+                    error,
+                };
+                let notice = effects::subagent::notice(&session_id, &agent_id, &completed);
+                let mut events = vec![EventPayload::SubagentTurnCompleted(completed)];
+                let (mut messages, mut sessions, notice_turn) =
+                    match self.state.queued_subagent_notice() {
+                        Some(prior) => {
+                            let queued = prior.decision_id.to_string();
+                            let held = (
+                                prior.messages.to_vec(),
+                                prior.sessions.to_vec(),
+                                prior.turn_id.to_string(),
+                            );
+                            events.push(EventPayload::DecisionDropped(DecisionDropped {
+                                id: queued,
+                            }));
+                            held
+                        }
+                        None => (Vec::new(), Vec::new(), new_call_id()),
+                    };
+                messages.push(notice);
+                sessions.push(session_id);
+                events.push(decision_queued(Trigger::SubagentNotice {
+                    messages,
+                    sessions,
+                    turn_id: notice_turn,
+                }));
+                self.then(|_| events);
+                Ok(())
             }
 
             CommandPayload::Interrupt {

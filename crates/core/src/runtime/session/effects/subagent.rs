@@ -2,12 +2,16 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use super::{decision_queued, fail, mismatched, void_events, KindSpec, Outcome, SettleError};
-use crate::protocol::{DraftMessage, ErrorCode, ErrorInfo, RetryPolicy, Usage};
+use crate::protocol::{
+    Content, DraftMessage, ErrorCode, ErrorInfo, RetryPolicy, Role, SpawnMode, SubagentMode, Usage,
+};
 use crate::runtime::session::command::SessionError;
 use crate::runtime::session::decision::Trigger;
 use crate::runtime::session::events::*;
 use crate::runtime::session::state::{json_to_string, EffectKind, SessionState};
 use crate::runtime::Caller;
+
+pub const DETACHED_STARTED: &str = "working detached; the result arrives as a later message";
 
 pub struct SubagentSpec;
 
@@ -23,9 +27,23 @@ impl KindSpec for SubagentSpec {
     fn settle(&self, state: &SessionState, id: &str, outcome: Outcome) -> Vec<EventPayload> {
         match outcome {
             Outcome::SubagentStarted => {
-                vec![EventPayload::SubagentStarted(SubagentStarted {
+                let mut events = vec![EventPayload::SubagentStarted(SubagentStarted {
                     id: id.to_string(),
-                })]
+                })];
+                if let Some(sa) = state
+                    .subagent(id)
+                    .filter(|sa| sa.mode == SpawnMode::Detached)
+                {
+                    events.push(decision_queued(Trigger::SubagentFinished {
+                        id: id.to_string(),
+                        ok: true,
+                        session_id: sa.session_id.clone(),
+                        agent_id: sa.agent_id.clone(),
+                        result: Some(DETACHED_STARTED.to_string()),
+                        error: None,
+                    }));
+                }
+                events
             }
             Outcome::Error(e) => fail(self, state, id, &e),
             other => mismatched(self.kind(), &other),
@@ -77,8 +95,36 @@ impl KindSpec for SubagentSpec {
             session_id: sa.session_id.clone(),
             message: sa.message.clone(),
             retry: t.retry_policy.clone(),
+            mode: sa.mode,
         })]
     }
+}
+
+fn withdraw_notice(state: &SessionState, session_id: &str) -> Vec<EventPayload> {
+    let Some(prior) = state.queued_subagent_notice() else {
+        return Vec::new();
+    };
+    if !prior.sessions.iter().any(|s| s == session_id) {
+        return Vec::new();
+    }
+    let mut events = vec![EventPayload::DecisionDropped(DecisionDropped {
+        id: prior.decision_id.to_string(),
+    })];
+    let (messages, sessions): (Vec<DraftMessage>, Vec<String>) = prior
+        .messages
+        .iter()
+        .zip(prior.sessions)
+        .filter(|(_, s)| *s != session_id)
+        .map(|(m, s)| (m.clone(), s.clone()))
+        .unzip();
+    if !messages.is_empty() {
+        events.push(decision_queued(Trigger::SubagentNotice {
+            messages,
+            sessions,
+            turn_id: prior.turn_id.to_string(),
+        }));
+    }
+    events
 }
 
 const SPAWN_NAMESPACE: Uuid = Uuid::from_u128(0x7b5e_1f2a_3c4d_5e6f_8091_a2b3_c4d5_e6f7);
@@ -98,6 +144,7 @@ pub(in crate::runtime::session) struct Spawn {
     pub message: Option<DraftMessage>,
     pub retry: RetryPolicy,
     pub decision_id: String,
+    pub mode: Option<SpawnMode>,
 }
 
 pub(in crate::runtime::session) fn request(
@@ -139,7 +186,7 @@ pub(in crate::runtime::session) fn request(
                     format!("`{named}` names no session this agent delegated to"),
                 ))
             }
-            Some(sa) if sa.agent_id != spawn.agent_id => {
+            Some(sa) if !spawn.agent_id.is_empty() && sa.agent_id != spawn.agent_id => {
                 return answer(ErrorInfo::new(
                     ErrorCode::Unroutable,
                     format!(
@@ -160,12 +207,75 @@ pub(in crate::runtime::session) fn request(
             ),
         ));
     }
+    let requested = spawn.mode.unwrap_or_default();
+    let mode = match config.subagent_mode(&spawn.agent_id) {
+        None | Some(SubagentMode::Any) => requested,
+        Some(_) if requested == SpawnMode::Wait => SpawnMode::Wait,
+        Some(SubagentMode::Blocking) => SpawnMode::Blocking,
+        Some(SubagentMode::Detached) => SpawnMode::Detached,
+    };
+    if mode == SpawnMode::Wait {
+        let Some((_, sa)) = spawn
+            .session_id
+            .as_deref()
+            .and_then(|named| state.subagent_detached(named))
+        else {
+            return answer(ErrorInfo::new(
+                ErrorCode::Unroutable,
+                "`wait` needs a `session` from an earlier detached call".to_string(),
+            ));
+        };
+        let agent_id = sa.agent_id.clone();
+        let Some(text) = sa.result.clone() else {
+            return Ok(vec![EventPayload::SubagentRequested(SubagentRequested {
+                id: spawn.tool_call_id,
+                agent_id,
+                session_id,
+                message: None,
+                retry: spawn.retry,
+                mode: SpawnMode::Wait,
+            })]);
+        };
+        let mut events = withdraw_notice(state, &session_id);
+        events.push(decision_queued(match sa.is_error {
+            false => Trigger::SubagentFinished {
+                id: spawn.tool_call_id,
+                ok: true,
+                session_id,
+                agent_id,
+                result: Some(text),
+                error: None,
+            },
+            true => Trigger::SubagentFinished {
+                id: spawn.tool_call_id,
+                ok: false,
+                session_id,
+                agent_id,
+                result: None,
+                error: Some(ErrorInfo::internal(text)),
+            },
+        }));
+        return Ok(events);
+    }
+    if state
+        .subagent_detached(&session_id)
+        .is_some_and(|(_, sa)| sa.result.is_none())
+    {
+        return answer(ErrorInfo::new(
+            ErrorCode::Unroutable,
+            format!(
+                "{} is still working detached; wait for its result, or start a fresh session",
+                spawn.agent_id
+            ),
+        ));
+    }
     Ok(vec![EventPayload::SubagentRequested(SubagentRequested {
         id: spawn.tool_call_id,
         agent_id: spawn.agent_id,
         session_id,
         message: spawn.message,
         retry: spawn.retry,
+        mode,
     })])
 }
 
@@ -184,6 +294,8 @@ pub(in crate::runtime::session) fn complete_turn(
             cost,
             token_usage,
             data,
+            turn_id: None,
+            error: None,
         }),
         decision_queued(Trigger::SubagentFinished {
             id: tool_call_id,
@@ -194,4 +306,31 @@ pub(in crate::runtime::session) fn complete_turn(
             error: None,
         }),
     ]
+}
+
+pub(in crate::runtime::session) fn notice(
+    session_id: &str,
+    agent_id: &str,
+    completed: &SubagentTurnCompleted,
+) -> DraftMessage {
+    let body = match &completed.error {
+        Some(e) => e.message.clone(),
+        None => json_to_string(&completed.data),
+    };
+    let attr = match completed.error.is_some() {
+        true => " error=\"true\"",
+        false => "",
+    };
+    DraftMessage {
+        id: None,
+        role: Role::User,
+        content: Some(Content::Text(format!(
+            "<subagent_result agent=\"{agent_id}\" session=\"{session_id}\"{attr}>\n{body}\n\
+             </subagent_result>"
+        ))),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        reasoning: None,
+    }
 }

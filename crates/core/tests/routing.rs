@@ -199,6 +199,7 @@ fn helper(defer: Option<bool>) -> Subagent {
         description: "Does the work.".to_string(),
         defer,
         prefix: None,
+        mode: None,
     }
 }
 
@@ -876,7 +877,7 @@ async fn a_deferred_subagent_is_delegated_through_call_tool() {
             .collect();
         assert_eq!(
             offered,
-            ["tool_search", "call_tool"],
+            ["subagent_wait", "tool_search", "call_tool"],
             "the deferred subagent tool stays out of the request"
         );
         assert!(
@@ -1026,6 +1027,7 @@ async fn a_session_of_another_agent_is_a_tool_error() {
         description: "Does other work.".to_string(),
         defer: None,
         prefix: None,
+        mode: None,
     });
     let mut agents = team(boss);
     agents.insert("other".to_string(), engine_hosted("claude"));
@@ -1046,6 +1048,7 @@ async fn a_session_of_another_agent_is_a_tool_error() {
 fn single() -> Option<SubagentTools> {
     Some(SubagentTools {
         strategy: substructure_core::protocol::SubagentToolsStrategy::Single,
+        wait: None,
     })
 }
 
@@ -1079,7 +1082,7 @@ async fn the_single_strategy_offers_one_subagent_tool_that_delegates() {
 
     assert_eq!(
         offered(&h),
-        ["subagent"],
+        ["subagent", "subagent_wait"],
         "one tool stands for every subagent"
     );
     assert_eq!(spawns(&events).len(), 1, "the call delegates: {events:#?}");

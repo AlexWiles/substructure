@@ -24,6 +24,7 @@ pub const TOOL_SEARCH: &str = "tool_search";
 pub const CALL_TOOL: &str = "call_tool";
 pub const SKILL: &str = "skill";
 pub const SUBAGENT: &str = "subagent";
+pub const SUBAGENT_WAIT: &str = "subagent_wait";
 
 /// How a file, the CLI, and the wire name a connection.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -960,6 +961,10 @@ impl AgentConfig {
     pub fn subagent_strategy(&self) -> SubagentToolsStrategy {
         SubagentTools::strategy_of(self.subagent_tools)
     }
+
+    pub fn subagent_mode(&self, agent_id: &str) -> Option<SubagentMode> {
+        self.subagents.iter().find(|s| s.id == agent_id)?.mode
+    }
 }
 
 /// What shape an agent's subagents take as tools.
@@ -969,6 +974,8 @@ impl AgentConfig {
 pub struct SubagentTools {
     #[serde(default, skip_serializing_if = "SubagentToolsStrategy::is_default")]
     pub strategy: SubagentToolsStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
 }
 
 /// How the model reaches an agent's subagents.
@@ -987,12 +994,49 @@ impl SubagentTools {
     pub fn strategy_of(tools: Option<Self>) -> SubagentToolsStrategy {
         tools.unwrap_or_default().strategy
     }
+
+    pub fn wait_of(tools: Option<Self>) -> bool {
+        tools.and_then(|t| t.wait).unwrap_or(true)
+    }
 }
 
 impl SubagentToolsStrategy {
     pub fn is_default(&self) -> bool {
         matches!(self, Self::PerAgent)
     }
+}
+
+/// How calls to a subagent return. Configuration; each call carries a
+/// [`SpawnMode`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "SubagentMode")]
+pub enum SubagentMode {
+    Blocking,
+    Detached,
+    #[default]
+    Any,
+}
+
+impl SubagentMode {
+    pub fn offered(self) -> &'static [SpawnMode] {
+        match self {
+            Self::Blocking => &[],
+            Self::Detached => &[SpawnMode::Detached],
+            Self::Any => &[SpawnMode::Blocking, SpawnMode::Detached],
+        }
+    }
+}
+
+/// How one subagent call returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(title = "SpawnMode")]
+pub enum SpawnMode {
+    #[default]
+    Blocking,
+    Detached,
+    Wait,
 }
 
 pub const DEFAULT_MAX_SUBAGENT_DEPTH: u32 = 5;
@@ -1315,6 +1359,8 @@ pub struct Subagent {
     /// Offer the tool as `agent__<id>` instead of `<id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SubagentMode>,
 }
 
 impl Subagent {
@@ -1327,6 +1373,10 @@ impl Subagent {
 
     pub fn defers(&self, default: bool) -> bool {
         self.defer.unwrap_or(default)
+    }
+
+    pub fn resolved_mode(&self) -> SubagentMode {
+        self.mode.unwrap_or_default()
     }
 }
 
@@ -2289,6 +2339,8 @@ pub enum DecisionAction {
         /// engine's default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry: Option<RetryOverride>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SpawnMode>,
     },
     #[serde(rename = "message.send")]
     SendMessage {

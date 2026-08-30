@@ -10,7 +10,7 @@ pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, ConnectorToolKind, DeferToolsStrategy, DraftMessage, ErrorInfo, InterruptOrigin,
     LlmFormat, LlmRequest, LlmResponse, Message, MessageTree, NewMessage, RetryPolicy,
-    SessionOwner, StoredResult, Usage, WorkerState,
+    SessionOwner, SpawnMode, StoredResult, Usage, WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +225,12 @@ pub struct SubagentRequested {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<DraftMessage>,
     pub retry: RetryPolicy,
+    #[serde(default, skip_serializing_if = "is_blocking")]
+    pub mode: SpawnMode,
+}
+
+fn is_blocking(mode: &SpawnMode) -> bool {
+    *mode == SpawnMode::Blocking
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,4 +418,8 @@ pub struct SubagentTurnCompleted {
     pub token_usage: Usage,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorInfo>,
 }

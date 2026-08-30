@@ -1053,6 +1053,7 @@ fn flow_subagent_call() -> Trace {
             tool_call_id: "tc-1".to_string(),
             message: None,
             retry: RetryPolicy::no_retry(),
+            mode: None,
         }],
     );
     let child = t
@@ -1097,6 +1098,7 @@ fn flow_subagent_call() -> Trace {
             message: None,
             retry: RetryPolicy::no_retry(),
             decision_id: "d-2".to_string(),
+            mode: None,
         },
         &system(),
     );

@@ -70,8 +70,8 @@ worker.
 
 ## How the tool is offered
 
-An entry can also be a table with `id`, `defer`, and `prefix`. The string form
-is the table with both unset.
+An entry can also be a table with `id`, `defer`, `prefix`, and `mode`. The
+string form is the table with all of them unset.
 
 ```toml title="subs.toml"
 [agent.assistant]
@@ -179,18 +179,84 @@ session of another agent, or no session at all — comes back as a tool error.
 A child answers one call at a time. A second call to a session that is still
 working comes back as a tool error; wait for the first result.
 
+## Detached calls
+
+A blocking call holds the parent's turn until the child answers. A detached
+call does not. It answers at once with the child's session id, and the parent
+continues its turn. When the child finishes, the result arrives in the
+parent's session as a message.
+
+```
+<subagent_result agent="poet" session="9f2c…">
+A haiku about rain.
+</subagent_result>
+```
+
+If the parent is mid-turn when the result lands, the message waits for the
+turn to end and then opens a turn of its own. Results that land while one is
+still waiting join it: one turn delivers them all. A failed child turn arrives
+the same way, with `error="true"` and the error text as the body.
+
+Set `mode` on a `subagents` entry, or `subagent_mode` on the agent section, to
+control who decides. The entry's own value wins.
+
+```toml title="subs.toml"
+[agent.assistant]
+llm = "claude"
+model = "claude-sonnet-4-5"
+subagents = [
+    "agent.poet",                                   # the model picks per call
+    { id = "agent.researcher", mode = "detached" }, # always detached
+    { id = "agent.critic", mode = "blocking" },     # always blocking
+]
+```
+
+- Unset means `any`: the tool offers `mode` with `blocking` and `detached`,
+  and the model picks per call. A call that names no `mode` blocks.
+- `detached` pins the mode. The tool loses `mode` and says in its description
+  that it runs detached.
+- `blocking` pins the old behavior: the tool keeps the schema it always had.
+
+Under `single`, one tool serves every agent, so the offered `mode` values are
+the union across them and each pin is named in the agent list.
+
+A worker that authors its own `subagent.spawn` passes `mode` on the action; an
+entry's pinned mode still wins.
+
+To collect a detached result instead of waiting for the message, the model
+calls `subagent_wait` with the child's `session`. If the result is already in,
+the call answers at once with the newest one; if the child is still working,
+the call holds the turn until the child's turn ends, like a blocking call. A
+wait that answers withdraws that child's undelivered message, so one result
+never arrives twice; other children's messages stay queued.
+
+The engine offers `subagent_wait` whenever any subagent can run detached, and
+its name joins the names no tool of yours may take.
+`subagent_tools = { wait = false }` removes it; results then arrive only as
+messages. A worker can still author a `subagent.spawn` with `mode: "wait"`
+either way.
+
+While a detached child is working, another message to its session comes back
+as a tool error naming `wait`. Cancelling the parent no longer reaches a
+detached child whose call has settled: the child finishes on its own.
+
 ## Reference
 
 ```typescript
-type Subagent = { id: string; description?: string; defer?: boolean; prefix?: boolean }
-type SubagentTools = { strategy?: "per_agent" | "single" }
+type SubagentMode = "blocking" | "detached" | "any"  // configuration
+type SpawnMode = "blocking" | "detached" | "wait"    // one call
+type Subagent = { id: string; description?: string; defer?: boolean; prefix?: boolean; mode?: SubagentMode }
+type SubagentTools = { strategy?: "per_agent" | "single"; wait?: boolean }
 
 // what the model passes a per-agent tool, and what `subagent` takes
-{ message: string, session?: string }
-{ agent: string, message: string, session?: string }
+{ message: string, session?: string, mode?: SpawnMode }
+{ agent: string, message: string, session?: string, mode?: SpawnMode }
+
+// what `subagent_wait` takes
+{ session: string }
 
 // the actions that start a child. the engine proposes them for you
-{ type: "subagent.spawn", session_id?: string, agent_id: string, tool_call_id: string }
+{ type: "subagent.spawn", session_id?: string, agent_id: string, tool_call_id: string, mode?: SpawnMode }
 { type: "message.send", session_id: string, message: DraftMessage }
 
 // the trigger

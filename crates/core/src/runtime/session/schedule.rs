@@ -371,6 +371,7 @@ mod tests {
                 message: None,
                 result: None,
                 is_error: false,
+                mode: Default::default(),
             }),
         ));
     }

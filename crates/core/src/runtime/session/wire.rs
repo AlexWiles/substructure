@@ -8,9 +8,9 @@ use super::state::{new_call_id, new_message_id, EffectState};
 use super::tool_contract::{classify_arguments, declared_tool, DeclaredTool};
 use crate::llm::LlmCallError;
 use crate::protocol::{
-    AgentConfig, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger, DraftMessage,
-    ErrorInfo, Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse, Message,
-    MessageTree, RetryPolicy, WorkerIdentity, WorkerState,
+    AgentConfig, ClientContext, DecisionAction, DecisionRequest, DecisionResponse, DecisionTrigger,
+    DraftMessage, ErrorInfo, Handler, InterruptResumption, LlmFormat, LlmRequest, LlmResponse,
+    Message, MessageTree, RetryPolicy, WorkerIdentity, WorkerState,
 };
 use crate::runtime::blob::{resolve, store, BlobStore};
 use crate::runtime::llm::LlmBlocks;
@@ -445,6 +445,7 @@ async fn lower_actions(
                     tool_call_id,
                     message,
                     retry,
+                    mode,
                 } => Action::SpawnSubagent {
                     session_id,
                     agent_id,
@@ -455,6 +456,7 @@ async fn lower_actions(
                         config_retry,
                         RetryTarget::Subagent,
                     ),
+                    mode,
                 },
                 DecisionAction::SendMessage {
                     session_id,
@@ -495,6 +497,32 @@ pub fn result_to_string(value: Value) -> String {
     }
 }
 
+fn appended_transcript(
+    messages: Vec<DraftMessage>,
+    client: ClientContext,
+    active_path: &[Message],
+    tree: &MessageTree,
+) -> DecisionTrigger {
+    let known: std::collections::HashSet<&str> =
+        tree.nodes.iter().map(|n| n.message.id.as_str()).collect();
+    let mut view: Vec<DraftMessage> = active_path
+        .iter()
+        .cloned()
+        .map(DraftMessage::from)
+        .collect();
+    let new_from = view.len();
+    view.extend(
+        messages
+            .into_iter()
+            .filter(|m| m.id.as_deref().is_none_or(|id| !known.contains(id))),
+    );
+    DecisionTrigger::ClientTranscript {
+        messages: view,
+        new_from,
+        client,
+    }
+}
+
 pub async fn to_wire_trigger(
     trigger: Trigger,
     active_path: &[Message],
@@ -507,25 +535,9 @@ pub async fn to_wire_trigger(
         Trigger::SessionStart => DecisionTrigger::SessionStart,
         Trigger::ClientMessage {
             messages, client, ..
-        } => {
-            let known: std::collections::HashSet<&str> =
-                tree.nodes.iter().map(|n| n.message.id.as_str()).collect();
-            let mut view: Vec<DraftMessage> = active_path
-                .iter()
-                .cloned()
-                .map(DraftMessage::from)
-                .collect();
-            let new_from = view.len();
-            view.extend(
-                messages
-                    .into_iter()
-                    .filter(|m| m.id.as_deref().is_none_or(|id| !known.contains(id))),
-            );
-            DecisionTrigger::ClientTranscript {
-                messages: view,
-                new_from,
-                client,
-            }
+        } => appended_transcript(messages, client, active_path, tree),
+        Trigger::SubagentNotice { messages, .. } => {
+            appended_transcript(messages, ClientContext::default(), active_path, tree)
         }
         Trigger::ClientTranscript {
             messages, client, ..

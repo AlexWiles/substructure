@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Add detached subagent support.
+
 ## [0.9.1] - 2026-08-28
 
 ### Added

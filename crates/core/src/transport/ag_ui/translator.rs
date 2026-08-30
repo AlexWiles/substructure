@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::events::{AgUiEvent, AgUiInterrupt, AgUiUsage, RunOutcome};
 use crate::connectors::filter::qualified_name;
-use crate::protocol::{TokenDelta, Usage};
+use crate::protocol::{SpawnMode, TokenDelta, Usage};
 use crate::session::events::{ConnectorSyncCompleted, EventPayload};
 use crate::session::SessionEvent;
 
@@ -39,6 +39,7 @@ pub struct AgUiTranslator {
     current_call_id: Option<String>,
     open_tools: HashSet<String>,
     subagent_calls: HashSet<String>,
+    detached_calls: HashMap<String, String>,
     called: HashMap<String, (String, String)>,
     terminated: bool,
 }
@@ -58,6 +59,7 @@ impl AgUiTranslator {
             current_call_id: None,
             open_tools: HashSet::new(),
             subagent_calls: HashSet::new(),
+            detached_calls: HashMap::new(),
             called: HashMap::new(),
             terminated: false,
         }
@@ -240,6 +242,9 @@ impl AgUiTranslator {
             }
             EventPayload::SubagentRequested(s) => {
                 self.subagent_calls.insert(s.id.clone());
+                if s.mode == SpawnMode::Detached {
+                    self.detached_calls.insert(s.id.clone(), s.session_id);
+                }
                 let out = if self.streamed_tool_calls.remove(&s.id) {
                     self.open_tools.remove(&s.id);
                     self.streamed_tool_call_args.remove(&s.id);
@@ -262,6 +267,16 @@ impl AgUiTranslator {
                 self.closed_tool_calls.insert(s.id);
                 out
             }
+            EventPayload::SubagentStarted(s) => match self.detached_calls.remove(&s.id) {
+                Some(session) => {
+                    let ack = serde_json::json!({
+                        "session": session,
+                        "result": crate::session::effects::subagent::DETACHED_STARTED,
+                    });
+                    self.settle_subagent(&s.id, ack.to_string(), false, ends_run)
+                }
+                None => vec![],
+            },
             EventPayload::SubagentTurnCompleted(s) => {
                 self.settle_subagent(&s.id, subagent_result(&s.data), false, ends_run)
             }
@@ -1292,6 +1307,41 @@ mod tests {
             false,
         ));
         assert_eq!(kinds(&end), ["RUN_FINISHED"]);
+    }
+
+    #[test]
+    fn a_detached_call_renders_its_result_at_start() {
+        let mut t = AgUiTranslator::new("t1".into(), "r1".into());
+        let _ = t.on_event(
+            ev(json!({
+                "type": "subagent.requested",
+                "id": "call-1",
+                "agent_id": "weather",
+                "session_id": "child-1",
+                "mode": "detached",
+                "retry": serde_json::from_str::<Value>(RETRY).unwrap(),
+            })),
+            false,
+        );
+
+        let started = vals(t.on_event(
+            ev(json!({"type": "subagent.started", "id": "call-1"})),
+            false,
+        ));
+        assert_eq!(kinds(&started), ["TOOL_CALL_RESULT"]);
+        assert_eq!(started[0]["toolCallId"], "call-1");
+        let content = started[0]["content"].as_str().unwrap();
+        assert!(content.contains("child-1"), "{content}");
+        assert!(content.contains("detached"), "{content}");
+
+        let later = vals(t.on_event(
+            subagent_turn_completed("call-1", json!("Clear, 68F.")),
+            false,
+        ));
+        assert!(
+            later.is_empty(),
+            "the answered bracket renders nothing twice; got {later:?}"
+        );
     }
 
     #[test]

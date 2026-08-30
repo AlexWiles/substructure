@@ -6,8 +6,8 @@ use super::tool_contract::{declared_tool, violates, DeclaredTool};
 use crate::protocol::StoredContent;
 use crate::protocol::{
     AgentConfig, ClientContext, ConnectorTool, ConnectorToolKind, Content, DecisionAction,
-    DecisionResponse, DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, StoredResult,
-    ToolCall,
+    DecisionResponse, DecisionTrigger, DraftMessage, ErrorInfo, Message, Role, SpawnMode,
+    StoredResult, ToolCall,
 };
 
 pub struct Proposing<'a> {
@@ -249,6 +249,7 @@ pub(super) fn route_tool_call(
             tool_call_id: call.id.clone(),
             message: Some(delegation.message),
             retry: None,
+            mode: delegation.mode,
         }];
     }
     vec![DecisionAction::CallTool {
@@ -263,6 +264,7 @@ struct Delegation {
     agent_id: String,
     message: DraftMessage,
     session: Option<String>,
+    mode: Option<SpawnMode>,
 }
 
 fn subagent_call(call: &ToolCall, connector_tools: &[ConnectorTool]) -> Option<Delegation> {
@@ -289,6 +291,10 @@ fn subagent_call(call: &ToolCall, connector_tools: &[ConnectorTool]) -> Option<D
     delegation(tool, &inner_arguments(&raw), true)
 }
 
+fn waits(tool: &ConnectorTool) -> bool {
+    tool.remote_name.is_empty() && tool.name == crate::protocol::SUBAGENT_WAIT
+}
+
 fn delegation(tool: &ConnectorTool, arguments: &str, strict: bool) -> Option<Delegation> {
     let bound = !tool.remote_name.is_empty();
     let strict = strict || !bound;
@@ -301,12 +307,23 @@ fn delegation(tool: &ConnectorTool, arguments: &str, strict: bool) -> Option<Del
         return None;
     }
     let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    if waits(tool) {
+        return Some(Delegation {
+            agent_id: String::new(),
+            session: text("session").filter(|v| !v.is_empty()),
+            mode: Some(SpawnMode::Wait),
+            message: user_message(String::new()),
+        });
+    }
     Some(Delegation {
         agent_id: match bound {
             true => tool.remote_name.clone(),
             false => text("agent").filter(|v| !v.is_empty())?,
         },
         session: text("session").filter(|v| !v.is_empty()),
+        mode: value
+            .get("mode")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         message: user_message(text("message").unwrap_or_else(|| arguments.to_string())),
     })
 }
@@ -1304,6 +1321,7 @@ mod tests {
                 description: String::new(),
                 defer: None,
                 prefix: None,
+                mode: None,
             }],
             ..Default::default()
         }
@@ -1547,6 +1565,58 @@ mod tests {
     }
 
     #[test]
+    fn subagent_spawn_forwards_the_requested_mode() {
+        let mut assistant = assistant_with_calls("call-1", &[("tc-a", "researcher")]);
+        assistant.tool_calls[0].function.arguments =
+            r#"{"message":"find X","mode":"detached"}"#.to_string();
+        let p = propose(
+            &llm_finished_trigger(DraftMessage::from(assistant), true, false),
+            &[msg("u1", Role::User, "hi")],
+            &HashMap::new(),
+            0,
+            Some(&agent_cfg()),
+        )
+        .expect("proposes");
+        match &p.actions[..] {
+            [DecisionAction::SpawnSubagent { mode, .. }] => {
+                assert_eq!(*mode, Some(SpawnMode::Detached));
+            }
+            other => panic!("expected one spawn carrying the mode; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_wait_call_spawns_with_the_wait_mode_and_no_agent() {
+        let mut assistant =
+            assistant_with_calls("call-1", &[("tc-a", crate::protocol::SUBAGENT_WAIT)]);
+        assistant.tool_calls[0].function.arguments = r#"{"session":"child-9"}"#.to_string();
+        let p = propose(
+            &llm_finished_trigger(DraftMessage::from(assistant), true, false),
+            &[msg("u1", Role::User, "hi")],
+            &HashMap::new(),
+            0,
+            Some(&agent_cfg()),
+        )
+        .expect("proposes");
+        match &p.actions[..] {
+            [DecisionAction::SpawnSubagent {
+                agent_id,
+                session_id,
+                mode,
+                ..
+            }] => {
+                assert!(
+                    agent_id.is_empty(),
+                    "the session names the agent, not the call"
+                );
+                assert_eq!(session_id.as_deref(), Some("child-9"));
+                assert_eq!(*mode, Some(SpawnMode::Wait));
+            }
+            other => panic!("expected a wait spawn; got {other:?}"),
+        }
+    }
+
+    #[test]
     fn call_tool_naming_a_subagent_spawns_it_with_the_inner_message() {
         let mut assistant = assistant_with_calls("call-1", &[("tc-a", "call_tool")]);
         assistant.tool_calls[0].function.arguments =
@@ -1636,6 +1706,7 @@ mod tests {
         AgentConfig {
             subagent_tools: Some(crate::protocol::SubagentTools {
                 strategy: crate::protocol::SubagentToolsStrategy::Single,
+                wait: None,
             }),
             ..agent_cfg()
         }

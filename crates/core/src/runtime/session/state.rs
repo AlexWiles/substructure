@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -66,7 +66,7 @@ pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, DraftMessage, Effect, EffectStatus, InterruptOrigin, LlmFormat, LlmRequest,
     LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryConfig, RetryPolicy, Role,
-    SessionOwner, Usage, WorkerState,
+    SessionOwner, SpawnMode, SubagentTools, Usage, WorkerState,
 };
 use crate::runtime::retry::RetryState;
 
@@ -435,6 +435,8 @@ pub struct SubagentCallState {
     pub result: Option<String>,
     #[serde(default)]
     pub is_error: bool,
+    #[serde(default)]
+    pub mode: SpawnMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,6 +470,14 @@ pub struct OpenInterrupt {
     pub reason: String,
     pub payload: serde_json::Value,
     pub anchor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QueuedNotice<'a> {
+    pub decision_id: &'a str,
+    pub messages: &'a [DraftMessage],
+    pub sessions: &'a [String],
+    pub turn_id: &'a str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -735,6 +745,9 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_turn_ids: Vec<String>,
 
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub detached_turns: BTreeSet<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_id: Option<String>,
 
@@ -771,6 +784,7 @@ impl SessionState {
             phase: TurnPhase::default(),
             turn_started_seq: None,
             completed_turn_ids: Vec::new(),
+            detached_turns: BTreeSet::new(),
             head_id: None,
             nodes: Vec::new(),
             open_interrupts: Vec::new(),
@@ -842,6 +856,23 @@ impl SessionState {
     pub fn subagent_session(&self, session_id: &str) -> Option<&SubagentCallState> {
         self.effects_of(EffectKind::Subagent)
             .find_map(|e| e.subagent().filter(|sa| sa.session_id == session_id))
+    }
+
+    pub fn subagent_detached(&self, session_id: &str) -> Option<(&str, &SubagentCallState)> {
+        let mut answered = None;
+        for e in self.effects_of(EffectKind::Subagent) {
+            let Some(sa) = e
+                .subagent()
+                .filter(|sa| sa.mode == SpawnMode::Detached && sa.session_id == session_id)
+            else {
+                continue;
+            };
+            match sa.result {
+                None => return Some((e.id.as_str(), sa)),
+                Some(_) => answered = answered.or(Some((e.id.as_str(), sa))),
+            }
+        }
+        answered
     }
 
     pub fn connector_sync(&self, path: &ConnectionPath) -> Option<&ConnectorSyncState> {
@@ -995,6 +1026,7 @@ impl SessionState {
                     message: payload.message.clone(),
                     result: None,
                     is_error: false,
+                    mode: payload.mode,
                 }),
             );
         }
@@ -1156,7 +1188,13 @@ impl SessionState {
             }
             EventPayload::SubagentStarted(payload) => {
                 if let Some(e) = self.effect_mut(EffectKind::Subagent, &payload.id) {
-                    e.tracking.run();
+                    match e
+                        .subagent()
+                        .is_some_and(|sa| sa.mode == SpawnMode::Detached)
+                    {
+                        true => e.tracking.complete(),
+                        false => e.tracking.run(),
+                    }
                 }
             }
             EventPayload::SubagentErrored(payload) => {
@@ -1281,15 +1319,27 @@ impl SessionState {
                 self.turn_cost += payload.cost;
                 self.subagent_token_usage.add(&payload.token_usage);
                 self.turn_token_usage.add(&payload.token_usage);
+                if let Some(turn_id) = &payload.turn_id {
+                    self.detached_turns.insert(turn_id.clone());
+                }
                 if let Some(e) = self.effect_mut(EffectKind::Subagent, &payload.id) {
                     if let Some(sa) = e.subagent_mut() {
-                        sa.result = Some(json_to_string(&payload.data));
-                        sa.is_error = false;
+                        sa.result = Some(match &payload.error {
+                            Some(error) => error.message.clone(),
+                            None => json_to_string(&payload.data),
+                        });
+                        sa.is_error = payload.error.is_some();
                     }
-                    if e.tracking.status() == EffectStatus::Running {
-                        e.tracking.complete();
+                    match e.tracking.status() {
+                        EffectStatus::Queued | EffectStatus::RetryScheduled => {
+                            e.tracking.dispatch(now);
+                            e.tracking.complete();
+                        }
+                        EffectStatus::Pending | EffectStatus::Running => e.tracking.complete(),
+                        _ => {}
                     }
                 }
+                self.dequeue(EffectKind::Subagent, &payload.id);
             }
             EventPayload::ChannelsUpdated(_) => {}
             EventPayload::TurnStarted(p) => {
@@ -1432,6 +1482,23 @@ impl SessionState {
         at.active_interrupt_for()
     }
 
+    pub fn queued_subagent_notice(&self) -> Option<QueuedNotice<'_>> {
+        self.decisions_with(EffectStatus::Queued)
+            .find_map(|e| match &e.decision()?.trigger {
+                Trigger::SubagentNotice {
+                    messages,
+                    sessions,
+                    turn_id,
+                } => Some(QueuedNotice {
+                    decision_id: &e.id,
+                    messages,
+                    sessions,
+                    turn_id,
+                }),
+                _ => None,
+            })
+    }
+
     pub fn has_pending_worker_decision(&self) -> bool {
         self.decisions_with(EffectStatus::Pending).next().is_some()
     }
@@ -1509,6 +1576,7 @@ impl SessionState {
                 &config.subagents,
                 config.defers_tools(),
                 config.subagent_strategy(),
+                SubagentTools::wait_of(config.subagent_tools),
             ));
         }
         resolutions.extend(servers.iter().filter_map(|connector| {
