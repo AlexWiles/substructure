@@ -10,14 +10,9 @@ use crate::session::wire::resolve_response;
 use crate::transport::http_push::HttpDecider;
 use crate::worker::push::{Decider, PushError};
 use crate::worker::{
-    AgentDirectory, DequeueFilter, FailDecision, Hosting, SubmitDecision, WorkerDecisionRequest,
+    AgentDirectory, DequeueFilter, FailDecision, Route, SubmitDecision, WorkerDecisionRequest,
 };
 use crate::{Caller, Runtime};
-
-enum Route {
-    Worker { id: String, url: String },
-    Engine,
-}
 
 pub struct PushAdapter {
     pub runtime: Arc<Runtime>,
@@ -103,37 +98,7 @@ struct Router {
 
 impl Router {
     fn route(&self, tenant_id: &str, decision: &WorkerDecisionRequest) -> Result<Route, String> {
-        let agent_id = &decision.agent_id;
-        let hosting = match &decision.worker {
-            Some(w) => Some(Hosting::Worker(w.id.clone())),
-            None => self.agents.agent(tenant_id, agent_id).map(|e| e.hosting),
-        };
-        let worker_id = match hosting {
-            Some(Hosting::Engine) => return Ok(Route::Engine),
-            Some(Hosting::Worker(id)) => id,
-            None if decision.agent.is_some() => return Ok(Route::Engine),
-            None => {
-                return Err(format!(
-                    "no [agent.{agent_id}], no worker on the session, and no config on the \
-                     session. Declared agents: {}",
-                    crate::copy::declared(self.agents.agent_ids(tenant_id))
-                ))
-            }
-        };
-        let Some(block) = self.agents.worker(tenant_id, &worker_id) else {
-            return Err(format!("no [worker.{worker_id}] in subs.toml"));
-        };
-        let Some(url) = decision
-            .worker
-            .as_ref()
-            .and_then(|w| w.url.clone())
-            .or(block.url)
-        else {
-            return Err(format!(
-                "[worker.{worker_id}] has no `url` and the session brought none"
-            ));
-        };
-        Ok(Route::Worker { id: worker_id, url })
+        self.agents.tenant(tenant_id).route(decision)
     }
 
     async fn transport(

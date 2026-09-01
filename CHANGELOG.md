@@ -21,6 +21,7 @@ together at the same version.
 - Consistent references in config and on the wire.
 - A plugin reference can narrow its servers: `plugins = [{ id = "x", servers = ["y"] }]`.
 - Make workers a separate entity, not an agent property.
+- The agent directory gives all of one tenant's declaration in one read.
 
 ### Removed
 

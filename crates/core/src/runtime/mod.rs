@@ -609,7 +609,7 @@ impl Runtime {
     }
 
     pub fn llm_blocks(&self, tenant_id: &str) -> LlmBlocks {
-        self.agents.llm(tenant_id)
+        self.agents.tenant(tenant_id).llm
     }
 
     pub fn reader(&self) -> SessionReader {

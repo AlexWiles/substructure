@@ -194,9 +194,13 @@ async fn extract(
     .or_else(|| {
         matches!(trigger, DecisionTrigger::SessionStart)
             .then(|| {
-                agent_config
-                    .clone()
-                    .or_else(|| agents.agent(&event.tenant_id, agent_id)?.config)
+                agent_config.clone().or_else(|| {
+                    agents
+                        .tenant(&event.tenant_id)
+                        .agent(agent_id)?
+                        .config
+                        .clone()
+                })
             })
             .flatten()
             .map(|config| DecisionResponse {
