@@ -24,18 +24,12 @@ pub struct AgentEntry {
     pub hosting: Hosting,
 }
 
-/// Where one decision goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Worker { id: String, url: String },
     Engine,
 }
 
-/// Everything one tenant declares, read once.
-///
-/// The decision path asks a question per decision, not per field, so an
-/// implementation backed by a database reads the tenant whole instead of
-/// answering one accessor at a time.
 #[derive(Debug, Clone, Default)]
 pub struct TenantDirectory {
     pub agents: BTreeMap<String, AgentEntry>,
@@ -61,8 +55,6 @@ impl TenantDirectory {
         self.agents.keys().cloned().collect()
     }
 
-    /// The worker a new session is stamped with. A declared agent follows the
-    /// file rather than a stamp; only one nobody declared takes the default.
     pub fn resolve_worker(&self, agent_id: &str, named: Option<WorkerRef>) -> Option<WorkerRef> {
         named.or_else(|| match self.declares(agent_id) {
             true => None,
@@ -73,8 +65,6 @@ impl TenantDirectory {
         })
     }
 
-    /// Where a dequeued decision goes: the worker the session pinned, else the
-    /// one its agent names, else the engine. `Err` is unroutable and says why.
     pub fn route(&self, decision: &WorkerDecisionRequest) -> Result<Route, String> {
         let agent_id = &decision.agent_id;
         let hosting = match &decision.worker {
@@ -347,8 +337,6 @@ mod tests {
         );
     }
 
-    /// A session pins a worker and may bring the address with it, which is how
-    /// a block with no `url` is reached at all.
     #[test]
     fn a_session_can_pin_a_worker_and_bring_its_address() {
         let d = directory().tenant("default");
@@ -377,8 +365,6 @@ mod tests {
             .is_err_and(|e| e.contains("no [worker.invented]")));
     }
 
-    /// An agent nothing declares is still decidable when the session carries
-    /// its config: the engine answers with its own proposal.
     #[test]
     fn an_undeclared_agent_needs_a_config_on_the_session() {
         let d = directory().tenant("default");
