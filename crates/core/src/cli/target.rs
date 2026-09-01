@@ -1,8 +1,3 @@
-//! Where a command acts. The `[remote]` section decides.
-//!
-//! Credential and bootstrap commands do not use this rule. They must work
-//! before a file has a `[remote]`.
-
 use anyhow::{bail, Result};
 
 use super::cloud::project_config::{self, ProjectConfig};
@@ -22,8 +17,6 @@ impl Target {
     }
 }
 
-/// Precedence: `--url`, then `[remote]`, then here. No file reads as a
-/// deployment.
 pub fn target(globals: &CloudGlobals) -> Result<Target> {
     if globals.url.is_some() {
         return Ok(Target::Deployment);
@@ -71,7 +64,8 @@ mod tests {
     }
 
     const ENGINE_HERE: &str = "[llm.byo]\ntype = \"worker\"\n\
-         [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n";
+         [worker.w]\nurl = \"https://w.test\"\n\
+         [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"w\"\n";
     const A_REMOTE: &str = "[remote]\nurl = \"https://subs.test\"\n";
 
     fn wrote(body: &str) -> CloudGlobals {

@@ -12,6 +12,21 @@ together at the same version.
 ### Added
 
 - Add detached subagent support.
+- Add `[worker.*]` blocks. Agents name a worker instead of a URL.
+- Project level default worker.
+- Add `subs secret` to print or rotate a minted secret.
+
+### Changed
+
+- Consistent references in config and on the wire.
+- A plugin reference can narrow its servers: `plugins = [{ id = "x", servers = ["y"] }]`.
+- Make workers a separate entity, not an agent property.
+
+### Removed
+
+- Remove `signing_secret_env`.
+- Remove `subs agents secret` and `subs agents rotate-secret`; use `subs secret worker.<id>`.
+- An agent's `mcp` list no longer names a plugin's server; use the plugin's `servers`.
 
 ## [0.9.1] - 2026-08-28
 

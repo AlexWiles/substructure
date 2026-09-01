@@ -2,8 +2,8 @@ use std::num::NonZeroUsize;
 
 use crate::connectors::RemoteTool;
 use crate::protocol::{
-    Approve, ConnectionPath, ConnectorProtocol, ConnectorTool, ConnectorToolKind,
-    DeferToolsStrategy, LlmTool, McpServer, McpTools, SpawnMode, Subagent, SubagentMode,
+    Approve, BoundServer, ConnectionPath, ConnectorProtocol, ConnectorTool, ConnectorToolKind,
+    DeferToolsStrategy, LlmTool, McpTools, SpawnMode, Subagent, SubagentMode,
     SubagentToolsStrategy, SUBAGENT_WAIT,
 };
 
@@ -33,7 +33,7 @@ impl Resolution {
 }
 
 pub fn resolve(
-    connector: &McpServer,
+    connector: &BoundServer,
     offered: &[RemoteTool],
     prefix: Option<&str>,
     defer: bool,
@@ -88,7 +88,7 @@ pub fn approves(policy: Approve, tool: &RemoteTool) -> bool {
     }
 }
 
-pub fn defers(connector: &McpServer, default: bool) -> bool {
+pub fn defers(connector: &BoundServer, default: bool) -> bool {
     connector
         .tools
         .as_ref()
@@ -96,7 +96,7 @@ pub fn defers(connector: &McpServer, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-pub fn callable<'a>(connector: &McpServer, offered: &'a [RemoteTool]) -> Vec<&'a RemoteTool> {
+pub fn callable<'a>(connector: &BoundServer, offered: &'a [RemoteTool]) -> Vec<&'a RemoteTool> {
     let filter = connector.tools.clone().unwrap_or_default();
     offered
         .iter()
@@ -633,8 +633,8 @@ mod tests {
         tool(name, ToolAnnotations::default())
     }
 
-    fn connector(id: &str, tools: Option<McpTools>) -> McpServer {
-        McpServer {
+    fn connector(id: &str, tools: Option<McpTools>) -> BoundServer {
+        BoundServer {
             path: ConnectionPath::Mcp(id.to_string()),
             tools,
             auth_failure: Default::default(),
@@ -643,8 +643,8 @@ mod tests {
         }
     }
 
-    fn asking(id: &str, approve: Approve) -> McpServer {
-        McpServer {
+    fn asking(id: &str, approve: Approve) -> BoundServer {
+        BoundServer {
             approve,
             ..connector(id, None)
         }

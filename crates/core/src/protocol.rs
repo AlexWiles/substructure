@@ -1,8 +1,3 @@
-//! The public protocol: every type that crosses the client or worker wire.
-//! Types only — no logic. Conversions and seams live with the engine
-//! (`runtime::session::wire`, `runtime::session::propose`, …). Every type
-//! derives [`JsonSchema`]; the schemas under `schemas/` are generated from them.
-
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
@@ -1191,12 +1186,12 @@ pub enum ConnectorProtocol {
     Agent,
 }
 
-/// An MCP server the agent draws tools from. `path` names a connection the
-/// engine holds. A worker never writes a URL or a credential.
+/// An MCP server the agent draws tools from. `id` names an `[mcp.*]`
+/// connection the engine holds. A worker never writes a URL or a credential.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(title = "McpServer")]
 pub struct McpServer {
-    pub path: ConnectionPath,
+    pub id: String,
     /// Narrows what the model sees. Absent ⇒ every tool the connection grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
@@ -1205,6 +1200,27 @@ pub struct McpServer {
     #[serde(default, skip_serializing_if = "McpToolSyncFailure::is_default")]
     pub tool_sync_failure: McpToolSyncFailure,
     #[serde(default, skip_serializing_if = "Approve::is_default")]
+    pub approve: Approve,
+}
+
+impl McpServer {
+    pub fn bind(&self) -> BoundServer {
+        BoundServer {
+            path: ConnectionPath::Mcp(self.id.clone()),
+            tools: self.tools.clone(),
+            auth_failure: self.auth_failure,
+            tool_sync_failure: self.tool_sync_failure,
+            approve: self.approve,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundServer {
+    pub path: ConnectionPath,
+    pub tools: Option<McpTools>,
+    pub auth_failure: McpAuthFailure,
+    pub tool_sync_failure: McpToolSyncFailure,
     pub approve: Approve,
 }
 
@@ -1308,9 +1324,9 @@ pub struct AgentPlugin {
     pub description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillMeta>,
-    /// Where each of this plugin's servers is declared.
+    /// The plugin's server names, from its bundle.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub servers: Vec<ConnectionPath>,
+    pub servers: Vec<String>,
     /// Applied to each of the plugin's servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpTools>,
@@ -1324,9 +1340,12 @@ pub struct AgentPlugin {
 
 impl AgentPlugin {
     /// One of the plugin's servers, with the plugin's policy on it.
-    pub fn server(&self, path: &ConnectionPath) -> McpServer {
-        McpServer {
-            path: path.clone(),
+    pub fn server(&self, name: &str) -> BoundServer {
+        BoundServer {
+            path: ConnectionPath::PluginServer {
+                plugin: self.id.clone(),
+                server: name.to_string(),
+            },
             tools: self.tools.clone(),
             auth_failure: self.auth_failure,
             tool_sync_failure: self.tool_sync_failure,
@@ -1994,6 +2013,30 @@ pub enum ClientInput {
     },
 }
 
+/// Which worker identity decides for a session, and optionally at what
+/// address. `url` fills in when the declared block has none, or overrides it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(title = "WorkerRef")]
+pub struct WorkerRef {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl ClientInput {
+    /// The submit variants route on an agent; a resume or settle continues
+    /// whatever is running.
+    pub fn agent_id(&self) -> Option<&str> {
+        match self {
+            ClientInput::Message { agent_id, .. }
+            | ClientInput::Messages { agent_id, .. }
+            | ClientInput::Append { agent_id, .. }
+            | ClientInput::Action { agent_id, .. } => Some(agent_id),
+            _ => None,
+        }
+    }
+}
+
 /// The body of an interrupt resume: which interrupt, and the payload delivered
 /// to the worker. Shared by the [`ClientInput::InterruptResume`] input and the
 /// [`DecisionTrigger::InterruptResumed`] trigger.
@@ -2423,6 +2466,9 @@ pub struct DecisionRequest<'a> {
     pub state: &'a WorkerState,
     /// The agent config for the active path. `null` when none is set.
     pub agent: &'a Option<AgentConfig>,
+    /// The worker this session is pinned to. `null` when the file's own
+    /// routing decides.
+    pub worker: &'a Option<WorkerRef>,
     pub calls: &'a [Effect],
     /// Count of in-flight `tool_call`/`subagent` calls.
     pub pending_calls: usize,

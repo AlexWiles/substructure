@@ -41,6 +41,8 @@ pub async fn client_input(
             caller,
             owner,
             input: req.input,
+            agent: None,
+            worker: None,
             span: crate::span::SpanContext::root().child("client_input"),
         })
         .await;

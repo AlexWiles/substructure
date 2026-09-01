@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::connectors::registry::{
     AuthKind, ConnectionDecl, ConnectionPath, ConnectionSpec, CredentialScope,
 };
+use crate::copy::declared;
 use crate::plugins::{BundleServer, PluginBundle};
 use crate::protocol::ReasoningEffort;
 use crate::protocol::{
@@ -15,7 +16,7 @@ use crate::protocol::{
     SUBAGENT_WAIT,
 };
 use crate::runtime::llm::{LlmBlock, LlmBlocks};
-use crate::runtime::worker::{AgentEntry, Hosting, WorkerEndpoint};
+use crate::runtime::worker::{AgentEntry, Hosting, WorkerBlock};
 
 pub use crate::cli::env::ProviderKind;
 
@@ -26,8 +27,12 @@ pub struct Manifest {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_subagent_depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_worker: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub llm: BTreeMap<String, ProviderSpec>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub worker: BTreeMap<String, WorkerBlock>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub agent: BTreeMap<String, AgentSection>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -38,6 +43,26 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn validate(&self) -> Result<()> {
+        for (id, spec) in &self.worker {
+            check_id(id).map_err(|e| anyhow::anyhow!("[worker.{id}]: {e}"))?;
+            if let Some(url) = &spec.url {
+                check_url(url).map_err(|e| anyhow::anyhow!("[worker.{id}]: {e}"))?;
+            }
+        }
+        if let Some(id) = &self.default_worker {
+            let Some(spec) = self.worker.get(id) else {
+                bail!(
+                    "`default_worker = \"{id}\"` names no block. Declared: {}",
+                    declared(self.worker.keys())
+                );
+            };
+            if spec.url.is_none() {
+                bail!(
+                    "`default_worker = \"{id}\"` needs a `url` on [worker.{id}]: a session that \
+                     names no worker brings no address"
+                );
+            }
+        }
         for (id, spec) in &self.mcp {
             check_id(id).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
             check_url(&spec.url).map_err(|e| anyhow::anyhow!("[mcp.{id}]: {e}"))?;
@@ -62,11 +87,6 @@ impl Manifest {
             .iter()
             .filter(|(_, s)| s.api_key_env.is_some())
             .map(|(id, _)| format!("[llm.{id}].api_key_env"));
-        let agent = self
-            .agent
-            .iter()
-            .filter(|(_, s)| s.signing_secret_env.is_some())
-            .map(|(id, _)| format!("[agent.{id}].signing_secret_env"));
         let mcp = self.mcp.iter().flat_map(|(id, s)| {
             s.client_id_env
                 .iter()
@@ -89,16 +109,13 @@ impl Manifest {
                     )
             })
         });
-        llm.chain(agent).chain(mcp).chain(plugin).collect()
+        llm.chain(mcp).chain(plugin).collect()
     }
 
     pub fn for_wire(&self) -> Self {
         let mut wire = self.clone();
         for spec in wire.llm.values_mut() {
             spec.api_key_env = None;
-        }
-        for section in wire.agent.values_mut() {
-            section.signing_secret_env = None;
         }
         for spec in wire.mcp.values_mut() {
             spec.client_id_env = None;
@@ -215,7 +232,7 @@ impl Manifest {
             let mut reached: Vec<ConnectionPath> = section
                 .mcp
                 .iter()
-                .filter_map(|r| ConnectionPath::parse(r.id()))
+                .map(|r| ConnectionPath::Mcp(r.id().to_string()))
                 .filter(|path| personal.contains(&path))
                 .collect();
             for plugin in &section.plugins {
@@ -320,10 +337,9 @@ pub struct AgentSection {
     pub mcp_auth_failure: Option<McpAuthFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_tool_sync_failure: Option<McpToolSyncFailure>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signing_secret_env: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slack: Option<AgentSlackConfig>,
 }
@@ -354,7 +370,7 @@ impl AgentSection {
             mcp: self
                 .mcp
                 .iter()
-                .filter_map(|m| m.to_server(self.mcp_defaults()))
+                .map(|m| m.to_server(self.mcp_defaults()))
                 .collect(),
             defer_tools: self.defer_tools,
             mcp_announce: self.mcp_announce.unwrap_or_default(),
@@ -376,23 +392,16 @@ impl AgentSection {
     fn to_subagents(&self, manifest: &Manifest) -> Vec<Subagent> {
         self.subagents
             .iter()
-            .map(|sub| {
-                let path = sub.id();
-                let id = match ConnectionPath::parse(path) {
-                    Some(ConnectionPath::Agent(id)) => id,
-                    _ => path.to_string(),
-                };
-                Subagent {
-                    description: manifest
-                        .agent
-                        .get(&id)
-                        .and_then(|s| s.description.clone())
-                        .unwrap_or_default(),
-                    id,
-                    defer: sub.defer(),
-                    prefix: sub.prefix(),
-                    mode: sub.mode().or(self.subagent_mode),
-                }
+            .map(|sub| Subagent {
+                description: manifest
+                    .agent
+                    .get(sub.id())
+                    .and_then(|s| s.description.clone())
+                    .unwrap_or_default(),
+                id: sub.id().to_string(),
+                defer: sub.defer(),
+                prefix: sub.prefix(),
+                mode: sub.mode().or(self.subagent_mode),
             })
             .collect()
     }
@@ -402,20 +411,12 @@ impl AgentSection {
             config: self.to_agent_config(manifest),
             hosting: match self.worker.clone() {
                 None => Hosting::Engine,
-                Some(url) => Hosting::Http(WorkerEndpoint {
-                    url,
-                    signing_secret: self
-                        .signing_secret_env
-                        .as_deref()
-                        .and_then(crate::cli::env_value),
-                }),
+                Some(id) => Hosting::Worker(id),
             },
         }
     }
 }
 
-/// A plugin's directory: `~` and `$VAR` expand, an absolute path stands alone,
-/// and the rest is read against the file that names it.
 fn plugin_dir(base: &std::path::Path, path: &str) -> Result<std::path::PathBuf> {
     let expanded = shellexpand::full(path).with_context(|| format!("`path = {path:?}`"))?;
     Ok(base.join(&*expanded))
@@ -513,16 +514,6 @@ fn check_plugin(id: &str, spec: &PluginSpec) -> Result<()> {
     Ok(())
 }
 
-fn unresolved(path: &ConnectionPath, manifest: &Manifest) -> bool {
-    let ConnectionPath::PluginServer { plugin, .. } = path else {
-        return false;
-    };
-    manifest
-        .plugin
-        .get(plugin)
-        .is_some_and(|spec| spec.bundle.is_none())
-}
-
 fn check_tool_prefixes(manifest: &Manifest) -> Result<()> {
     let paths = manifest.connection_paths();
     for (i, path) in paths.iter().enumerate() {
@@ -539,15 +530,89 @@ fn check_tool_prefixes(manifest: &Manifest) -> Result<()> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum McpRef {
-    All(String),
-    Filtered(McpEntry),
+pub enum Ref<T> {
+    Id(String),
+    Entry(T),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum SubagentRef {
-    Id(String),
-    Configured(SubagentEntry),
+pub trait RefEntry {
+    const EXPECTING: &'static str;
+    fn id(&self) -> &str;
+}
+
+impl<T: RefEntry> Ref<T> {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Id(id) => id,
+            Self::Entry(e) => e.id(),
+        }
+    }
+
+    fn entry(&self) -> Option<&T> {
+        match self {
+            Self::Id(_) => None,
+            Self::Entry(e) => Some(e),
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for Ref<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Id(id) => s.serialize_str(id),
+            Self::Entry(e) => e.serialize(s),
+        }
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de> + RefEntry> serde::Deserialize<'de> for Ref<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: serde::Deserialize<'de> + RefEntry> serde::de::Visitor<'de> for V<T> {
+            type Value = Ref<T>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(T::EXPECTING)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<Ref<T>, E> {
+                Ok(Ref::Id(id.to_string()))
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<Ref<T>, M::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(Ref::Entry)
+            }
+        }
+
+        d.deserialize_any(V(std::marker::PhantomData))
+    }
+}
+
+pub type McpRef = Ref<McpEntry>;
+pub type SubagentRef = Ref<SubagentEntry>;
+pub type PluginRef = Ref<PluginEntry>;
+
+impl RefEntry for McpEntry {
+    const EXPECTING: &'static str = "a connection id, or a table with `id` and `tools`";
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl RefEntry for SubagentEntry {
+    const EXPECTING: &'static str =
+        "an agent id, or a table with `id`, `defer`, `prefix`, and `mode`";
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl RefEntry for PluginEntry {
+    const EXPECTING: &'static str = "a plugin id, or a table with `id`";
+    fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -562,33 +627,17 @@ pub struct SubagentEntry {
     pub mode: Option<SubagentMode>,
 }
 
-impl SubagentRef {
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Id(id) => id,
-            Self::Configured(entry) => &entry.id,
-        }
-    }
-
+impl Ref<SubagentEntry> {
     fn defer(&self) -> Option<bool> {
-        match self {
-            Self::Id(_) => None,
-            Self::Configured(entry) => entry.defer,
-        }
+        self.entry().and_then(|e| e.defer)
     }
 
     fn prefix(&self) -> Option<bool> {
-        match self {
-            Self::Id(_) => None,
-            Self::Configured(entry) => entry.prefix,
-        }
+        self.entry().and_then(|e| e.prefix)
     }
 
     fn mode(&self) -> Option<SubagentMode> {
-        match self {
-            Self::Id(_) => None,
-            Self::Configured(entry) => entry.mode,
-        }
+        self.entry().and_then(|e| e.mode)
     }
 }
 
@@ -642,46 +691,32 @@ impl McpToolsEntry {
     }
 }
 
-impl McpRef {
-    pub fn id(&self) -> &str {
-        match self {
-            Self::All(id) => id,
-            Self::Filtered(entry) => &entry.id,
+impl Ref<McpEntry> {
+    fn to_server(&self, defaults: McpDefaults) -> McpServer {
+        let entry = self.entry();
+        McpServer {
+            id: self.id().to_string(),
+            tools: entry
+                .and_then(|e| e.tools.as_ref())
+                .map(McpToolsEntry::to_wire),
+            auth_failure: entry
+                .and_then(|e| e.auth_failure)
+                .unwrap_or(defaults.auth_failure),
+            tool_sync_failure: entry
+                .and_then(|e| e.tool_sync_failure)
+                .unwrap_or(defaults.tool_sync_failure),
+            approve: entry.and_then(|e| e.approve).unwrap_or_default(),
         }
     }
-
-    fn to_server(&self, defaults: McpDefaults) -> Option<McpServer> {
-        Some(match self {
-            Self::All(written) => McpServer {
-                path: ConnectionPath::parse(written)?,
-                tools: None,
-                auth_failure: defaults.auth_failure,
-                tool_sync_failure: defaults.tool_sync_failure,
-                approve: Approve::default(),
-            },
-            Self::Filtered(entry) => McpServer {
-                path: ConnectionPath::parse(&entry.id)?,
-                tools: entry.tools.as_ref().map(McpToolsEntry::to_wire),
-                auth_failure: entry.auth_failure.unwrap_or(defaults.auth_failure),
-                tool_sync_failure: entry
-                    .tool_sync_failure
-                    .unwrap_or(defaults.tool_sync_failure),
-                approve: entry.approve.unwrap_or_default(),
-            },
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PluginRef {
-    All(String),
-    Configured(PluginEntry),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginEntry {
     pub id: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub servers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<McpToolsEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -692,16 +727,11 @@ pub struct PluginEntry {
     pub approve: Option<Approve>,
 }
 
-impl PluginRef {
-    pub fn id(&self) -> &str {
-        match self {
-            Self::All(id) => id,
-            Self::Configured(entry) => &entry.id,
-        }
-    }
-
+impl Ref<PluginEntry> {
     fn to_wire(&self, manifest: &Manifest, defaults: McpDefaults) -> AgentPlugin {
         let id = self.id();
+        let entry = self.entry();
+        let named = entry.and_then(|e| e.servers.as_ref());
         let bundle = manifest.plugin.get(id).and_then(|s| s.bundle.as_ref());
         let (description, skills, servers) = match bundle {
             Some(b) => (
@@ -709,17 +739,11 @@ impl PluginRef {
                 b.skill_metas(),
                 b.servers
                     .keys()
-                    .map(|name| ConnectionPath::PluginServer {
-                        plugin: id.to_string(),
-                        server: name.clone(),
-                    })
+                    .filter(|name| named.is_none_or(|list| list.contains(name)))
+                    .cloned()
                     .collect(),
             ),
             None => (String::new(), Vec::new(), Vec::new()),
-        };
-        let entry = match self {
-            Self::All(_) => None,
-            Self::Configured(entry) => Some(entry),
         };
         AgentPlugin {
             id: id.to_string(),
@@ -737,116 +761,6 @@ impl PluginRef {
                 .unwrap_or(defaults.tool_sync_failure),
             approve: entry.and_then(|e| e.approve).unwrap_or_default(),
         }
-    }
-}
-
-impl Serialize for PluginRef {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::All(id) => s.serialize_str(id),
-            Self::Configured(entry) => entry.serialize(s),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PluginRef {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = PluginRef;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a plugin id, or a table with `id`")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<PluginRef, E> {
-                Ok(PluginRef::All(id.to_string()))
-            }
-
-            fn visit_map<M: serde::de::MapAccess<'de>>(
-                self,
-                map: M,
-            ) -> Result<PluginRef, M::Error> {
-                PluginEntry::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-                    .map(PluginRef::Configured)
-            }
-        }
-
-        d.deserialize_any(V)
-    }
-}
-
-impl Serialize for McpRef {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::All(id) => s.serialize_str(id),
-            Self::Filtered(entry) => entry.serialize(s),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for McpRef {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = McpRef;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a connection id, or a table with `id` and `tools`")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<McpRef, E> {
-                Ok(McpRef::All(id.to_string()))
-            }
-
-            fn visit_map<M: serde::de::MapAccess<'de>>(self, map: M) -> Result<McpRef, M::Error> {
-                McpEntry::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-                    .map(McpRef::Filtered)
-            }
-        }
-
-        d.deserialize_any(V)
-    }
-}
-
-impl Serialize for SubagentRef {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Id(id) => s.serialize_str(id),
-            Self::Configured(entry) => entry.serialize(s),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for SubagentRef {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = SubagentRef;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str(
-                    "an `agent.<id>` path, or a table with `id`, `defer`, `prefix`, and `mode`",
-                )
-            }
-
-            fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<SubagentRef, E> {
-                Ok(SubagentRef::Id(id.to_string()))
-            }
-
-            fn visit_map<M: serde::de::MapAccess<'de>>(
-                self,
-                map: M,
-            ) -> Result<SubagentRef, M::Error> {
-                SubagentEntry::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-                    .map(SubagentRef::Configured)
-            }
-        }
-
-        d.deserialize_any(V)
     }
 }
 
@@ -963,12 +877,19 @@ pub fn cache_ttls(kind: ProviderKind) -> &'static [&'static str] {
 pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Result<()> {
     check_id(id)?;
 
-    if let Some(url) = &section.worker {
-        check_url(url)?;
-    } else if section.signing_secret_env.is_some() {
-        bail!(
-            "`signing_secret_env` signs decision requests, and there is no `worker` to send any to"
-        );
+    if let Some(worker) = &section.worker {
+        let Some(spec) = manifest.worker.get(worker) else {
+            bail!(
+                "`worker = \"{worker}\"` names no block. Declared: {}",
+                declared(manifest.worker.keys())
+            );
+        };
+        if spec.url.is_none() {
+            bail!(
+                "[worker.{worker}] has no `url`, so nothing declared can route to it. \
+                 A session can still name it and bring an address."
+            );
+        }
     }
 
     if let Some(slack) = &section.slack {
@@ -980,7 +901,7 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
             bail!(
                 "declares nothing. An agent the engine decides for needs an `llm` and a \
                  `model` to propose from; an agent whose worker authors its config needs a \
-                 `worker` URL."
+                 `worker`."
             );
         }
         return Ok(());
@@ -1002,57 +923,37 @@ pub fn check_agent(id: &str, section: &AgentSection, manifest: &Manifest) -> Res
         bail!("no `model`. An agent that declares an `llm` has to say which model on it.");
     }
 
-    let connections = manifest.connections();
-    let via_plugins: BTreeMap<ConnectionPath, &str> = section
-        .plugins
-        .iter()
-        .filter_map(|p| Some((p.id(), manifest.plugin.get(p.id())?.bundle.as_ref()?)))
-        .flat_map(|(plugin, bundle)| {
-            bundle.servers.keys().map(move |server| {
-                let path = ConnectionPath::PluginServer {
-                    plugin: plugin.to_string(),
-                    server: server.clone(),
-                };
-                (path, plugin)
-            })
-        })
-        .collect();
-
     for server in &section.mcp {
-        let written = server.id();
-        let Some(path) = ConnectionPath::parse(written) else {
-            if let Some(known) = connections.keys().find(|p| p.tool_prefix() == *written) {
-                bail!(
-                    "`mcp` names `{written}`, and a connection is named by where it is \
-                     declared. Write `{known}`."
-                );
-            }
-            bail!(
-                "`mcp` names no connection `{written}`. Declared: {}",
-                list(&connections)
-            );
-        };
-        if !connections.contains_key(&path) && !unresolved(&path, manifest) {
-            bail!(
-                "`mcp` names no connection `{path}`. Declared: {}",
-                list(&connections)
-            );
+        let id = server.id();
+        if let Some(bare) = id.strip_prefix("mcp.") {
+            bail!("`mcp` names `{id}`. A reference is the bare id: write `\"{bare}\"`.");
         }
-        if let Some(plugin) = via_plugins.get(&path) {
+        if !manifest.mcp.contains_key(id) {
             bail!(
-                "`mcp` names `{path}`, which `plugins = [\"{plugin}\"]` already grants. \
-                 Name it once."
+                "`mcp` names no [mcp.{id}]. Declared: {}",
+                declared(manifest.mcp.keys())
             );
         }
     }
 
     for plugin in &section.plugins {
-        if !manifest.plugin.contains_key(plugin.id()) {
+        let Some(spec) = manifest.plugin.get(plugin.id()) else {
             bail!(
                 "`plugins` names no plugin `{}`. Declared: {}",
                 plugin.id(),
                 declared(manifest.plugin.keys())
             );
+        };
+        if let (Ref::Entry(entry), Some(bundle)) = (plugin, spec.bundle.as_ref()) {
+            for named in entry.servers.iter().flatten() {
+                if !bundle.servers.contains_key(named) {
+                    bail!(
+                        "`plugins` names no server `{named}` in `{}`. Declared: {}",
+                        plugin.id(),
+                        declared(bundle.servers.keys())
+                    );
+                }
+            }
         }
     }
 
@@ -1103,26 +1004,14 @@ fn offers_wait_tool(section: &AgentSection) -> bool {
 }
 
 fn check_subagent(sub: &SubagentRef, section: &AgentSection, manifest: &Manifest) -> Result<()> {
-    let written = sub.id();
-    let id = match ConnectionPath::parse(written) {
-        Some(ConnectionPath::Agent(id)) => id,
-        _ => {
-            if manifest.agent.contains_key(written) {
-                bail!(
-                    "`{written}` names an agent, and an agent is named by where it is declared. \
-                     Write `agent.{written}`."
-                );
-            }
-            bail!(
-                "`{written}` names no agent. Declared: {}",
-                agent_paths(manifest)
-            );
-        }
-    };
-    let Some(child) = manifest.agent.get(&id) else {
+    let id = sub.id();
+    if let Some(bare) = id.strip_prefix("agent.") {
+        bail!("`{id}` names an agent by path. A reference is the bare id: write `\"{bare}\"`.");
+    }
+    let Some(child) = manifest.agent.get(id) else {
         bail!(
-            "`{written}` names no agent. Declared: {}",
-            agent_paths(manifest)
+            "`{id}` names no agent. Declared: {}",
+            declared(manifest.agent.keys())
         );
     };
     let single =
@@ -1139,7 +1028,7 @@ fn check_subagent(sub: &SubagentRef, section: &AgentSection, manifest: &Manifest
         }
     }
     let wire = Subagent {
-        id: id.clone(),
+        id: id.to_string(),
         description: String::new(),
         defer: sub.defer(),
         prefix: sub.prefix(),
@@ -1182,15 +1071,6 @@ fn reserved_by_single(offered: &str) -> anyhow::Error {
     )
 }
 
-fn agent_paths(manifest: &Manifest) -> String {
-    let paths: Vec<String> = manifest
-        .agent
-        .keys()
-        .map(|id| format!("agent.{id}"))
-        .collect();
-    declared(paths.iter())
-}
-
 const SLACK_APP_NAME_MAX: usize = 35;
 const SLACK_APP_DESCRIPTION_MAX: usize = 140;
 
@@ -1208,22 +1088,6 @@ pub fn check_agent_slack(id: &str, slack: &AgentSlackConfig) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn list(connections: &BTreeMap<ConnectionPath, ConnectionSpec>) -> String {
-    let paths: Vec<String> = connections.keys().map(ConnectionPath::to_string).collect();
-    match paths.is_empty() {
-        true => "none".to_string(),
-        false => paths.join(", "),
-    }
-}
-
-pub fn declared<'a>(mut ids: impl Iterator<Item = &'a String>) -> String {
-    let joined = ids.by_ref().cloned().collect::<Vec<_>>().join(", ");
-    match joined.is_empty() {
-        true => "none".to_string(),
-        false => joined,
-    }
 }
 
 pub fn check_id(id: &str) -> Result<()> {
@@ -1295,11 +1159,13 @@ mod tests {
             type = "anthropic"
             api_key_env = "MY_KEY"
 
+            [worker.bot]
+            url = "https://bot.example.com/agent"
+
             [agent.support]
             llm = "claude"
             model = "claude-sonnet-4-5"
-            worker = "https://bot.example.com/agent"
-            signing_secret_env = "MY_SECRET"
+            worker = "bot"
 
             [mcp.gmail]
             url = "https://gmailmcp.googleapis.com/mcp/v1"
@@ -1312,7 +1178,6 @@ mod tests {
             m.local_bindings(),
             [
                 "[llm.claude].api_key_env",
-                "[agent.support].signing_secret_env",
                 "[mcp.gmail].client_id_env",
                 "[mcp.gmail].client_secret_env",
             ]
@@ -1323,6 +1188,62 @@ mod tests {
         assert_eq!(wire.agent["support"].worker, m.agent["support"].worker);
         assert_eq!(wire.llm["claude"].kind, ProviderKind::Anthropic);
         assert_eq!(wire.mcp["gmail"].scopes, m.mcp["gmail"].scopes);
+    }
+
+    #[test]
+    fn worker_blocks_reach_the_directory_unchanged() {
+        let m = manifest(
+            r#"
+            default_worker = "main"
+
+            [worker.main]
+            url = "https://api.example.com/agent"
+
+            [worker.customers]
+            "#,
+        );
+        m.validate().expect("workers alone are valid");
+        assert_eq!(m.default_worker.as_deref(), Some("main"));
+        let blocks = &m.worker;
+        assert_eq!(
+            blocks["main"].url.as_deref(),
+            Some("https://api.example.com/agent")
+        );
+        assert!(
+            blocks["customers"].url.is_none(),
+            "a session brings the address"
+        );
+
+        let err = toml::from_str::<Manifest>(
+            "default_worker = \"a\"\ndefault_worker = \"b\"\n[worker.a]\nurl = \"https://a.test\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("duplicate key"), "{err}");
+
+        let err = manifest("default_worker = \"typo\"\n[worker.a]\nurl = \"https://a.test\"\n")
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no block"), "{err}");
+
+        let err = manifest("default_worker = \"a\"\n[worker.a]\n")
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a `url`"), "{err}");
+
+        let written = toml::to_string(&m).unwrap();
+        assert_eq!(
+            toml::from_str::<Manifest>(&written).unwrap().default_worker,
+            m.default_worker,
+            "a rewrite keeps it above the tables, not inside the last one: {written}"
+        );
+
+        let err = manifest("[llm.l]\ntype = \"anthropic\"\n[agent.x]\nllm = \"l\"\nmodel = \"m\"\nworker = \"typo\"\n[worker.main]\nurl = \"https://a.test\"\n")
+            .validate().unwrap_err().to_string();
+        assert!(err.contains("names no block"), "{err}");
+        assert!(err.contains("main"), "{err}");
     }
 
     #[test]
@@ -1410,6 +1331,9 @@ mod tests {
             [llm.claude]
             type = "anthropic"
 
+            [worker.bot]
+            url = "https://bot.example.com/agent"
+
             [agent.assistant]
             llm = "claude"
             model = "m"
@@ -1426,7 +1350,7 @@ mod tests {
     #[test]
     fn a_subagent_takes_its_description_from_the_agent_it_names() {
         let m = team(
-            r#"subagents = ["agent.poet"]"#,
+            r#"subagents = ["poet"]"#,
             r#"description = "Writes a haiku.""#,
         );
         m.validate().unwrap();
@@ -1454,7 +1378,7 @@ mod tests {
         let m = team(
             r#"
             subagent_mode = "detached"
-            subagents = ["agent.poet", { id = "agent.poet2", mode = "any" }]
+            subagents = ["poet", { id = "poet2", mode = "any" }]
             "#
             .trim(),
             r#"description = "Writes a haiku.""#,
@@ -1482,7 +1406,7 @@ mod tests {
     #[test]
     fn a_wait_mode_does_not_parse_as_configuration() {
         for section in [
-            r#"subagents = [{ id = "agent.poet", mode = "wait" }]"#,
+            r#"subagents = [{ id = "poet", mode = "wait" }]"#,
             r#"subagent_mode = "wait""#,
         ] {
             let err = toml::from_str::<Manifest>(&format!(
@@ -1544,18 +1468,18 @@ mod tests {
 
     #[test]
     fn a_subagent_names_a_declared_agent() {
-        let bad = team(r#"subagents = ["agent.potet"]"#, r#"description = "d""#);
+        let bad = team(r#"subagents = ["potet"]"#, r#"description = "d""#);
         let err = bad.validate().unwrap_err().to_string();
         assert!(err.contains("[agent.assistant]"), "{err}");
         assert!(err.contains("names no agent"), "{err}");
-        assert!(err.contains("agent.poet"), "{err}");
+        assert!(err.contains("poet"), "{err}");
     }
 
     #[test]
-    fn a_bare_id_points_at_the_agent_path() {
-        let bad = team(r#"subagents = ["poet"]"#, r#"description = "d""#);
+    fn a_path_is_told_to_write_the_bare_agent_id() {
+        let bad = team(r#"subagents = ["agent.poet"]"#, r#"description = "d""#);
         let err = bad.validate().unwrap_err().to_string();
-        assert!(err.contains("Write `agent.poet`"), "{err}");
+        assert!(err.contains(r#"write `"poet"`"#), "{err}");
     }
 
     #[test]
@@ -1568,7 +1492,7 @@ mod tests {
     #[test]
     fn a_subagent_cannot_take_a_tool_s_name() {
         let bad = team(
-            r#"subagents = ["agent.poet"]
+            r#"subagents = ["poet"]
                tools = [{ name = "poet", description = "d", handler = "client" }]"#,
             r#"description = "d""#,
         );
@@ -1579,7 +1503,7 @@ mod tests {
     #[test]
     fn a_subagent_entry_takes_a_map_with_defer_and_prefix() {
         let m = team(
-            r#"subagents = [{ id = "agent.poet", defer = true, prefix = true }]"#,
+            r#"subagents = [{ id = "poet", defer = true, prefix = true }]"#,
             r#"description = "Writes a haiku.""#,
         );
         m.validate().unwrap();
@@ -1604,7 +1528,7 @@ mod tests {
     #[test]
     fn subagent_tools_reads_the_strategy_from_the_agent() {
         let m = team(
-            r#"subagents = ["agent.poet"]
+            r#"subagents = ["poet"]
                subagent_tools = { strategy = "single" }"#,
             r#"description = "Writes a haiku.""#,
         );
@@ -1624,7 +1548,7 @@ mod tests {
     #[test]
     fn an_absent_subagent_tools_offers_one_tool_per_agent() {
         let m = team(
-            r#"subagents = ["agent.poet"]"#,
+            r#"subagents = ["poet"]"#,
             r#"description = "Writes a haiku.""#,
         );
         let agents = m.agents();
@@ -1647,11 +1571,11 @@ mod tests {
     fn the_single_strategy_rejects_a_per_agent_shape() {
         for (sub, said) in [
             (
-                r#"{ id = "agent.poet", prefix = true }"#,
+                r#"{ id = "poet", prefix = true }"#,
                 "`prefix` shapes a per-agent tool",
             ),
             (
-                r#"{ id = "agent.poet", defer = true }"#,
+                r#"{ id = "poet", defer = true }"#,
                 "`defer` hides a per-agent tool",
             ),
         ] {
@@ -1671,7 +1595,7 @@ mod tests {
     #[test]
     fn the_single_strategy_keeps_the_subagent_name_for_itself() {
         let bad = team(
-            r#"subagents = ["agent.poet"]
+            r#"subagents = ["poet"]
                subagent_tools = { strategy = "single" }
                tools = [{ name = "subagent", description = "d", handler = "client" }]"#,
             r#"description = "d""#,
@@ -1681,7 +1605,7 @@ mod tests {
         assert!(err.contains("subagent"), "{err}");
 
         team(
-            r#"subagents = ["agent.poet"]
+            r#"subagents = ["poet"]
                tools = [{ name = "subagent", description = "d", handler = "client" }]"#,
             r#"description = "d""#,
         )
@@ -1698,7 +1622,7 @@ mod tests {
             [agent.assistant]
             llm = "claude"
             model = "m"
-            subagents = ["agent.subagent"]
+            subagents = ["subagent"]
             subagent_tools = { strategy = "single" }
 
             [agent.subagent]
@@ -1721,7 +1645,7 @@ mod tests {
             [agent.assistant]
             llm = "claude"
             model = "m"
-            subagents = ["agent.{long}"]
+            subagents = ["{long}"]
             subagent_tools = {{ strategy = "single" }}
 
             [agent.{long}]
@@ -1739,7 +1663,7 @@ mod tests {
     fn an_unknown_subagent_key_is_rejected() {
         let raw = r#"
             [agent.a]
-            subagents = [{ id = "agent.b", approve = true }]
+            subagents = [{ id = "b", approve = true }]
             "#;
         let err = toml::from_str::<Manifest>(raw).unwrap_err().to_string();
         assert!(err.contains("approve"), "{err}");
@@ -1748,7 +1672,7 @@ mod tests {
     #[test]
     fn a_prefixed_subagent_frees_the_bare_name_and_claims_the_prefixed_one() {
         team(
-            r#"subagents = [{ id = "agent.poet", prefix = true }]
+            r#"subagents = [{ id = "poet", prefix = true }]
                tools = [{ name = "poet", description = "d", handler = "client" }]"#,
             r#"description = "d""#,
         )
@@ -1756,7 +1680,7 @@ mod tests {
         .expect("the offered name is `agent__poet`, so `poet` is free");
 
         let bad = team(
-            r#"subagents = [{ id = "agent.poet", prefix = true }]
+            r#"subagents = [{ id = "poet", prefix = true }]
                tools = [{ name = "agent__poet", description = "d", handler = "client" }]"#,
             r#"description = "d""#,
         );
@@ -1786,25 +1710,25 @@ mod tests {
                 "#
             ))
         };
-        let err = manifest_with(&format!(r#""agent.{long}""#))
+        let err = manifest_with(&format!(r#""{long}""#))
             .validate()
             .unwrap_err()
             .to_string();
         assert!(err.contains("64 characters"), "{err}");
-        manifest_with(&format!(r#"{{ id = "agent.{long}", defer = true }}"#))
+        manifest_with(&format!(r#"{{ id = "{long}", defer = true }}"#))
             .validate()
             .expect("a name that never reaches the request has nothing to fit");
     }
 
     #[test]
     fn an_engine_hosted_parent_needs_its_teammate_described() {
-        let bad = team(r#"subagents = ["agent.poet"]"#, "");
+        let bad = team(r#"subagents = ["poet"]"#, "");
         let err = bad.validate().unwrap_err().to_string();
         assert!(err.contains("no description"), "{err}");
 
         team(
-            r#"subagents = ["agent.poet"]
-               worker = "https://bot.example.com/agent""#,
+            r#"subagents = ["poet"]
+               worker = "bot""#,
             "",
         )
         .validate()
@@ -1815,9 +1739,12 @@ mod tests {
     fn a_description_alone_does_not_seed_a_config() {
         let m = manifest(
             r#"
+            [worker.bot]
+            url = "https://bot.example.com/agent"
+
             [agent.poet]
             description = "Writes a haiku."
-            worker = "https://bot.example.com/agent"
+            worker = "bot"
             "#,
         );
         m.validate().unwrap();
@@ -1846,17 +1773,17 @@ mod tests {
 
     #[test]
     fn a_connection_is_named_bare_or_narrowed() {
-        for spelling in [r#"["mcp.sentry"]"#, r#"[{ id = "mcp.sentry" }]"#] {
+        for spelling in [r#"["sentry"]"#, r#"[{ id = "sentry" }]"#] {
             let m = connected(spelling).unwrap();
             m.validate().unwrap();
             let agents = m.agents();
             let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
             assert_eq!(mcp.len(), 1, "{spelling}");
-            assert_eq!(mcp[0].path.to_string(), "mcp.sentry", "{spelling}");
+            assert_eq!(mcp[0].id, "sentry", "{spelling}");
             assert!(mcp[0].tools.is_none(), "no filter ⇒ everything: {spelling}");
         }
 
-        let m = connected(r#"[{ id = "mcp.sentry", tools = { read_only = true } }]"#).unwrap();
+        let m = connected(r#"[{ id = "sentry", tools = { read_only = true } }]"#).unwrap();
         m.validate().unwrap();
         let agents = m.agents();
         let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
@@ -1868,13 +1795,13 @@ mod tests {
 
     #[test]
     fn approve_is_read_from_the_entry_that_names_the_connection() {
-        let m = connected(r#"[{ id = "mcp.sentry", approve = "destructive" }]"#).unwrap();
+        let m = connected(r#"[{ id = "sentry", approve = "destructive" }]"#).unwrap();
         m.validate().unwrap();
         let agents = m.agents();
         let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
         assert_eq!(mcp[0].approve, Approve::Destructive);
 
-        let m = connected(r#"["mcp.sentry"]"#).unwrap();
+        let m = connected(r#"["sentry"]"#).unwrap();
         let agents = m.agents();
         let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
         assert_eq!(mcp[0].approve, Approve::Never, "nothing asks by default");
@@ -1882,7 +1809,7 @@ mod tests {
 
     #[test]
     fn an_unknown_approve_value_is_an_error() {
-        let err = connected(r#"[{ id = "mcp.sentry", approve = "sometimes" }]"#)
+        let err = connected(r#"[{ id = "sentry", approve = "sometimes" }]"#)
             .unwrap_err()
             .to_string();
         assert!(err.contains("sometimes"), "names the value: {err}");
@@ -1890,7 +1817,7 @@ mod tests {
 
     #[test]
     fn a_misspelled_filter_is_an_error_rather_than_no_filter() {
-        let err = connected(r#"[{ id = "mcp.sentry", tool = { read_only = true } }]"#)
+        let err = connected(r#"[{ id = "sentry", tool = { read_only = true } }]"#)
             .unwrap_err()
             .to_string();
         assert!(err.contains("tool"), "{err}");
@@ -1913,7 +1840,7 @@ llm = "claude"
 model = "m"
 mcp_auth_failure = "degrade"
 mcp_tool_sync_failure = "silent"
-mcp = ["mcp.sentry", { id = "mcp.linear", tool_sync_failure = "warn" }]
+mcp = ["sentry", { id = "linear", tool_sync_failure = "warn" }]
 "#,
         )
         .unwrap();
@@ -1922,14 +1849,14 @@ mcp = ["mcp.sentry", { id = "mcp.linear", tool_sync_failure = "warn" }]
         let sentry = config
             .mcp
             .iter()
-            .find(|s| s.path.to_string() == "mcp.sentry")
+            .find(|s| s.id == "sentry")
             .expect("sentry");
         assert_eq!(sentry.auth_failure, McpAuthFailure::Degrade);
         assert_eq!(sentry.tool_sync_failure, McpToolSyncFailure::Silent);
         let linear = config
             .mcp
             .iter()
-            .find(|s| s.path.to_string() == "mcp.linear")
+            .find(|s| s.id == "linear")
             .expect("linear");
         assert_eq!(linear.auth_failure, McpAuthFailure::Degrade);
         assert_eq!(
@@ -1968,11 +1895,7 @@ plugins = ["pdf", { id = "ocr", tool_sync_failure = "warn" }]
             "the plugin overrides the agent"
         );
         assert_eq!(
-            pdf.server(&ConnectionPath::PluginServer {
-                plugin: "pdf".into(),
-                server: "renderer".into(),
-            })
-            .tool_sync_failure,
+            pdf.server("renderer").tool_sync_failure,
             McpToolSyncFailure::Silent,
             "and each of its servers is stamped with it"
         );
@@ -1990,7 +1913,7 @@ url = "https://sentry.example/mcp"
 [agent.support]
 llm = "claude"
 model = "m"
-mcp = ["mcp.sentry"]
+mcp = ["sentry"]
 "#,
         )
         .unwrap();
@@ -2119,13 +2042,13 @@ defer_tools = { strategy = "sometimes" }
 
     #[test]
     fn defer_is_read_from_the_tools_table() {
-        let m = connected(r#"[{ id = "mcp.sentry", tools = { defer = true } }]"#).unwrap();
+        let m = connected(r#"[{ id = "sentry", tools = { defer = true } }]"#).unwrap();
         m.validate().unwrap();
         let agents = m.agents();
         let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
         assert_eq!(mcp[0].tools.as_ref().expect("a table").defer, Some(true));
 
-        let m = connected(r#"[{ id = "mcp.sentry", tools = { read_only = true } }]"#).unwrap();
+        let m = connected(r#"[{ id = "sentry", tools = { read_only = true } }]"#).unwrap();
         let agents = m.agents();
         let mcp = &agents["support"].config.as_ref().expect("seeded").mcp;
         assert!(
@@ -2136,7 +2059,7 @@ defer_tools = { strategy = "sometimes" }
 
     #[test]
     fn a_misspelled_key_inside_the_tools_table_is_an_error() {
-        let err = connected(r#"[{ id = "mcp.sentry", tools = { defr = true } }]"#)
+        let err = connected(r#"[{ id = "sentry", tools = { defr = true } }]"#)
             .unwrap_err()
             .to_string();
         assert!(err.contains("defr"), "names the field: {err}");
@@ -2145,7 +2068,7 @@ defer_tools = { strategy = "sometimes" }
 
     #[test]
     fn a_defer_that_is_not_a_boolean_is_an_error() {
-        let err = connected(r#"[{ id = "mcp.sentry", tools = { defer = "search" } }]"#)
+        let err = connected(r#"[{ id = "sentry", tools = { defer = "search" } }]"#)
             .unwrap_err()
             .to_string();
         assert!(err.contains("boolean"), "says what it wanted: {err}");
@@ -2153,19 +2076,21 @@ defer_tools = { strategy = "sometimes" }
 
     #[test]
     fn a_bare_id_is_written_back_bare() {
-        let m = connected(r#"["mcp.sentry"]"#).unwrap();
+        let m = connected(r#"["sentry"]"#).unwrap();
+        m.validate().unwrap();
         let written = toml::to_string(&m).unwrap();
         assert!(
-            written.contains(r#"mcp = ["mcp.sentry"]"#),
+            written.contains(r#"mcp = ["sentry"]"#),
             "a rewrite does not wrap it in a table: {written}"
         );
     }
 
     #[test]
     fn a_connection_an_agent_names_is_declared() {
-        let m = connected(r#"["mcp.sentyr"]"#).unwrap();
+        let m = connected(r#"["sentyr"]"#).unwrap();
         let err = m.validate().unwrap_err().to_string();
-        assert!(err.contains("names no connection"), "{err}");
+        assert!(err.contains("names no [mcp.sentyr]"), "{err}");
+        assert!(err.contains("sentry"), "{err}");
     }
 
     #[test]
@@ -2194,7 +2119,7 @@ defer_tools = { strategy = "sometimes" }
             [agent.assistant]
             llm = "claude"
             model = "m"
-            mcp = ["mcp.gmail", "mcp.sentry"]
+            mcp = ["gmail", "sentry"]
 
             [agent.assistant.slack]
 
@@ -2266,7 +2191,7 @@ defer_tools = { strategy = "sometimes" }
             [agent.assistant]
             llm = "claude"
             model = "m"
-            mcp = ["mcp.gmail"]
+            mcp = ["gmail"]
 
             [agent.assistant.slack]
             answers = "dm"
@@ -2307,7 +2232,7 @@ defer_tools = { strategy = "sometimes" }
     }
 
     #[test]
-    fn a_path_into_an_unresolved_plugin_parses() {
+    fn a_servers_filter_into_an_unresolved_plugin_parses() {
         let m = manifest(
             r#"
             [llm.claude]
@@ -2319,7 +2244,7 @@ defer_tools = { strategy = "sometimes" }
             [agent.support]
             llm = "claude"
             model = "m"
-            mcp = ["plugin.reggu.mcp.code"]
+            plugins = [{ id = "reggu", servers = ["code"] }]
             "#,
         );
         m.validate()
@@ -2332,10 +2257,7 @@ defer_tools = { strategy = "sometimes" }
             ..Default::default()
         });
         let err = resolved.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("names no connection `plugin.reggu.mcp.code`"),
-            "{err}"
-        );
+        assert!(err.contains("names no server `code`"), "{err}");
     }
 
     fn plugin_manifest(agent_plugins: &str) -> Manifest {
@@ -2412,7 +2334,7 @@ defer_tools = { strategy = "sometimes" }
         let p = &config.plugins[0];
         assert_eq!(p.description, "PDF work.");
         assert_eq!(p.skills[0].name, "form-filling");
-        assert_eq!(p.servers, [path("plugin.pdf.mcp.renderer")]);
+        assert_eq!(p.servers, ["renderer"]);
         assert!(
             m.connections()
                 .contains_key(&path("plugin.pdf.mcp.renderer")),
@@ -2680,7 +2602,7 @@ defer_tools = { strategy = "sometimes" }
             [agent.searcher]
             llm = "claude"
             model = "m"
-            mcp = [{ id = "plugin.reggu.mcp.code", tools = { read_only = true } }]
+            plugins = [{ id = "reggu", servers = ["code"], tools = { read_only = true } }]
             "#,
         );
         m.plugin.get_mut("reggu").unwrap().bundle = Some(crate::plugins::PluginBundle {
@@ -2695,18 +2617,21 @@ defer_tools = { strategy = "sometimes" }
         m.validate().unwrap();
 
         let config = m.agent["searcher"].to_agent_config(&m).unwrap();
-        assert!(config.plugins.is_empty(), "no bundle, just the one server");
-        assert_eq!(config.mcp.len(), 1);
+        assert!(config.mcp.is_empty(), "the server rides with its plugin");
+        assert_eq!(config.plugins.len(), 1);
         assert_eq!(
-            config.mcp[0].path,
-            path("plugin.reggu.mcp.code"),
-            "the file names the path and the wire carries it"
+            config.plugins[0].servers,
+            ["code"],
+            "`servers` narrows the bundle to the one named"
         );
-        assert_eq!(config.mcp[0].tools.as_ref().unwrap().read_only, Some(true));
+        assert_eq!(
+            config.plugins[0].tools.as_ref().unwrap().read_only,
+            Some(true)
+        );
     }
 
     #[test]
-    fn a_server_granted_twice_is_named_once() {
+    fn a_servers_filter_names_a_declared_server() {
         let mut m = manifest(
             r#"
             [llm.claude]
@@ -2718,8 +2643,7 @@ defer_tools = { strategy = "sometimes" }
             [agent.support]
             llm = "claude"
             model = "m"
-            plugins = ["reggu"]
-            mcp = [{ id = "plugin.reggu.mcp.code", approve = "never" }]
+            plugins = [{ id = "reggu", servers = ["coed"] }]
             "#,
         );
         m.plugin.get_mut("reggu").unwrap().bundle = Some(crate::plugins::PluginBundle {
@@ -2728,13 +2652,17 @@ defer_tools = { strategy = "sometimes" }
             ..Default::default()
         });
         let err = m.validate().unwrap_err().to_string();
-        assert!(err.contains("already grants"), "{err}");
+        assert!(err.contains("names no server `coed`"), "{err}");
+        assert!(err.contains("code"), "{err}");
     }
 
     #[test]
-    fn a_bare_id_is_told_which_path_it_meant() {
-        let err = connected(r#"["sentry"]"#).unwrap().validate().unwrap_err();
-        assert!(err.to_string().contains("Write `mcp.sentry`"), "{err}");
+    fn a_path_is_told_to_write_the_bare_id() {
+        let err = connected(r#"["mcp.sentry"]"#)
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains(r#"write `"sentry"`"#), "{err}");
     }
 
     #[test]

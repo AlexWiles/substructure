@@ -1,8 +1,3 @@
-//! Driving one turn on the deployment the file names.
-//!
-//! One request submits the input and streams the turn. A client that submits
-//! first and subscribes second loses the start of its turn.
-
 use anyhow::{Context as _, Result};
 
 use crate::api::v1::{RunFormat, RunRequest, RUN_DONE_EVENT};
@@ -22,7 +17,6 @@ pub(crate) fn format_for(output: OutputFormat) -> RunFormat {
     }
 }
 
-/// Submit one input to the deployment and render the turn it opens, to its end.
 pub(crate) async fn drive(
     ctx: &Context,
     project: &str,
@@ -33,6 +27,8 @@ pub(crate) async fn drive(
 ) -> Result<TurnEnd> {
     let body = RunRequest {
         session_id: Some(session_id.to_string()),
+        agent: None,
+        worker: None,
         input,
     };
 
@@ -79,8 +75,6 @@ pub(crate) async fn drive(
     Ok(render.into_end())
 }
 
-/// `format=events` carries no AG-UI events, so the route marks its end.
-/// `format=ag-ui` ends on the AG-UI terminal event.
 fn ended(format: RunFormat, done_event: bool, render: &TurnRender<'_>) -> bool {
     match format {
         RunFormat::Events => done_event,
@@ -161,7 +155,7 @@ mod tests {
             outcome: None,
             metadata: None,
         }));
-        // An error is an ending too: the reader has been told what happened.
+
         assert!(saw(&AgUiEvent::RunError {
             message: "no".into(),
         }));

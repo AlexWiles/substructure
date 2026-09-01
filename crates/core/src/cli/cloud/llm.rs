@@ -1,13 +1,3 @@
-//! `subs llm`: the keys behind the `[llm.*]` blocks the file declares.
-//!
-//! A block is declared in `subs.toml`; the key for it is uploaded here.
-//! Pasting a key is configuration rather than money or consent, so it belongs
-//! on this side of the write partition — and it never appears in argv, where a
-//! shell history would keep it.
-//!
-//! An engine here holds no key. The file names the variable each block reads,
-//! and this machine holds it.
-
 use anyhow::{bail, Result};
 use serde::Serialize;
 
@@ -104,12 +94,11 @@ fn declared(name: &str, config: &ProjectConfig) -> Option<Row> {
     })
 }
 
-/// There is no key to upload or remove here. Says which variable holds it.
 fn key_is_a_variable(block: &str, config: &ProjectConfig, verb: &str) -> Result<()> {
     let Some(spec) = config.llm.get(block) else {
         bail!(
             "no [llm.{block}] in subs.toml. Declared: {}",
-            crate::worker::directory::declared(&config.llm.keys().cloned().collect::<Vec<_>>())
+            crate::copy::declared(config.llm.keys())
         );
     };
     if spec.kind == ProviderKind::Worker {
@@ -180,7 +169,8 @@ mod tests {
     const BLOCKS: &str =
         "[llm.claude]\ntype = \"anthropic\"\napi_key_env = \"NOT_SET_ANTHROPIC\"\n\
          [llm.byo]\ntype = \"worker\"\n\
-         [agent.a]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n";
+         [worker.w]\nurl = \"https://w.test\"\n\
+         [agent.a]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"w\"\n";
 
     #[test]
     fn a_block_here_reports_the_variable_it_reads() {

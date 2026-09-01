@@ -50,7 +50,7 @@ pub async fn run(args: RunArgs) -> anyhow::Result<()> {
 
     let output_mode = args.output.unwrap_or_else(OutputFormat::for_stdout);
 
-    let agent_id = declared_agent(args.agent, &cfg.agent_ids())?;
+    let agent_id = declared_agent(args.agent, &cfg)?;
 
     let payload = args.message.clone().or_else(|| args.input.clone());
 

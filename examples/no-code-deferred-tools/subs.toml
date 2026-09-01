@@ -7,7 +7,7 @@ type = "openrouter"
 llm = "openrouter"
 model = "anthropic/claude-haiku-4.5"
 system = "You answer questions about public GitHub repositories. Search for a tool before you answer, read the repository, and name what you read."
-mcp = ["mcp.deepwiki"]
+mcp = ["deepwiki"]
 defer_tools = true
 
 [mcp.deepwiki]

@@ -18,10 +18,6 @@ use super::connections::Row;
 pub const SLACK_NEW_APP: &str = "https://api.slack.com/apps";
 pub const SLACK_DOCS: &str = "https://substructure.ai/docs/slack";
 
-pub fn path_agent(path: &str) -> Option<&str> {
-    path.strip_prefix("agent.")?.strip_suffix(".slack")
-}
-
 pub async fn set_credentials(agent_id: String, scope: ProjectScope) -> Result<()> {
     let cfg = super::connections::environment(&scope.globals)?;
     let app = declared(&cfg, &agent_id)?;
@@ -206,8 +202,6 @@ fn print_manifest(rendered: &Value) {
     println!();
 }
 
-/// No deployment to install onto, so Slack dials this machine instead and the
-/// two tokens live in the environment `subs serve` reads.
 fn setup_here(agent_id: &str, app: &AgentSlackConfig) -> Result<()> {
     let app_token = env_var("SLACK_APP_TOKEN", agent_id);
     let bot_token = env_var("SLACK_BOT_TOKEN", agent_id);
@@ -240,14 +234,6 @@ fn setup_here(agent_id: &str, app: &AgentSlackConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_an_agents_slack_block_is_this_path() {
-        assert_eq!(path_agent("agent.support.slack"), Some("support"));
-        assert_eq!(path_agent("agent.support"), None);
-        assert_eq!(path_agent("mcp.sentry"), None);
-        assert_eq!(path_agent("llm.openrouter"), None);
-    }
 
     #[test]
     fn an_agent_with_no_block_is_told_how_to_declare_one() {

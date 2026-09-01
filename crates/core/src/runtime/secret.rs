@@ -1,21 +1,3 @@
-//! Where secrets live: one store, one table, one place to encrypt.
-//!
-//! Everything the engine must read back and present to a third party — an
-//! OAuth grant, a static token — goes through [`SecretStore`], and the tables
-//! that need one carry a reference, the way `blob://` references bytes. The
-//! rest of the database never holds a secret.
-//!
-//! One person on one machine holding their own credential in plain text is
-//! acceptable; a team server holding the mail credentials of many persons is
-//! not. So the key is optional, and the engine refuses to *start* — not to
-//! run — when a personal connection is declared and no key is set.
-//!
-//! AES-256-GCM under one key from `SUBS_SECRET_KEY` (64 hex chars) — the same
-//! primitive and key shape as the cloud's `SECRETS_MASTER_KEY`. Each sealed
-//! row records a key version so a rotation scheme can slot in later; today
-//! there is one version, and rotating means re-sealing under the new key
-//! before dropping the old one.
-
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use async_trait::async_trait;
@@ -27,19 +9,15 @@ pub const KEYS_ENV: &str = "SUBS_SECRET_KEY";
 
 const NONCE_LEN: usize = 12;
 
-/// An opaque reference to one secret — what every other table carries in
-/// place of the material, the way `blob://` references bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct SecretRef(String);
 
 impl SecretRef {
-    /// A fresh reference for a secret about to be written.
     pub fn mint() -> Self {
         Self(uuid::Uuid::now_v7().to_string())
     }
 
-    /// A reference as another table stored it.
     pub fn from_stored(id: String) -> Self {
         Self(id)
     }
@@ -55,9 +33,6 @@ impl std::fmt::Display for SecretRef {
     }
 }
 
-/// Bytes the engine will need back, keyed by a reference another table
-/// carries. Writing to a reference it already holds replaces the value, which
-/// is what a token rotation is.
 #[async_trait]
 pub trait SecretStore: Send + Sync {
     async fn put(&self, tenant_id: &str, r: &SecretRef, value: &[u8]) -> Result<(), StoreError>;
@@ -65,14 +40,53 @@ pub trait SecretStore: Send + Sync {
     async fn delete(&self, tenant_id: &str, r: &SecretRef) -> Result<bool, StoreError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretPath {
+    Worker(String),
+}
+
+impl SecretPath {
+    pub fn secret_ref(&self) -> SecretRef {
+        SecretRef::from_stored(self.to_string())
+    }
+}
+
+impl std::fmt::Display for SecretPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Worker(id) => write!(f, "worker.{id}"),
+        }
+    }
+}
+
+pub fn random_token(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    rand::Rng::fill(&mut rand::rng(), &mut buf[..]);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+}
+
+pub fn mint_secret() -> String {
+    random_token(32)
+}
+
+pub async fn get_or_mint(
+    store: &dyn SecretStore,
+    tenant_id: &str,
+    r: &SecretRef,
+) -> Result<String, StoreError> {
+    if let Some(bytes) = store.get(tenant_id, r).await? {
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    let minted = mint_secret();
+    store.put(tenant_id, r, minted.as_bytes()).await?;
+    Ok(minted)
+}
+
 pub struct SecretCipher {
     cipher: Aes256Gcm,
 }
 
 impl SecretCipher {
-    /// The cipher the environment configures, or nothing when the variable is
-    /// unset. A variable that is set and wrong is an error, never "no cipher":
-    /// silently running unencrypted is the one outcome this must not have.
     pub fn from_env() -> Result<Option<Self>, String> {
         match std::env::var(KEYS_ENV) {
             Ok(v) => Self::parse(&v).map(Some),
@@ -81,7 +95,6 @@ impl SecretCipher {
         }
     }
 
-    /// 64 hex chars — the same key material shape as the cloud's master key.
     pub fn parse(value: &str) -> Result<Self, String> {
         let bytes = hex::decode(value.trim()).map_err(|e| {
             format!("${KEYS_ENV} is not hex: {e} (generate a key with `openssl rand -hex 32`)")
@@ -96,7 +109,6 @@ impl SecretCipher {
         Ok(Self { cipher })
     }
 
-    /// The version stamped on new rows.
     pub fn current_version(&self) -> u32 {
         1
     }

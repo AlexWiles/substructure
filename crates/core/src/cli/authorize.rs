@@ -1,10 +1,11 @@
 use anyhow::{bail, Result};
 
+use super::address::Address;
 use super::cloud::project_config::ProjectConfig;
 use super::cloud::{llm, print, ProjectScope};
 use super::connections;
 use super::slack_app;
-use crate::connectors::registry::{AuthKind, ConnectionPath, ConnectionSpec};
+use crate::connectors::registry::{AuthKind, ConnectionSpec};
 
 enum Target {
     Connection(ConnectionSpec),
@@ -13,24 +14,25 @@ enum Target {
 }
 
 fn target(path: Option<String>, cfg: &ProjectConfig) -> Result<Target> {
-    if let Some(block) = path.as_deref().and_then(|p| p.strip_prefix("llm.")) {
-        return Ok(Target::Block(block.to_string()));
-    }
-    if let Some(agent) = path.as_deref().and_then(slack_app::path_agent) {
-        return Ok(Target::SlackApp(agent.to_string()));
-    }
-    let connections = cfg.resolved_connections()?;
     let parsed = match &path {
-        Some(written) => match ConnectionPath::parse(written) {
-            Some(path) => Some(path),
+        Some(written) => match Address::parse(written) {
+            Some(Address::Llm(block)) => return Ok(Target::Block(block)),
+            Some(Address::SlackApp(agent)) => return Ok(Target::SlackApp(agent)),
+            Some(Address::Worker(id)) => {
+                bail!("`worker.{id}` holds a minted secret, not a credential: `subs secret worker.{id}`")
+            }
+            Some(Address::Connection(path)) => Some(path),
             None => bail!(
                 "`{written}` names nothing. Declared: {}",
-                connections::list(&connections)
+                connections::list(&cfg.resolved_connections()?)
             ),
         },
         None => None,
     };
-    Ok(Target::Connection(connections::pick(&connections, parsed)?))
+    Ok(Target::Connection(connections::pick(
+        &cfg.resolved_connections()?,
+        parsed,
+    )?))
 }
 
 #[derive(Debug, clap::Args)]

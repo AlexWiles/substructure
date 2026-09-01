@@ -1,9 +1,3 @@
-//! Where a turn runs: an engine here, or the deployment the file names.
-//!
-//! The only place a command asks [`target`]. `subs run` drives one turn
-//! through this seam and `subs chat` drives many; neither knows which side
-//! answered.
-
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -34,8 +28,6 @@ use super::{local, run_remote, DEFAULT_TENANT, LOCAL_SUBJECT};
 
 const SPAN: &str = "cli_client_input";
 
-/// One user message, the shape a `subs run` positional argument means — and
-/// the shape a line typed at `subs chat` means.
 pub(crate) fn message_input(message: String, agent_id: String) -> ClientInput {
     ClientInput::Message {
         agent_id,
@@ -54,30 +46,29 @@ pub(crate) fn message_input(message: String, agent_id: String) -> ClientInput {
     }
 }
 
-/// Which agent a command drives: the one it names, and nothing else. A file
-/// that picks for you picks differently the day a second agent is declared.
-///
-/// A typo here would otherwise surface as a failed decision one turn later.
-pub(crate) fn declared_agent(agent_id: String, declared: &[String]) -> Result<String> {
-    if !declared.contains(&agent_id) {
-        anyhow::bail!(
-            "no [agent.{agent_id}] in subs.toml. Declared: {}",
-            crate::worker::directory::declared(declared)
-        );
+/// The agent this command runs, as the file has it. An agent the file does
+/// not declare runs only where the file also says where to send it.
+pub(crate) fn declared_agent(agent_id: String, cfg: &ProjectConfig) -> Result<String> {
+    if cfg.agent.contains_key(&agent_id) {
+        return Ok(agent_id);
     }
+    let Some(worker) = &cfg.default_worker else {
+        anyhow::bail!(
+            "no [agent.{agent_id}] in subs.toml, and no `default_worker` to send it to. \
+             Declared: {}",
+            crate::copy::declared(cfg.agent_ids())
+        );
+    };
+    eprintln!("agent \"{agent_id}\" is not declared; using default_worker = \"{worker}\"");
     Ok(agent_id)
 }
 
-/// One turn, wherever it runs. Both sides end at the same AG-UI event stream,
-/// so only the submission differs.
 #[async_trait]
 pub(crate) trait Turns: Send + Sync {
     async fn drive(&mut self, input: ClientInput, renderer: &mut Renderer) -> Result<TurnEnd>;
 
     async fn parked(&self) -> Result<Vec<AgUiInterrupt>>;
 
-    /// Local: wait for the session index to read the turn. Remote: the
-    /// deployment does this.
     async fn wait_for_index(&self) {}
 }
 
@@ -149,11 +140,15 @@ impl Turns for LocalTurns {
         let translated = !renderer.is_raw();
         let turn = ag_ui_run::start(
             &self.ctx,
-            &self.caller,
-            &self.owner,
-            &self.session_id,
-            input,
-            SPAN,
+            crate::HandleClientInput {
+                session_id: self.session_id.clone(),
+                caller: self.caller.clone(),
+                owner: self.owner.clone(),
+                input,
+                agent: None,
+                worker: None,
+                span: crate::span::SpanContext::root().child(SPAN),
+            },
             translated,
         )
         .await?;
@@ -197,8 +192,6 @@ impl Turns for LocalTurns {
         Ok(snapshot::open_interrupts(&session.state))
     }
 
-    /// Best effort, so `subs sessions list` shows the turn. The index polls,
-    /// and nothing runs after this process stops.
     async fn wait_for_index(&self) {
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
         const POLL: std::time::Duration = std::time::Duration::from_millis(20);
@@ -289,25 +282,36 @@ mod tests {
     use super::*;
     use crate::protocol::{Content, Role};
 
-    fn declared() -> Vec<String> {
-        vec!["assistant".to_string(), "researcher".to_string()]
+    fn declared(extra: &str) -> ProjectConfig {
+        let toml = format!(
+            "{extra}\n[llm.l]\ntype = \"anthropic\"\n\
+             [agent.assistant]\nllm = \"l\"\nmodel = \"m\"\n\
+             [agent.researcher]\nllm = \"l\"\nmodel = \"m\"\n"
+        );
+        toml::from_str(&toml).expect("a readable file")
     }
 
     #[test]
     fn the_named_agent_is_the_one_that_runs() {
-        let agent = declared_agent("researcher".to_string(), &declared()).unwrap();
+        let agent = declared_agent("researcher".to_string(), &declared("")).unwrap();
         assert_eq!(agent, "researcher");
     }
 
-    /// The preflight is what makes a typo cost nothing: without it the run
-    /// creates a session and fails one decision later.
     #[test]
     fn an_undeclared_agent_fails_before_the_session_exists() {
-        let err = declared_agent("assistnat".to_string(), &declared())
+        let err = declared_agent("assistnat".to_string(), &declared(""))
             .unwrap_err()
             .to_string();
         assert!(err.contains("no [agent.assistnat]"), "got {err}");
+        assert!(err.contains("no `default_worker`"), "got {err}");
         assert!(err.contains("assistant, researcher"), "got {err}");
+    }
+
+    #[test]
+    fn an_undeclared_agent_runs_where_the_default_worker_says() {
+        let cfg = declared("default_worker = \"app\"\n[worker.app]\nurl = \"https://w.test\"");
+        let agent = declared_agent("invented".to_string(), &cfg).unwrap();
+        assert_eq!(agent, "invented", "the file said where to send it");
     }
 
     #[test]

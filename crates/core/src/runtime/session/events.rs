@@ -10,7 +10,7 @@ pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, ConnectorToolKind, DeferToolsStrategy, DraftMessage, ErrorInfo, InterruptOrigin,
     LlmFormat, LlmRequest, LlmResponse, Message, MessageTree, NewMessage, RetryPolicy,
-    SessionOwner, SpawnMode, StoredResult, Usage, WorkerState,
+    SessionOwner, SpawnMode, StoredResult, Usage, WorkerRef, WorkerState,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +97,8 @@ pub struct SessionCreated {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,
     pub worker_retry: RetryPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<WorkerRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -11,13 +11,13 @@ use super::tool_contract::classify_arguments;
 use crate::connectors::registry::ConnectionPath;
 use crate::connectors::{filter, AuthNeed, RemoteTool};
 use crate::protocol::{
-    AgentTool, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, Handler, McpServer,
-    StoredResult, SubagentToolsStrategy,
+    AgentTool, BoundServer, ConnectorTool, ConnectorToolKind, DeferToolsStrategy, Handler,
+    McpServer, StoredResult, SubagentToolsStrategy,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Source {
-    pub server: McpServer,
+    pub server: BoundServer,
     pub offered: Vec<RemoteTool>,
     pub instructions: Option<String>,
 }
@@ -66,7 +66,7 @@ pub use crate::protocol::EffectKind;
 use crate::protocol::{
     AgentConfig, DraftMessage, Effect, EffectStatus, InterruptOrigin, LlmFormat, LlmRequest,
     LlmTool, Message, MessageTree, NewMessage, ReasoningConfig, RetryConfig, RetryPolicy, Role,
-    SessionOwner, SpawnMode, SubagentTools, Usage, WorkerState,
+    SessionOwner, SpawnMode, SubagentTools, Usage, WorkerRef, WorkerState,
 };
 use crate::runtime::retry::RetryState;
 
@@ -730,6 +730,9 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_retry: Option<RetryPolicy>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<WorkerRef>,
+
     #[serde(with = "effect_table", default = "BTreeMap::new")]
     pub effects: BTreeMap<(EffectKind, String), EffectState>,
 
@@ -779,6 +782,7 @@ impl SessionState {
             ancestry: Vec::new(),
             data: serde_json::Value::Null,
             worker_retry: None,
+            worker: None,
             effects: BTreeMap::new(),
             schedule_queue: Vec::new(),
             phase: TurnPhase::default(),
@@ -1121,6 +1125,7 @@ impl SessionState {
                 self.owner = Some(payload.identity.clone());
                 self.ancestry = payload.ancestry.clone();
                 self.worker_retry = Some(payload.worker_retry.clone());
+                self.worker = payload.worker.clone();
             }
             EventPayload::NewMessage(payload) => {
                 if payload.message.role == Role::User {
@@ -1529,7 +1534,7 @@ impl SessionState {
         while let Some(id) = cursor {
             let Some(node) = by_id.get(id) else { break };
             if !ids.insert(id) {
-                break; // parent cycle guard
+                break;
             }
             cursor = node.parent_id.as_deref();
         }
@@ -1596,12 +1601,7 @@ impl SessionState {
             || (may_spawn
                 && config.subagent_strategy() == SubagentToolsStrategy::PerAgent
                 && config.subagents.iter().any(|s| s.defer == Some(true)))
-            || config.mcp.iter().any(|c| filter::defers(c, false))
-            || config.plugins.iter().any(|p| {
-                p.servers
-                    .iter()
-                    .any(|id| filter::defers(&p.server(id), false))
-            });
+            || servers.iter().any(|c| filter::defers(c, false));
         if defers {
             resolutions.push(filter::Resolution::of(filter::search_tools(
                 config.defer_strategy(),
@@ -1650,12 +1650,17 @@ impl SessionState {
         self.ancestry.len() as u32
     }
 
-    pub fn servers_for(&self, config: &AgentConfig) -> Vec<McpServer> {
+    pub fn servers_for(&self, config: &AgentConfig) -> Vec<BoundServer> {
         let plugin_servers = config
             .plugins
             .iter()
-            .flat_map(|p| p.servers.iter().map(|id| p.server(id)));
-        config.mcp.iter().cloned().chain(plugin_servers).collect()
+            .flat_map(|p| p.servers.iter().map(|name| p.server(name)));
+        config
+            .mcp
+            .iter()
+            .map(McpServer::bind)
+            .chain(plugin_servers)
+            .collect()
     }
 
     pub fn message_tree(&self) -> MessageTree {
@@ -2399,7 +2404,7 @@ mod agent_version_tests {
             entry: AgentVersion {
                 value: AgentConfig {
                     mcp: vec![McpServer {
-                        path: ConnectionPath::Mcp("sentry".into()),
+                        id: "sentry".into(),
                         tools: None,
                         auth_failure: Default::default(),
                         tool_sync_failure: Default::default(),

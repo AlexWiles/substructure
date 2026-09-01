@@ -16,7 +16,7 @@ use crate::protocol::{
 };
 use crate::providers::format::DeltaParser;
 use crate::runtime::llm::TokenDeltaTransport;
-use crate::worker::push::{Decider, PushError, TransportConstructor};
+use crate::worker::push::{Decider, PushError};
 use crate::worker::WorkerDecisionRequest;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -24,28 +24,25 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct HttpDecider {
     http: Client,
     endpoint_url: String,
-    /// Max silence, not total duration: request → first response, and between
-    /// SSE events / body reads. A total timeout would kill long token streams;
-    /// total duration is the decision deadline's job.
     idle_timeout: Duration,
-    signing_secret: Option<String>,
+    signing_secret: String,
 }
 
 impl HttpDecider {
-    pub fn new(
-        endpoint_url: String,
-        idle_timeout: Option<Duration>,
-        signing_secret: Option<String>,
-    ) -> Self {
+    pub fn new(http: Client, endpoint_url: String, signing_secret: String) -> Self {
         Self {
-            http: Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            http,
             endpoint_url,
-            idle_timeout: idle_timeout.unwrap_or(Duration::from_secs(60)),
+            idle_timeout: Duration::from_secs(60),
             signing_secret,
         }
+    }
+
+    pub fn client() -> Client {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
     }
 }
 
@@ -70,14 +67,11 @@ impl Decider for HttpDecider {
             .header(ACCEPT, "text/event-stream, application/json")
             .header("traceparent", decision.span.traceparent());
 
-        if let Some(ref secret) = self.signing_secret {
-            let mut mac =
-                HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-            mac.update(&body);
-            let signature = hex::encode(mac.finalize().into_bytes());
-
-            builder = builder.header("X-Substructure-Signature", format!("sha256={signature}"));
-        }
+        let mut mac = HmacSha256::new_from_slice(self.signing_secret.as_bytes())
+            .expect("HMAC accepts any key length");
+        mac.update(&body);
+        let signature = hex::encode(mac.finalize().into_bytes());
+        builder = builder.header("X-Substructure-Signature", format!("sha256={signature}"));
 
         let started = std::time::Instant::now();
         tracing::info!(
@@ -100,8 +94,6 @@ impl Decider for HttpDecider {
                 )
             })?
             .map_err(|e| {
-                // reqwest's `Display` names only the stage that failed; the
-                // cause (DNS, refused, TLS) is one link down the source chain.
                 PushError::retryable(
                     ErrorCode::WorkerUnreachable,
                     format!("request to {} failed: {}", self.endpoint_url, describe(&e)),
@@ -124,11 +116,6 @@ impl Decider for HttpDecider {
             .unwrap_or_default()
             .to_ascii_lowercase();
 
-        // A failing worker says why in its body — an unset API key, a model it
-        // does not know. Reporting only the status throws that away and leaves
-        // the operator with a number. The body itself is logged, never carried
-        // into the error: it is unbounded, and it is whatever the worker
-        // happened to print.
         if !status.is_success() {
             let body = self.read_body(resp).await.unwrap_or_default();
             tracing::warn!(
@@ -163,8 +150,6 @@ impl Decider for HttpDecider {
 }
 
 impl HttpDecider {
-    /// The whole body in hand, so a failure can quote it. `.json()` would
-    /// consume the body and hand back an error that names neither.
     async fn read_body(&self, resp: reqwest::Response) -> Result<Vec<u8>, PushError> {
         tokio::time::timeout(self.idle_timeout, resp.bytes())
             .await
@@ -184,19 +169,6 @@ impl HttpDecider {
     }
 }
 
-/// A worker's answer → the decision it encodes. `null` is the empty decision —
-/// the natural "nothing to add" reply from JSON-language workers.
-///
-/// A body that carries an error message and authors nothing is reported as the
-/// worker's error rather than accepted: a handler that catches its own
-/// exception and answers `{"error": …}` outside the protocol still knows why it
-/// failed, and that sentence is the one worth forwarding. Every field of a
-/// decision is optional, so such a body would otherwise parse as the empty
-/// decision and settle the turn as a silent no-op — the failure reported as
-/// nothing at all.
-/// `decision` is carried only to key the log line: the body it quotes is the
-/// operator's copy of what went wrong, and it is worth nothing without the
-/// decision it belongs to.
 fn parse_decision(
     decision: &WorkerDecisionRequest,
     body: &[u8],
@@ -234,9 +206,6 @@ fn parse_decision(
     }
 }
 
-/// A `reqwest::Error` says only which stage failed — "error sending request",
-/// "error decoding response body". Every cause worth reading is in the source
-/// chain behind it.
 fn describe(e: &(dyn std::error::Error + 'static)) -> String {
     let mut parts = vec![e.to_string()];
     let mut source = e.source();
@@ -251,32 +220,6 @@ fn describe(e: &(dyn std::error::Error + 'static)) -> String {
 }
 
 #[derive(Deserialize)]
-struct HttpTransportConfig {
-    endpoint_url: String,
-    /// Idle timeout: max silence before/between response reads.
-    #[serde(default)]
-    timeout_secs: Option<u64>,
-    #[serde(default)]
-    signing_secret: Option<String>,
-}
-
-pub fn http_transport() -> (&'static str, TransportConstructor) {
-    (
-        "http",
-        Box::new(|config| {
-            let c: HttpTransportConfig =
-                serde_json::from_value(config).map_err(|e| e.to_string())?;
-            let timeout = c.timeout_secs.map(Duration::from_secs);
-            Ok(Arc::new(HttpDecider::new(
-                c.endpoint_url,
-                timeout,
-                c.signing_secret,
-            )))
-        }),
-    )
-}
-
-#[derive(Deserialize)]
 struct DecisionError {
     message: String,
     #[serde(default = "retryable_default")]
@@ -287,8 +230,6 @@ fn retryable_default() -> bool {
     true
 }
 
-/// Republishes streamed token deltas and returns the terminal decision.
-/// `idle_timeout` bounds the silence between events, not the stream's length.
 async fn read_sse_response<S, B, E>(
     stream: S,
     decision: &WorkerDecisionRequest,
@@ -302,7 +243,7 @@ where
 {
     let mut events = Box::pin(stream.eventsource());
     let mut seq: u32 = 0;
-    // A declared format ⇒ delta frames are raw provider events.
+
     let mut parser: Option<DeltaParser> = match &decision.trigger {
         DecisionTrigger::LlmExecute {
             format: Some(f), ..
@@ -454,6 +395,7 @@ mod tests {
             session_id: "sess-1".to_string(),
             decision_id: "dec-1".to_string(),
             agent_id: "agent-1".to_string(),
+            worker: None,
             identity: SessionOwner {
                 tenant_id: "tenant-a".to_string(),
                 requester: Requester::new(
@@ -493,7 +435,6 @@ mod tests {
         }
     }
 
-    /// Split `body` into tiny chunks so multibyte chars and SSE frames straddle boundaries.
     fn chunked(body: &str) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> {
         let chunks: Vec<_> = body.as_bytes().chunks(3).map(|c| Ok(c.to_vec())).collect();
         futures_util::stream::iter(chunks)
@@ -503,7 +444,7 @@ mod tests {
     async fn parses_deltas_then_terminal_result() {
         let transport = Arc::new(RecordingTransport::default());
         let decision = streaming_decision();
-        // Multibyte token text; chunked() splits it mid-codepoint.
+
         let body = "event: llm.token.delta\ndata: {\"text\":\"héllo 🎉\"}\n\n\
                     event: llm.token.delta\ndata: {\"reasoning\":\"hmm\"}\n\n\
                     event: decision.result\ndata: {\"actions\":[],\"state\":\"\"}\n\n";
@@ -512,7 +453,6 @@ mod tests {
             .await
             .expect("should parse the stream");
 
-        // The terminal frame carries only the worker-authored decision — no ids.
         assert!(submit.actions.is_empty());
         assert!(submit.state.is_some());
 

@@ -77,10 +77,6 @@ impl WorkerQueue for SqliteWorkerQueue {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn do_enqueue(conn: &Connection, decision: WorkerDecisionRequest) -> Result<(), String> {
     let payload = serde_json::to_string(&decision).map_err(|e| e.to_string())?;
     let enqueued_at = Utc::now().to_rfc3339();
@@ -153,6 +149,7 @@ mod tests {
             session_id: "sess-1".to_string(),
             decision_id: decision_id.to_string(),
             agent_id: "agent-1".to_string(),
+            worker: None,
             identity: SessionOwner {
                 tenant_id: tenant_id.to_string(),
                 requester: Requester::new(
@@ -192,10 +189,6 @@ mod tests {
         }
     }
 
-    /// The durable queue serializes the decision into SQLite and reads it back.
-    /// The tenant lives only on `identity` now, so this proves it survives the
-    /// round-trip — otherwise the push loop's `registry.lookup(decision.tenant_id())`
-    /// would key on an empty tenant and silently drop the decision.
     #[tokio::test]
     async fn dequeue_preserves_tenant_across_serialization() {
         let path = std::env::temp_dir().join(format!("core-worker-queue-{}.db", Uuid::now_v7()));

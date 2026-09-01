@@ -1,3 +1,4 @@
+pub mod address;
 pub mod auth;
 pub mod authorize;
 pub mod chat;
@@ -10,6 +11,7 @@ mod output;
 mod resume_hint;
 pub mod run;
 mod run_remote;
+pub mod secret;
 pub mod sessions;
 mod slack_app;
 pub mod target;
@@ -19,8 +21,6 @@ use clap::Subcommand;
 
 use cloud::{CloudGlobals, ProjectScope, GLOBAL_FLAGS_HELP};
 
-/// Read a secret the project file names rather than holds. An unset or blank
-/// variable reads as absent, so a stale name never becomes an empty secret.
 pub(crate) fn env_value(var: &str) -> Option<String> {
     std::env::var(var)
         .ok()
@@ -28,9 +28,6 @@ pub(crate) fn env_value(var: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// The `log` setting from the project file, for setting up tracing before the
-/// command runs. Silent on any failure — the command reads the same file and
-/// reports a real problem with it, and there is no logger yet to report to.
 pub fn project_log_filter(config: Option<&std::path::Path>) -> Option<String> {
     let found = cloud::project_config::resolve(config).ok().flatten()?;
     found.config.log
@@ -38,14 +35,9 @@ pub fn project_log_filter(config: Option<&std::path::Path>) -> Option<String> {
 
 pub(crate) const DEFAULT_TENANT: &str = "default";
 
-/// The one person at an installation nothing authenticates. `subs run` acts
-/// collide with a subject an identity source issues.
 pub(crate) const LOCAL_SUBJECT: &str = "local";
 
 impl Command {
-    /// The project file this invocation will read, for callers that need it
-    /// before the command runs. Only the engine commands: a cloud command
-    /// neither runs an engine nor logs at a level worth pinning.
     pub fn config_path(&self) -> Option<&std::path::Path> {
         match self {
             Command::Run(a) => a.config_path(),
@@ -55,8 +47,6 @@ impl Command {
         }
     }
 
-    /// The log filter to use when `$RUST_LOG` is unset: `run` and `chat` stream
-    /// a turn to stdout, so only errors belong on stderr beside it.
     pub fn default_log(&self) -> &'static str {
         match self {
             Command::Run(_) | Command::Chat(_) => "error",
@@ -157,6 +147,10 @@ pub enum Command {
     /// Forget what a path holds. Every holder's, whichever way it was obtained.
     #[command(after_help = GLOBAL_FLAGS_HELP)]
     Revoke(authorize::RevokeCommand),
+    /// Print the minted secret for a path like `worker.main`, minting it on
+    /// first read. `--rotate` mints a replacement. No path lists what holds one.
+    #[command(after_help = GLOBAL_FLAGS_HELP)]
+    Secret(secret::SecretCommand),
     /// Show every connection and `[llm.*]` block this project declares, and
     /// whether each one holds what it needs.
     #[command(name = "list", visible_alias = "ls", after_help = GLOBAL_FLAGS_HELP)]
@@ -180,8 +174,6 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
             no_browser,
             globals,
         } => {
-            // --no-interaction implies --no-browser; opening a browser is
-            // never appropriate in non-interactive contexts (CI, scripts).
             let no_browser = no_browser || globals.no_interaction;
             cloud::login::run(&globals, no_browser).await
         }
@@ -202,14 +194,12 @@ pub async fn run(command: Command) -> anyhow::Result<()> {
         Command::Config { command } => cloud::apply::config(command).await,
         Command::Auth(cmd) => authorize::auth(cmd).await,
         Command::Revoke(cmd) => authorize::revoke(cmd).await,
+        Command::Secret(cmd) => secret::run(cmd).await,
         Command::List(cmd) => authorize::list(cmd).await,
         Command::Doctor { scope } => doctor::run(scope).await,
     }
 }
 
-// Leaf command path for telemetry headers (e.g. "webhook set"). Kept manually
-// in sync with the enum rather than scraping argv so we never leak secrets
-// users pass on the command line.
 fn command_path(cmd: &Command) -> &'static str {
     use cloud::agents::AgentsCommand;
     use cloud::{keys::KeysCommand, orgs::OrgsCommand, projects::ProjectsCommand};
@@ -229,6 +219,7 @@ fn command_path(cmd: &Command) -> &'static str {
         },
         Command::Auth(_) => "auth",
         Command::Revoke(_) => "revoke",
+        Command::Secret(_) => "secret",
         Command::List(_) => "list",
         Command::Doctor { .. } => "doctor",
         Command::Orgs { command } => match command {
@@ -242,8 +233,6 @@ fn command_path(cmd: &Command) -> &'static str {
         Command::Agents { command } => match command {
             AgentsCommand::List { .. } => "agents list",
             AgentsCommand::Show { .. } => "agents show",
-            AgentsCommand::Secret { .. } => "agents secret",
-            AgentsCommand::RotateSecret { .. } => "agents rotate-secret",
         },
         Command::Keys { command } => match command {
             KeysCommand::List { .. } => "keys list",

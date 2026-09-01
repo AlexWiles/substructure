@@ -1,8 +1,3 @@
-//! `subs sessions`: reads sessions from the store that holds them.
-//!
-//! With no `[remote]`, it reads the SQLite file `subs run` and `subs serve`
-//! write.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +21,6 @@ use super::output::{self, write_json, Renderer};
 use super::target::target;
 use super::DEFAULT_TENANT;
 
-/// A local `--stream` polls: no server pushes from a file.
 const POLL: Duration = Duration::from_millis(250);
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -100,7 +94,6 @@ enum Source {
     Local(String),
 }
 
-/// `--db` names a store outright. Everything else follows [`target`].
 fn source(globals: &CloudGlobals, db: Option<String>) -> Result<Source> {
     if let Some(db) = db {
         return Ok(Source::Local(db));
@@ -111,7 +104,6 @@ fn source(globals: &CloudGlobals, db: Option<String>) -> Result<Source> {
     })
 }
 
-/// Does not create the database. An empty one answers every question.
 fn open_db(path: &str) -> Result<SqliteDb> {
     if !std::path::Path::new(path).exists() {
         bail!("no database at {path}. `subs run` or `subs serve` creates one.");
@@ -261,10 +253,6 @@ fn render(page: &Page, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Renders a stored stream as `subs run` renders a live one.
-///
-/// A translator covers one turn, so each turn gets its own. Each turn opens on
-/// its first event, because `--from` can start in the middle of a turn.
 struct Replay {
     session_id: String,
     renderer: Renderer,
@@ -324,7 +312,7 @@ async fn remote_events(cmd: &EventsCommand) -> Result<()> {
             "/api/v1/projects/{project}/sessions/{session_id}/events/stream?after_seq={}",
             cmd.from
         );
-        // The line callback cannot fail. Report the first failure at the end.
+
         let mut failed: Option<anyhow::Error> = None;
         ctx.client
             .stream_sse(&path, |line| {
@@ -359,7 +347,6 @@ async fn remote_events(cmd: &EventsCommand) -> Result<()> {
     Ok(())
 }
 
-/// `jsonl` prints the bytes the API sent, not a re-serialization of them.
 fn render_wire(replay: &mut Replay, stdout: &mut std::io::Stdout, wire: &str) -> Result<()> {
     if replay.raw() {
         use std::io::Write as _;
@@ -371,7 +358,6 @@ fn render_wire(replay: &mut Replay, stdout: &mut std::io::Stdout, wire: &str) ->
     replay.push(stdout, event)
 }
 
-/// `[run].output` is not read. It applies to a turn you watch.
 fn output(cmd: &EventsCommand) -> OutputFormat {
     cmd.output.unwrap_or(OutputFormat::Jsonl)
 }
@@ -381,7 +367,6 @@ async fn local_events(cmd: &EventsCommand, db: &str) -> Result<()> {
     let reader = reader(db)?;
     let caller = caller();
 
-    // A mistyped id would print nothing, and `--stream` would wait forever.
     let head = reader.events(&caller, &session_id, None, Some(1)).await?;
     if head.is_empty() {
         bail!("no session {session_id} in {db}");
@@ -461,7 +446,8 @@ mod tests {
     }
 
     const ENGINE_HERE: &str = "[llm.byo]\ntype = \"worker\"\n\
-         [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n";
+         [worker.w]\nurl = \"https://w.test\"\n\
+         [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"w\"\n";
     const A_REMOTE: &str = "[remote]\nurl = \"https://subs.test\"\n";
 
     #[test]
@@ -473,7 +459,6 @@ mod tests {
         );
     }
 
-    /// A file that names its own database is read where it named it.
     #[test]
     fn a_file_naming_a_database_reads_the_one_beside_it() {
         let (globals, dir) = wrote(&format!("db = \"engine.db\"\n{ENGINE_HERE}"));

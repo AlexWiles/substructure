@@ -113,6 +113,8 @@ fn create_session_with_config(
             },
             ancestry: vec![],
             worker_retry: RetryPolicy::no_retry(),
+            agent: None,
+            worker: None,
         },
         &Caller::System {
             tenant_id: "tenant-a".to_string(),
@@ -2883,6 +2885,8 @@ fn the_default_depth_limit_stops_a_spawn_five_deep() {
                 "sess-5".to_string(),
             ],
             worker_retry: RetryPolicy::no_retry(),
+            agent: None,
+            worker: None,
         },
         &system(),
     );
@@ -5435,11 +5439,177 @@ fn frontend_caller_with_mismatched_tenant_on_create_session_is_denied() {
                 },
                 ancestry: vec![],
                 worker_retry: RetryPolicy::no_retry(),
+                agent: None,
+                worker: None,
             },
             &caller,
         )
         .expect_err("creating a session in a different tenant should be rejected");
 
+    assert!(
+        matches!(err, SessionError::SessionAccessDenied),
+        "expected SessionAccessDenied; got {err:?}"
+    );
+}
+
+#[test]
+fn a_session_opens_with_the_config_its_creation_carries() {
+    let mut agg = SessionAggregate::new(
+        "sess-1".to_string(),
+        "tenant-a".to_string(),
+        SessionState::new("sess-1".to_string()),
+    );
+    let events = dispatch(
+        &mut agg,
+        CommandPayload::CreateSession {
+            agent_id: "invented".to_string(),
+            owner: SessionOwner {
+                tenant_id: "tenant-a".to_string(),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
+                metadata: HashMap::new(),
+            },
+            ancestry: vec![],
+            worker_retry: RetryPolicy::no_retry(),
+            agent: Some(agent_config("inline-model")),
+            worker: None,
+        },
+        &machine(),
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::AgentConfigUpdated(_))),
+        "creation seeds the config: {events:#?}"
+    );
+    assert_eq!(
+        agg.state.at_head().resolve_agent_for().map(|c| c.model),
+        Some("inline-model".to_string())
+    );
+}
+
+#[test]
+fn a_session_records_the_worker_its_creation_names() {
+    let mut agg = SessionAggregate::new(
+        "sess-1".to_string(),
+        "tenant-a".to_string(),
+        SessionState::new("sess-1".to_string()),
+    );
+    let named = crate::protocol::WorkerRef {
+        id: "customers".to_string(),
+        url: Some("https://acme.internal/decide".to_string()),
+    };
+    dispatch(
+        &mut agg,
+        CommandPayload::CreateSession {
+            agent_id: "invented".to_string(),
+            owner: SessionOwner {
+                tenant_id: "tenant-a".to_string(),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
+                metadata: HashMap::new(),
+            },
+            ancestry: vec![],
+            worker_retry: RetryPolicy::no_retry(),
+            agent: None,
+            worker: Some(named.clone()),
+        },
+        &machine(),
+    );
+    assert_eq!(agg.state.worker, Some(named.clone()));
+
+    let err = SessionAggregate::new(
+        "sess-2".to_string(),
+        "tenant-a".to_string(),
+        SessionState::new("sess-2".to_string()),
+    )
+    .try_handle(
+        CommandPayload::CreateSession {
+            agent_id: "invented".to_string(),
+            owner: SessionOwner {
+                tenant_id: "tenant-a".to_string(),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
+                metadata: HashMap::new(),
+            },
+            ancestry: vec![],
+            worker_retry: RetryPolicy::no_retry(),
+            agent: None,
+            worker: Some(named.clone()),
+        },
+        &frontend(),
+    )
+    .expect_err("a frontend brings no address");
+    assert!(matches!(err, SessionError::SessionAccessDenied));
+
+    let mut agg = SessionAggregate::new(
+        "sess-3".to_string(),
+        "tenant-a".to_string(),
+        SessionState::new("sess-3".to_string()),
+    );
+    let bare = crate::protocol::WorkerRef {
+        id: "customers".to_string(),
+        url: None,
+    };
+    dispatch(
+        &mut agg,
+        CommandPayload::CreateSession {
+            agent_id: "invented".to_string(),
+            owner: SessionOwner {
+                tenant_id: "tenant-a".to_string(),
+                requester: Requester::new(
+                    Subject::new(Issuer::app(), "user-1".to_string()),
+                    Default::default(),
+                ),
+                metadata: HashMap::new(),
+            },
+            ancestry: vec![],
+            worker_retry: RetryPolicy::no_retry(),
+            agent: None,
+            worker: Some(bare.clone()),
+        },
+        &frontend(),
+    );
+    assert_eq!(
+        agg.state.worker,
+        Some(bare),
+        "a declared worker's bare id is as open as an agent id"
+    );
+}
+
+#[test]
+fn a_frontend_cannot_open_a_session_with_its_own_config() {
+    let agg = SessionAggregate::new(
+        "sess-1".to_string(),
+        "tenant-a".to_string(),
+        SessionState::new("sess-1".to_string()),
+    );
+    let err = agg
+        .try_handle(
+            CommandPayload::CreateSession {
+                agent_id: "invented".to_string(),
+                owner: SessionOwner {
+                    tenant_id: "tenant-a".to_string(),
+                    requester: Requester::new(
+                        Subject::new(Issuer::app(), "user-1".to_string()),
+                        Default::default(),
+                    ),
+                    metadata: HashMap::new(),
+                },
+                ancestry: vec![],
+                worker_retry: RetryPolicy::no_retry(),
+                agent: Some(agent_config("inline-model")),
+                worker: None,
+            },
+            &frontend(),
+        )
+        .expect_err("a frontend chooses no config");
     assert!(
         matches!(err, SessionError::SessionAccessDenied),
         "expected SessionAccessDenied; got {err:?}"
@@ -6274,6 +6444,8 @@ fn create_session_with_retry(retry: RetryPolicy) -> SessionAggregate {
             },
             ancestry: vec![],
             worker_retry: retry,
+            agent: None,
+            worker: None,
         },
         &system(),
     );
@@ -6696,7 +6868,7 @@ fn no_turn_completes_immediately() {
 
 #[test]
 fn turn_finished_terminal_failure_completes_as_failed_run() {
-    let mut agg = create_session("sess-1", "tenant-a", "user-1"); // no-retry
+    let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let p1 = drive_turn_done(&mut agg, "t1", serde_json::json!("answer"));
     let tf = turn_finished_decision(&p1).expect("turn.finished queued");
 
@@ -7022,7 +7194,7 @@ fn connector_config(ids: &[&str]) -> AgentConfig {
         mcp: ids
             .iter()
             .map(|id| McpServer {
-                path: ConnectionPath::Mcp(id.to_string()),
+                id: id.to_string(),
                 tools: None,
                 auth_failure: Default::default(),
                 tool_sync_failure: Default::default(),
@@ -7704,7 +7876,7 @@ fn searching_connector_config(ids: &[&str]) -> AgentConfig {
         mcp: ids
             .iter()
             .map(|id| McpServer {
-                path: ConnectionPath::Mcp(id.to_string()),
+                id: id.to_string(),
                 tools: Some(McpTools {
                     defer: Some(true),
                     ..Default::default()
@@ -8013,7 +8185,7 @@ fn call_tool_refuses_a_name_the_filter_removed_and_never_dials() {
         "user-1",
         Some(AgentConfig {
             mcp: vec![McpServer {
-                path: ConnectionPath::Mcp("sentry".into()),
+                id: "sentry".into(),
                 tools: Some(McpTools {
                     exclude: vec!["resolve_*".to_string()],
                     defer: Some(true),
@@ -8176,7 +8348,7 @@ fn a_subagent_and_an_unprefixed_connector_tool_both_lose_a_shared_name() {
         "user-1",
         Some(AgentConfig {
             mcp: vec![McpServer {
-                path: ConnectionPath::Mcp("sentry".into()),
+                id: "sentry".into(),
                 tools: None,
                 auth_failure: Default::default(),
                 tool_sync_failure: Default::default(),
@@ -8299,14 +8471,14 @@ fn a_search_covers_a_connection_that_lists_its_own_tools() {
         Some(AgentConfig {
             mcp: vec![
                 McpServer {
-                    path: ConnectionPath::Mcp("sentry".into()),
+                    id: "sentry".into(),
                     tools: None,
                     auth_failure: Default::default(),
                     tool_sync_failure: Default::default(),
                     approve: Default::default(),
                 },
                 McpServer {
-                    path: ConnectionPath::Mcp("aws".into()),
+                    id: "aws".into(),
                     tools: Some(McpTools {
                         defer: Some(true),
                         ..Default::default()
@@ -8382,7 +8554,7 @@ fn a_worker_tool_takes_a_search_name_and_the_other_half_survives() {
                 defer: None,
             }],
             mcp: vec![McpServer {
-                path: ConnectionPath::Mcp("sentry".into()),
+                id: "sentry".into(),
                 tools: Some(McpTools {
                     defer: Some(true),
                     ..Default::default()
@@ -8453,7 +8625,7 @@ fn an_agent_can_declare_search_before_it_names_a_connection() {
                 mcp_announce: Default::default(),
                 plugins: Vec::new(),
                 mcp: vec![McpServer {
-                    path: ConnectionPath::Mcp("sentry".into()),
+                    id: "sentry".into(),
                     tools: None,
                     auth_failure: Default::default(),
                     tool_sync_failure: Default::default(),
@@ -8485,7 +8657,7 @@ fn a_connection_overrides_the_agents_default() {
             mcp_announce: Default::default(),
             plugins: Vec::new(),
             mcp: vec![McpServer {
-                path: ConnectionPath::Mcp("sentry".into()),
+                id: "sentry".into(),
                 tools: Some(McpTools {
                     defer: Some(false),
                     ..Default::default()
@@ -9128,7 +9300,7 @@ fn a_filter_change_re_derives_without_another_fetch() {
 
     let narrowed = AgentConfig {
         mcp: vec![McpServer {
-            path: ConnectionPath::Mcp("sentry".into()),
+            id: "sentry".into(),
             tools: Some(McpTools {
                 include: vec!["search_*".to_string()],
                 ..Default::default()
@@ -9266,6 +9438,8 @@ fn create_session_emits_session_start_before_client_input() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy::no_retry(),
+            agent: None,
+            worker: None,
         },
         &system(),
     );
@@ -9303,6 +9477,8 @@ fn session_start_config_is_visible_to_a_queued_client_decision() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy::no_retry(),
+            agent: None,
+            worker: None,
         },
         &system(),
     );
@@ -9393,6 +9569,8 @@ fn client_message_parks_while_session_start_retry_is_scheduled() {
                 backoff_base_secs: 1,
                 backoff_max_secs: 1,
             },
+            agent: None,
+            worker: None,
         },
         &system(),
     );
@@ -9513,6 +9691,8 @@ fn terminal_session_start_failure_restarts_on_the_next_message() {
             },
             ancestry: vec![],
             worker_retry: RetryPolicy::no_retry(),
+            agent: None,
+            worker: None,
         },
         &system(),
     );
@@ -9855,7 +10035,7 @@ fn truncation_voids_work_anchored_on_the_abandoned_branch() {
         ],
         None,
     );
-    request_client_tool(&mut agg, "tc-1"); // anchored at a1
+    request_client_tool(&mut agg, "tc-1");
 
     let d2 = open_decision(&mut agg, "regen");
     let events = submit_state(&mut agg, d2, vec![node_msg("u1", Role::User, "hi")], None);
@@ -9937,7 +10117,7 @@ fn fork_voids_a_pending_tool_call() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d1 = open_decision(&mut agg, "hi");
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
-    request_client_tool(&mut agg, "tc-1"); // anchored at u1
+    request_client_tool(&mut agg, "tc-1");
 
     let d2 = open_decision(&mut agg, "redo");
     let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
@@ -9971,7 +10151,7 @@ fn fork_spares_work_anchored_on_the_shared_prefix() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d1 = open_decision(&mut agg, "hi");
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
-    request_client_tool(&mut agg, "tc-1"); // anchored at u1
+    request_client_tool(&mut agg, "tc-1");
 
     let d2 = open_decision(&mut agg, "more");
     submit_state(
@@ -10055,7 +10235,7 @@ fn promoting_submit_drops_a_queued_settle_for_the_branch_it_forked_away() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d1 = open_decision(&mut agg, "hi");
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
-    request_client_tool(&mut agg, "tc-1"); // anchored at u1
+    request_client_tool(&mut agg, "tc-1");
 
     let d2 = open_decision(&mut agg, "redo");
     let events = dispatch(
@@ -10106,7 +10286,7 @@ fn fork_voids_a_pending_llm_call() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d1 = open_decision(&mut agg, "hi");
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
-    request_llm(&mut agg, "llm-1", LlmHandler::Server); // anchored at u1
+    request_llm(&mut agg, "llm-1", LlmHandler::Server);
 
     let d2 = open_decision(&mut agg, "redo");
     let events = submit_state(&mut agg, d2, vec![node_msg("x1", Role::User, "redo")], None);
@@ -10186,7 +10366,7 @@ fn submit_settling_work_it_forked_away_voids_it_instead() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d1 = open_decision(&mut agg, "hi");
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
-    request_client_tool(&mut agg, "tc-1"); // anchored at u1
+    request_client_tool(&mut agg, "tc-1");
 
     let d2 = open_decision(&mut agg, "redo");
     let events = dispatch(
@@ -10266,7 +10446,7 @@ fn void_guard_matches_kind_not_just_id() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
     let d1 = open_decision(&mut agg, "hi");
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
-    request_client_tool(&mut agg, "shared"); // anchored at u1
+    request_client_tool(&mut agg, "shared");
 
     let d2 = open_decision(&mut agg, "more");
     submit_state(
@@ -10337,6 +10517,8 @@ fn fork_drops_a_retrying_settle_decision() {
                 backoff_base_secs: 1,
                 backoff_max_secs: 1,
             },
+            agent: None,
+            worker: None,
         },
         &system(),
     );
@@ -10344,7 +10526,7 @@ fn fork_drops_a_retrying_settle_decision() {
 
     let d1 = open_decision(&mut agg, "hi");
     submit_state(&mut agg, d1, vec![node_msg("u1", Role::User, "hi")], None);
-    request_client_tool(&mut agg, "tc-1"); // anchored at u1
+    request_client_tool(&mut agg, "tc-1");
 
     let events = dispatch(
         &mut agg,
@@ -10496,7 +10678,7 @@ fn appending_to_a_parked_branch_is_rejected() {
 #[test]
 fn global_interrupt_gates_all_new_views() {
     let mut agg = create_session("sess-1", "tenant-a", "user-1");
-    interrupt(&mut agg, "int-1"); // empty tree: anchorless, global
+    interrupt(&mut agg, "int-1");
     assert_eq!(agg.state.open_interrupt("int-1").unwrap().anchor, None);
     let err = agg
         .try_handle(
@@ -10518,7 +10700,7 @@ fn global_interrupt_gates_all_new_views() {
 #[test]
 fn answer_carrying_view_is_accepted_and_queued_while_parked() {
     let mut agg = parked_session();
-    request_client_tool(&mut agg, "tc-1"); // anchored at a1, spared by the interrupt
+    request_client_tool(&mut agg, "tc-1");
     let events = submit_messages(
         &mut agg,
         vec![
@@ -10580,7 +10762,7 @@ fn two_parked_branches_coexist_and_resume_independently() {
     assert_eq!(agg.state.head_id.as_deref(), Some("e1"));
     assert!(!agg.state.head_parked(), "the new branch starts unparked");
 
-    interrupt(&mut agg, "int-2"); // anchored at e1
+    interrupt(&mut agg, "int-2");
     assert_eq!(agg.state.open_interrupts.len(), 2);
     assert!(agg.state.head_parked());
 
@@ -10659,11 +10841,11 @@ fn interrupt_voiding_is_scoped_to_the_parked_path() {
         })
     };
     agg.commit(vec![msg("u1", None), msg("a1", Some("u1"))], &ctx);
-    agg.commit(vec![llm("L1")], &ctx); // anchored at a1
-    agg.commit(vec![msg("e1", Some("u1"))], &ctx); // head moves to the sibling
-    agg.commit(vec![llm("L2")], &ctx); // anchored at e1
+    agg.commit(vec![llm("L1")], &ctx);
+    agg.commit(vec![msg("e1", Some("u1"))], &ctx);
+    agg.commit(vec![llm("L2")], &ctx);
 
-    let events = interrupt(&mut agg, "int-1"); // anchored at e1
+    let events = interrupt(&mut agg, "int-1");
     assert_eq!(
         voided_ids(&events),
         vec!["L2"],
@@ -10754,7 +10936,7 @@ fn worker_interrupt_on_an_escaped_branch_is_not_deduped_by_the_old_one() {
 #[test]
 fn promotion_and_wake_skip_parked_branches() {
     let mut agg = parked_session();
-    request_client_tool(&mut agg, "tc-1"); // anchored at a1
+    request_client_tool(&mut agg, "tc-1");
     let events = complete_tool(&mut agg, "tc-1", "ok");
     assert!(
         events
@@ -10870,6 +11052,8 @@ fn escape_decision_retry_fires_while_the_head_is_parked() {
                 backoff_base_secs: 1,
                 backoff_max_secs: 1,
             },
+            agent: None,
+            worker: None,
         },
         &system(),
     );
@@ -11454,10 +11638,7 @@ fn plugin_config() -> AgentConfig {
                 name: "form-filling".to_string(),
                 description: "Fill out PDF forms.".to_string(),
             }],
-            servers: vec![ConnectionPath::PluginServer {
-                plugin: "pdf".into(),
-                server: "renderer".into(),
-            }],
+            servers: vec!["renderer".to_string()],
             tools: None,
             auth_failure: Default::default(),
             tool_sync_failure: Default::default(),

@@ -95,7 +95,7 @@ mod tests {
         AgentConfig {
             model: "m1".to_string(),
             mcp: vec![McpServer {
-                path: ConnectionPath::Mcp("sentry".into()),
+                id: "sentry".into(),
                 tools: None,
                 auth_failure: policy,
                 tool_sync_failure: Default::default(),

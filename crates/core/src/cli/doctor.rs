@@ -1,12 +1,3 @@
-//! `subs doctor`: what this project still needs before it works.
-//!
-//! Two sources, one list. A file naming a `[remote]` asks the deployment, which
-//! holds the keys, the consents and the workspaces and is therefore the only
-//! thing that knows what is missing. A file naming none describes an engine you
-//! run here, whose credentials are this machine's environment and this machine's
-//! database — so the same notices are read off both, and printed by the same
-//! code that prints them after `subs apply`.
-
 use anyhow::{Context as _, Result};
 
 use crate::api::v1::{Notice, NoticesResponse};
@@ -19,15 +10,12 @@ use super::slack_app;
 use super::target::target;
 use super::{connections, env_value};
 
-/// The two variables an agent's own Slack app reads over Socket Mode, with an
-/// example of what each holds.
 const SLACK_TOKENS: [(&str, &str); 2] = [
     ("SLACK_APP_TOKEN", "xapp-..."),
     ("SLACK_BOT_TOKEN", "xoxb-..."),
 ];
 
 pub async fn run(scope: ProjectScope) -> Result<()> {
-    // Read for the local branch's sake; the rule itself is `target`'s.
     let found = project_config::resolve(scope.globals.config.as_deref())?
         .context("no subs.toml found. Write one, or pass -c.")?;
 
@@ -52,8 +40,6 @@ fn report(notices: &[Notice], scope: &ProjectScope) -> Result<()> {
     Ok(())
 }
 
-/// What the deployment says. One that does not report it is older than this
-/// CLI, and there is no earlier shape to read instead.
 async fn deployed(scope: &ProjectScope) -> Result<Vec<Notice>> {
     let (ctx, project) = CloudContext::from_project(scope).await?;
     notices::fetch(&ctx, &project).await?.context(
@@ -62,16 +48,10 @@ async fn deployed(scope: &ProjectScope) -> Result<Vec<Notice>> {
     )
 }
 
-/// What an engine you run here still needs: the credentials it reads from this
-/// machine's environment, and the consents in its own database. The lookup is
-/// a parameter so a test states what is set instead of reading the machine.
 async fn here(found: &Found, env: impl Fn(&str) -> Option<String>) -> Result<Vec<Notice>> {
     let config = &found.config;
     let mut out = Vec::new();
 
-    // A block the engine calls itself, whose key is a variable that holds
-    // nothing. Where the key is issued is part of the sentence: a reader who
-    // has to go and get one should not have to go and find that too.
     for block in config.provider_bindings() {
         if env(&block.api_key_env).is_some() {
             continue;
@@ -104,8 +84,6 @@ async fn here(found: &Found, env: impl Fn(&str) -> Option<String>) -> Result<Vec
         });
     }
 
-    // An agent's own Slack app answers over Socket Mode here, so its two
-    // tokens are this machine's to hold. It answers nowhere without them.
     for (agent_id, _) in config.manifest().slack_apps() {
         for (prefix, example) in SLACK_TOKENS {
             let var = crate::transport::slack::env_var(prefix, agent_id);
@@ -118,22 +96,6 @@ async fn here(found: &Found, env: impl Fn(&str) -> Option<String>) -> Result<Vec
                 ))
                 .with_command(format!("export {var}={example}"))
                 .with_url(slack_app::SLACK_DOCS),
-            );
-        }
-    }
-
-    // A named secret that holds nothing sends decisions unsigned, which the
-    // worker on the other end is entitled to refuse.
-    for (id, section) in &config.agent {
-        let Some(var) = &section.signing_secret_env else {
-            continue;
-        };
-        if env(var).is_none() {
-            out.push(
-                Notice::action(format!(
-                    "Set ${var}, which signs the decisions [agent.{id}] sends its worker"
-                ))
-                .with_command(format!("export {var}=...")),
             );
         }
     }
@@ -169,19 +131,16 @@ mod tests {
         notices.iter().map(|n| n.message.as_str()).collect()
     }
 
-    /// An environment holding nothing, whatever this machine holds.
     fn empty(_: &str) -> Option<String> {
         None
     }
 
-    /// Every credential an engine here reads, named with the variable it is
-    /// missing from — the whole point of running this before `subs serve`.
     #[tokio::test]
     async fn an_engine_here_reports_the_variables_that_hold_nothing() {
         let file = found(
             "[llm.claude]\ntype = \"anthropic\"\napi_key_env = \"NOT_SET_ANTHROPIC\"\n\
-             [agent.support]\nllm = \"claude\"\nmodel = \"m\"\n\
-             worker = \"https://w.test\"\nsigning_secret_env = \"NOT_SET_SECRET\"\n\
+             [worker.main]\nurl = \"https://w.test\"\n\
+             [agent.support]\nllm = \"claude\"\nmodel = \"m\"\nworker = \"main\"\n\
              [mcp.github]\nurl = \"https://api.github.test/mcp\"\nauth = \"token\"\n\
              [mcp.linear]\nurl = \"https://mcp.linear.app/mcp\"\n\
              [agent.support.slack]\n",
@@ -201,10 +160,7 @@ mod tests {
         );
         assert!(said.contains("$SLACK_APP_TOKEN_SUPPORT"), "{said}");
         assert!(said.contains("$SLACK_BOT_TOKEN_SUPPORT"), "{said}");
-        assert!(said.contains("$NOT_SET_SECRET"), "{said}");
 
-        // Each connection is offered the command its declared method takes;
-        // neither is a variable this machine's environment could hold.
         let command = |needle: &str| {
             notices
                 .iter()
@@ -223,23 +179,22 @@ mod tests {
         );
     }
 
-    /// A file that declares nothing to hold a credential for needs nothing.
     #[tokio::test]
     async fn a_project_with_everything_it_needs_says_so() {
         let file = found(
             "[llm.byo]\ntype = \"worker\"\n\
-             [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n",
+             [worker.w]\nurl = \"https://w.test\"\n\
+             [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"w\"\n",
         );
         assert!(here(&file, empty).await.unwrap().is_empty());
     }
 
-    /// Slack tokens are only this machine's business for an agent that
-    /// declares its own app; one that does not asks for nothing.
     #[tokio::test]
     async fn slack_tokens_are_asked_for_only_by_an_agent_with_its_own_app() {
         let file = found(
             "[llm.byo]\ntype = \"worker\"\n\
-             [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://w.test\"\n",
+             [worker.w]\nurl = \"https://w.test\"\n\
+             [agent.support]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"w\"\n",
         );
         assert!(here(&file, empty).await.unwrap().is_empty());
     }

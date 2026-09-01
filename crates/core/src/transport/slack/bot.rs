@@ -657,6 +657,8 @@ impl SlackBot {
         let submitted = ctx
             .handle_client_input(HandleClientInput {
                 session_id: session_id.clone(),
+                agent: None,
+                worker: None,
                 caller: Caller::System {
                     tenant_id: ws.tenant_id.clone(),
                 },
@@ -1116,6 +1118,8 @@ impl SlackBot {
         let submitted = ctx
             .handle_client_input(HandleClientInput {
                 session_id: session_id.clone(),
+                agent: None,
+                worker: None,
                 caller: Caller::System {
                     tenant_id: ws.tenant_id.clone(),
                 },

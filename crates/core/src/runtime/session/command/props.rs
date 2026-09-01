@@ -1,4 +1,3 @@
-use crate::connectors::registry::ConnectionPath;
 use crate::protocol::StoredResult;
 use std::collections::HashMap;
 
@@ -175,6 +174,8 @@ impl World {
                 },
                 ancestry: vec![],
                 worker_retry: policy(),
+                agent: None,
+                worker: None,
             },
             &system(),
         );
@@ -359,7 +360,7 @@ impl World {
             llm: Some("claude".to_string()),
             model,
             mcp: vec![McpServer {
-                path: ConnectionPath::Mcp("conn-1".into()),
+                id: "conn-1".into(),
                 tools: None,
                 auth_failure: Default::default(),
                 tool_sync_failure: Default::default(),

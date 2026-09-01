@@ -162,6 +162,8 @@ async fn run(
                 session_id: session_id.clone(),
                 caller: caller.clone(),
                 owner: owner.clone(),
+                agent: None,
+                worker: None,
                 input: ClientInput::InterruptResume {
                     resumption: InterruptResumption {
                         interrupt_id: entry.interrupt_id,
@@ -182,6 +184,8 @@ async fn run(
                 caller,
                 owner,
                 agent_id,
+                agent: None,
+                worker: None,
                 payload: ClientPayload::Messages(ClientMessages {
                     // Full client view so edits/branches reconcile into the tree.
                     messages: input.to_messages(),

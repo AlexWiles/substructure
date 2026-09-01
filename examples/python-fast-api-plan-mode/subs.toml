@@ -1,7 +1,10 @@
 [llm.claude]
 type = "anthropic"
 
+[worker.app]
+url = "http://localhost:4444"
+
 [agent.planner]
 llm = "claude"
 model = "claude-haiku-4-5-20251001"
-worker = "http://localhost:4444"
+worker = "app"

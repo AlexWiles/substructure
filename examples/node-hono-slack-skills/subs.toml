@@ -3,10 +3,13 @@ name = "example"
 [llm.openrouter]
 type = "openrouter"
 
+[worker.app]
+url = "http://localhost:4444"
+
 [agent.oncall]
 llm = "openrouter"
 model = "deepseek/deepseek-v4-flash-0731"
-worker = "http://localhost:4444"
+worker = "app"
 
 [agent.oncall.slack]
 name = "Oncall"

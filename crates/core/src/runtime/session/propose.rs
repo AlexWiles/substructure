@@ -694,7 +694,7 @@ mod tests {
     fn with_sentry(base: Option<&AgentConfig>, defer: bool) -> AgentConfig {
         let mut config = base.cloned().unwrap_or_else(minimal_cfg);
         config.mcp.push(McpServer {
-            path: ConnectionPath::Mcp("sentry".into()),
+            id: "sentry".into(),
             tools: None,
             auth_failure: Default::default(),
             tool_sync_failure: Default::default(),

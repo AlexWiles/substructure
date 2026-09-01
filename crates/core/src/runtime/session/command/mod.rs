@@ -14,7 +14,7 @@ use crate::protocol::ErrorInfo;
 use crate::protocol::{
     AgentConfig, ClientContext, ClientPayload, DraftMessage, EffectStatus, InterruptOrigin,
     LlmFormat, LlmRequest, RetryOverride, RetryPolicy, Role, SessionOwner, SpawnMode, Usage,
-    WorkerState,
+    WorkerRef, WorkerState,
 };
 use crate::runtime::retry::RetryTarget;
 use crate::runtime::Caller;
@@ -28,6 +28,8 @@ pub enum CommandPayload {
         owner: SessionOwner,
         ancestry: Vec<String>,
         worker_retry: RetryPolicy,
+        agent: Option<AgentConfig>,
+        worker: Option<WorkerRef>,
     },
     SubmitClientPayload {
         payload: ClientPayload,
@@ -745,18 +747,25 @@ impl Working {
                     owner,
                     ancestry,
                     worker_retry,
+                    agent,
+                    worker,
                 },
             ) => {
                 SessionState::ensure_tenant_matches(caller, &owner.tenant_id)?;
                 if matches!(caller, Caller::Frontend { .. }) && !caller.owns(&owner) {
                     return Err(SessionError::SessionAccessDenied);
                 }
+                if agent.is_some() || worker.as_ref().is_some_and(|w| w.url.is_some()) {
+                    SessionState::ensure_operator_or_system(caller)?;
+                }
                 self.emit(EventPayload::SessionCreated(Box::new(SessionCreated {
                     agent_id,
                     identity: owner,
                     ancestry,
                     worker_retry,
+                    worker,
                 })));
+                self.then(|s| s.agent_config_events(agent));
                 self.queue_decision(Trigger::SessionStart);
             }
             (true, CommandPayload::CreateSession { .. }) => {

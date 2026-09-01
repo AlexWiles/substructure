@@ -288,6 +288,8 @@ pub async fn submit_client_payload(
             caller,
             owner,
             agent_id: req.agent_id,
+            agent: None,
+            worker: None,
             payload: req.payload,
             turn_id: req.turn_id,
             continue_turn: false,

@@ -130,9 +130,9 @@
             "type": "string"
           },
           "servers": {
-            "description": "Where each of this plugin's servers is declared.",
+            "description": "The plugin's server names, from its bundle.",
             "items": {
-              "$ref": "#/components/schemas/ConnectionPath"
+              "type": "string"
             },
             "type": "array"
           },
@@ -795,6 +795,17 @@
               "string",
               "null"
             ]
+          },
+          "worker": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The worker this session is pinned to. `null` when the file's own\nrouting decides."
           }
         },
         "required": [
@@ -1614,7 +1625,7 @@
       },
       "McpServer": {
         "additionalProperties": false,
-        "description": "An MCP server the agent draws tools from. `path` names a connection the\nengine holds. A worker never writes a URL or a credential.",
+        "description": "An MCP server the agent draws tools from. `id` names an `[mcp.*]`\nconnection the engine holds. A worker never writes a URL or a credential.",
         "properties": {
           "approve": {
             "$ref": "#/components/schemas/Approve"
@@ -1622,8 +1633,8 @@
           "auth_failure": {
             "$ref": "#/components/schemas/McpAuthFailure"
           },
-          "path": {
-            "$ref": "#/components/schemas/ConnectionPath"
+          "id": {
+            "type": "string"
           },
           "tool_sync_failure": {
             "$ref": "#/components/schemas/McpToolSyncFailure"
@@ -1641,7 +1652,7 @@
           }
         },
         "required": [
-          "path"
+          "id"
         ],
         "title": "McpServer",
         "type": "object"
@@ -2559,6 +2570,26 @@
           "metadata"
         ],
         "title": "WorkerIdentity",
+        "type": "object"
+      },
+      "WorkerRef": {
+        "additionalProperties": false,
+        "description": "Which worker identity decides for a session, and optionally at what\naddress. `url` fills in when the declared block has none, or overrides it.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "WorkerRef",
         "type": "object"
       },
       "WorkerState": {

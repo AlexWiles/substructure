@@ -1,7 +1,6 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
-use rand::Rng;
 use reqwest::header::WWW_AUTHENTICATE;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -398,9 +397,9 @@ pub fn authorize(
     redirect_uri: &str,
     scopes: &[String],
 ) -> Result<Pending, OauthError> {
-    let verifier = random_token(64);
+    let verifier = crate::runtime::secret::random_token(64);
     let challenge = B64URL.encode(Sha256::digest(verifier.as_bytes()));
-    let state = random_token(32);
+    let state = crate::runtime::secret::random_token(32);
 
     let scopes: &[String] = if scopes.is_empty() {
         &discovered.resource.scopes_supported
@@ -563,12 +562,6 @@ fn build(
         resource: resource.to_string(),
         client: client.clone(),
     }
-}
-
-fn random_token(bytes: usize) -> String {
-    let mut buf = vec![0u8; bytes];
-    rand::rng().fill(&mut buf[..]);
-    B64URL.encode(buf)
 }
 
 #[cfg(test)]

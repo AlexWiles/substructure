@@ -71,6 +71,7 @@ impl<'a> From<&'a WorkerDecisionRequest> for DecisionRequest<'a> {
             proposed: &r.proposed,
             state: &r.state,
             agent: &r.agent,
+            worker: &r.worker,
             calls: &r.calls,
             pending_calls: r.pending_calls,
             messages: &r.transcript,

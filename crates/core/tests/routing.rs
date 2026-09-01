@@ -10,13 +10,13 @@ use substructure_core::llm::{
 use substructure_core::protocol::{
     AgentConfig, ChannelKind, ClientInput, Content, DecisionResponse, DraftMessage, ErrorCode,
     LlmResponse, PromptContent, PromptRequest, Role, SessionOwner, Subagent, SubagentTools,
-    ToolCall, ToolCallFunction,
+    ToolCall, ToolCallFunction, WorkerRef,
 };
 use substructure_core::protocol::{Issuer, Requester, Subject};
 use substructure_core::providers::memory_queue::{ShardedInMemoryQueue, TaskQueue};
 use substructure_core::providers::sqlite::{
-    SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSessionIndexStore, SqliteWakeStore,
-    SqliteWorkerQueue,
+    SqliteCursorStore, SqliteDb, SqliteEventStore, SqliteSecretStore, SqliteSessionIndexStore,
+    SqliteWakeStore, SqliteWorkerQueue,
 };
 use substructure_core::runtime::connector::ConnectorTask;
 use substructure_core::session::events::{DecisionErrored, EventPayload};
@@ -27,11 +27,9 @@ use substructure_core::transport::ag_ui::events::AgUiEvent;
 use substructure_core::transport::ag_ui::run as ag_ui_run;
 use substructure_core::transport::ag_ui::translator::run_ag_ui_translation;
 use substructure_core::transport::channel::ChannelContext;
-use substructure_core::transport::http_push::http_transport;
 use substructure_core::transport::push::PushAdapter;
-use substructure_core::worker::push::TransportRegistry;
 use substructure_core::worker::ChannelProposer;
-use substructure_core::worker::{AgentEntry, Hosting, StaticAgentDirectory, WorkerEndpoint};
+use substructure_core::worker::{AgentEntry, Hosting, StaticAgentDirectory, WorkerBlock};
 use substructure_core::{Caller, HandleClientInput, Runtime, RuntimeConfig, RuntimeDeps};
 use tokio_util::sync::CancellationToken;
 
@@ -170,14 +168,22 @@ fn engine_hosted(llm: &str) -> AgentEntry {
     }
 }
 
-fn worker_hosted(llm: &str, url: &str) -> AgentEntry {
+fn worker_hosted(llm: &str) -> AgentEntry {
     AgentEntry {
         config: Some(config(llm)),
-        hosting: Hosting::Http(WorkerEndpoint {
-            url: url.to_string(),
-            signing_secret: None,
-        }),
+        hosting: Hosting::Worker("w".to_string()),
     }
+}
+
+fn unconfigured_worker() -> AgentEntry {
+    AgentEntry {
+        config: None,
+        hosting: Hosting::Worker("w".to_string()),
+    }
+}
+
+fn workers(url: &str) -> BTreeMap<String, WorkerBlock> {
+    BTreeMap::from([("w".to_string(), block(url))])
 }
 
 fn team(boss: AgentConfig) -> BTreeMap<String, AgentEntry> {
@@ -211,13 +217,9 @@ fn delegating(subagent_tools: Option<SubagentTools>) -> AgentConfig {
     }
 }
 
-fn unconfigured_worker(url: &str) -> AgentEntry {
-    AgentEntry {
-        config: None,
-        hosting: Hosting::Http(WorkerEndpoint {
-            url: url.to_string(),
-            signing_secret: None,
-        }),
+fn block(url: &str) -> WorkerBlock {
+    WorkerBlock {
+        url: Some(url.to_string()),
     }
 }
 
@@ -229,7 +231,22 @@ struct Harness {
 }
 
 async fn start(agents: BTreeMap<String, AgentEntry>) -> Harness {
-    start_with(agents, Vec::new(), Issuer::app()).await
+    start_with(agents, Vec::new(), Issuer::app(), BTreeMap::new(), None).await
+}
+
+async fn start_workers(
+    agents: BTreeMap<String, AgentEntry>,
+    workers: BTreeMap<String, WorkerBlock>,
+    default_worker: Option<&str>,
+) -> Harness {
+    start_with(
+        agents,
+        Vec::new(),
+        Issuer::app(),
+        workers,
+        default_worker.map(str::to_string),
+    )
+    .await
 }
 
 struct Recorder {
@@ -259,6 +276,8 @@ async fn start_with(
     agents: BTreeMap<String, AgentEntry>,
     proposers: Vec<Arc<dyn ChannelProposer>>,
     issuer: Issuer,
+    workers: BTreeMap<String, WorkerBlock>,
+    default_worker: Option<String>,
 ) -> Harness {
     let db = SqliteDb::open(
         tmpdir().join("subs.db").to_str().unwrap(),
@@ -277,14 +296,17 @@ async fn start_with(
         Arc::new(StubProvider(model.clone())) as Arc<dyn LlmProviderTrait>,
     )]));
 
-    let directory = Arc::new(StaticAgentDirectory::new(
-        TENANT.to_string(),
-        agents,
-        LlmBlocks::from_iter([
-            ("claude".to_string(), LlmBlock::engine()),
-            ("byo".to_string(), LlmBlock::worker(None)),
-        ]),
-    ));
+    let directory = Arc::new(
+        StaticAgentDirectory::new(
+            TENANT.to_string(),
+            agents,
+            LlmBlocks::from_iter([
+                ("claude".to_string(), LlmBlock::engine()),
+                ("byo".to_string(), LlmBlock::worker(None)),
+            ]),
+        )
+        .with_workers(workers, default_worker),
+    );
 
     let config = RuntimeConfig::default();
     let runtime = substructure_core::start(
@@ -308,7 +330,7 @@ async fn start_with(
             channel_proposers: proposers,
             session_index_store: Arc::new(SqliteSessionIndexStore::new(db.clone()).unwrap()),
             cursor_store: Arc::new(SqliteCursorStore::new(db.clone()).unwrap()),
-            wake_store: Arc::new(SqliteWakeStore::new(db).unwrap()),
+            wake_store: Arc::new(SqliteWakeStore::new(db.clone()).unwrap()),
             token_delta_transport: Arc::new(InMemoryTokenDeltaTransport::new()),
         },
         config,
@@ -317,7 +339,7 @@ async fn start_with(
     let adapter = Arc::new(PushAdapter::new(
         runtime.clone(),
         directory,
-        TransportRegistry::new(vec![http_transport()]),
+        Arc::new(SqliteSecretStore::new(db, None)),
         8,
     ));
     adapter.start();
@@ -331,7 +353,8 @@ async fn start_with(
 }
 
 async fn turn(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
-    drain(h, agent_id, text, |e| {
+    let session_id = uuid::Uuid::now_v7().to_string();
+    drain(h, &session_id, agent_id, text, |e| {
         matches!(
             e,
             EventPayload::TurnCompleted(_)
@@ -345,7 +368,8 @@ async fn turn(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
 }
 
 async fn turn_completed(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPayload> {
-    drain(h, agent_id, text, |e| {
+    let session_id = uuid::Uuid::now_v7().to_string();
+    drain(h, &session_id, agent_id, text, |e| {
         matches!(e, EventPayload::TurnCompleted(_))
     })
     .await
@@ -353,11 +377,12 @@ async fn turn_completed(h: &Harness, agent_id: &str, text: &str) -> Vec<EventPay
 
 async fn drain(
     h: &Harness,
+    session_id: &str,
     agent_id: &str,
     text: &str,
     stop: impl Fn(&EventPayload) -> bool,
 ) -> Vec<EventPayload> {
-    let session_id = uuid::Uuid::now_v7().to_string();
+    let session_id = session_id.to_string();
     let caller = Caller::System {
         tenant_id: TENANT.to_string(),
     };
@@ -366,6 +391,8 @@ async fn drain(
         .handle_client_input(HandleClientInput {
             session_id: session_id.clone(),
             caller: caller.clone(),
+            agent: None,
+            worker: None,
             owner: SessionOwner {
                 tenant_id: TENANT.to_string(),
                 requester: Requester::new(
@@ -477,12 +504,160 @@ async fn an_undeclared_agent_fails_fast() {
 }
 
 #[tokio::test]
+async fn an_undeclared_agent_routes_to_the_project_worker() {
+    let worker = configuring_worker(config("claude")).await;
+    let h = start_workers(
+        BTreeMap::new(),
+        BTreeMap::from([("w".to_string(), block(&worker.url()))]),
+        Some("w"),
+    )
+    .await;
+
+    let events = turn_completed(&h, "invented-on-the-spot", "hi").await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the worker's config runs the turn: {events:#?}"
+    );
+    assert!(worker.calls() > 0, "the project worker decides");
+    assert!(
+        worker.request("session.start").is_some(),
+        "the invented agent's start reaches the project worker"
+    );
+    assert_eq!(h.model.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_session_brings_its_own_address_to_a_declared_worker() {
+    let worker = configuring_worker(config("claude")).await;
+    let h = start_workers(
+        BTreeMap::new(),
+        BTreeMap::from([("w".to_string(), WorkerBlock { url: None })]),
+        None,
+    )
+    .await;
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let caller = Caller::System {
+        tenant_id: TENANT.to_string(),
+    };
+    let owner = SessionOwner {
+        tenant_id: TENANT.to_string(),
+        requester: Requester::new(
+            Subject::new(h.issuer.clone(), "user-1".to_string()),
+            Default::default(),
+        ),
+        metadata: Default::default(),
+    };
+    h.runtime
+        .create_session(
+            &session_id,
+            &caller,
+            "acme-support".to_string(),
+            owner,
+            None,
+            Some(WorkerRef {
+                id: "w".to_string(),
+                url: Some(worker.url()),
+            }),
+        )
+        .await
+        .expect("the session opens");
+
+    let events = drain(&h, &session_id, "acme-support", "hi", |e| {
+        matches!(e, EventPayload::TurnCompleted(_))
+    })
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the session's own address decides: {events:#?}"
+    );
+    assert!(worker.calls() > 0, "decisions reach the brought address");
+    assert_eq!(h.model.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_declared_engine_agent_ignores_the_default_worker() {
+    let worker = echo_worker().await;
+    let h = start_workers(
+        BTreeMap::from([("assistant".to_string(), engine_hosted("claude"))]),
+        BTreeMap::from([("w".to_string(), block(&worker.url()))]),
+        Some("w"),
+    )
+    .await;
+
+    let events = turn_completed(&h, "assistant", "hi").await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "{events:#?}"
+    );
+    assert_eq!(worker.calls(), 0, "declared hosting wins over the default");
+}
+
+#[tokio::test]
+async fn a_session_opened_with_its_own_config_runs_in_engine() {
+    let h = start(BTreeMap::new()).await;
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let caller = Caller::System {
+        tenant_id: TENANT.to_string(),
+    };
+    let owner = SessionOwner {
+        tenant_id: TENANT.to_string(),
+        requester: Requester::new(
+            Subject::new(h.issuer.clone(), "user-1".to_string()),
+            Default::default(),
+        ),
+        metadata: Default::default(),
+    };
+    let created = h
+        .runtime
+        .create_session(
+            &session_id,
+            &caller,
+            "ad-hoc".to_string(),
+            owner,
+            Some(config("claude")),
+            None,
+        )
+        .await
+        .expect("the session opens");
+    assert!(created);
+
+    let events = drain(&h, &session_id, "ad-hoc", "hi", |e| {
+        matches!(e, EventPayload::TurnCompleted(_))
+    })
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, EventPayload::TurnCompleted(_))),
+        "the inline config runs the turn: {events:#?}"
+    );
+
+    let seen = h.model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "one model call");
+    let roles: Vec<_> = seen[0].messages.iter().map(|m| &m.role).collect();
+    assert!(
+        matches!(roles[..], [Role::System, Role::User]),
+        "the inline `system` leads the prompt; got {roles:?}"
+    );
+}
+
+#[tokio::test]
 async fn engine_hosted_and_worker_hosted_agents_share_a_tenant() {
     let worker = echo_worker().await;
-    let h = start(BTreeMap::from([
-        ("assistant".to_string(), engine_hosted("claude")),
-        ("triage".to_string(), worker_hosted("claude", &worker.url())),
-    ]))
+    let h = start_workers(
+        BTreeMap::from([
+            ("assistant".to_string(), engine_hosted("claude")),
+            ("triage".to_string(), worker_hosted("claude")),
+        ]),
+        workers(&worker.url()),
+        None,
+    )
     .await;
 
     turn(&h, "assistant", "hi").await;
@@ -550,6 +725,40 @@ async fn echo_worker() -> StubWorker {
     }
 }
 
+async fn configuring_worker(agent: AgentConfig) -> StubWorker {
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let agent = serde_json::to_value(&agent).unwrap();
+    let app = Router::new().route(
+        "/agent",
+        post(move |Json(req): Json<serde_json::Value>| {
+            let recorder = recorder.clone();
+            let agent = agent.clone();
+            async move {
+                recorder.lock().unwrap().push(req.clone());
+                Json(match req["trigger"]["type"] == "session.start" {
+                    true => serde_json::json!({ "agent": agent }),
+                    false => req["proposed"].clone(),
+                })
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    StubWorker {
+        addr,
+        seen,
+        _handle: handle,
+    }
+}
+
 async fn broken_worker(status: u16, body: &'static str) -> StubWorker {
     use axum::http::{header, StatusCode};
     use axum::routing::post;
@@ -586,10 +795,11 @@ async fn broken_worker(status: u16, body: &'static str) -> StubWorker {
 
 async fn events_from(status: u16, body: &'static str) -> Vec<EventPayload> {
     let worker = broken_worker(status, body).await;
-    let h = start(BTreeMap::from([(
-        "triage".to_string(),
-        worker_hosted("claude", &worker.url()),
-    )]))
+    let h = start_workers(
+        BTreeMap::from([("triage".to_string(), worker_hosted("claude"))]),
+        workers(&worker.url()),
+        None,
+    )
     .await;
     turn(&h, "triage", "hi").await
 }
@@ -680,10 +890,11 @@ async fn the_turn_terminal_carries_the_failure_code() {
         r#"{"messages":[],"actions":[{"type":"llm.call","model":17}]}"#,
     )
     .await;
-    let h = start(BTreeMap::from([(
-        "triage".to_string(),
-        worker_hosted("claude", &worker.url()),
-    )]))
+    let h = start_workers(
+        BTreeMap::from([("triage".to_string(), worker_hosted("claude"))]),
+        workers(&worker.url()),
+        None,
+    )
     .await;
     let events = turn_completed(&h, "triage", "hi").await;
     let completed = events
@@ -758,10 +969,11 @@ async fn an_agent_that_delegates_everything_gets_no_seeded_config() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let h = start(BTreeMap::from([(
-        "reggu".to_string(),
-        unconfigured_worker(&format!("http://{addr}/agent")),
-    )]))
+    let h = start_workers(
+        BTreeMap::from([("reggu".to_string(), unconfigured_worker())]),
+        workers(&format!("http://{addr}/agent")),
+        None,
+    )
     .await;
     let events = turn(&h, "reggu", "hi").await;
 
@@ -788,10 +1000,11 @@ async fn an_agent_that_delegates_everything_gets_no_seeded_config() {
 #[tokio::test]
 async fn a_worker_sees_the_declared_config_as_its_start_proposal() {
     let worker = echo_worker().await;
-    let h = start(BTreeMap::from([(
-        "triage".to_string(),
-        worker_hosted("claude", &worker.url()),
-    )]))
+    let h = start_workers(
+        BTreeMap::from([("triage".to_string(), worker_hosted("claude"))]),
+        workers(&worker.url()),
+        None,
+    )
     .await;
     let events = turn(&h, "triage", "hi").await;
 
@@ -1245,17 +1458,21 @@ async fn started(h: &Harness, translated: bool) -> (ChannelContext, String, ag_u
     let session_id = uuid::Uuid::now_v7().to_string();
     let turn = ag_ui_run::start(
         &ctx,
-        &Caller::System {
-            tenant_id: TENANT.to_string(),
+        HandleClientInput {
+            session_id: session_id.clone(),
+            caller: Caller::System {
+                tenant_id: TENANT.to_string(),
+            },
+            owner: SessionOwner {
+                tenant_id: TENANT.to_string(),
+                requester: Requester::private(Subject::new(Issuer::cli(), "local".to_string())),
+                metadata: Default::default(),
+            },
+            input: client_message("assistant", "hi"),
+            agent: None,
+            worker: None,
+            span: SpanContext::root().child("test_start"),
         },
-        &SessionOwner {
-            tenant_id: TENANT.to_string(),
-            requester: Requester::private(Subject::new(Issuer::cli(), "local".to_string())),
-            metadata: Default::default(),
-        },
-        &session_id,
-        client_message("assistant", "hi"),
-        "test_start",
         translated,
     )
     .await
@@ -1349,6 +1566,8 @@ async fn a_proposer_sees_only_the_sessions_its_own_channel_owns() {
         BTreeMap::from([("assistant".to_string(), engine_hosted("claude"))]),
         proposers,
         Issuer::cli(),
+        BTreeMap::new(),
+        None,
     )
     .await;
 

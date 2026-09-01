@@ -1,9 +1,3 @@
-//! The hosted cloud's `/api/v1` surface, served by a local server so the same
-//! commands work against both. Scope comes from the caller's tenant, so `{org}`
-//! and `{project}` are accepted and ignored: a local server has one of each.
-//! Control-plane mutations (create/rename/delete project, API keys) are
-//! rejected.
-
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::StatusCode;
@@ -98,8 +92,6 @@ pub fn router(admin: AdminHttpState) -> Router {
         .with_state(state)
 }
 
-// Tells the CLI it's a single-tenant server: it adopts these as the org/project
-// and skips the interactive picker.
 async fn advertise_defaults(
     request: axum::http::Request<axum::body::Body>,
     next: Next,
@@ -117,13 +109,6 @@ async fn advertise_defaults(
     res
 }
 
-/// Runs one turn and streams it back, for an operator credential.
-///
-/// The caller is a machine, so the session has no end user. To run as a user,
-/// mint a client token and use the client surface.
-///
-/// One call submits and streams. A caller that submits first and subscribes
-/// second loses the start of its turn.
 async fn run(
     State(state): State<V1State>,
     Extension(caller): Extension<Caller>,
@@ -141,15 +126,31 @@ async fn run(
         metadata: Default::default(),
     };
 
+    if (req.agent.is_some() || req.worker.is_some()) && req.input.agent_id().is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new(
+                "agent_without_submit",
+                "`agent` and `worker` open a session, so they ride only on an input \
+                 that names an `agent_id`",
+            )),
+        )
+            .into_response();
+    }
+
     let shutdown = state.shutdown.clone();
     let ctx = ChannelContext::new(state.runtime.clone(), shutdown.clone());
     let turn = ag_ui_run::start(
         &ctx,
-        &caller,
-        &owner,
-        &session_id,
-        req.input,
-        "v1_run",
+        crate::HandleClientInput {
+            session_id: session_id.clone(),
+            caller,
+            owner,
+            input: req.input,
+            agent: req.agent,
+            worker: req.worker,
+            span: crate::span::SpanContext::root().child("v1_run"),
+        },
         matches!(params.format, RunFormat::AgUi),
     )
     .await;
@@ -218,8 +219,6 @@ async fn connect_session_ag_ui(
     routes::connect_session_ag_ui(state, caller, Path(session_id), input).await
 }
 
-/// What this server offers. `single_tenant` is what lets the CLI adopt the
-/// advertised org/project instead of asking which one.
 async fn meta() -> impl IntoResponse {
     Json(Meta {
         single_tenant: true,
@@ -247,7 +246,6 @@ fn local_org() -> Org {
     }
 }
 
-// balance_usd is left None: local servers don't track a balance.
 fn local_project() -> Project {
     Project {
         id: LOCAL_PROJECT.into(),
@@ -259,9 +257,6 @@ fn local_project() -> Project {
     }
 }
 
-/// A local server holds no Slack app, so there is no workspace for it to
-/// install one into. `meta` leaves the feature out, so the CLI says this
-/// before asking; the route answers the same for anything that asks directly.
 async fn no_slack_install() -> impl IntoResponse {
     (
         StatusCode::BAD_REQUEST,

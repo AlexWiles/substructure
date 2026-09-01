@@ -1,8 +1,3 @@
-//! `subs chat`: a session that stays open, in the terminal.
-//!
-//! A typed line becomes a client message; the event stream back becomes text.
-//! `subs serve` never runs this — a server has no terminal to read.
-
 use std::io::IsTerminal;
 
 use anyhow::{Context as _, Result};
@@ -66,7 +61,7 @@ impl ChatArgs {
 
 pub async fn chat(args: ChatArgs) -> Result<()> {
     let cfg = project_config::load(args.config.as_deref())?;
-    let agent_id = declared_agent(args.agent, &cfg.agent_ids())?;
+    let agent_id = declared_agent(args.agent, &cfg)?;
 
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("chat needs a terminal. Send one message with `subs run` instead.");
@@ -164,7 +159,6 @@ async fn settle(
     Ok(true)
 }
 
-/// `readline` blocks, and an engine here shares this runtime.
 async fn read_line(mut editor: ChatEditor) -> Result<(ChatEditor, Option<String>)> {
     tokio::task::spawn_blocking(move || match editor.readline(PROMPT) {
         Ok(line) => Ok((editor, Some(line))),
@@ -174,7 +168,6 @@ async fn read_line(mut editor: ChatEditor) -> Result<(ChatEditor, Option<String>
     .await?
 }
 
-/// Ask about a parked turn and build the resume it needs.
 async fn answer(interrupt: AgUiInterrupt) -> Result<Option<ClientInput>> {
     let message = interrupt
         .message
@@ -212,7 +205,6 @@ async fn answer(interrupt: AgUiInterrupt) -> Result<Option<ClientInput>> {
     .await?
 }
 
-/// Prompts until the typed answer satisfies `response_schema`.
 fn typed_answer(message: &str, schema: Option<&Value>) -> Result<Option<Value>> {
     loop {
         let typed = Input::<String>::with_theme(&ColorfulTheme::default())
@@ -240,13 +232,10 @@ fn quit_or<T>(result: dialoguer::Result<T>) -> Result<Option<T>> {
     }
 }
 
-/// Sends the answer as JSON when it parses as JSON, as a string otherwise.
 fn as_payload(typed: String) -> Value {
     serde_json::from_str(&typed).unwrap_or(Value::String(typed))
 }
 
-/// The interrupt's options. Unreadable ones are treated as none, so the
-/// prompt stays answerable.
 fn options_of(interrupt: &AgUiInterrupt) -> Vec<InterruptOption> {
     let Some(raw) = interrupt.metadata.as_ref().and_then(|m| m.get("options")) else {
         return Vec::new();
@@ -317,9 +306,13 @@ fn agent_rows(
         rows.push(("effort", format!("{effort:?}").to_lowercase()));
     }
     if let Some(worker) = &agent.worker {
-        rows.push(("worker", worker.clone()));
+        let shown = match cfg.worker.get(worker).and_then(|w| w.url.clone()) {
+            Some(url) => format!("{worker} ({url})"),
+            None => worker.clone(),
+        };
+        rows.push(("worker", shown));
     }
-    let mcp: Vec<&str> = agent.mcp.iter().map(mcp_id).collect();
+    let mcp: Vec<&str> = agent.mcp.iter().map(McpRef::id).collect();
     if !mcp.is_empty() {
         rows.push(("mcp", mcp.join(", ")));
     }
@@ -329,13 +322,6 @@ fn agent_rows(
     }
     rows.push(("session", session_id.to_string()));
     rows
-}
-
-fn mcp_id(reference: &McpRef) -> &str {
-    match reference {
-        McpRef::All(id) => id,
-        McpRef::Filtered(entry) => &entry.id,
-    }
 }
 
 fn history_path() -> Option<std::path::PathBuf> {
@@ -367,7 +353,6 @@ mod tests {
         toml::from_str(toml).expect("a readable file")
     }
 
-    /// What the file says about the agent, in the order it reads.
     #[test]
     fn the_banner_reads_the_agent_out_of_the_file() {
         let cfg = config(
@@ -375,10 +360,12 @@ mod tests {
             name = "example"
             [llm.claude]
             type = "anthropic"
+            [worker.local]
+            url = "http://localhost:4444"
             [agent.my-agent]
             llm = "claude"
             model = "claude-haiku-4-5-20251001"
-            worker = "http://localhost:4444"
+            worker = "local"
             mcp = ["bash", { id = "files" }]
             "#,
         );
@@ -387,34 +374,33 @@ mod tests {
             vec![
                 ("model", "claude-haiku-4-5-20251001".to_string()),
                 ("llm", "claude (anthropic)".to_string()),
-                ("worker", "http://localhost:4444".to_string()),
+                ("worker", "local (http://localhost:4444)".to_string()),
                 ("mcp", "bash, files".to_string()),
                 ("session", "sess-1".to_string()),
             ]
         );
     }
 
-    /// A row for something the file leaves out would name a default this chat
-    /// cannot promise.
     #[test]
     fn what_the_file_leaves_out_gets_no_row() {
         let cfg = config(
             r#"
             name = "example"
+            [worker.local]
+            url = "http://localhost:4444"
             [agent.bare]
-            worker = "http://localhost:4444"
+            worker = "local"
             "#,
         );
         assert_eq!(
             agent_rows(&cfg, "bare", "sess-1"),
             vec![
-                ("worker", "http://localhost:4444".to_string()),
+                ("worker", "local (http://localhost:4444)".to_string()),
                 ("session", "sess-1".to_string()),
             ]
         );
     }
 
-    /// An agent declared nowhere still says which session it opened.
     #[test]
     fn an_undeclared_agent_still_names_its_session() {
         let cfg = config(r#"name = "example""#);

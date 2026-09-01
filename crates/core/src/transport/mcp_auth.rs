@@ -18,7 +18,6 @@ use axum::extract::{Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
-use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -103,9 +102,7 @@ impl AuthorizeLinks {
         if self.spec(connection_id).is_none() {
             return Ok(None);
         }
-        let mut raw = [0u8; 32];
-        rand::Rng::fill(&mut rand::rng(), &mut raw);
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        let token = crate::runtime::secret::random_token(32);
 
         self.flows
             .mint(

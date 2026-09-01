@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::connectors::registry::Connections;
 use crate::protocol::{
-    ClientAction, ClientAppend, ClientInput, ClientMessage, ClientMessages, ClientPayload,
-    ErrorCode, ErrorInfo, InterruptResumption, SessionOwner, TokenDelta,
+    AgentConfig, ClientAction, ClientAppend, ClientInput, ClientMessage, ClientMessages,
+    ClientPayload, ErrorCode, ErrorInfo, InterruptResumption, SessionOwner, TokenDelta, WorkerRef,
 };
 use crate::providers::memory_queue::TaskQueue;
 use crate::runtime::blob::BlobStore;
@@ -111,53 +111,42 @@ pub struct SubmitClientPayload {
     pub owner: SessionOwner,
     pub agent_id: String,
     pub payload: ClientPayload,
-    /// Caller-provided turn ID for idempotency. Auto-generated if None.
+
+    pub agent: Option<AgentConfig>,
+
+    pub worker: Option<WorkerRef>,
+
     pub turn_id: Option<String>,
-    /// Record into the turn already running instead of opening one, leaving
-    /// `turn_id` as the fallback for when none is. For input that continues a
-    /// turn rather than requesting one — an interrupt resume that also revises
-    /// the view, which AG-UI requires to arrive as a single input.
+
     pub continue_turn: bool,
-    /// Hold the payload for the next turn instead of refusing it when one is
-    /// already running. Only the message shapes queue; the rest are refused as
-    /// before. The submit answers as soon as the payload is durable — the turn
-    /// starts when the running one ends.
+
     pub queue: bool,
 }
 
 pub struct SubmitClientPayloadOutput {
     pub session_id: String,
     pub turn_id: String,
-    /// The turn was accepted but has not started: another turn holds the
-    /// session. A snapshot taken as the submit answers, so a turn that starts
-    /// immediately after reads as `false`.
+
     pub queued: bool,
 }
 
-/// A client input plus the ambient context an engine call needs. The single entry point
-/// for the whole client input surface — HTTP, CLI, and AG-UI all build one of these and
-/// hand it to [`Runtime::handle_client_input`]. `session_id` is the universal address
-/// (minted by the caller when absent); the submit-only `agent_id`/`turn_id` ride inside
-/// `input`.
 pub struct HandleClientInput {
     pub session_id: String,
     pub caller: Caller,
     pub owner: SessionOwner,
     pub input: ClientInput,
+    pub agent: Option<AgentConfig>,
+    pub worker: Option<WorkerRef>,
     pub span: SpanContext,
 }
 
 pub struct ClientInputOutput {
     pub session_id: String,
     pub turn_id: String,
-    /// The turn was accepted but has not started — see
-    /// [`SubmitClientPayloadOutput::queued`]. Always false for the inputs that
-    /// cannot queue.
+
     pub queued: bool,
 }
 
-/// How an effect settled out-of-band. `Result` carries a tool result or llm
-/// response; `Error` is uniform across kinds.
 #[derive(Debug)]
 pub enum EffectSettlement {
     Result(EffectResultPayload),
@@ -173,7 +162,7 @@ pub struct SettleEffectInput {
     pub session_id: String,
     pub kind: WorkKind,
     pub id: String,
-    /// `None` settles the current attempt; `Some` fences a stale executor.
+
     pub attempt: Option<u32>,
     pub settlement: EffectSettlement,
     pub caller: Caller,
@@ -245,14 +234,14 @@ impl Runtime {
         self.queue.dequeue(filter).await
     }
 
-    /// Opens the session and queues its `session.start`, without submitting
-    /// anything to it. `false` when the session was already open.
     pub async fn create_session(
         &self,
         session_id: &str,
         caller: &Caller,
         agent_id: String,
         owner: SessionOwner,
+        agent: Option<AgentConfig>,
+        worker: Option<WorkerRef>,
     ) -> Result<bool, RuntimeError> {
         let worker_retry = self.worker_retry_resolver.resolve(caller.tenant_id()).await;
         let result = execute(
@@ -260,12 +249,15 @@ impl Runtime {
             ExecuteInput {
                 session_id: session_id.to_string(),
                 caller: caller.clone(),
-                command: CommandPayload::CreateSession {
+                command: worker::directory::create_session_command(
+                    &*self.agents,
                     agent_id,
                     owner,
-                    ancestry: vec![],
+                    vec![],
                     worker_retry,
-                },
+                    agent,
+                    worker,
+                ),
                 span: SpanContext::root().child("create_session"),
             },
             &ConflictRetry::default(),
@@ -279,10 +271,6 @@ impl Runtime {
         }
     }
 
-    /// Submit a client payload to a session. Returns immediately with the
-    /// resolved session and turn ids; an idempotent re-submission resolves to
-    /// the existing turn id. Use `stream` to observe events, including
-    /// completion of an already-finished turn.
     pub async fn submit_client_payload(
         &self,
         input: SubmitClientPayload,
@@ -293,18 +281,22 @@ impl Runtime {
 
         let span = SpanContext::root();
 
-        self.create_session(&session_id, &input.caller, input.agent_id, input.owner)
-            .await?;
+        self.create_session(
+            &session_id,
+            &input.caller,
+            input.agent_id,
+            input.owner,
+            input.agent,
+            input.worker,
+        )
+        .await?;
 
-        // Try to submit the payload (idempotency guard may reject)
         let send_result = execute(
             &*self.store,
             ExecuteInput {
                 session_id: session_id.clone(),
                 caller: input.caller,
                 command: CommandPayload::SubmitClientPayload {
-                    // An action does not ask for a turn; work in its answer
-                    // opens one.
                     turn: match (&input.payload, input.continue_turn) {
                         (ClientPayload::Action(_), _) => TurnTarget::Detached,
                         (_, true) => TurnTarget::Continue(turn_id.clone()),
@@ -319,21 +311,13 @@ impl Runtime {
         )
         .await;
 
-        // The turn the caller must watch, and whether it is waiting rather than
-        // running. The command reports the turn it left the session on, so an
-        // accepted submit answers both from what it just committed.
         let (effective_turn_id, queued) = match send_result {
-            // A continued submit landed in whatever turn was running, which is
-            // the one the caller must watch — not the fallback it offered.
             Ok(out) if input.continue_turn => (out.turn_id.unwrap_or(turn_id), false),
             Ok(out) => {
                 let queued = input.queue && out.turn_id.as_deref() != Some(turn_id.as_str());
                 (turn_id, queued)
             }
-            // A turn id the session already holds. Naming our own id means it
-            // was taken and still owes a run — running or waiting, a difference
-            // only the session knows, so a retrying submitter pays one read for
-            // it. Naming another turn means this one was refused, not taken.
+
             Err(ExecuteError::Command(SessionError::TurnAlreadyActive { turn_id: held })) => {
                 let queued = input.queue
                     && held == turn_id
@@ -356,11 +340,6 @@ impl Runtime {
         })
     }
 
-    /// The single seam for the whole client input surface. A submit delegates to
-    /// [`Self::submit_client_payload`]; a resume/settle continues the session's active turn
-    /// — looked up here, `NoActiveTurn` if there is none — via [`Self::resume_interrupt`] /
-    /// [`Self::settle_effect`]. Those three methods stay public for the machine and embedded
-    /// surfaces, which address effects directly rather than the active turn.
     pub async fn handle_client_input(
         &self,
         input: HandleClientInput,
@@ -370,12 +349,11 @@ impl Runtime {
             caller,
             owner,
             input,
+            agent,
+            worker,
             span,
         } = input;
 
-        // Submit variants carry their addressing inline; resume/settle continue the active
-        // turn. The submit arms yield the payload and fall through to one submit call; the
-        // rest handle their own dispatch and return.
         let (agent_id, turn_id, payload, queue) = match input {
             ClientInput::Message {
                 agent_id,
@@ -514,6 +492,8 @@ impl Runtime {
                 owner,
                 agent_id,
                 payload,
+                agent,
+                worker,
                 turn_id,
                 continue_turn: false,
                 queue,
@@ -526,8 +506,6 @@ impl Runtime {
         })
     }
 
-    /// Settle a client-handled effect against the session's active turn (returned for
-    /// stream scoping); `NoActiveTurn` if there is none.
     async fn settle_client_tool(
         &self,
         session_id: String,
@@ -555,8 +533,6 @@ impl Runtime {
         })
     }
 
-    /// The active turn a resume/settle continues. `NoActiveTurn` when the session has
-    /// none (or does not exist yet); the subsequent resume/settle enforces ownership.
     async fn active_turn_id(
         &self,
         caller: &Caller,
@@ -572,9 +548,6 @@ impl Runtime {
         }
     }
 
-    /// Unified event stream. `spec` selects which events to observe (a single
-    /// turn or the whole session); `after` (a per-stream cursor) optionally
-    /// replays historical events with `seq > N` before streaming live.
     pub async fn stream(
         &self,
         spec: SessionSubscriptionSpec,
@@ -593,9 +566,6 @@ impl Runtime {
         self.reader().authorize(session_id, caller).await
     }
 
-    /// Attach a durable event processor, joined into runtime shutdown. With
-    /// `start_at_tail`, every stream's cursor is parked at its head so a new
-    /// processor renders the future, not the whole history.
     pub async fn spawn_processor(
         &self,
         processor: Arc<dyn EventProcessor>,
@@ -634,8 +604,6 @@ impl Runtime {
         self.token_delta_transport.clone()
     }
 
-    /// What this deployment declares — the routing truth, and the blocks a
-    /// decision seam resolves an `llm.call` against.
     pub fn agents(&self) -> Arc<dyn AgentDirectory> {
         self.agents.clone()
     }
@@ -644,10 +612,6 @@ impl Runtime {
         self.agents.llm(tenant_id)
     }
 
-    // ---- Admin / inspection methods ----
-
-    /// A read needs the two stores only, so a caller with no engine can use
-    /// this.
     pub fn reader(&self) -> SessionReader {
         SessionReader::new(self.store.clone(), self.session_index.clone())
     }
@@ -721,9 +685,7 @@ impl Runtime {
             EffectSettlement::Result(EffectResultPayload::LlmCall { response }) => {
                 Outcome::Llm(response)
             }
-            // Worker- and client-authored: flat on the wire, and it may
-            // classify itself or not. Unclassified is a handler failure — the
-            // thing asked to do the work reported that it could not.
+
             EffectSettlement::Error {
                 error,
                 retryable,
@@ -820,18 +782,16 @@ impl Runtime {
     }
 }
 
-/// The stores, queues and providers a runtime drives.
 pub struct RuntimeDeps {
     pub store: Arc<dyn EventStore>,
-    /// What this deployment declares: its agents, their hosting, and the
-    /// `[llm.*]` blocks they name.
+
     pub agents: Arc<dyn AgentDirectory>,
-    /// The client for an engine-run llm block, resolved per call.
+
     pub llm: Arc<dyn LlmResolver>,
     pub llm_task_queue: Arc<dyn TaskQueue<LlmTask>>,
     pub subagent_task_queue: Arc<dyn TaskQueue<SubagentTask>>,
     pub connections: Option<Arc<Connections>>,
-    /// Where this deployment reads plugin bundles from.
+
     pub plugins: Arc<dyn crate::plugins::PluginResolver>,
     pub connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>>,
     pub worker_queue: Arc<dyn WorkerQueue>,
@@ -863,9 +823,6 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     } = deps;
     let cancel = CancellationToken::new();
 
-    // The LLM dispatch processor + executor only run engine-side calls. With no
-    // engine-run block declared, every model call belongs to a worker, so we
-    // skip that subsystem entirely.
     let mut llm_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if !llm.is_empty() {
         llm_handles.push(spawn_llm_dispatch_processor(
@@ -909,6 +866,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
     );
     let subagent_executor_handles = spawn_subagent_task_executor(
         store.clone(),
+        agents.clone(),
         subagent_task_queue,
         config.pool(config.subagent_executor_workers),
         cancel.clone(),
@@ -943,9 +901,6 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         cancel.clone(),
     );
 
-    // After the dispatcher: its event subscription must exist before the
-    // reconciler commits failures, or their retry timers oversleep to the
-    // fallback poll.
     let boot_reconciler_handle = spawn_boot_reconciler(store.clone(), wake_store);
 
     let session_subscriptions = session::subscriptions::SessionSubscriptions::new(store.clone());

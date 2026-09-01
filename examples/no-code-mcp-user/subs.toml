@@ -7,7 +7,7 @@ type = "anthropic"
 llm = "claude"
 model = "claude-haiku-4-5-20251001"
 system = "You are a careful assistant. When asked about the connected account, call the whoami tool and repeat its answer exactly."
-mcp = ["mcp.mail"]
+mcp = ["mail"]
 
 # A connection whose credential is one person's own account. Set
 # SUBS_SECRET_KEY to seal stored credentials; without it they are stored

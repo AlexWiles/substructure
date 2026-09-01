@@ -1,12 +1,20 @@
 use std::collections::BTreeMap;
 
-use crate::protocol::AgentConfig;
+use crate::protocol::{AgentConfig, RetryPolicy, SessionOwner, WorkerRef};
 use crate::runtime::llm::LlmBlocks;
+use crate::runtime::session::command::CommandPayload;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hosting {
     Engine,
-    Http(WorkerEndpoint),
+    Worker(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerBlock {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -15,14 +23,20 @@ pub struct AgentEntry {
     pub hosting: Hosting,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkerEndpoint {
-    pub url: String,
-    pub signing_secret: Option<String>,
-}
-
 pub trait AgentDirectory: Send + Sync {
     fn agent(&self, tenant_id: &str, agent_id: &str) -> Option<AgentEntry>;
+
+    fn declares(&self, tenant_id: &str, agent_id: &str) -> bool {
+        self.agent(tenant_id, agent_id).is_some()
+    }
+
+    fn worker(&self, _tenant_id: &str, _id: &str) -> Option<WorkerBlock> {
+        None
+    }
+
+    fn default_worker(&self, _tenant_id: &str) -> Option<String> {
+        None
+    }
 
     fn llm(&self, tenant_id: &str) -> LlmBlocks;
 
@@ -31,10 +45,45 @@ pub trait AgentDirectory: Send + Sync {
     fn tenants(&self) -> Vec<String>;
 }
 
+pub fn create_session_command(
+    agents: &dyn AgentDirectory,
+    agent_id: String,
+    owner: SessionOwner,
+    ancestry: Vec<String>,
+    worker_retry: RetryPolicy,
+    agent: Option<AgentConfig>,
+    worker: Option<WorkerRef>,
+) -> CommandPayload {
+    CommandPayload::CreateSession {
+        worker: resolve_worker(agents, &owner.tenant_id, &agent_id, worker),
+        agent_id,
+        owner,
+        ancestry,
+        worker_retry,
+        agent,
+    }
+}
+
+pub fn resolve_worker(
+    agents: &dyn AgentDirectory,
+    tenant_id: &str,
+    agent_id: &str,
+    named: Option<WorkerRef>,
+) -> Option<WorkerRef> {
+    named.or_else(|| match agents.declares(tenant_id, agent_id) {
+        true => None,
+        false => agents
+            .default_worker(tenant_id)
+            .map(|id| WorkerRef { id, url: None }),
+    })
+}
+
 pub struct StaticAgentDirectory {
     tenant_id: String,
     agents: BTreeMap<String, AgentEntry>,
     llm: LlmBlocks,
+    workers: BTreeMap<String, WorkerBlock>,
+    default_worker: Option<String>,
 }
 
 impl StaticAgentDirectory {
@@ -43,7 +92,19 @@ impl StaticAgentDirectory {
             tenant_id,
             agents,
             llm,
+            workers: BTreeMap::new(),
+            default_worker: None,
         }
+    }
+
+    pub fn with_workers(
+        mut self,
+        workers: BTreeMap<String, WorkerBlock>,
+        default_worker: Option<String>,
+    ) -> Self {
+        self.workers = workers;
+        self.default_worker = default_worker;
+        self
     }
 }
 
@@ -51,6 +112,22 @@ impl AgentDirectory for StaticAgentDirectory {
     fn agent(&self, tenant_id: &str, agent_id: &str) -> Option<AgentEntry> {
         (tenant_id == self.tenant_id)
             .then(|| self.agents.get(agent_id).cloned())
+            .flatten()
+    }
+
+    fn declares(&self, tenant_id: &str, agent_id: &str) -> bool {
+        tenant_id == self.tenant_id && self.agents.contains_key(agent_id)
+    }
+
+    fn worker(&self, tenant_id: &str, id: &str) -> Option<WorkerBlock> {
+        (tenant_id == self.tenant_id)
+            .then(|| self.workers.get(id).cloned())
+            .flatten()
+    }
+
+    fn default_worker(&self, tenant_id: &str) -> Option<String> {
+        (tenant_id == self.tenant_id)
+            .then(|| self.default_worker.clone())
             .flatten()
     }
 
@@ -69,10 +146,7 @@ impl AgentDirectory for StaticAgentDirectory {
     }
 
     fn tenants(&self) -> Vec<String> {
-        match self.agents.is_empty() {
-            true => Vec::new(),
-            false => vec![self.tenant_id.clone()],
-        }
+        vec![self.tenant_id.clone()]
     }
 }
 
@@ -93,13 +167,6 @@ impl AgentDirectory for EmptyAgentDirectory {
 
     fn tenants(&self) -> Vec<String> {
         Vec::new()
-    }
-}
-
-pub fn declared(ids: &[String]) -> String {
-    match ids.is_empty() {
-        true => "none".to_string(),
-        false => ids.join(", "),
     }
 }
 
@@ -131,14 +198,23 @@ mod tests {
                     "triage".to_string(),
                     AgentEntry {
                         config: None,
-                        hosting: Hosting::Http(WorkerEndpoint {
-                            url: "https://triage.internal/agent".to_string(),
-                            signing_secret: None,
-                        }),
+                        hosting: Hosting::Worker("triage".to_string()),
                     },
                 ),
             ]),
             LlmBlocks::from_iter([("claude".to_string(), LlmBlock::engine())]),
+        )
+        .with_workers(
+            BTreeMap::from([
+                (
+                    "triage".to_string(),
+                    WorkerBlock {
+                        url: Some("https://triage.internal/agent".to_string()),
+                    },
+                ),
+                ("customers".to_string(), WorkerBlock { url: None }),
+            ]),
+            Some("customers".to_string()),
         )
     }
 
@@ -153,11 +229,17 @@ mod tests {
         assert_eq!(engine_hosted.hosting, Hosting::Engine);
 
         let pushed = d.agent("default", "triage").expect("declared");
-        assert!(pushed.config.is_none());
-        let Hosting::Http(endpoint) = pushed.hosting else {
-            panic!("a declared worker is hosted over http");
-        };
-        assert_eq!(endpoint.url, "https://triage.internal/agent");
+        assert_eq!(pushed.hosting, Hosting::Worker("triage".to_string()));
+        let block = d.worker("default", "triage").expect("declared");
+        assert_eq!(block.url.as_deref(), Some("https://triage.internal/agent"));
+    }
+
+    #[test]
+    fn the_default_worker_is_the_one_the_file_names() {
+        let d = directory();
+        assert_eq!(d.default_worker("default").as_deref(), Some("customers"));
+        assert!(d.default_worker("other").is_none());
+        assert!(d.worker("other", "triage").is_none());
     }
 
     #[test]
@@ -171,10 +253,44 @@ mod tests {
     }
 
     #[test]
+    fn creation_resolves_the_worker_once() {
+        let d = directory();
+        let named = WorkerRef {
+            id: "triage".to_string(),
+            url: None,
+        };
+        assert_eq!(
+            resolve_worker(&d, "default", "invented", Some(named.clone())),
+            Some(named),
+            "a named worker wins"
+        );
+        assert_eq!(
+            resolve_worker(&d, "default", "assistant", None),
+            None,
+            "a declared agent follows the file, not a stamp"
+        );
+        assert_eq!(
+            resolve_worker(&d, "default", "invented", None),
+            Some(WorkerRef {
+                id: "customers".to_string(),
+                url: None,
+            }),
+            "an undeclared agent is stamped with the default at creation"
+        );
+        assert_eq!(
+            resolve_worker(&EmptyAgentDirectory, "default", "invented", None),
+            None,
+            "no default, no stamp"
+        );
+    }
+
+    #[test]
     fn an_empty_directory_declares_nothing() {
         let d = EmptyAgentDirectory;
         assert!(d.agent("default", "assistant").is_none());
+        assert!(d.worker("default", "main").is_none());
+        assert!(d.default_worker("default").is_none());
         assert!(d.tenants().is_empty());
-        assert_eq!(declared(&d.agent_ids("default")), "none");
+        assert_eq!(crate::copy::declared(d.agent_ids("default")), "none");
     }
 }

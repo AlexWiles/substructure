@@ -16,92 +16,48 @@ use crate::runtime::worker::AgentEntry;
 pub const FILENAME: &str = "subs.toml";
 pub const DEFAULT_DB: &str = "subs.db";
 
-/// One project, described once. One file is one project: a second environment
-/// is a second file (`subs apply -c subs.staging.toml`), deployed as a
-/// second project with its own wallet, quota, and keys.
-///
-/// A file carries two roles, either or both: **an engine you run** (`db`, `log`,
-/// `[run]`, `[serve]`) and **a remote you administer** (`[remote]`). What the
-/// project *is* — `name`, `[agent.<id>]`, `[llm.<id>]`, `[mcp.<id>]`
-/// — is one declaration whichever role reads it, and it is exactly
-/// [`Manifest`], so a self-hosted system is served and administered from the
-/// same file rather than two that have to agree.
-///
-/// The manifest's sections are spelled out here rather than nested behind
-/// `#[serde(flatten)]` because flattening would cost `deny_unknown_fields`, and
-/// a typo'd section name being loud matters more than the repetition.
-///
-/// A role is present when its keys are: `[remote]` is what `subs apply` and
-/// `subs sessions` act on, and it is also what decides that a connection's
-/// credential belongs to the remote rather than to the engine here.
-///
-/// Precedence for anything the CLI also accepts as a flag is
-/// **flag > environment > this > default**, so pinning something here never
-/// takes an override away.
-///
-/// Per-invocation arguments are deliberately absent: `--input`, `--session`, and
-/// `-c` itself say what one run is doing, not how the environment is set up.
-/// Secrets are absent for the same reason they are absent from `[mcp]` — a
-/// committed file must not be able to hold one, so the signing secret is named
-/// rather than written.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
-    /// Where this was read from, which is what `db` defaults from and what a
-    /// relative `db` is resolved against. Not a setting: it is the file's own
-    /// path, so it is never written back.
     #[serde(skip)]
     source: PathBuf,
-    /// The project's name. `subs apply` creates the project from it when
-    /// nothing is pinned, and renames when it changes: the file is the source
-    /// of truth.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Engine state: events, sessions, and the credentials `subs auth`
-    /// authorized. Unset, it is `~/.config/subs/subs.db`,
-    /// beside the credentials — one engine per machine, whichever directory a
-    /// command is run from. Set it to give this project its own, resolved
-    /// against this file.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<String>,
-    /// Log filter in `RUST_LOG` syntax: a bare level (`info`) or per-target
-    /// directives (`substructure_core=debug,warn`). `$RUST_LOG` still wins.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_subagent_depth: Option<u32>,
-    /// The LLM blocks this project declares, keyed by the name an agent names.
-    /// The declaration travels with the project; the credential binds per
-    /// environment.
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_worker: Option<String>,
+
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub llm: BTreeMap<String, ProviderSpec>,
-    /// The agents this project declares, keyed by the id a client routes on.
-    /// Each section is the wire `AgentConfig` plus where its decisions go.
+
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub worker: BTreeMap<String, crate::worker::WorkerBlock>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub agent: BTreeMap<String, AgentSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serve: Option<ServeConfig>,
-    /// MCP servers this project may reach, keyed by the id an agent names. An
-    /// engine here dials them itself; a remote is told the id and URL and
-    /// holds the credential, so `auth` is the engine's half alone.
+
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, ConnectionDecl>,
-    /// Agent plugins this project declares, each a directory the CLI reads.
+
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub plugin: BTreeMap<String, PluginSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<Remote>,
 }
 
-/// The deployment this file administers — the hosted cloud, a self-hosted one,
-/// or someone else's `subs serve` — and what it is pinned to there.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Remote {
-    /// The API to talk to [default: `https://api.substructure.ai`]. A `--url`
-    /// flag still overrides it; `$SUBS_API_URL` only fills in when neither is
-    /// set. `subs login` reads it too, so the token is stored under the same
-    /// server the rest of the file's commands reach.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,7 +66,6 @@ pub struct Remote {
     pub project: Option<String>,
 }
 
-/// `subs serve` only.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServeConfig {
@@ -118,24 +73,20 @@ pub struct ServeConfig {
     pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Client and worker authentication [default: true]. `false` serves
-    /// without issuing tokens, which is for a server nothing outside this
-    /// machine can reach.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<bool>,
-    /// The HTTPS address this engine is reachable at from a browser. Setting
-    /// it is what lets an agent hand a person an authorize *link* for an MCP
-    /// connection; without one, consent needs `subs auth` on this machine.
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
 }
 
 impl ProjectConfig {
-    /// The half of this file a remote holds. Cheap enough to build on
-    /// demand: it is read at startup and at `subs apply`, never per decision.
     pub fn manifest(&self) -> Manifest {
         Manifest {
             name: self.name.clone(),
+            worker: self.worker.clone(),
+            default_worker: self.default_worker.clone(),
             max_subagent_depth: self.max_subagent_depth,
             llm: self.llm.clone(),
             agent: self.agent.clone(),
@@ -144,8 +95,6 @@ impl ProjectConfig {
         }
     }
 
-    /// The manifest with every plugin's bundle loaded, against this file's
-    /// directory.
     pub fn resolved_manifest(&self) -> anyhow::Result<(Manifest, ResolvedPlugins)> {
         let mut manifest = self.manifest();
         let base = self
@@ -158,34 +107,24 @@ impl ProjectConfig {
         Ok((manifest, resolved))
     }
 
-    /// Every connection the file reaches, a plugin's servers included. Reads
-    /// the plugin directories.
     pub fn resolved_connections(&self) -> anyhow::Result<BTreeMap<ConnectionPath, ConnectionSpec>> {
         Ok(self.resolved_manifest()?.0.connections())
     }
 
-    /// The engine's database: the one beside the credentials, unless the file
-    /// names another. A named one sits beside the file that names it, so a
-    /// project that wants its own says so and gets it where it is read.
     pub fn db_path(&self) -> String {
         let Some(named) = self.db.clone() else {
             return user_db_path();
         };
         match self.source.parent() {
-            // `join` keeps an absolute `db` absolute.
             Some(dir) if !dir.as_os_str().is_empty() => dir.join(named).display().to_string(),
             _ => named,
         }
     }
 
-    /// The declared blocks as the engine reads them: venue and wire shape,
-    /// never a credential.
     pub fn llm_blocks(&self) -> LlmBlocks {
         self.manifest().llm_blocks()
     }
 
-    /// The blocks the engine runs itself, each with the variable its key comes
-    /// from. `worker` blocks are absent: they never need a credential here.
     pub fn provider_bindings(&self) -> Vec<ProviderBinding> {
         self.llm
             .iter()
@@ -202,18 +141,14 @@ impl ProjectConfig {
             .collect()
     }
 
-    /// Every agent this project declares, keyed by the id a client routes on.
     pub fn agents(&self) -> BTreeMap<String, AgentEntry> {
         self.manifest().agents()
     }
 
-    /// The declared agent ids, for the error that says what could have been named.
     pub fn agent_ids(&self) -> Vec<String> {
         self.agent.keys().cloned().collect()
     }
 
-    /// Whether an engine here authenticates its clients and workers
-    /// [default: yes].
     pub fn serve_auth(&self) -> bool {
         self.serve.as_ref().and_then(|s| s.auth).unwrap_or(true)
     }
@@ -230,8 +165,6 @@ impl ProjectConfig {
         self.remote.as_ref()?.project.as_deref()
     }
 
-    /// The remote section, creating it if the file has none — for the
-    /// commands that pin (`subs link`, `subs apply`).
     pub fn remote_mut(&mut self) -> &mut Remote {
         self.remote.get_or_insert_with(Remote::default)
     }
@@ -241,7 +174,7 @@ impl ProjectConfig {
         let value: toml::Value = toml::from_str(s).map_err(|e| anyhow!("parsing {at}: {e}"))?;
         let mut config: ProjectConfig =
             value.try_into().map_err(|e| anyhow!("parsing {at}: {e}"))?;
-        // A committed bundle would shadow the directory it came from.
+
         for (id, spec) in &config.plugin {
             if spec.bundle.is_some() {
                 return Err(anyhow!(
@@ -259,8 +192,6 @@ impl ProjectConfig {
     }
 }
 
-/// Make the directory a database is about to be created in. The default one is
-/// the config dir, which is private: it holds the tokens too.
 pub fn ensure_parent(path: &str) -> Result<()> {
     let Some(dir) = Path::new(path)
         .parent()
@@ -274,9 +205,6 @@ pub fn ensure_parent(path: &str) -> Result<()> {
     }
 }
 
-/// The database nothing named: beside the credentials under
-/// `~/.config/subs`, rather than in whichever directory the command
-/// was run from.
 fn user_db_path() -> String {
     match super::credentials::config_dir() {
         Ok(dir) => dir.join(DEFAULT_DB).display().to_string(),
@@ -290,9 +218,6 @@ pub struct Found {
     pub path: PathBuf,
 }
 
-/// The environment file at `path`, or the nearest one above the working
-/// directory. An explicit path that does not resolve is an error; discovery
-/// finding nothing is not.
 pub fn resolve(path: Option<&Path>) -> Result<Option<Found>> {
     match path {
         Some(p) => load_explicit(p).map(Some),
@@ -300,16 +225,10 @@ pub fn resolve(path: Option<&Path>) -> Result<Option<Found>> {
     }
 }
 
-/// What the file says, or the defaults when there is none. For the commands
-/// that work without one — an engine runs on defaults, and every setting is
-/// also a flag.
 pub fn load(path: Option<&Path>) -> Result<ProjectConfig> {
     Ok(resolve(path)?.map(|found| found.config).unwrap_or_default())
 }
 
-/// The file in this directory, and only this one. Ancestors are not searched:
-/// a command run in a subdirectory acting on a project two levels up is a
-/// surprise, and `-c` already says when the file is somewhere else.
 pub fn find_from(dir: &Path) -> Result<Option<Found>> {
     let candidate = dir.join(FILENAME);
     match candidate.is_file() {
@@ -331,9 +250,6 @@ pub fn load_explicit(path: &Path) -> Result<Found> {
     })
 }
 
-/// Write `config` back, keeping everything about the file that is not a
-/// setting. A machine edit must not cost a reader their comments or their
-/// layout, so the parsed document is edited in place rather than replaced.
 pub fn write(path: &Path, config: &ProjectConfig) -> Result<()> {
     let mut rendered: DocumentMut =
         toml_edit::ser::to_document(config).context("serializing subs.toml")?;
@@ -354,9 +270,6 @@ pub fn write(path: &Path, config: &ProjectConfig) -> Result<()> {
     Ok(())
 }
 
-/// Serde renders every struct as an inline table. Sections are what a reader
-/// expects of the two outermost levels — `[worker]`, `[mcp.sentry]` — and an
-/// inline table is what they expect of anything below.
 fn expand(item: &mut Item, depth: usize) {
     if depth == 0 {
         return;
@@ -368,22 +281,19 @@ fn expand(item: &mut Item, depth: usize) {
         for (_, child) in table.iter_mut() {
             expand(child, depth - 1);
         }
-        // `[mcp]` holds nothing of its own, so it is a header nobody needs.
+
         if !table.is_empty() && table.iter().all(|(_, child)| child.is_table()) {
             table.set_implicit(true);
         }
     }
 }
 
-/// Overwrite `target` with `source`, key by key. A key `source` does not carry
-/// is a setting that was removed, so it goes; a value that changed keeps its
-/// decoration, which is where a trailing comment lives.
 fn merge(target: &mut Table, source: &Table) {
     target.retain(|key, _| source.contains_key(key));
     for (key, item) in source.iter() {
         match (target.get_mut(key), item) {
             (Some(Item::Table(existing)), Item::Table(next)) => merge(existing, next),
-            // A section someone wrote inline stays inline.
+
             (Some(Item::Value(Value::InlineTable(existing))), Item::Table(next)) => {
                 let mut merged = next.clone().into_inline_table();
                 *merged.decor_mut() = existing.decor().clone();
@@ -409,7 +319,6 @@ mod tests {
     use crate::runtime::llm::LlmBlock;
 
     fn tmpdir() -> PathBuf {
-        // Timestamp alone collides across parallel tests; the counter disambiguates.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -439,7 +348,6 @@ mod tests {
         assert_eq!(deployment.org(), Some("org_1"));
         assert_eq!(deployment.db_path(), user_db_path());
 
-        // One system: served here, administered there, declared once.
         let both = ok(r#"
             name = "support-bot"
             db = "prod.db"
@@ -447,10 +355,13 @@ mod tests {
             [llm.claude]
             type = "anthropic"
 
+            [worker.bot]
+            url = "https://bot.example.com/agent"
+
             [agent.support]
             llm = "claude"
             model = "claude-sonnet-4-5"
-            worker = "https://bot.example.com/agent"
+            worker = "bot"
 
             [remote]
             url = "https://subs.internal"
@@ -474,9 +385,6 @@ mod tests {
         assert!(ProjectConfig::default().serve_auth());
     }
 
-    /// No file behind it at all — `subs chat` in a directory that is not a
-    /// project. The database joins the credentials rather than landing in
-    /// whichever directory the command was run from.
     #[test]
     fn no_file_puts_the_database_beside_the_credentials() {
         let expected = super::super::credentials::config_dir()
@@ -488,8 +396,6 @@ mod tests {
         );
     }
 
-    /// A file names a project, not a database: what it does not ask for, it
-    /// shares with every other command on the machine.
     #[test]
     fn a_file_that_names_no_database_uses_the_one_beside_the_credentials() {
         let dir = tmpdir();
@@ -513,7 +419,6 @@ mod tests {
             dir.join("engine.db").to_str().unwrap()
         );
 
-        // An absolute one is taken as given.
         let elsewhere = tmpdir().join("far.db");
         fs::write(&path, format!("db = {:?}\n", elsewhere.to_str().unwrap())).unwrap();
         assert_eq!(
@@ -531,11 +436,13 @@ mod tests {
             [llm.claude]
             type = "anthropic"
 
+            [worker.local]
+            url = "http://localhost:4444"
+
             [agent.support]
             llm = "claude"
             model = "claude-sonnet-4-5"
-            worker = "http://localhost:4444"
-            signing_secret_env = "SUBS_SIGNING_SECRET"
+            worker = "local"
 
             [serve]
             port = 9000
@@ -543,22 +450,21 @@ mod tests {
         "#);
         assert_eq!(cfg.db_path(), "dev.subs.db");
         assert_eq!(cfg.log.as_deref(), Some("substructure_core=debug,warn"));
+        assert_eq!(cfg.agent["support"].worker.as_deref(), Some("local"));
         assert_eq!(
-            cfg.agent["support"].worker.as_deref(),
+            cfg.worker["local"].url.as_deref(),
             Some("http://localhost:4444")
         );
         assert_eq!(cfg.llm["claude"].kind, ProviderKind::Anthropic);
         assert!(!cfg.serve_auth());
         let serve = cfg.serve.unwrap();
         assert_eq!(serve.port, Some(9000));
-        // Absent is absent, not a default the flag would then have to beat.
+
         assert_eq!(serve.host, None);
     }
 
     #[test]
     fn a_misspelled_key_is_a_parse_error_not_a_silent_no_op() {
-        // An agent section is the wire config plus two hosting keys, and
-        // `flatten` blinds serde's own check, so the key set is checked by hand.
         let err = parse(
             "[llm.claude]\ntype = \"anthropic\"\n\n\
              [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nsytem = \"be brief\"\n",
@@ -570,7 +476,6 @@ mod tests {
         let err = parse("[remote]\nnmae = \"x\"\n").unwrap_err().to_string();
         assert!(err.contains("nmae"), "got {err}");
 
-        // There is no catalog key: a connection always declares a URL.
         let err = parse("[mcp.sentry]\ncatalog = \"sentry\"\n")
             .unwrap_err()
             .to_string();
@@ -579,20 +484,16 @@ mod tests {
 
     #[test]
     fn a_connection_is_checked_where_it_was_typed() {
-        // An id prefixes every tool name the model sees.
         let err = parse("[mcp.\"my server\"]\nurl = \"https://x/mcp\"\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("cannot prefix a tool name"), "got {err}");
 
-        // A typo is caught here rather than at the first fetch.
         let err = parse("[mcp.sentry]\nurl = \"mcp.sentry.dev\"\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains("is not a URL"), "got {err}");
 
-        // Plaintext is the file's call: a server on this machine or this
-        // network is reached in the clear, and only a deployment knows better.
         ok("[mcp.issues]\nurl = \"http://localhost:4445/mcp\"\n");
         ok("[mcp.issues]\nurl = \"http://mcp.internal:8080/mcp\"\n");
     }
@@ -621,51 +522,49 @@ mod tests {
         assert!(err.contains("token"), "got {err}");
     }
 
-    /// An agent whose worker authors its whole config declares nothing but the
-    /// URL — the file has no business naming an `llm` or a `model` it will
-    /// never use.
     #[test]
     fn an_agent_may_delegate_everything_to_its_worker() {
         let cfg = ok(r#"
+            [worker.reggu]
+            url = "http://localhost:4000/substructure/agent"
+
             [agent.reggu]
-            worker = "http://localhost:4000/substructure/agent"
+            worker = "reggu"
         "#);
         let entry = &cfg.agents()["reggu"];
         assert!(entry.config.is_none(), "nothing to seed");
-        assert!(
-            matches!(entry.hosting, crate::worker::Hosting::Http(_)),
+        assert_eq!(
+            entry.hosting,
+            crate::worker::Hosting::Worker("reggu".to_string()),
             "the worker authors it"
         );
     }
 
-    /// …but only a worker can author one, so an agent that declares neither a
-    /// config nor a worker is a declaration nothing can act on.
     #[test]
     fn an_agent_that_declares_nothing_at_all_is_an_error() {
         let err = parse("[agent.a]\n").unwrap_err().to_string();
         assert!(err.contains("declares nothing"), "got {err}");
     }
 
-    /// A half-declared config would seed a proposal the engine cannot call
-    /// with, so it fails here instead of at the first model call.
     #[test]
     fn a_partly_declared_config_is_an_error() {
         let err = parse(
-            "[llm.claude]\ntype = \"anthropic\"\n\n\
-             [agent.a]\nllm = \"claude\"\nworker = \"https://a/agent\"\n",
+            "[worker.a]\nurl = \"https://a/agent\"\n[llm.claude]\ntype = \"anthropic\"\n\n\
+             [agent.a]\nllm = \"claude\"\nworker = \"a\"\n",
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("no `model`"), "got {err}");
 
-        let err = parse("[agent.a]\nsystem = \"be brief\"\nworker = \"https://a/agent\"\n")
-            .unwrap_err()
-            .to_string();
+        let err = parse(
+            "[worker.a]\nurl = \"https://a/agent\"\n\
+             [agent.a]\nsystem = \"be brief\"\nworker = \"a\"\n",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("no `llm`"), "got {err}");
     }
 
-    /// Every name an agent uses is declared in this same file, so a typo is a
-    /// parse error rather than a decision that fails on the first turn.
     #[test]
     fn an_agents_references_are_checked_against_the_file() {
         let err = parse("[agent.a]\nmodel = \"m\"\n").unwrap_err().to_string();
@@ -684,15 +583,13 @@ mod tests {
 
         let err = parse(
             "[llm.claude]\ntype = \"anthropic\"\n\n\
-             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nmcp = [\"mcp.sentry\"]\n",
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nmcp = [\"sentry\"]\n",
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("no connection `mcp.sentry`"), "got {err}");
+        assert!(err.contains("names no [mcp.sentry]"), "got {err}");
     }
 
-    /// A `worker` block's calls are made by a worker, so an agent on one that
-    /// has no worker could never make a call at all.
     #[test]
     fn an_agent_on_a_worker_block_needs_a_worker() {
         let err = parse(
@@ -703,13 +600,12 @@ mod tests {
         .to_string();
         assert!(err.contains("needs a `worker`"), "got {err}");
 
-        // With one attached it parses.
-        ok("[llm.byo]\ntype = \"worker\"\n\n\
-            [agent.a]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"https://a/agent\"\n");
+        ok(
+            "[llm.byo]\ntype = \"worker\"\n[worker.a]\nurl = \"https://a/agent\"\n\n\
+            [agent.a]\nllm = \"byo\"\nmodel = \"m\"\nworker = \"a\"\n",
+        );
     }
 
-    /// A field belonging to the other venue is a misunderstanding of the block,
-    /// not a detail to ignore.
     #[test]
     fn a_block_is_checked_against_its_own_type() {
         let err = parse("[llm.claude]\ntype = \"anthropic\"\nformat = \"anthropic\"\n")
@@ -723,8 +619,6 @@ mod tests {
         assert!(err.contains("never leaves your worker"), "got {err}");
     }
 
-    /// A file can only declare tools the browser runs: a worker-run tool is
-    /// worker code, and nothing here could execute one.
     #[test]
     fn a_file_declared_tool_must_be_client_handled() {
         let err = parse(
@@ -737,21 +631,17 @@ mod tests {
         assert!(err.contains("handler = \"client\""), "got {err}");
     }
 
-    /// Signing a request nobody receives is a setting with no effect, which is
-    /// worse than an error.
     #[test]
-    fn a_signing_secret_without_a_worker_is_an_error() {
+    fn an_undeclared_worker_reference_is_an_error() {
         let err = parse(
             "[llm.claude]\ntype = \"anthropic\"\n\n\
-             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nsigning_secret_env = \"S\"\n",
+             [agent.a]\nllm = \"claude\"\nmodel = \"m\"\nworker = \"typo\"\n",
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("no `worker`"), "got {err}");
+        assert!(err.contains("names no block"), "got {err}");
     }
 
-    /// What the engine reads off the file: the venue per block, and one binding
-    /// per block it runs itself.
     #[test]
     fn the_engine_reads_venues_and_bindings_off_the_blocks() {
         let cfg = ok(r#"
@@ -775,7 +665,6 @@ mod tests {
         );
         assert_eq!(blocks.declared(), "byo, cheap, claude");
 
-        // A worker block needs no credential where the engine runs.
         let bindings: Vec<(String, String)> = cfg
             .provider_bindings()
             .into_iter()
@@ -790,8 +679,17 @@ mod tests {
         );
     }
 
-    /// The directory the engine routes on: config without hosting, hosting
-    /// without config.
+    #[test]
+    fn a_default_worker_reaches_the_manifest() {
+        let cfg = ok(
+            "default_worker = \"main\"\n[worker.main]\nurl = \"https://api.example.com/agent\"\n",
+        );
+        let m = cfg.manifest();
+        assert_eq!(m.default_worker.as_deref(), Some("main"));
+        let main = m.worker.get("main").expect("declared");
+        assert_eq!(main.url.as_deref(), Some("https://api.example.com/agent"));
+    }
+
     #[test]
     fn agents_become_directory_entries() {
         let cfg = ok(r#"
@@ -802,19 +700,22 @@ mod tests {
             llm = "claude"
             model = "claude-sonnet-4-5"
 
+            [worker.triage]
+            url = "https://triage.internal/agent"
+
             [agent.triage]
             llm = "claude"
             model = "claude-haiku-4-5"
-            worker = "https://triage.internal/agent"
+            worker = "triage"
         "#);
         let agents = cfg.agents();
         assert_eq!(agents["assistant"].hosting, crate::worker::Hosting::Engine);
         assert!(agents["assistant"].config.is_some(), "and needs a config");
-        let crate::worker::Hosting::Http(endpoint) = &agents["triage"].hosting else {
-            panic!("a declared worker is hosted over http");
-        };
-        assert_eq!(endpoint.url, "https://triage.internal/agent");
-        // The hosting never crosses the wire.
+        assert_eq!(
+            agents["triage"].hosting,
+            crate::worker::Hosting::Worker("triage".to_string())
+        );
+
         let wire = serde_json::to_value(agents["triage"].config.as_ref().unwrap()).unwrap();
         assert!(wire.get("worker").is_none(), "got {wire}");
         assert_eq!(wire["llm"], "claude");
@@ -836,14 +737,16 @@ mod tests {
             type = "worker"
             format = "anthropic"
 
+            [worker.local]
+            url = "http://localhost:4444"
+
             [agent.support]
             llm = "cheap"
             model = "gpt-5-mini"
             system = "Be brief."
-            worker = "http://localhost:4444"
-            signing_secret_env = "S"
-            mcp = ["mcp.sentry"]
-            subagents = ["agent.researcher"]
+            worker = "local"
+            mcp = ["sentry"]
+            subagents = ["researcher"]
             tools = [{ name = "confirm", description = "Ask", handler = "client" }]
 
             [agent.researcher]
@@ -869,8 +772,6 @@ mod tests {
         assert_eq!(ok(&written), cfg, "written back as {written}");
     }
 
-    /// Serde renders in declaration order, and a top-level scalar written after
-    /// a section would parse back as that section's key.
     #[test]
     fn a_written_file_keeps_its_scalars_above_its_sections() {
         let path = tmpdir().join(FILENAME);
@@ -880,8 +781,6 @@ mod tests {
         cfg.remote_mut().project = Some("proj_1".into());
         write(&path, &cfg).unwrap();
 
-        // Same settings, read from where it was written: `source` is the file's
-        // own path rather than something the file declares.
         assert_eq!(
             load_explicit(&path).unwrap().config,
             ProjectConfig {
@@ -909,11 +808,14 @@ mod tests {
              [llm.claude]\n\
              type = \"anthropic\"\n\
              \n\
+             [worker.bot]\n\
+             url = \"https://bot.example.com/agent\"\n\
+             \n\
              [agent.support]\n\
              llm = \"claude\"\n\
              model = \"claude-sonnet-4-5\"\n\
              # where the agent runs\n\
-             worker = \"https://bot.example.com/agent\"\n\
+             worker = \"bot\"\n\
              \n\
              [mcp.sentry]\n\
              url = \"https://mcp.sentry.dev/mcp\"\n\
@@ -959,8 +861,6 @@ mod tests {
         assert!(resolve(Some(&missing)).is_err());
     }
 
-    /// Every example's config parses and validates. One that does not load is
-    /// worse than no example: it is the first file a reader copies.
     #[test]
     fn every_example_config_parses_and_validates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -992,8 +892,6 @@ mod tests {
         assert!(find_from(&root).unwrap().is_none());
     }
 
-    /// Only this directory. A command run in a subdirectory acting on a project
-    /// two levels up is a surprise, and `-c` says when the file is elsewhere.
     #[test]
     fn find_does_not_look_at_ancestors() {
         let root = tmpdir();
@@ -1013,7 +911,6 @@ mod tests {
         assert_eq!(found.config.org(), Some("org-x"));
         assert_eq!(found.config.project(), Some("project-y"));
 
-        // And a file of its own is the one a directory uses.
         fs::write(nested.join(FILENAME), "[remote]\norg = \"inner\"\n").unwrap();
         assert_eq!(
             find_from(&nested).unwrap().unwrap().config.org(),

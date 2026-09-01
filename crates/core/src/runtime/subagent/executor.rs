@@ -12,6 +12,7 @@ use crate::runtime::session::command::{CommandPayload, Outcome, SessionError, Se
 use crate::runtime::session::state::EffectKind;
 use crate::runtime::session::{execute, ConflictRetry, ExecuteError, ExecuteInput};
 use crate::runtime::span::SpanContext;
+use crate::runtime::worker::{directory::create_session_command, AgentDirectory};
 use crate::runtime::Caller;
 
 use super::SubagentTask;
@@ -19,6 +20,7 @@ use crate::protocol::ErrorInfo;
 
 pub fn spawn_subagent_task_executor(
     store: Arc<dyn EventStore>,
+    agents: Arc<dyn AgentDirectory>,
     queue: Arc<dyn TaskQueue<SubagentTask>>,
     pool: ExecutorPool,
     cancel: CancellationToken,
@@ -26,7 +28,8 @@ pub fn spawn_subagent_task_executor(
     let inner = store.clone();
     spawn_bounded_executors(store, queue, pool, cancel, move |task| {
         let store = inner.clone();
-        async move { handle_task(store.as_ref(), task).await }
+        let agents = agents.clone();
+        async move { handle_task(store.as_ref(), agents.as_ref(), task).await }
     })
 }
 
@@ -78,7 +81,7 @@ async fn send_message(
     .map(|_| ())
 }
 
-async fn handle_task(store: &dyn EventStore, task: SubagentTask) {
+async fn handle_task(store: &dyn EventStore, agents: &dyn AgentDirectory, task: SubagentTask) {
     match task {
         SubagentTask::SpawnSubagent {
             parent_session_id,
@@ -100,12 +103,9 @@ async fn handle_task(store: &dyn EventStore, task: SubagentTask) {
                     caller: Caller::System {
                         tenant_id: tenant_id.clone(),
                     },
-                    command: CommandPayload::CreateSession {
-                        agent_id,
-                        owner,
-                        ancestry,
-                        worker_retry: retry,
-                    },
+                    command: create_session_command(
+                        agents, agent_id, owner, ancestry, retry, None, None,
+                    ),
                     span: span.child("create_subagent"),
                 },
                 &ConflictRetry::default(),

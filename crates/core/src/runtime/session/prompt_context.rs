@@ -37,7 +37,7 @@ fn announce_servers(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext>
     at.state()
         .servers_for(&config)
         .into_iter()
-        .map(|server| (format!("mcp:{}", server.path), server))
+        .map(|server| (server.path.to_string(), server))
         .filter(|(id, _)| !said.contains(id))
         .filter_map(|(id, server)| {
             Some(PromptContext {
@@ -57,7 +57,7 @@ fn announce_unavailable(at: SessionStateAtNode, call_id: &str) -> Vec<PromptCont
     let mut owed = Vec::new();
     for (path, auth) in at.unavailable_connectors(&config) {
         let reason = crate::copy::unavailable_reason(auth);
-        let id = format!("mcp-unavailable:{path}:{reason}");
+        let id = format!("{path}:unavailable:{reason}");
         if said.contains(&id) {
             continue;
         }
@@ -91,7 +91,7 @@ fn plugin_catalog(at: SessionStateAtNode, call_id: &str) -> Vec<PromptContext> {
     config
         .plugins
         .iter()
-        .map(|plugin| (plugin, format!("plugin:{}", plugin.id)))
+        .map(|plugin| (plugin, format!("plugin.{}", plugin.id)))
         .filter(|(_, id)| !said.contains(id))
         .map(|(plugin, id)| {
             let skills: Vec<SkillListing> = plugin
@@ -252,10 +252,7 @@ mod tests {
                                 description: "also long ".repeat(500),
                             },
                         ],
-                        servers: vec![ConnectionPath::PluginServer {
-                            plugin: "pdf".into(),
-                            server: "renderer".into(),
-                        }],
+                        servers: vec!["renderer".to_string()],
                         tools: None,
                         auth_failure: Default::default(),
                         tool_sync_failure: Default::default(),
@@ -324,7 +321,7 @@ mod tests {
                 config: AgentConfig {
                     model: "m1".to_string(),
                     mcp: vec![McpServer {
-                        path: sentry(),
+                        id: "sentry".to_string(),
                         tools: None,
                         auth_failure: Default::default(),
                         tool_sync_failure: policy,
@@ -363,7 +360,7 @@ mod tests {
     #[test]
     fn a_connection_that_could_not_be_fetched_is_named() {
         let state = failed_state(McpToolSyncFailure::Warn, None);
-        assert_eq!(owed_ids(&state), ["mcp-unavailable:mcp.sentry:unreachable"]);
+        assert_eq!(owed_ids(&state), ["mcp.sentry:unavailable:unreachable"]);
         assert_eq!(
             owed(state.at(None), "call-1")[0].content,
             "{\"mcp_server\":\"mcp.sentry\",\"unavailable\":true,\"reason\":\"unreachable\"}"
@@ -383,7 +380,7 @@ mod tests {
         let state = failed_state(McpToolSyncFailure::Warn, Some(AuthNeed::Reauthorize));
         assert_eq!(
             owed_ids(&state),
-            ["mcp-unavailable:mcp.sentry:needs_authorization"]
+            ["mcp.sentry:unavailable:needs_authorization"]
         );
     }
 
@@ -414,7 +411,7 @@ mod tests {
                 anchor: None,
             }),
         );
-        assert_eq!(owed_ids(&s), ["mcp-unavailable:mcp.sentry:unreachable"]);
+        assert_eq!(owed_ids(&s), ["mcp.sentry:unavailable:unreachable"]);
     }
 
     #[test]
@@ -496,7 +493,7 @@ mod tests {
             reasoning: None,
         }];
         let c = PromptContext {
-            id: "mcp-unavailable:mcp.sentry:unreachable".into(),
+            id: "mcp.sentry:unavailable:unreachable".into(),
             placement: Placement::System,
             content: "gone".into(),
         };
@@ -511,10 +508,7 @@ mod tests {
     #[test]
     fn a_plugins_settled_server_is_announced_like_any_connection() {
         let state = plugin_state(true);
-        assert_eq!(
-            owed_ids(&state),
-            ["plugin:pdf", "mcp:plugin.pdf.mcp.renderer"]
-        );
+        assert_eq!(owed_ids(&state), ["plugin.pdf", "plugin.pdf.mcp.renderer"]);
         let owed = owed(state.at(None), "call-1");
         assert!(
             owed[1]
@@ -530,7 +524,7 @@ mod tests {
         let state = plugin_state(false);
         assert_eq!(
             owed_ids(&state),
-            ["plugin:pdf"],
+            ["plugin.pdf"],
             "the catalog speaks; the server has not answered yet"
         );
     }

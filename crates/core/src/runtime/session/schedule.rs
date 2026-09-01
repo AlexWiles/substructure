@@ -401,7 +401,7 @@ mod tests {
             llm: Some("claude".to_string()),
             model: "m".to_string(),
             mcp: vec![McpServer {
-                path: ConnectionPath::Mcp(connection.to_string()),
+                id: connection.to_string(),
                 tools: None,
                 auth_failure: Default::default(),
                 tool_sync_failure: Default::default(),

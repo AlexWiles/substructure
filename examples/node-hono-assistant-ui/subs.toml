@@ -1,10 +1,13 @@
 [llm.claude]
 type = "anthropic"
 
+[worker.app]
+url = "http://localhost:4444/agent"
+
 [agent.chat-agent]
 llm = "claude"
 model = "claude-haiku-4-5-20251001"
-worker = "http://localhost:4444/agent"
+worker = "app"
 
 [serve]
 port = 9000

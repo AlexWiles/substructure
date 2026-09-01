@@ -7,6 +7,22 @@ pub const CALL_NOT_ROUTED: &str = "the call could not be routed";
 
 pub const PLUGIN_USAGE: &str = "load a skill with the `skill` tool";
 
+pub fn declared<I>(ids: I) -> String
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let joined = ids
+        .into_iter()
+        .map(|id| id.as_ref().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match joined.is_empty() {
+        true => "none".to_string(),
+        false => joined,
+    }
+}
+
 pub fn matches_truncated(shown: usize, matched: usize) -> String {
     format!(
         "{shown} of {matched} matches shown. Narrow the query to see the rest: a connector's \

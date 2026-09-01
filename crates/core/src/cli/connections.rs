@@ -44,7 +44,7 @@ const CLIENT_NAME: &str = "Substructure";
 
 /// The cipher the environment configures, with a set-and-wrong variable
 /// reported rather than read as "no cipher".
-fn cipher() -> Result<Option<Arc<SecretCipher>>> {
+pub(crate) fn cipher() -> Result<Option<Arc<SecretCipher>>> {
     Ok(SecretCipher::from_env()
         .map_err(|e| anyhow::anyhow!(e))?
         .map(Arc::new))

@@ -152,6 +152,7 @@ async fn extract(
         return Ok(None);
     };
 
+    let worker = session.state.worker.clone();
     let state = session.state.rewind(event.seq, meta.head_id.as_deref());
 
     let message_tree = state.message_tree();
@@ -192,7 +193,11 @@ async fn extract(
     )
     .or_else(|| {
         matches!(trigger, DecisionTrigger::SessionStart)
-            .then(|| agents.agent(&event.tenant_id, agent_id)?.config)
+            .then(|| {
+                agent_config
+                    .clone()
+                    .or_else(|| agents.agent(&event.tenant_id, agent_id)?.config)
+            })
             .flatten()
             .map(|config| DecisionResponse {
                 agent: Some(config),
@@ -258,6 +263,7 @@ async fn extract(
         proposed,
         state: worker_state,
         agent: agent_config,
+        worker,
         calls: meta.calls.clone(),
         pending_calls,
         transcript,
@@ -272,7 +278,6 @@ async fn extract(
 
 #[cfg(test)]
 mod tests {
-    use crate::connectors::registry::ConnectionPath;
     use std::collections::HashMap;
 
     use chrono::Utc;
@@ -409,6 +414,8 @@ mod tests {
                 },
                 ancestry: vec![],
                 worker_retry: RetryPolicy::no_retry(),
+                agent: None,
+                worker: None,
             },
             &system(),
         );
@@ -484,6 +491,8 @@ mod tests {
                 },
                 ancestry: vec![],
                 worker_retry: RetryPolicy::no_retry(),
+                agent: None,
+                worker: None,
             },
             &system(),
         )
@@ -618,6 +627,8 @@ mod tests {
                 },
                 ancestry: vec![],
                 worker_retry: RetryPolicy::no_retry(),
+                agent: None,
+                worker: None,
             },
             &system(),
         );
@@ -637,7 +648,7 @@ mod tests {
                 state: None,
                 agent: Some(AgentConfig {
                     mcp: vec![McpServer {
-                        path: ConnectionPath::Mcp("sentry".into()),
+                        id: "sentry".into(),
                         tools: None,
                         auth_failure: Default::default(),
                         tool_sync_failure: Default::default(),

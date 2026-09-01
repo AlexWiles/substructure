@@ -29,13 +29,11 @@ use crate::transport::admin_http::{self, AdminHttpState};
 use crate::transport::ag_ui::channel::AgUiChannel;
 use crate::transport::channel::{start_channels, Channel, ChannelContext};
 use crate::transport::client_http::{self, ClientHttpState};
-use crate::transport::http_push::http_transport;
 use crate::transport::mcp_auth::{self, AuthorizeLinks, McpAuthDeps};
 use crate::transport::push::PushAdapter;
 use crate::transport::server::SubstructureServer;
 use crate::transport::slack::{SlackChannel, StreamStore};
 use crate::transport::worker_http::{self, WorkerHttpState};
-use crate::worker::push::TransportRegistry;
 use crate::worker::StaticAgentDirectory;
 use crate::{start, Runtime, RuntimeConfig, RuntimeDeps};
 
@@ -67,9 +65,6 @@ impl ServeArgs {
     }
 }
 
-/// The dashboard page a person authorizes a connection on. The API's own
-/// `/authorize` takes a POST, so it is not a link. Absent for a local engine,
-/// and where only the API's address is known.
 fn authorize_page(cfg: &ProjectConfig) -> Option<String> {
     let project = cfg.project()?;
     let api_url = credentials::resolve_api_url(cfg.remote_url());
@@ -77,8 +72,6 @@ fn authorize_page(cfg: &ProjectConfig) -> Option<String> {
     hosted.then(|| format!("{}/overview", print::admin_url(&api_url, project)))
 }
 
-/// Where a person authorizes: this engine when it hosts the flow, the
-/// dashboard for a hosted project, otherwise the command.
 fn consent(
     mcp_auth: &Option<Arc<McpAuthDeps>>,
     cfg: &ProjectConfig,
@@ -98,8 +91,6 @@ pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 }
 
 async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
-    // Anything argv omits can be pinned in the project file. Precedence is
-    // flag > environment > file > default, applied one field at a time.
     let cfg = project_config::load(args.config.as_deref())?;
 
     let server = cfg.serve.clone().unwrap_or_default();
@@ -137,9 +128,8 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Held for the process's life: dropping it aborts the decision loops.
     let (rt, _adapter, mcp_auth) = start_engine(db, blobs.clone(), env.providers, &cfg).await?;
-    // Whether this engine hosts the consent flow is known only now.
+
     let slack: Vec<SlackChannel> = slack
         .into_iter()
         .map(|s| s.with_consent(consent(&mcp_auth, &cfg)))
@@ -211,8 +201,6 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
     server.serve(listener, shutdown).await
 }
 
-/// What this engine serves, once, at startup: an agent's hosting is a property
-/// of the file, so it should be readable without reading the file.
 fn announce_agents(cfg: &ProjectConfig) {
     if cfg.agent.is_empty() {
         tracing::warn!("subs.toml declares no [agent.*]; every decision will fail until one does");
@@ -226,17 +214,12 @@ fn announce_agents(cfg: &ProjectConfig) {
     }
 }
 
-/// Open the SQLite-backed stores, start the in-process engine, and build a
-/// started push adapter. Shared by `serve` (which then mounts HTTP routers) and
-/// `run` (which drives a single turn without any HTTP server).
 pub(crate) async fn start_engine(
     db: SqliteDb,
     blobs: Arc<dyn BlobStore>,
     providers: Vec<ProviderEnv>,
     cfg: &ProjectConfig,
 ) -> anyhow::Result<(Arc<Runtime>, Arc<PushAdapter>, Option<Arc<McpAuthDeps>>)> {
-    // The engine serves skills from this copy, so a change on disk does not
-    // move a live session.
     let (manifest, mut resolved) = cfg.resolved_manifest()?;
     for notice in &resolved.notices {
         tracing::warn!("{notice}");
@@ -249,7 +232,7 @@ pub(crate) async fn start_engine(
         .iter()
         .filter_map(|(id, spec)| Some((id.clone(), spec.bundle.clone()?)))
         .collect();
-    // Stored before anything can ask for the file.
+
     for (id, bundle) in &mut bundles {
         let Some(pending) = resolved.pending.remove(id) else {
             continue;
@@ -266,8 +249,7 @@ pub(crate) async fn start_engine(
     let cipher = SecretCipher::from_env()
         .map_err(|e| anyhow::anyhow!(e))?
         .map(Arc::new);
-    // Secrets are sealed only when a key is set. Personal credentials in
-    // plain text are worth a word, not a refusal.
+
     if cipher.is_none() {
         if let Some((id, _)) = connectors
             .iter()
@@ -291,8 +273,7 @@ pub(crate) async fn start_engine(
         db.clone(),
         secret_store.clone(),
     )?);
-    // The file is the whole declaration, so starting on it is also what applies
-    // it: a connection taken out of the file is one whose credential is gone.
+
     let declared: Vec<String> = connectors.keys().map(ConnectionPath::to_string).collect();
     for forgotten in token_store.retain(DEFAULT_TENANT, &declared).await? {
         tracing::info!(
@@ -300,9 +281,7 @@ pub(crate) async fn start_engine(
             "forgot the credential: the file no longer declares this connection"
         );
     }
-    // A scope that changed never adopts the old credential: the slots differ,
-    // so the old rows simply stop being read. Say so, or the silence reads as
-    // a broken login.
+
     for (id, spec) in &connectors {
         let holders = token_store.holders(DEFAULT_TENANT, &id.to_string()).await?;
         let scope = spec.effective_scope();
@@ -332,9 +311,7 @@ pub(crate) async fn start_engine(
     let connector_task_queue: Arc<dyn TaskQueue<ConnectorTask>> = Arc::new(
         ShardedInMemoryQueue::new(config.connector_executor_workers as u32),
     );
-    // Connections come from `subs.toml`; the file holds only names and
-    // env-var references, never a token. What `subs auth` authorized is in this
-    // same database, so a login and the engine that uses it cannot drift apart.
+
     let connections = Some(connectors.clone())
         .filter(|c| !c.is_empty())
         .map(|connectors| {
@@ -349,15 +326,13 @@ pub(crate) async fn start_engine(
             ))
         });
 
-    // A public address is what turns the auth prompt's command into a link:
-    // the engine mints authorize URLs and hosts the callback.
     let mcp_auth = match cfg.serve.as_ref().and_then(|s| s.public_url.clone()) {
         Some(public_url) if !connectors.is_empty() => {
             let flows = Arc::new(SqliteAuthFlows::new(db));
             Some(Arc::new(McpAuthDeps {
                 links: Arc::new(AuthorizeLinks::new(&public_url, flows.clone(), connectors)),
                 flows,
-                secrets: secret_store,
+                secrets: secret_store.clone(),
                 credentials: token_store,
                 http: reqwest::Client::new(),
             }))
@@ -370,7 +345,7 @@ pub(crate) async fn start_engine(
             "no engine-run [llm.*] block declared; every model call belongs to a worker"
         );
     }
-    // Prompts persist `blob://` refs; the wrapper inlines the bytes at the call.
+
     let llm_providers = Arc::new(BlobResolvingLlm::new(
         Arc::new(LlmProviderRegistry::new(
             providers
@@ -381,11 +356,14 @@ pub(crate) async fn start_engine(
         blobs.clone(),
     ));
 
-    let agents = Arc::new(StaticAgentDirectory::new(
-        DEFAULT_TENANT.to_string(),
-        manifest.agents(),
-        cfg.llm_blocks(),
-    ));
+    let agents = Arc::new(
+        StaticAgentDirectory::new(
+            DEFAULT_TENANT.to_string(),
+            manifest.agents(),
+            cfg.llm_blocks(),
+        )
+        .with_workers(manifest.worker.clone(), manifest.default_worker.clone()),
+    );
 
     let token_delta_transport = Arc::new(crate::llm::InMemoryTokenDeltaTransport::new());
     let rt = start(
@@ -409,19 +387,12 @@ pub(crate) async fn start_engine(
         config,
     );
 
-    let adapter = Arc::new(PushAdapter::new(
-        rt.clone(),
-        agents,
-        TransportRegistry::new(vec![http_transport()]),
-        16,
-    ));
+    let adapter = Arc::new(PushAdapter::new(rt.clone(), agents, secret_store, 16));
     adapter.start();
 
     Ok((rt, adapter, mcp_auth))
 }
 
-/// The client one engine-run block calls with. `base_url` is the file's when it
-/// sets one, then the vendor's own variable, then the vendor default.
 fn client(p: ProviderEnv) -> Arc<dyn LlmProviderTrait> {
     let base_url = p
         .base_url
@@ -451,8 +422,7 @@ fn client(p: ProviderEnv) -> Arc<dyn LlmProviderTrait> {
             config.cache_retention = p.cache_ttl;
             Arc::new(OpenAiProvider::new(config))
         }
-        // Never reached: `provider_bindings` keeps worker blocks out of the
-        // registry, since the engine never calls one.
+
         ProviderKind::Worker => unreachable!("a worker block has no engine-side client"),
     }
 }

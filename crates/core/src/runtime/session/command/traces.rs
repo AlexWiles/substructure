@@ -1,4 +1,3 @@
-use crate::connectors::registry::ConnectionPath;
 use crate::protocol::StoredResult;
 use std::collections::{BTreeSet, HashMap};
 
@@ -147,7 +146,7 @@ fn config_with_client_tool(tool: &str) -> AgentConfig {
 fn config_with_mcp(connection: &str) -> AgentConfig {
     AgentConfig {
         mcp: vec![McpServer {
-            path: ConnectionPath::Mcp(connection.to_string()),
+            id: connection.to_string(),
             tools: None,
             auth_failure: Default::default(),
             tool_sync_failure: Default::default(),
@@ -206,6 +205,8 @@ impl Trace {
                 },
                 ancestry: vec![],
                 worker_retry,
+                agent: None,
+                worker: None,
             },
             &system(),
         );
@@ -789,11 +790,11 @@ fn flow_timeout_to_exhaustion() -> Trace {
     );
 
     t.advance(2);
-    t.wake(); // deadline exceeded → errored, retry scheduled
+    t.wake();
     t.advance(2);
-    t.wake(); // retry due → re-requested and re-dispatched
+    t.wake();
     t.advance(2);
-    t.wake(); // deadline exceeded again → terminal, llm.finished queued
+    t.wake();
 
     assert!(matches!(
         t.live_trigger(),
