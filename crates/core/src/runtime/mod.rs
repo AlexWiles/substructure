@@ -257,7 +257,8 @@ impl Runtime {
                     worker_retry,
                     agent,
                     worker,
-                ),
+                )
+                .await,
                 span: SpanContext::root().child("create_session"),
             },
             &ConflictRetry::default(),
@@ -608,8 +609,8 @@ impl Runtime {
         self.agents.clone()
     }
 
-    pub fn llm_blocks(&self, tenant_id: &str) -> LlmBlocks {
-        self.agents.tenant(tenant_id).llm
+    pub async fn llm_blocks(&self, tenant_id: &str) -> LlmBlocks {
+        self.agents.tenant(tenant_id).await.llm
     }
 
     pub fn reader(&self) -> SessionReader {

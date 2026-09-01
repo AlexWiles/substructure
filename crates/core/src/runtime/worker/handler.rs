@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{ChannelKind, DecisionResponse, DecisionTrigger, Message};
+use crate::protocol::{AgentConfig, ChannelKind, DecisionResponse, DecisionTrigger, Message};
 use crate::runtime::blob::BlobStore;
 use crate::runtime::event_store::{EventFilter, EventStore, Seq};
 use crate::runtime::processor::{
@@ -118,6 +118,26 @@ pub fn spawn_worker_processor(
     .spawn()
 }
 
+async fn seed_config(
+    agents: &dyn AgentDirectory,
+    tenant_id: &str,
+    agent_id: &str,
+    trigger: &DecisionTrigger,
+    resolved: Option<AgentConfig>,
+) -> Option<AgentConfig> {
+    if !matches!(trigger, DecisionTrigger::SessionStart) {
+        return None;
+    }
+    match resolved {
+        Some(config) => Some(config),
+        None => agents
+            .tenant(tenant_id)
+            .await
+            .agent(agent_id)
+            .and_then(|e| e.config.clone()),
+    }
+}
+
 async fn extract(
     store: &dyn EventStore,
     agents: &dyn AgentDirectory,
@@ -190,25 +210,23 @@ async fn extract(
             state: at,
             pending_calls,
         },
-    )
-    .or_else(|| {
-        matches!(trigger, DecisionTrigger::SessionStart)
-            .then(|| {
-                agent_config.clone().or_else(|| {
-                    agents
-                        .tenant(&event.tenant_id)
-                        .agent(agent_id)?
-                        .config
-                        .clone()
-                })
-            })
-            .flatten()
-            .map(|config| DecisionResponse {
-                agent: Some(config),
-                ..Default::default()
-            })
-    })
-    .unwrap_or_default();
+    );
+    let proposed = match proposed {
+        Some(proposed) => proposed,
+        None => seed_config(
+            agents,
+            &event.tenant_id,
+            agent_id,
+            &trigger,
+            agent_config.clone(),
+        )
+        .await
+        .map(|config| DecisionResponse {
+            agent: Some(config),
+            ..Default::default()
+        })
+        .unwrap_or_default(),
+    };
     let owning = ChannelKind::owning(owner);
     let proposer = proposers.iter().find(|p| Some(p.channel()) == owning);
 

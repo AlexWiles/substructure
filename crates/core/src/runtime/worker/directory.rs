@@ -100,13 +100,14 @@ impl TenantDirectory {
     }
 }
 
+#[async_trait::async_trait]
 pub trait AgentDirectory: Send + Sync {
-    fn tenant(&self, tenant_id: &str) -> TenantDirectory;
+    async fn tenant(&self, tenant_id: &str) -> TenantDirectory;
 
-    fn tenants(&self) -> Vec<String>;
+    async fn tenants(&self) -> Vec<String>;
 }
 
-pub fn create_session_command(
+pub async fn create_session_command(
     agents: &dyn AgentDirectory,
     agent_id: String,
     owner: SessionOwner,
@@ -118,6 +119,7 @@ pub fn create_session_command(
     CommandPayload::CreateSession {
         worker: agents
             .tenant(&owner.tenant_id)
+            .await
             .resolve_worker(&agent_id, worker),
         agent_id,
         owner,
@@ -155,27 +157,29 @@ impl StaticAgentDirectory {
     }
 }
 
+#[async_trait::async_trait]
 impl AgentDirectory for StaticAgentDirectory {
-    fn tenant(&self, tenant_id: &str) -> TenantDirectory {
+    async fn tenant(&self, tenant_id: &str) -> TenantDirectory {
         match tenant_id == self.tenant_id {
             true => self.directory.clone(),
             false => TenantDirectory::default(),
         }
     }
 
-    fn tenants(&self) -> Vec<String> {
+    async fn tenants(&self) -> Vec<String> {
         vec![self.tenant_id.clone()]
     }
 }
 
 pub struct EmptyAgentDirectory;
 
+#[async_trait::async_trait]
 impl AgentDirectory for EmptyAgentDirectory {
-    fn tenant(&self, _tenant_id: &str) -> TenantDirectory {
+    async fn tenant(&self, _tenant_id: &str) -> TenantDirectory {
         TenantDirectory::default()
     }
 
-    fn tenants(&self) -> Vec<String> {
+    async fn tenants(&self) -> Vec<String> {
         Vec::new()
     }
 }
@@ -253,9 +257,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_agent_carries_its_config_and_its_hosting() {
-        let d = directory().tenant("default");
+    #[tokio::test]
+    async fn an_agent_carries_its_config_and_its_hosting() {
+        let d = directory().tenant("default").await;
         let engine_hosted = d.agent("assistant").expect("declared");
         assert_eq!(
             engine_hosted.config.as_ref().and_then(|c| c.llm.as_deref()),
@@ -269,30 +273,33 @@ mod tests {
         assert_eq!(block.url.as_deref(), Some("https://triage.internal/agent"));
     }
 
-    #[test]
-    fn the_default_worker_is_the_one_the_file_names() {
+    #[tokio::test]
+    async fn the_default_worker_is_the_one_the_file_names() {
         let d = directory();
         assert_eq!(
-            d.tenant("default").default_worker.as_deref(),
+            d.tenant("default").await.default_worker.as_deref(),
             Some("customers")
         );
-        assert!(d.tenant("other").default_worker.is_none());
-        assert!(d.tenant("other").worker("triage").is_none());
+        assert!(d.tenant("other").await.default_worker.is_none());
+        assert!(d.tenant("other").await.worker("triage").is_none());
     }
 
-    #[test]
-    fn an_undeclared_agent_and_another_tenant_are_both_absent() {
+    #[tokio::test]
+    async fn an_undeclared_agent_and_another_tenant_are_both_absent() {
         let d = directory();
-        assert!(d.tenant("default").agent("typo").is_none());
-        assert!(d.tenant("other").agent("assistant").is_none());
-        assert!(d.tenant("other").llm.is_empty());
-        assert_eq!(d.tenants(), vec!["default".to_string()]);
-        assert_eq!(d.tenant("default").agent_ids(), ["assistant", "triage"]);
+        assert!(d.tenant("default").await.agent("typo").is_none());
+        assert!(d.tenant("other").await.agent("assistant").is_none());
+        assert!(d.tenant("other").await.llm.is_empty());
+        assert_eq!(d.tenants().await, vec!["default".to_string()]);
+        assert_eq!(
+            d.tenant("default").await.agent_ids(),
+            ["assistant", "triage"]
+        );
     }
 
-    #[test]
-    fn creation_resolves_the_worker_once() {
-        let d = directory().tenant("default");
+    #[tokio::test]
+    async fn creation_resolves_the_worker_once() {
+        let d = directory().tenant("default").await;
         let named = WorkerRef {
             id: "triage".to_string(),
             url: None,
@@ -318,15 +325,16 @@ mod tests {
         assert_eq!(
             EmptyAgentDirectory
                 .tenant("default")
+                .await
                 .resolve_worker("invented", None),
             None,
             "no default, no stamp"
         );
     }
 
-    #[test]
-    fn a_decision_follows_its_agents_hosting() {
-        let d = directory().tenant("default");
+    #[tokio::test]
+    async fn a_decision_follows_its_agents_hosting() {
+        let d = directory().tenant("default").await;
         assert_eq!(d.route(&decision("assistant")), Ok(Route::Engine));
         assert_eq!(
             d.route(&decision("triage")),
@@ -337,9 +345,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_session_can_pin_a_worker_and_bring_its_address() {
-        let d = directory().tenant("default");
+    #[tokio::test]
+    async fn a_session_can_pin_a_worker_and_bring_its_address() {
+        let d = directory().tenant("default").await;
         let pinned = |id: &str, url: Option<&str>| WorkerDecisionRequest {
             worker: Some(WorkerRef {
                 id: id.to_string(),
@@ -365,9 +373,9 @@ mod tests {
             .is_err_and(|e| e.contains("no [worker.invented]")));
     }
 
-    #[test]
-    fn an_undeclared_agent_needs_a_config_on_the_session() {
-        let d = directory().tenant("default");
+    #[tokio::test]
+    async fn an_undeclared_agent_needs_a_config_on_the_session() {
+        let d = directory().tenant("default").await;
         assert!(d
             .route(&decision("typo"))
             .is_err_and(|e| e.contains("no [agent.typo]")));
@@ -380,15 +388,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_empty_directory_declares_nothing() {
+    #[tokio::test]
+    async fn an_empty_directory_declares_nothing() {
         let d = EmptyAgentDirectory;
-        assert!(d.tenant("default").agent("assistant").is_none());
-        assert!(d.tenant("default").worker("main").is_none());
-        assert!(d.tenant("default").default_worker.is_none());
-        assert!(d.tenants().is_empty());
+        assert!(d.tenant("default").await.agent("assistant").is_none());
+        assert!(d.tenant("default").await.worker("main").is_none());
+        assert!(d.tenant("default").await.default_worker.is_none());
+        assert!(d.tenants().await.is_empty());
         assert_eq!(
-            crate::copy::declared(d.tenant("default").agent_ids()),
+            crate::copy::declared(d.tenant("default").await.agent_ids()),
             "none"
         );
     }

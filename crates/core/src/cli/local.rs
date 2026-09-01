@@ -388,7 +388,7 @@ pub(crate) async fn start_engine(
     );
 
     let adapter = Arc::new(PushAdapter::new(rt.clone(), agents, secret_store, 16));
-    adapter.start();
+    adapter.start().await;
 
     Ok((rt, adapter, mcp_auth))
 }

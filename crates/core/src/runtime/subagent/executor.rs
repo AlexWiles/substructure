@@ -105,7 +105,8 @@ async fn handle_task(store: &dyn EventStore, agents: &dyn AgentDirectory, task: 
                     },
                     command: create_session_command(
                         agents, agent_id, owner, ancestry, retry, None, None,
-                    ),
+                    )
+                    .await,
                     span: span.child("create_subagent"),
                 },
                 &ConflictRetry::default(),

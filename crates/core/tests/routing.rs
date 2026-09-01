@@ -342,7 +342,7 @@ async fn start_with(
         Arc::new(SqliteSecretStore::new(db, None)),
         8,
     ));
-    adapter.start();
+    adapter.start().await;
 
     Harness {
         runtime,

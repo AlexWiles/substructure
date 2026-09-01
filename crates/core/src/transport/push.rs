@@ -40,8 +40,8 @@ impl PushAdapter {
         }
     }
 
-    pub fn start(&self) {
-        for tenant_id in self.router.agents.tenants() {
+    pub async fn start(&self) {
+        for tenant_id in self.router.agents.tenants().await {
             self.spawn_loop(tenant_id);
         }
     }
@@ -97,8 +97,12 @@ struct Router {
 }
 
 impl Router {
-    fn route(&self, tenant_id: &str, decision: &WorkerDecisionRequest) -> Result<Route, String> {
-        self.agents.tenant(tenant_id).route(decision)
+    async fn route(
+        &self,
+        tenant_id: &str,
+        decision: &WorkerDecisionRequest,
+    ) -> Result<Route, String> {
+        self.agents.tenant(tenant_id).await.route(decision)
     }
 
     async fn transport(
@@ -123,7 +127,7 @@ impl Router {
 async fn decide(runtime: &Runtime, router: &Router, decision: WorkerDecisionRequest) {
     let tenant_id = decision.tenant_id().to_string();
 
-    match router.route(&tenant_id, &decision) {
+    match router.route(&tenant_id, &decision).await {
         Err(e) => {
             tracing::warn!(agent_id = %decision.agent_id, error = %e, "decision is unroutable");
             let failure = PushError::fatal(ErrorCode::Unroutable, e);
@@ -220,7 +224,7 @@ async fn submit(
         response,
         decision.agent.as_ref(),
         Some(&decision.trigger),
-        &runtime.llm_blocks(tenant_id),
+        &runtime.llm_blocks(tenant_id).await,
         runtime.blob_store(),
         tenant_id,
     )
