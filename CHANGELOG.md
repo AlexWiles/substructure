@@ -9,6 +9,8 @@ together at the same version.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-09-02
+
 ### Fixed
 
 - Secret command picks correct environment
@@ -208,7 +210,8 @@ together at the same version.
 - The changelog starts again at this release. For the changes before it, refer
   to the git history.
 
-[Unreleased]: https://github.com/substructureai/substructure/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/substructureai/substructure/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/substructureai/substructure/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/substructureai/substructure/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/substructureai/substructure/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/substructureai/substructure/compare/v0.8.3...v0.9.0
