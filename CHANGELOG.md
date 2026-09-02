@@ -9,6 +9,10 @@ together at the same version.
 
 ## [Unreleased]
 
+### Fixed
+
+- Secret command picks correct environment
+
 ## [0.9.2] - 2026-09-01
 
 ### Added

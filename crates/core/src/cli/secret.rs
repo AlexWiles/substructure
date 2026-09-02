@@ -1,7 +1,10 @@
 use anyhow::{bail, Result};
+use serde::Deserialize;
 
 use super::address::Address;
-use super::cloud::{print, project_config, CloudGlobals};
+use super::cloud::context::Context;
+use super::cloud::{print, project_config, ProjectScope};
+use super::target::{target, Target};
 use super::DEFAULT_TENANT;
 use crate::providers::sqlite::{SqliteDb, SqliteSecretStore};
 use crate::runtime::secret::{get_or_mint, mint_secret, SecretPath, SecretStore};
@@ -16,19 +19,112 @@ pub struct SecretCommand {
     #[arg(long)]
     pub rotate: bool,
     #[command(flatten)]
-    pub globals: CloudGlobals,
+    pub scope: ProjectScope,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerSecretView {
+    signing_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerRow {
+    id: String,
+}
+
+/// Which store holds the secret is decided the same way every other command
+/// decides what it acts on: a `[remote]` means the deployment owns it. Reading
+/// the local store for a deployed project would hand back a secret nothing
+/// signs with — see the `Target::Here` arm for the case where it is real.
 pub async fn run(cmd: SecretCommand) -> Result<()> {
-    let found = project_config::resolve(cmd.globals.config.as_deref())?
-        .ok_or_else(|| anyhow::anyhow!("no subs.toml found; secrets belong to its `[worker.*]`"))?;
-    let cfg = found.config;
+    match target(&cmd.scope.globals)? {
+        Target::Deployment => run_deployment(cmd).await,
+        Target::Here(cfg) => run_here(cmd, *cfg).await,
+    }
+}
+
+async fn run_deployment(cmd: SecretCommand) -> Result<()> {
+    let (ctx, project) = Context::from_project(&cmd.scope).await?;
 
     let Some(path) = cmd.path else {
         if cmd.rotate {
             bail!("--rotate needs a path: `subs secret worker.<id> --rotate`");
         }
-        return list(&cfg, cmd.globals.json).await;
+        let workers: Vec<WorkerRow> = ctx
+            .client
+            .get(&format!("/api/v1/projects/{project}/workers"))
+            .await?;
+        return list_deployment(workers, cmd.scope.globals.json);
+    };
+
+    let id = match Address::parse(&path) {
+        Some(Address::Worker(id)) => id,
+        Some(_) => {
+            bail!("`{path}` holds no minted secret; for a credential, use `subs auth {path}`")
+        }
+        None => bail!("`{path}` holds no minted secret. Today only a `[worker.*]` block does."),
+    };
+
+    let view: WorkerSecretView = match cmd.rotate {
+        false => {
+            ctx.client
+                .get(&format!("/api/v1/projects/{project}/workers/{id}/secret"))
+                .await?
+        }
+        true => {
+            let view = ctx
+                .client
+                .post_empty(&format!(
+                    "/api/v1/projects/{project}/workers/{id}/rotate-secret"
+                ))
+                .await?;
+            eprintln!("Rotated. The engine signs with it from its next push.");
+            view
+        }
+    };
+
+    if cmd.scope.globals.json {
+        return print::json(&serde_json::json!({
+            "path": SecretPath::Worker(id).to_string(),
+            "secret": view.signing_secret,
+        }));
+    }
+    println!("{}", view.signing_secret);
+    Ok(())
+}
+
+fn list_deployment(workers: Vec<WorkerRow>, json: bool) -> Result<()> {
+    let rows: Vec<(String, bool)> = workers
+        .into_iter()
+        .map(|w| (SecretPath::Worker(w.id).to_string(), true))
+        .collect();
+    if json {
+        let rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(path, set)| serde_json::json!({ "path": path, "set": set }))
+            .collect();
+        return print::json(&rows);
+    }
+    if rows.is_empty() {
+        println!("This deployment declares no [worker.*], so nothing holds a minted secret.");
+        return Ok(());
+    }
+    let columns = [print::Column::left("PATH"), print::Column::left("SECRET")];
+    let rows: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|(path, _)| vec![path, "minted".to_string()])
+        .collect();
+    print::table(&columns, &rows);
+    Ok(())
+}
+
+async fn run_here(cmd: SecretCommand, cfg: project_config::ProjectConfig) -> Result<()> {
+    let Some(path) = cmd.path else {
+        if cmd.rotate {
+            bail!("--rotate needs a path: `subs secret worker.<id> --rotate`");
+        }
+        return list(&cfg, cmd.scope.globals.json).await;
     };
 
     let id = match Address::parse(&path) {
