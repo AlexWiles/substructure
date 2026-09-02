@@ -1,11 +1,3 @@
-//! Blob storage for message attachments and model-generated media.
-//!
-//! Messages and prompts persist only a `blob://` reference; bytes stay in a
-//! [`BlobStore`] and are inlined as `data:` URIs at the provider call. On the
-//! way back, a generated image's `data:` URI is stored and the response keeps
-//! the ref. A ref never carries a fetchable URL, so nothing persisted can
-//! leak the bytes.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,10 +5,11 @@ use base64::Engine;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmResolver};
+use crate::mime::essence;
 use crate::protocol::{
-    AudioData, Content, ContentPart, ErrorCode, FileData, ImageUrl, LlmRequest, LlmResponse,
-    PromptContent, PromptMessage, PromptRequest, SessionOwner, StoredContent, StoredResult,
-    ToolContent, ToolResult, VideoUrl, OCTET_STREAM,
+    ClientPayload, Content, ContentPart, DraftMessage, ErrorCode, LlmRequest, LlmResponse,
+    PromptContent, PromptMessage, PromptPart, PromptRequest, SessionOwner, StoredContent,
+    StoredResult, ToolContent, ToolResult, OCTET_STREAM,
 };
 
 pub const BLOB_SCHEME: &str = "blob://";
@@ -147,36 +140,25 @@ impl BlobStore for MemoryBlobStore {
     }
 }
 
-fn mime_parts(mime: &str) -> (&str, &str) {
-    let base = mime.split(';').next().unwrap_or_default().trim();
-    match base.split_once('/') {
-        Some((kind, sub)) => (kind, sub),
-        None => (base, ""),
+impl From<ContentPart> for StoredContent {
+    fn from(part: ContentPart) -> Self {
+        let link = |uri: String, name: Option<String>, mime_type: Option<&str>| Self::Link {
+            uri,
+            name,
+            mime_type: mime_type.map(str::to_string),
+        };
+        match part {
+            ContentPart::Text { text } => Self::Text { text },
+            ContentPart::ImageUrl { image_url } => link(image_url.url, None, Some("image/*")),
+            ContentPart::VideoUrl { video_url } => link(video_url.url, None, Some("video/*")),
+            ContentPart::File { file } => link(file.file_data, Some(file.filename), None),
+            ContentPart::InputAudio { input_audio } => {
+                let mime = format!("audio/{}", input_audio.format);
+                let uri = format!("data:{mime};base64,{}", input_audio.data);
+                link(uri, None, Some(&mime))
+            }
+        }
     }
-}
-
-/// The set OpenRouter documents; anything else rides as a file.
-pub(crate) fn audio_format(mime: &str) -> Option<&'static str> {
-    let (kind, sub) = mime_parts(mime);
-    if kind != "audio" {
-        return None;
-    }
-    match sub {
-        "mpeg" | "mp3" => Some("mp3"),
-        "wav" | "x-wav" | "wave" | "vnd.wave" => Some("wav"),
-        "aiff" | "x-aiff" => Some("aiff"),
-        "aac" => Some("aac"),
-        "ogg" => Some("ogg"),
-        "flac" | "x-flac" => Some("flac"),
-        "mp4" | "m4a" | "x-m4a" => Some("m4a"),
-        _ => None,
-    }
-}
-
-/// The containers OpenRouter documents.
-pub(crate) fn video_playable(mime: &str) -> bool {
-    let (kind, sub) = mime_parts(mime);
-    kind == "video" && matches!(sub, "mp4" | "mpeg" | "mov" | "quicktime" | "webm")
 }
 
 pub async fn store(result: ToolResult, blobs: &dyn BlobStore, tenant_id: &str) -> StoredResult {
@@ -232,25 +214,75 @@ async fn keep(
     blobs: &dyn BlobStore,
     tenant_id: &str,
 ) -> StoredContent {
-    let named = |what: &str| StoredContent::Text {
-        text: format!("[{what} {} content]", essence(&mime)),
-    };
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data) else {
-        return named("unreadable");
-    };
-    let put = blobs
+    match base64::engine::general_purpose::STANDARD.decode(&data) {
+        Ok(bytes) => put(bytes, mime, name, blobs, tenant_id).await,
+        Err(_) => unkept("unreadable", &mime),
+    }
+}
+
+async fn put(
+    bytes: Vec<u8>,
+    mime: String,
+    name: Option<String>,
+    blobs: &dyn BlobStore,
+    tenant_id: &str,
+) -> StoredContent {
+    match stash(bytes, mime.clone(), name, blobs, tenant_id).await {
+        Ok(r) => StoredContent::Blob { uri: r.uri() },
+        Err(_) => unkept("unstored", &mime),
+    }
+}
+
+async fn stash(
+    bytes: Vec<u8>,
+    mime: String,
+    name: Option<String>,
+    blobs: &dyn BlobStore,
+    tenant_id: &str,
+) -> Result<BlobRef, BlobError> {
+    blobs
         .put(NewBlob {
             tenant_id: tenant_id.to_string(),
-            mime: mime.clone(),
+            mime,
             name,
             bytes,
         })
-        .await;
-    match put {
-        Ok(r) => StoredContent::Blob { uri: r.uri() },
-        Err(e) => {
-            tracing::warn!("storing a tool's inline content failed: {e}");
-            named("unstored")
+        .await
+        .inspect_err(|e| tracing::warn!("storing inline content failed: {e}"))
+}
+
+fn unkept(what: &str, mime: &str) -> StoredContent {
+    StoredContent::Text {
+        text: format!("[{what} {} content]", essence(mime)),
+    }
+}
+
+pub async fn intern_payload(payload: &mut ClientPayload, blobs: &dyn BlobStore, tenant_id: &str) {
+    match payload {
+        ClientPayload::Message(m) => {
+            intern(std::slice::from_mut(&mut m.message), blobs, tenant_id).await
+        }
+        ClientPayload::Messages(m) => intern(&mut m.messages, blobs, tenant_id).await,
+        ClientPayload::Append(a) => intern(&mut a.messages, blobs, tenant_id).await,
+        ClientPayload::Action(_) => {}
+    }
+}
+
+pub async fn intern(messages: &mut [DraftMessage], blobs: &dyn BlobStore, tenant_id: &str) {
+    for message in messages {
+        let Some(Content::Parts(parts)) = &mut message.content else {
+            continue;
+        };
+        for part in parts {
+            let (uri, name) = match part {
+                StoredContent::Blob { uri } => (uri, None),
+                StoredContent::Link { uri, name, .. } => (uri, name.clone()),
+                StoredContent::Text { .. } | StoredContent::Attachment(_) => continue,
+            };
+            let Some((mime, bytes)) = parse_data_uri(uri) else {
+                continue;
+            };
+            *part = put(bytes, mime, name, blobs, tenant_id).await;
         }
     }
 }
@@ -269,54 +301,6 @@ impl BlobStore for Nowhere {
     }
 }
 
-fn essence(mime: &str) -> &str {
-    match mime_parts(mime).0 {
-        "" => "file",
-        kind => kind,
-    }
-}
-
-pub fn attachment_part(r: &BlobRef) -> ContentPart {
-    if essence(&r.mime) == "image" {
-        ContentPart::ImageUrl {
-            image_url: ImageUrl { url: r.uri() },
-        }
-    } else {
-        ContentPart::File {
-            file: FileData {
-                filename: r.name.clone().unwrap_or_else(|| "file".to_string()),
-                file_data: r.uri(),
-            },
-        }
-    }
-}
-
-/// Mimes that read as text: the file inlines into the prompt as a text part,
-/// which every provider takes.
-pub fn text_like(mime: &str) -> bool {
-    let (kind, _) = mime_parts(mime);
-    let essence = mime.split(';').next().unwrap_or_default().trim();
-    kind == "text"
-        || matches!(
-            essence,
-            "application/json"
-                | "application/xml"
-                | "application/yaml"
-                | "application/x-yaml"
-                | "application/toml"
-                | "application/csv"
-                | "application/x-ndjson"
-                | "application/javascript"
-                | "application/typescript"
-                | "application/x-sh"
-                | "application/sql"
-        )
-}
-
-/// Wraps a resolver so every callable inlines `blob://` images as `data:`
-/// URIs just before the provider call, and stores a response's generated
-/// images as blobs on the way back. The recorded prompt and message keep the
-/// refs; the bytes exist only for the duration of the request.
 pub struct BlobResolvingLlm {
     inner: Arc<dyn LlmResolver>,
     blobs: Arc<dyn BlobStore>,
@@ -393,23 +377,20 @@ async fn prompt_part(
     part: &StoredContent,
     blobs: &dyn BlobStore,
     tenant_id: &str,
-) -> Result<ContentPart, LlmCallError> {
+) -> Result<PromptPart, LlmCallError> {
     match part {
-        StoredContent::Text { text } => Ok(ContentPart::Text { text: text.clone() }),
+        StoredContent::Text { text } => Ok(PromptPart::Text { text: text.clone() }),
+        StoredContent::Attachment(attachment) => Ok(PromptPart::Text {
+            text: attachment.line(),
+        }),
         StoredContent::Link {
             uri,
             mime_type,
             name,
-        } => Ok(match mime_type.as_deref() {
-            Some(mime) if essence(mime) == "image" => ContentPart::ImageUrl {
-                image_url: ImageUrl { url: uri.clone() },
-            },
-            _ => ContentPart::Text {
-                text: match name {
-                    Some(name) => format!("{name}: {uri}"),
-                    None => uri.clone(),
-                },
-            },
+        } => Ok(PromptPart::Link {
+            uri: uri.clone(),
+            name: name.clone(),
+            mime_type: mime_type.clone(),
         }),
         StoredContent::Blob { uri } => {
             let r =
@@ -421,43 +402,12 @@ async fn prompt_part(
                 .get(&r)
                 .await
                 .map_err(|e| blob_call_error(&e.to_string(), matches!(e, BlobError::Io(_))))?;
-            Ok(media_part(&r, bytes))
+            Ok(PromptPart::Media {
+                mime: r.mime,
+                name: r.name,
+                bytes,
+            })
         }
-    }
-}
-
-fn media_part(r: &BlobRef, bytes: Vec<u8>) -> ContentPart {
-    let b64 = || base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let name = r.name.clone().unwrap_or_else(|| "file".to_string());
-    if text_like(&r.mime) {
-        let text = String::from_utf8_lossy(&bytes);
-        return ContentPart::Text {
-            text: format!("<file name={name:?}>\n{text}\n</file>"),
-        };
-    }
-    match essence(&r.mime) {
-        "image" => ContentPart::ImageUrl {
-            image_url: ImageUrl {
-                url: format!("data:{};base64,{}", r.mime, b64()),
-            },
-        },
-        "audio" if audio_format(&r.mime).is_some() => ContentPart::InputAudio {
-            input_audio: AudioData {
-                data: b64(),
-                format: audio_format(&r.mime).unwrap_or_default().to_string(),
-            },
-        },
-        "video" if video_playable(&r.mime) => ContentPart::VideoUrl {
-            video_url: VideoUrl {
-                url: format!("data:{};base64,{}", r.mime, b64()),
-            },
-        },
-        _ => ContentPart::File {
-            file: FileData {
-                filename: name,
-                file_data: format!("data:{};base64,{}", r.mime, b64()),
-            },
-        },
     }
 }
 
@@ -469,20 +419,8 @@ impl BlobResolvingCallable {
             let Some((mime, bytes)) = parse_data_uri(&img.url) else {
                 continue;
             };
-            let stored = self
-                .blobs
-                .put(NewBlob {
-                    tenant_id: ctx.tenant_id.to_string(),
-                    mime,
-                    name: None,
-                    bytes,
-                })
-                .await;
-            match stored {
-                Ok(r) => img.url = r.uri(),
-                Err(e) => {
-                    tracing::warn!(error = %e, call = %ctx.call_id, "generated image not stored; kept inline")
-                }
+            if let Ok(r) = stash(bytes, mime, None, self.blobs.as_ref(), ctx.tenant_id).await {
+                img.url = r.uri();
             }
         }
     }
@@ -548,6 +486,71 @@ mod tests {
 
     const ID: &str = "0198b2a0-3c5d-7f00-8000-0123456789ab";
 
+    #[tokio::test]
+    async fn every_payload_that_carries_messages_stores_its_data_uris() {
+        use crate::protocol::{ClientAppend, ClientMessage, ClientMessages};
+        let file = || DraftMessage {
+            id: None,
+            role: Role::User,
+            content: Some(Content::Parts(vec![StoredContent::Link {
+                uri: "data:text/csv;base64,YQ==".to_string(),
+                name: Some("a.csv".to_string()),
+                mime_type: None,
+            }])),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+        };
+        let payloads = [
+            (
+                "client.message",
+                ClientPayload::Message(ClientMessage {
+                    message: file(),
+                    stream: false,
+                }),
+            ),
+            (
+                "client.messages",
+                ClientPayload::Messages(ClientMessages {
+                    messages: vec![file()],
+                    stream: false,
+                    client: Default::default(),
+                }),
+            ),
+            (
+                "client.append",
+                ClientPayload::Append(ClientAppend {
+                    messages: vec![file()],
+                    stream: false,
+                    client: Default::default(),
+                }),
+            ),
+        ];
+        for (kind, mut payload) in payloads {
+            let blobs = MemoryBlobStore::new();
+            intern_payload(&mut payload, &blobs, "t1").await;
+
+            let messages = match &payload {
+                ClientPayload::Message(m) => std::slice::from_ref(&m.message),
+                ClientPayload::Messages(m) => m.messages.as_slice(),
+                ClientPayload::Append(a) => a.messages.as_slice(),
+                ClientPayload::Action(_) => panic!("{kind} carries no message"),
+            };
+            let Some(Content::Parts(parts)) = &messages[0].content else {
+                panic!("{kind} lost its parts");
+            };
+            let [StoredContent::Blob { uri }] = parts.as_slice() else {
+                panic!("{kind} kept {:?} instead of a blob", parts[0]);
+            };
+            let stored = BlobRef::parse(uri).expect("a parseable ref");
+            assert_eq!(stored.tenant_id, "t1");
+            assert_eq!(stored.mime, "text/csv");
+            assert_eq!(stored.name.as_deref(), Some("a.csv"), "{kind}");
+            assert_eq!(blobs.get(&stored).await.expect("stored"), b"a");
+        }
+    }
+
     fn blob_ref(tenant: &str) -> BlobRef {
         BlobRef {
             tenant_id: tenant.to_string(),
@@ -581,7 +584,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sound_and_moving_pictures_take_the_parts_named_for_them() {
+    async fn blobs_resolve_to_media_with_their_mime_bytes_and_name() {
         let blobs = MemoryBlobStore::new();
         let mut refs = Vec::new();
         for (mime, bytes) in [
@@ -612,108 +615,24 @@ mod tests {
         let Some(PromptContent::Parts(parts)) = &out.messages[0].content else {
             panic!("parts");
         };
-        match &parts[0] {
-            ContentPart::InputAudio { input_audio } => {
-                assert_eq!(input_audio.format, "mp3", "the mime names the encoding");
-                assert_eq!(
-                    base64::engine::general_purpose::STANDARD
-                        .decode(&input_audio.data)
-                        .expect("base64"),
-                    b"aaa".to_vec()
-                );
-            }
-            other => panic!("expected audio, got {other:?}"),
-        }
-        assert!(
-            matches!(&parts[1], ContentPart::VideoUrl { video_url }
-                if video_url.url.starts_with("data:video/mp4;base64,")),
-            "video takes its own part, not a file: {:?}",
-            parts[1]
-        );
-        assert!(
-            matches!(&parts[2], ContentPart::File { file }
-                if file.file_data.starts_with("data:application/zip;base64,")),
-            "anything else still rides as a file"
-        );
-    }
-
-    #[test]
-    fn audio_formats_cover_what_a_provider_names() {
-        for (mime, want) in [
-            ("audio/mpeg", Some("mp3")),
-            ("audio/mp4", Some("m4a")),
-            ("audio/x-m4a", Some("m4a")),
-            ("audio/ogg", Some("ogg")),
-            ("audio/flac", Some("flac")),
-            ("audio/aac", Some("aac")),
-            ("audio/wav; rate=44100", Some("wav")),
-            ("audio/basic", None),
-            // `mp4` and `mpeg` are subtypes of both kinds; the type decides.
-            ("video/mp4", None),
-            ("video/mpeg", None),
-        ] {
-            assert_eq!(audio_format(mime), want, "{mime}");
-        }
-        assert!(video_playable("video/mp4"));
-        assert!(video_playable("video/quicktime"));
-        assert!(!video_playable("video/x-matroska"));
-        assert!(
-            !video_playable("audio/mpeg"),
-            "the type decides, not the subtype"
-        );
-    }
-
-    #[tokio::test]
-    async fn audio_and_video_reach_the_model_in_their_own_parts() {
-        let blobs = MemoryBlobStore::new();
-        let mut refs = Vec::new();
-        for (mime, bytes) in [
-            ("audio/ogg", b"aaa".to_vec()),
-            ("video/quicktime", b"vvv".to_vec()),
-            ("video/x-matroska", b"mmm".to_vec()),
-        ] {
-            refs.push(
-                blobs
-                    .put(NewBlob {
-                        tenant_id: "t1".into(),
-                        mime: mime.into(),
-                        name: Some("f".into()),
-                        bytes,
-                    })
-                    .await
-                    .expect("stored"),
-            );
-        }
-        let mut request = request("unused");
-        request.messages[0].content = Some(Content::Parts(
-            refs.iter()
-                .map(|r| StoredContent::Blob { uri: r.uri() })
-                .collect(),
-        ));
-
-        let out = resolve(&request, &blobs, "t1").await.expect("resolves");
-        let Some(PromptContent::Parts(parts)) = &out.messages[0].content else {
-            panic!("parts");
+        let media = |mime: &str, bytes: &[u8]| PromptPart::Media {
+            mime: mime.into(),
+            name: Some("f".into()),
+            bytes: bytes.to_vec(),
         };
-        assert!(
-            matches!(&parts[0], ContentPart::InputAudio { input_audio }
-                if input_audio.format == "ogg"),
-            "an encoding a provider names rides as audio: {:?}",
-            parts[0]
-        );
-        assert!(
-            matches!(&parts[1], ContentPart::VideoUrl { video_url }
-                if video_url.url.starts_with("data:video/quicktime;base64,")),
-            "a container a provider names rides as video"
-        );
-        assert!(
-            matches!(&parts[2], ContentPart::File { .. }),
-            "one it does not name rides as a file, not as a rejected part"
+        assert_eq!(
+            parts,
+            &[
+                media("audio/mpeg", b"aaa"),
+                media("video/mp4", b"vvv"),
+                media("application/zip", b"zzz"),
+            ],
+            "nothing is decided here; the adapter sees the mime and the bytes"
         );
     }
 
     #[tokio::test]
-    async fn a_link_reaches_the_model_rather_than_being_dropped() {
+    async fn links_reach_the_adapter_as_they_were_recorded() {
         let mut request = request("https://x/y.png");
         request.messages[0].content = Some(Content::Parts(vec![
             StoredContent::Link {
@@ -727,21 +646,24 @@ mod tests {
                 mime_type: None,
             },
         ]));
-
         let out = resolve(&request, &FakeStore, "t1").await.expect("resolves");
         let Some(PromptContent::Parts(parts)) = &out.messages[0].content else {
             panic!("parts");
         };
-        assert!(
-            matches!(&parts[0], ContentPart::ImageUrl { image_url }
-                if image_url.url == "https://cdn.example/a.png"),
-            "an image a provider can fetch rides as one"
-        );
-        assert!(
-            matches!(&parts[1], ContentPart::Text { text }
-                if text == "spec: https://docs.example/spec"),
-            "anything else is the url, which the model can read: {:?}",
-            parts[1]
+        assert_eq!(
+            parts,
+            &[
+                PromptPart::Link {
+                    uri: "https://cdn.example/a.png".into(),
+                    name: None,
+                    mime_type: Some("image/png".into()),
+                },
+                PromptPart::Link {
+                    uri: "https://docs.example/spec".into(),
+                    name: Some("spec".into()),
+                    mime_type: None,
+                },
+            ]
         );
     }
 
@@ -955,18 +877,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blob_refs_inline_as_data_uris_when_resolved() {
+    async fn blob_refs_resolve_to_media_when_resolved() {
         let request = request(&blob_ref("t1").uri());
         let prompt = resolve(&request, &FakeStore, "t1").await.expect("resolves");
-        let expected = format!(
-            "data:image/png;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4])
-        );
         let Some(PromptContent::Parts(parts)) = &prompt.messages[0].content else {
             panic!("parts");
         };
-        assert!(
-            matches!(&parts[1], ContentPart::ImageUrl { image_url } if image_url.url == expected)
+        assert_eq!(
+            parts[1],
+            PromptPart::Media {
+                mime: "image/png".into(),
+                name: Some("a photo & more.png".into()),
+                bytes: vec![1, 2, 3, 4],
+            }
         );
         match &request.messages[0].content {
             Some(Content::Parts(parts)) => {
@@ -1023,6 +946,168 @@ mod tests {
         }
     }
 
+    fn client_message(parts: Vec<StoredContent>) -> DraftMessage {
+        DraftMessage {
+            id: None,
+            role: Role::User,
+            content: Some(Content::Parts(parts)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn client_data_uris_become_refs() {
+        let blobs = MemoryBlobStore::new();
+        let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        let mut messages = vec![client_message(vec![
+            StoredContent::Text {
+                text: "look".into(),
+            },
+            StoredContent::Blob {
+                uri: format!("data:image/png;base64,{b64}"),
+            },
+            StoredContent::Blob {
+                uri: "blob://t1/not-ours".into(),
+            },
+        ])];
+
+        intern(&mut messages, &blobs, "t1").await;
+
+        let Some(Content::Parts(parts)) = &messages[0].content else {
+            panic!("parts");
+        };
+        let StoredContent::Blob { uri } = &parts[1] else {
+            panic!("expected a ref, got {:?}", parts[1]);
+        };
+        let r = BlobRef::parse(uri).expect("a stored ref");
+        assert_eq!(r.mime, "image/png");
+        assert_eq!(blobs.get(&r).await.expect("bytes"), vec![1, 2, 3]);
+        assert_eq!(
+            parts[2],
+            StoredContent::Blob {
+                uri: "blob://t1/not-ours".into()
+            },
+            "non-data uris are left alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_message_parts_are_taken_and_interned() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        let json = serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "look" },
+                { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{b64}") } },
+                { "type": "image_url", "image_url": { "url": "https://x.example/p.png" } },
+                { "type": "file", "file": { "filename": "q.pdf", "file_data": format!("data:application/pdf;base64,{b64}") } },
+                { "type": "input_audio", "input_audio": { "data": b64, "format": "mp3" } },
+                { "type": "video_url", "video_url": { "url": "https://x.example/v.mp4" } },
+                { "type": "blob", "uri": format!("data:image/jpeg;base64,{b64}") },
+            ]
+        });
+        let mut messages = vec![serde_json::from_value::<DraftMessage>(json).expect("parses")];
+        let blobs = MemoryBlobStore::new();
+
+        intern(&mut messages, &blobs, "t1").await;
+
+        let Some(Content::Parts(parts)) = &messages[0].content else {
+            panic!("parts");
+        };
+        let stored = |part: &StoredContent| match part {
+            StoredContent::Blob { uri } => BlobRef::parse(uri).expect("a stored ref"),
+            other => panic!("expected a ref, got {other:?}"),
+        };
+        assert_eq!(
+            parts[0],
+            StoredContent::Text {
+                text: "look".into()
+            }
+        );
+        assert_eq!(stored(&parts[1]).mime, "image/png");
+        assert_eq!(
+            parts[2],
+            StoredContent::Link {
+                uri: "https://x.example/p.png".into(),
+                name: None,
+                mime_type: Some("image/*".into()),
+            }
+        );
+        let pdf = stored(&parts[3]);
+        assert_eq!(
+            (pdf.mime.as_str(), pdf.name.as_deref()),
+            ("application/pdf", Some("q.pdf"))
+        );
+        let audio = stored(&parts[4]);
+        assert_eq!(audio.mime, "audio/mp3", "the format is kept as given");
+        assert_eq!(blobs.get(&audio).await.expect("bytes"), vec![1, 2, 3]);
+        assert_eq!(
+            parts[5],
+            StoredContent::Link {
+                uri: "https://x.example/v.mp4".into(),
+                name: None,
+                mime_type: Some("video/*".into()),
+            }
+        );
+        assert_eq!(stored(&parts[6]).mime, "image/jpeg");
+
+        let request = LlmRequest {
+            model: "m".into(),
+            messages: messages.clone(),
+            tools: None,
+            temperature: None,
+            max_completion_tokens: None,
+            reasoning: None,
+        };
+        let out = resolve(&request, &blobs, "t1").await.expect("resolves");
+        let Some(PromptContent::Parts(sent)) = &out.messages[0].content else {
+            panic!("parts");
+        };
+        let kinds: Vec<&str> = sent
+            .iter()
+            .map(|p| match ContentPart::from(p) {
+                ContentPart::Text { .. } => "text",
+                ContentPart::ImageUrl { .. } => "image_url",
+                ContentPart::File { .. } => "file",
+                ContentPart::InputAudio { .. } => "input_audio",
+                ContentPart::VideoUrl { .. } => "video_url",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "text",
+                "image_url",
+                "image_url",
+                "file",
+                "input_audio",
+                "video_url",
+                "image_url"
+            ],
+            "on the wire each part keeps the shape the client sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn unstorable_client_bytes_leave_a_note() {
+        let mut messages = vec![client_message(vec![StoredContent::Blob {
+            uri: "data:image/jpeg;base64,AQID".into(),
+        }])];
+        intern(&mut messages, &NOWHERE, "t1").await;
+        let Some(Content::Parts(parts)) = &messages[0].content else {
+            panic!("parts");
+        };
+        assert_eq!(
+            parts[0],
+            StoredContent::Text {
+                text: "[unstored image content]".into()
+            }
+        );
+    }
+
     #[test]
     fn data_uri_parse_covers_rfc_2397_variants() {
         let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
@@ -1040,7 +1125,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_refs_resolve_by_kind_at_the_call() {
+    async fn the_worker_wire_carries_each_part_by_kind() {
         let callable = BlobResolvingCallable {
             inner: Arc::new(Echo),
             blobs: Arc::new(FakeStore),
@@ -1062,29 +1147,11 @@ mod tests {
         let prompt = resolve(&request, &FakeStore, "t1").await.expect("resolves");
         let resp = callable.call(&prompt, &ctx("t1", &owner)).await.unwrap();
         let sent = resp.content.unwrap();
-        // The pdf keeps its file shape with the bytes inlined…
         let b64 = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
         assert!(sent.contains(&format!("data:application/pdf;base64,{b64}")));
         assert!(sent.contains("q3.pdf"));
-        // …while the text file becomes a text part any provider takes.
-        assert!(sent.contains("<file name=\\\"sales.csv\\\">"));
-        assert!(!sent.contains("data:text/csv"));
-    }
-
-    #[test]
-    fn text_like_covers_the_business_formats() {
-        for mime in [
-            "text/plain",
-            "text/markdown",
-            "text/csv; charset=utf-8",
-            "application/json",
-            "application/x-yaml",
-        ] {
-            assert!(text_like(mime), "{mime}");
-        }
-        for mime in ["application/pdf", "image/png", "application/zip"] {
-            assert!(!text_like(mime), "{mime}");
-        }
+        assert!(sent.contains(&format!("data:text/csv;base64,{b64}")));
+        assert!(sent.contains("sales.csv"));
     }
 
     #[tokio::test]

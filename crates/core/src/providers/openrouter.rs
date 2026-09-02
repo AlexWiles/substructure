@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,11 +8,13 @@ use tokio_stream::StreamExt;
 
 use rust_decimal::Decimal;
 
+use super::openai::{wire_content, WireContent};
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
+use crate::mime;
 use crate::protocol::{
-    DeferToolsStrategy, ErrorCode, LlmResponse, LlmTool, PromptContent, PromptMessage,
-    PromptRequest, Reasoning, ReasoningConfig, ReasoningProvider, ResponseImage, Role,
-    SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
+    AudioData, ContentPart, DeferToolsStrategy, ErrorCode, FileData, LlmResponse, LlmTool,
+    PromptMessage, PromptPart, PromptRequest, Reasoning, ReasoningConfig, ReasoningProvider,
+    ResponseImage, Role, SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction,
 };
 
 #[derive(Serialize)]
@@ -47,7 +48,7 @@ impl From<&LlmTool> for WireTool {
 struct WireMessage<'a> {
     role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<Cow<'a, PromptContent>>,
+    content: Option<WireContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<&'a Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,11 +59,11 @@ struct WireMessage<'a> {
     reasoning_details: &'a [serde_json::Value],
 }
 
-impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
-    fn from(m: &'a PromptMessage) -> Self {
+fn wire_message(m: &PromptMessage) -> WireMessage<'_> {
+    {
         WireMessage {
             role: m.role.clone(),
-            content: m.content.as_ref().map(Cow::Borrowed),
+            content: wire_content(m.content.as_ref(), part),
             tool_calls: m.tool_calls.as_ref(),
             tool_call_id: m.tool_call_id.as_ref(),
             name: m.name.as_ref(),
@@ -75,18 +76,68 @@ impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
     }
 }
 
+fn part(p: &PromptPart) -> ContentPart {
+    match p {
+        PromptPart::Media { mime, name, bytes } => match mime::essence(mime) {
+            "audio" => match audio_format(mime) {
+                Some(format) => ContentPart::InputAudio {
+                    input_audio: AudioData {
+                        data: mime::base64(bytes),
+                        format: format.to_string(),
+                    },
+                },
+                None => file(mime, name.as_deref(), bytes),
+            },
+            "video" if !video_playable(mime) => file(mime, name.as_deref(), bytes),
+            _ => ContentPart::from(p),
+        },
+        _ => ContentPart::from(p),
+    }
+}
+
+fn file(mime: &str, name: Option<&str>, bytes: &[u8]) -> ContentPart {
+    ContentPart::File {
+        file: FileData {
+            filename: name.unwrap_or("file").to_string(),
+            file_data: mime::data_uri(mime, bytes),
+        },
+    }
+}
+
+fn audio_format(mime: &str) -> Option<&'static str> {
+    let (kind, sub) = mime::parts(mime);
+    if kind != "audio" {
+        return None;
+    }
+    match sub {
+        "mpeg" | "mp3" => Some("mp3"),
+        "wav" | "x-wav" | "wave" | "vnd.wave" => Some("wav"),
+        "aiff" | "x-aiff" => Some("aiff"),
+        "aac" => Some("aac"),
+        "ogg" => Some("ogg"),
+        "flac" | "x-flac" => Some("flac"),
+        "mp4" | "m4a" | "x-m4a" => Some("m4a"),
+        _ => None,
+    }
+}
+
+fn video_playable(mime: &str) -> bool {
+    let (kind, sub) = mime::parts(mime);
+    kind == "video" && matches!(sub, "mp4" | "mpeg" | "mov" | "quicktime" | "webm")
+}
+
 fn wire_messages(messages: &[PromptMessage]) -> Vec<WireMessage<'_>> {
-    super::openai::turns(messages)
+    super::openai::turns(messages, part)
         .into_iter()
         .map(|turn| match turn {
-            super::openai::Turn::Message(m) => WireMessage::from(m),
+            super::openai::Turn::Message(m) => wire_message(m),
             super::openai::Turn::ToolText(m, text) => WireMessage {
-                content: Some(Cow::Owned(PromptContent::Text(text))),
-                ..WireMessage::from(m)
+                content: Some(WireContent::Text(text)),
+                ..wire_message(m)
             },
             super::openai::Turn::Media(parts) => WireMessage {
                 role: Role::User,
-                content: Some(Cow::Owned(PromptContent::Parts(parts))),
+                content: Some(WireContent::Parts(parts)),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -733,6 +784,58 @@ mod tests {
 
     use super::*;
     use crate::protocol::{PromptContent, PromptMessage, Role};
+
+    #[test]
+    fn audio_formats_cover_what_openrouter_names() {
+        for (mime, want) in [
+            ("audio/mpeg", Some("mp3")),
+            ("audio/mp4", Some("m4a")),
+            ("audio/x-m4a", Some("m4a")),
+            ("audio/ogg", Some("ogg")),
+            ("audio/flac", Some("flac")),
+            ("audio/aac", Some("aac")),
+            ("audio/wav; rate=44100", Some("wav")),
+            ("audio/basic", None),
+            ("video/mp4", None),
+            ("video/mpeg", None),
+        ] {
+            assert_eq!(audio_format(mime), want, "{mime}");
+        }
+        assert!(video_playable("video/mp4"));
+        assert!(video_playable("video/quicktime"));
+        assert!(!video_playable("video/x-matroska"));
+        assert!(
+            !video_playable("audio/mpeg"),
+            "the type decides, not the subtype"
+        );
+    }
+
+    #[test]
+    fn the_openrouter_policy_sends_named_media_and_files_the_rest() {
+        let media = |mime: &str| PromptPart::Media {
+            mime: mime.into(),
+            name: Some("f".into()),
+            bytes: vec![1, 2, 3],
+        };
+        let kind = |p: &PromptPart| serde_json::to_value(part(p)).unwrap();
+        let ogg = kind(&media("audio/ogg"));
+        assert_eq!(ogg["type"], "input_audio");
+        assert_eq!(ogg["input_audio"]["format"], "ogg");
+        assert_eq!(kind(&media("audio/mpeg"))["input_audio"]["format"], "mp3");
+        assert_eq!(kind(&media("audio/basic"))["type"], "file");
+        let mov = kind(&media("video/quicktime"));
+        assert_eq!(mov["type"], "video_url");
+        assert!(mov["video_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:video/quicktime;base64,"));
+        assert_eq!(kind(&media("video/x-matroska"))["type"], "file");
+        assert_eq!(kind(&media("image/png"))["type"], "image_url");
+        assert_eq!(kind(&media("text/csv"))["type"], "file");
+        let zip = kind(&media("application/zip"));
+        assert_eq!(zip["type"], "file");
+        assert_eq!(zip["file"]["filename"], "f");
+    }
 
     fn req() -> PromptRequest {
         PromptRequest {

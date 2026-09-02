@@ -77,9 +77,18 @@ pub struct ServeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<bool>,
 
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::size::de"
+    )]
+    pub max_body: Option<u64>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
 }
+
+/// Base64 is 4/3 the bytes, so this carries a file of about 6 MB.
+pub const MAX_BODY: u64 = 8 * 1024 * 1024;
 
 impl ProjectConfig {
     pub fn manifest(&self) -> Manifest {
@@ -425,6 +434,18 @@ mod tests {
             load_explicit(&path).unwrap().config.db_path(),
             elsewhere.to_str().unwrap()
         );
+    }
+
+    #[test]
+    fn max_body_takes_bytes_or_a_size_word() {
+        let body = |toml: &str| ok(toml).serve.and_then(|s| s.max_body);
+        assert_eq!(body("[serve]\nmax_body = \"32mb\"\n"), Some(32 << 20));
+        assert_eq!(body("[serve]\nmax_body = 4096\n"), Some(4096));
+        assert_eq!(body("[serve]\nport = 9000\n"), None, "the default applies");
+        let err = parse("[serve]\nmax_body = \"huge\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("huge"), "{err}");
     }
 
     #[test]

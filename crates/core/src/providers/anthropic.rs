@@ -9,8 +9,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
+use crate::mime;
 use crate::protocol::{
-    ContentPart, DeferToolsStrategy, ErrorCode, LlmResponse, PromptContent, PromptRequest,
+    DeferToolsStrategy, ErrorCode, LlmResponse, PromptContent, PromptPart, PromptRequest,
     Reasoning, ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta, ToolCall,
     ToolCallChunk, ToolCallFunction, Usage,
 };
@@ -343,63 +344,45 @@ fn content_to_blocks(content: Option<&PromptContent>) -> Vec<RequestBlock> {
                 }]
             }
         }
-        Some(PromptContent::Parts(parts)) => parts.iter().filter_map(part_to_block).collect(),
+        Some(PromptContent::Parts(parts)) => parts.iter().map(part_to_block).collect(),
     }
 }
 
-fn part_to_block(part: &ContentPart) -> Option<RequestBlock> {
+fn part_to_block(part: &PromptPart) -> RequestBlock {
+    let text = |text: String| RequestBlock::Text {
+        text,
+        cache_control: None,
+    };
     match part {
-        ContentPart::Text { text } => Some(RequestBlock::Text {
-            text: text.clone(),
-            cache_control: None,
-        }),
-        ContentPart::ImageUrl { image_url } => Some(image_block(&image_url.url)),
-        ContentPart::File { file } => document_block(&file.file_data),
-        ContentPart::InputAudio { .. } => Some(RequestBlock::Text {
-            text: "[audio content]".to_string(),
-            cache_control: None,
-        }),
-        ContentPart::VideoUrl { .. } => Some(RequestBlock::Text {
-            text: "[video content]".to_string(),
-            cache_control: None,
-        }),
-    }
-}
-
-fn document_block(file_data: &str) -> Option<RequestBlock> {
-    let rest = file_data.strip_prefix("data:")?;
-    let (meta, data) = rest.split_once(',')?;
-    let media_type = meta.split(';').next().unwrap_or_default();
-    if media_type != "application/pdf" {
-        return None;
-    }
-    Some(RequestBlock::Document {
-        source: ImageSource::Base64 {
-            media_type: media_type.to_string(),
-            data: data.to_string(),
-        },
-        cache_control: None,
-    })
-}
-
-fn image_block(url: &str) -> RequestBlock {
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((meta, data)) = rest.split_once(',') {
-            let media_type = meta.split(';').next().unwrap_or("image/png").to_string();
-            return RequestBlock::Image {
-                source: ImageSource::Base64 {
-                    media_type,
-                    data: data.to_string(),
-                },
+        PromptPart::Text { text: t } => text(t.clone()),
+        PromptPart::Link {
+            uri,
+            name,
+            mime_type,
+        } => match mime_type.as_deref().map(mime::essence) {
+            Some("image") => RequestBlock::Image {
+                source: ImageSource::Url { url: uri.clone() },
                 cache_control: None,
-            };
-        }
-    }
-    RequestBlock::Image {
-        source: ImageSource::Url {
-            url: url.to_string(),
+            },
+            _ => text(PromptPart::link_text(uri, name.as_deref())),
         },
-        cache_control: None,
+        PromptPart::Media { mime: m, bytes, .. } => {
+            let source = || ImageSource::Base64 {
+                media_type: mime::base(m).to_string(),
+                data: mime::base64(bytes),
+            };
+            match (mime::essence(m), mime::parts(m).1) {
+                ("image", _) => RequestBlock::Image {
+                    source: source(),
+                    cache_control: None,
+                },
+                ("application", "pdf") => RequestBlock::Document {
+                    source: source(),
+                    cache_control: None,
+                },
+                (kind, _) => text(format!("[{kind} content]")),
+            }
+        }
     }
 }
 
@@ -1264,28 +1247,33 @@ mod tests {
     }
 
     #[test]
-    fn a_pdf_file_part_becomes_a_document_block() {
+    fn a_pdf_becomes_a_document_block_and_other_files_a_note() {
+        let media = |mime: &str, name: &str| PromptPart::Media {
+            mime: mime.into(),
+            name: Some(name.into()),
+            bytes: vec![1, 2, 3],
+        };
         let parts = vec![
-            ContentPart::File {
-                file: crate::protocol::FileData {
-                    filename: "q3.pdf".into(),
-                    file_data: "data:application/pdf;base64,AQID".into(),
-                },
-            },
-            ContentPart::File {
-                file: crate::protocol::FileData {
-                    filename: "deck.pptx".into(),
-                    file_data: "data:application/vnd.ms-powerpoint;base64,AQID".into(),
-                },
-            },
+            media("application/pdf", "q3.pdf"),
+            media("application/vnd.ms-powerpoint", "deck.pptx"),
+            media("audio/mpeg", "call.mp3"),
+            media("image/jpeg; charset=binary", "p.jpg"),
+            media("text/csv", "sales.csv"),
         ];
         let blocks = content_to_blocks(Some(&PromptContent::Parts(parts)));
-        assert_eq!(blocks.len(), 1);
-        let v = serde_json::to_value(&blocks[0]).unwrap();
-        assert_eq!(v["type"], "document");
-        assert_eq!(v["source"]["type"], "base64");
-        assert_eq!(v["source"]["media_type"], "application/pdf");
-        assert_eq!(v["source"]["data"], "AQID");
+        let v: Vec<serde_json::Value> = blocks
+            .iter()
+            .map(|b| serde_json::to_value(b).unwrap())
+            .collect();
+        assert_eq!(v[0]["type"], "document");
+        assert_eq!(v[0]["source"]["type"], "base64");
+        assert_eq!(v[0]["source"]["media_type"], "application/pdf");
+        assert_eq!(v[0]["source"]["data"], "AQID");
+        assert_eq!(v[1]["text"], "[application content]");
+        assert_eq!(v[2]["text"], "[audio content]");
+        assert_eq!(v[3]["type"], "image");
+        assert_eq!(v[3]["source"]["media_type"], "image/jpeg");
+        assert_eq!(v[4]["text"], "[text content]", "nothing is inlined");
     }
 
     #[test]
@@ -1488,7 +1476,7 @@ mod tests {
 
     fn wide_message(blocks: usize) -> PromptMessage {
         let parts = (0..blocks)
-            .map(|i| ContentPart::Text {
+            .map(|i| PromptPart::Text {
                 text: format!("block {i}"),
             })
             .collect();

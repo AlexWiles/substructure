@@ -18,9 +18,7 @@ use crate::processor::{EventProcessor, EventProcessorRunnerConfig, ProcessorErro
 use crate::protocol::{
     ClientInput, Content, Issuer, Requester, Role, SessionOwner, StoredContent, Subject, Visibility,
 };
-use crate::runtime::blob::{
-    audio_format, text_like, video_playable, BlobError, BlobRef, BlobStore, NewBlob,
-};
+use crate::runtime::blob::{BlobError, BlobRef, BlobStore, NewBlob};
 use crate::runtime::session::interrupts::auth::Authorize;
 use crate::session::command::SessionError;
 use crate::session::events::EventPayload;
@@ -204,14 +202,14 @@ fn attachment_cap(mime: &str) -> Option<u64> {
         Some(MAX_IMAGE_BYTES)
     } else if mime == "application/pdf" {
         Some(MAX_PDF_BYTES)
-    } else if text_like(mime) {
+    } else if crate::mime::text_like(mime) {
         Some(MAX_TEXT_BYTES)
-    } else if audio_format(mime).is_some() {
-        Some(MAX_AUDIO_BYTES)
-    } else if video_playable(mime) {
-        Some(MAX_VIDEO_BYTES)
     } else {
-        None
+        match crate::mime::essence(mime) {
+            "audio" => Some(MAX_AUDIO_BYTES),
+            "video" => Some(MAX_VIDEO_BYTES),
+            _ => None,
+        }
     }
 }
 
@@ -2401,8 +2399,8 @@ mod tests {
         );
         assert_eq!(
             super::attachment_cap("video/x-matroska"),
-            None,
-            "a container no provider names is reported, not downloaded"
+            Some(MAX_VIDEO_BYTES),
+            "which containers a model reads is the adapter's call, not the bot's"
         );
         assert_eq!(super::attachment_cap("application/zip"), None);
     }

@@ -8,6 +8,7 @@ use crate::connectors::ConnectorError;
 use crate::plugins::PluginResolver;
 use crate::protocol::StoredResult;
 use crate::providers::memory_queue::TaskQueue;
+use crate::runtime::blob::BlobStore;
 use crate::runtime::event_store::EventStore;
 use crate::runtime::executor::{spawn_bounded_executors, ExecutorPool};
 use crate::runtime::session::command::{CommandPayload, Outcome, SettleError};
@@ -24,6 +25,7 @@ pub fn spawn_connector_task_executor(
     store: Arc<dyn EventStore>,
     connections: Option<Arc<Connections>>,
     plugins: Arc<dyn PluginResolver>,
+    blobs: Arc<dyn BlobStore>,
     queue: Arc<dyn TaskQueue<ConnectorTask>>,
     pool: ExecutorPool,
     cancel: CancellationToken,
@@ -33,11 +35,13 @@ pub fn spawn_connector_task_executor(
         let store = inner.clone();
         let connections = connections.clone();
         let plugins = plugins.clone();
+        let blobs = blobs.clone();
         async move {
             handle_task(
                 store.as_ref(),
                 connections.as_deref(),
                 plugins.as_ref(),
+                blobs.as_ref(),
                 task,
             )
             .await
@@ -55,6 +59,7 @@ async fn handle_task(
     store: &dyn EventStore,
     connections: Option<&Connections>,
     plugins: &dyn PluginResolver,
+    blobs: &dyn BlobStore,
     task: ConnectorTask,
 ) {
     match task {
@@ -164,19 +169,20 @@ async fn handle_task(
                 }
             };
             // A skill call reads the bundle, which is here, not in state.
-            let answer = match session.state.skill_call(&tool_call_id) {
-                Some(call) => {
-                    let bundle = match call.plugin_id.is_empty() {
-                        true => None,
-                        false => plugins.resolve(&tenant_id, &call.plugin_id).await,
-                    };
-                    Some(engine_tools::skill_answer(
-                        session.state.at(call.node.as_deref()),
-                        bundle.as_ref(),
-                        &call.arguments,
-                    ))
-                }
-                None => session.state.local_connector_answer(&tool_call_id),
+            let answer = if let Some(call) = session.state.attachment_call(&tool_call_id) {
+                Some(crate::attachments::tools::answer(call, blobs).await)
+            } else if let Some(call) = session.state.skill_call(&tool_call_id) {
+                let bundle = match call.plugin_id.is_empty() {
+                    true => None,
+                    false => plugins.resolve(&tenant_id, &call.plugin_id).await,
+                };
+                Some(engine_tools::skill_answer(
+                    session.state.at(call.node.as_deref()),
+                    bundle.as_ref(),
+                    &call.arguments,
+                ))
+            } else {
+                session.state.local_connector_answer(&tool_call_id)
             };
             let Some(answer) = answer else {
                 tracing::error!(

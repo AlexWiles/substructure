@@ -1610,6 +1610,11 @@ impl SessionState {
         if !config.plugins.is_empty() {
             resolutions.push(filter::Resolution::of(vec![filter::skill_tool()]));
         }
+        if let Some(attachments) = &config.attachments {
+            resolutions.push(filter::Resolution::of(
+                crate::attachments::tools::definitions(attachments),
+            ));
+        }
         let taken: Vec<&str> = config.tools.iter().map(|t| t.name.as_str()).collect();
         filter::merge(resolutions, taken)
     }
@@ -1620,6 +1625,22 @@ impl SessionState {
         let tc = effect.tool()?;
         let target = tc.target.as_ref()?;
         super::engine_tools::answer(self.at(node.as_deref()), target.kind(), &tc.arguments)
+    }
+
+    pub fn attachment_call(&self, tool_call_id: &str) -> Option<crate::attachments::tools::Call> {
+        let effect = self.effect(EffectKind::ToolCall, tool_call_id)?;
+        let tc = effect.tool()?;
+        if tc.target.as_ref()? != &ConnectorTarget::Attachment {
+            return None;
+        }
+        Some(crate::attachments::tools::Call {
+            tool: crate::attachments::Tool::of_name(&tc.name)?,
+            arguments: tc.arguments.clone(),
+            attachments: crate::attachments::on_path(
+                &self.message_tree(),
+                effect.anchor.as_deref(),
+            ),
+        })
     }
 
     pub fn skill_call(&self, tool_call_id: &str) -> Option<SkillCall> {

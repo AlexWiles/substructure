@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::attachments::Attachments;
 use crate::connectors::registry::{
     AuthKind, ConnectionDecl, ConnectionPath, ConnectionSpec, CredentialScope,
 };
@@ -332,6 +333,8 @@ pub struct AgentSection {
     )]
     pub defer_tools: Option<DeferTools>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Attachments>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_announce: Option<McpAnnounce>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_auth_failure: Option<McpAuthFailure>,
@@ -373,6 +376,7 @@ impl AgentSection {
                 .map(|m| m.to_server(self.mcp_defaults()))
                 .collect(),
             defer_tools: self.defer_tools,
+            attachments: self.attachments.clone(),
             mcp_announce: self.mcp_announce.unwrap_or_default(),
             plugins: self
                 .plugins

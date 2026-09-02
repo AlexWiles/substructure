@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::attachments;
 use crate::protocol::{AgentConfig, ChannelKind, DecisionResponse, DecisionTrigger, Message};
 use crate::runtime::blob::BlobStore;
 use crate::runtime::event_store::{EventFilter, EventStore, Seq};
@@ -9,6 +10,7 @@ use crate::runtime::processor::{
     EventProcessor, EventProcessorRunner, EventProcessorRunnerConfig, ProcessorCursorStore,
     ProcessorError,
 };
+use crate::runtime::session::decision::Trigger;
 use crate::runtime::session::events::EventPayload;
 use crate::runtime::session::propose::{propose, Proposing};
 use crate::runtime::session::state::SessionState;
@@ -164,7 +166,7 @@ async fn extract(
         .await
         .map_err(|e| ProcessorError::Apply(format!("load session for decision: {e}")))?;
 
-    let Some(trigger) = session
+    let Some(mut trigger) = session
         .state
         .worker_decision(&req.id)
         .map(|d| d.trigger.clone())
@@ -188,6 +190,16 @@ async fn extract(
     let pending_calls = meta.pending_work(&req.id);
     let worker_state = at.resolve_state_for();
     let agent_config = at.resolve_agent_for();
+
+    if let (
+        Some(rules),
+        Trigger::ClientMessage { messages, .. } | Trigger::ClientTranscript { messages, .. },
+    ) = (
+        agent_config.as_ref().and_then(|c| c.attachments.as_ref()),
+        &mut trigger,
+    ) {
+        attachments::mark(messages, rules, &message_tree);
+    }
 
     let trigger = to_wire_trigger(
         trigger,
@@ -311,7 +323,7 @@ mod tests {
     use crate::protocol::{
         AgentConfig, Approve, ClientMessage, ClientPayload, Content, DraftMessage, EffectKind,
         Issuer, LlmRequest, LlmResponse, McpServer, Requester, RetryPolicy, Role, SessionOwner,
-        StoredResult, Subject, ToolCall, ToolCallFunction,
+        StoredContent, StoredResult, Subject, ToolCall, ToolCallFunction,
     };
     use crate::runtime::event_store::{
         AppendInput, BroadcastBus, EventBus, EventFilter, EventStore, EventTap, StoreError,
@@ -417,6 +429,13 @@ mod tests {
     }
 
     async fn wire_request_for_client_message(agent: Option<AgentConfig>) -> serde_json::Value {
+        wire_request_for(agent, user_msg("hi")).await
+    }
+
+    async fn wire_request_for(
+        agent: Option<AgentConfig>,
+        message: DraftMessage,
+    ) -> serde_json::Value {
         let mut agg = SessionAggregate::new(
             "sess-1".to_string(),
             "tenant-a".to_string(),
@@ -464,7 +483,7 @@ mod tests {
             &mut agg,
             CommandPayload::SubmitClientPayload {
                 payload: ClientPayload::Message(ClientMessage {
-                    message: user_msg("hi"),
+                    message,
                     stream: false,
                 }),
                 turn: TurnTarget::Detached,
@@ -551,6 +570,37 @@ mod tests {
         assert!(wire["proposed"]["actions"]
             .as_array()
             .is_none_or(|a| a.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn the_workers_attachment_rules_reach_the_first_message() {
+        use crate::attachments::{Attachments, Disposition};
+        let agent = AgentConfig {
+            attachments: Some(Attachments {
+                rules: BTreeMap::from([("*/*".to_string(), Disposition::Attachment)]),
+                ..Default::default()
+            }),
+            ..config("m1")
+        };
+        let uri = crate::runtime::blob::BlobRef {
+            tenant_id: "tenant-a".to_string(),
+            id: "0198b2a0-3c5d-7f00-8000-0123456789ab".to_string(),
+            mime: "text/csv".to_string(),
+            name: Some("sales.csv".to_string()),
+            size: 12,
+        }
+        .uri();
+        let mut message = user_msg("here");
+        message.content = Some(Content::Parts(vec![StoredContent::Blob { uri }]));
+
+        let wire = wire_request_for(Some(agent), message).await;
+
+        let sent = wire["trigger"]["messages"]
+            .as_array()
+            .and_then(|m| m.last())
+            .expect("the new message is last");
+        assert_eq!(sent["content"][0]["type"], "attachment", "{sent}");
+        assert_eq!(sent["content"][0]["id"], "sales.csv");
     }
 
     #[tokio::test]

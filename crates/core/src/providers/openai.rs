@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,10 +8,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 
 use crate::llm::{CallContext, LlmCallError, LlmCallable, LlmProviderTrait};
+use crate::mime;
 use crate::protocol::{
-    ContentPart, DeferToolsStrategy, ErrorCode, LlmResponse, LlmTool, PromptContent, PromptMessage,
-    PromptRequest, Reasoning, ReasoningEffort, ReasoningProvider, Role, SessionOwner, StreamDelta,
-    ToolCall, ToolCallChunk, ToolCallFunction, Usage,
+    AudioData, ContentPart, DeferToolsStrategy, ErrorCode, LlmResponse, LlmTool, PromptContent,
+    PromptMessage, PromptPart, PromptRequest, Reasoning, ReasoningEffort, ReasoningProvider, Role,
+    SessionOwner, StreamDelta, ToolCall, ToolCallChunk, ToolCallFunction, Usage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -75,7 +75,7 @@ struct StreamOptions {
 struct WireMessage<'a> {
     role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<Cow<'a, PromptContent>>,
+    content: Option<WireContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<&'a Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,15 +84,65 @@ struct WireMessage<'a> {
     name: Option<&'a String>,
 }
 
-impl<'a> From<&'a PromptMessage> for WireMessage<'a> {
-    fn from(m: &'a PromptMessage) -> Self {
-        WireMessage {
-            role: m.role.clone(),
-            content: m.content.as_ref().map(Cow::Borrowed),
-            tool_calls: m.tool_calls.as_ref(),
-            tool_call_id: m.tool_call_id.as_ref(),
-            name: m.name.as_ref(),
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(super) enum WireContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+pub(super) type PartPolicy = fn(&PromptPart) -> ContentPart;
+
+pub(super) fn wire_content(
+    content: Option<&PromptContent>,
+    part: PartPolicy,
+) -> Option<WireContent> {
+    match content {
+        None => None,
+        Some(PromptContent::Text(text)) => Some(WireContent::Text(text.clone())),
+        Some(PromptContent::Parts(parts)) => {
+            Some(WireContent::Parts(parts.iter().map(part).collect()))
         }
+    }
+}
+
+fn part(p: &PromptPart) -> ContentPart {
+    match p {
+        PromptPart::Media { mime, bytes, .. } => match (mime::essence(mime), mime::parts(mime).1) {
+            ("image", _) | ("application", "pdf") => ContentPart::from(p),
+            ("audio", "wav" | "x-wav" | "wave") => audio(bytes, "wav"),
+            ("audio", "mpeg" | "mp3") => audio(bytes, "mp3"),
+            (kind, _) => ContentPart::Text {
+                text: format!("[{kind} content]"),
+            },
+        },
+        PromptPart::Link {
+            uri,
+            name,
+            mime_type,
+        } if mime_type.as_deref().map(mime::essence) != Some("image") => ContentPart::Text {
+            text: PromptPart::link_text(uri, name.as_deref()),
+        },
+        _ => ContentPart::from(p),
+    }
+}
+
+fn audio(bytes: &[u8], format: &str) -> ContentPart {
+    ContentPart::InputAudio {
+        input_audio: AudioData {
+            data: mime::base64(bytes),
+            format: format.to_string(),
+        },
+    }
+}
+
+fn wire_message<'a>(m: &'a PromptMessage, part: PartPolicy) -> WireMessage<'a> {
+    WireMessage {
+        role: m.role.clone(),
+        content: wire_content(m.content.as_ref(), part),
+        tool_calls: m.tool_calls.as_ref(),
+        tool_call_id: m.tool_call_id.as_ref(),
+        name: m.name.as_ref(),
     }
 }
 
@@ -102,7 +152,7 @@ pub(super) enum Turn<'a> {
     Media(Vec<ContentPart>),
 }
 
-pub(super) fn turns(messages: &[PromptMessage]) -> Vec<Turn<'_>> {
+pub(super) fn turns(messages: &[PromptMessage], part: PartPolicy) -> Vec<Turn<'_>> {
     let mut out = Vec::with_capacity(messages.len());
     let mut carried: Vec<ContentPart> = Vec::new();
     for message in messages {
@@ -111,7 +161,7 @@ pub(super) fn turns(messages: &[PromptMessage]) -> Vec<Turn<'_>> {
             out.push(Turn::Message(message));
             continue;
         }
-        let (text, media) = split_media(message.content.as_ref());
+        let (text, media) = split_media(message.content.as_ref(), part);
         if media.is_empty() {
             out.push(Turn::Message(message));
             continue;
@@ -139,17 +189,17 @@ fn flush_media<'a>(carried: &mut Vec<ContentPart>, out: &mut Vec<Turn<'a>>) {
 }
 
 fn wire_messages(messages: &[PromptMessage]) -> Vec<WireMessage<'_>> {
-    turns(messages)
+    turns(messages, part)
         .into_iter()
         .map(|turn| match turn {
-            Turn::Message(m) => WireMessage::from(m),
+            Turn::Message(m) => wire_message(m, part),
             Turn::ToolText(m, text) => WireMessage {
-                content: Some(Cow::Owned(PromptContent::Text(text))),
-                ..WireMessage::from(m)
+                content: Some(WireContent::Text(text)),
+                ..wire_message(m, part)
             },
             Turn::Media(parts) => WireMessage {
                 role: Role::User,
-                content: Some(Cow::Owned(PromptContent::Parts(parts))),
+                content: Some(WireContent::Parts(parts)),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -167,12 +217,16 @@ fn names(message: &PromptMessage) -> String {
     }
 }
 
-fn split_media(content: Option<&PromptContent>) -> (String, Vec<ContentPart>) {
+fn split_media(content: Option<&PromptContent>, part: PartPolicy) -> (String, Vec<ContentPart>) {
     match content {
         None => (String::new(), Vec::new()),
         Some(PromptContent::Text(text)) => (text.clone(), Vec::new()),
         Some(PromptContent::Parts(parts)) => {
-            let text = parts
+            let (text, media): (Vec<ContentPart>, Vec<ContentPart>) = parts
+                .iter()
+                .map(part)
+                .partition(|p| matches!(p, ContentPart::Text { .. }));
+            let text = text
                 .iter()
                 .filter_map(|p| match p {
                     ContentPart::Text { text } => Some(text.as_str()),
@@ -180,11 +234,6 @@ fn split_media(content: Option<&PromptContent>) -> (String, Vec<ContentPart>) {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let media = parts
-                .iter()
-                .filter(|p| !matches!(p, ContentPart::Text { .. }))
-                .cloned()
-                .collect();
             (text, media)
         }
     }
@@ -904,16 +953,42 @@ mod tests {
     }
 
     #[test]
+    fn the_openai_policy_sends_what_openai_takes_and_notes_the_rest() {
+        let media = |mime: &str| PromptPart::Media {
+            mime: mime.into(),
+            name: Some("f".into()),
+            bytes: vec![1, 2, 3],
+        };
+        let kind = |p: &PromptPart| serde_json::to_value(part(p)).unwrap();
+        assert_eq!(kind(&media("image/jpeg"))["type"], "image_url");
+        assert_eq!(kind(&media("application/pdf"))["type"], "file");
+        let wav = kind(&media("audio/x-wav"));
+        assert_eq!(wav["type"], "input_audio");
+        assert_eq!(wav["input_audio"]["format"], "wav");
+        assert_eq!(kind(&media("audio/mpeg"))["input_audio"]["format"], "mp3");
+        assert_eq!(kind(&media("audio/ogg"))["text"], "[audio content]");
+        assert_eq!(kind(&media("video/mp4"))["text"], "[video content]");
+        assert_eq!(kind(&media("text/csv"))["text"], "[text content]");
+        let link = |mime: &str| PromptPart::Link {
+            uri: "https://x.example/f".into(),
+            name: None,
+            mime_type: Some(mime.into()),
+        };
+        assert_eq!(kind(&link("image/*"))["type"], "image_url");
+        assert_eq!(kind(&link("video/*"))["text"], "https://x.example/f");
+    }
+
+    #[test]
     fn image_parts_serialize_in_the_openai_wire_shape() {
         let mut request = req("gpt-4o");
         request.messages[0].content = Some(PromptContent::Parts(vec![
-            crate::protocol::ContentPart::Text {
+            PromptPart::Text {
                 text: "look".into(),
             },
-            crate::protocol::ContentPart::ImageUrl {
-                image_url: crate::protocol::ImageUrl {
-                    url: "data:image/png;base64,AQID".into(),
-                },
+            PromptPart::Media {
+                mime: "image/png".into(),
+                name: None,
+                bytes: vec![1, 2, 3],
             },
         ]));
         let body = request_to_wire(&request, DeferToolsStrategy::Search);
@@ -1112,11 +1187,11 @@ mod tests {
         }
     }
 
-    fn image() -> ContentPart {
-        ContentPart::ImageUrl {
-            image_url: crate::protocol::ImageUrl {
-                url: "data:image/png;base64,AAAA".to_string(),
-            },
+    fn image() -> PromptPart {
+        PromptPart::Media {
+            mime: "image/png".into(),
+            name: None,
+            bytes: vec![0, 0, 0],
         }
     }
 
@@ -1126,7 +1201,7 @@ mod tests {
         r.messages.push(tool_message(
             "call_1",
             PromptContent::Parts(vec![
-                ContentPart::Text {
+                PromptPart::Text {
                     text: "the diagram".to_string(),
                 },
                 image(),

@@ -7166,6 +7166,7 @@ fn agent_config(model: &str) -> AgentConfig {
         mcp_announce: Default::default(),
         plugins: Vec::new(),
         effort: None,
+        attachments: None,
     }
 }
 
@@ -11823,4 +11824,44 @@ fn a_declared_tool_named_skill_shadows_the_engines_and_is_a_collision() {
         !merged.tools.iter().any(|t| t.name == "skill"),
         "the declared tool wins; the engine's is not offered"
     );
+}
+
+fn attachment_config() -> AgentConfig {
+    AgentConfig {
+        attachments: Some(crate::attachments::Attachments {
+            tools: vec![
+                crate::attachments::Tool::View,
+                crate::attachments::Tool::Read,
+            ],
+            ..Default::default()
+        }),
+        ..agent_config("m1")
+    }
+}
+
+#[test]
+fn an_agent_that_declares_attachment_tools_offers_them_in_name_order() {
+    let agg = create_session_with_config("sess-1", "tenant-a", "user-1", Some(attachment_config()));
+    assert_eq!(offered(&agg), ["attachment_read", "attachment_view"]);
+}
+
+#[test]
+fn an_attachment_call_is_answered_by_the_engine() {
+    let mut agg =
+        create_session_with_config("sess-1", "tenant-a", "user-1", Some(attachment_config()));
+    call(
+        &mut agg,
+        "tc-1",
+        "attachment_read",
+        r#"{"attachment":"sales.csv"}"#,
+    );
+    let tc = agg.state.tool_call("tc-1").expect("requested");
+    assert_eq!(tc.handler, ToolHandler::Server);
+    assert_eq!(tc.target, Some(ConnectorTarget::Attachment));
+    let call = agg
+        .state
+        .attachment_call("tc-1")
+        .expect("the engine reads this one");
+    assert_eq!(call.tool, crate::attachments::Tool::Read);
+    assert!(call.attachments.is_empty(), "nothing arrived on this path");
 }

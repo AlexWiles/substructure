@@ -14,6 +14,7 @@ pub fn answer(
         ConnectorToolKind::Call => Some(call(at, arguments)),
         ConnectorToolKind::Skill => None,
         ConnectorToolKind::Subagent => None,
+        ConnectorToolKind::Attachment => None,
     }
 }
 

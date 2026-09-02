@@ -276,6 +276,14 @@ impl Runtime {
         &self,
         input: SubmitClientPayload,
     ) -> Result<SubmitClientPayloadOutput, RuntimeError> {
+        let mut input = input;
+        blob::intern_payload(
+            &mut input.payload,
+            self.blob_store(),
+            input.caller.tenant_id(),
+        )
+        .await;
+
         let session_id = input.session_id;
         let turn_id = input.turn_id.unwrap_or_else(|| Uuid::now_v7().to_string());
         let caller = input.caller.clone();
@@ -349,11 +357,29 @@ impl Runtime {
             session_id,
             caller,
             owner,
-            input,
+            mut input,
             agent,
             worker,
             span,
         } = input;
+
+        match &mut input {
+            ClientInput::Message { message, .. } => {
+                blob::intern(
+                    std::slice::from_mut(message),
+                    self.blob_store(),
+                    caller.tenant_id(),
+                )
+                .await
+            }
+            ClientInput::Messages { messages, .. } | ClientInput::Append { messages, .. } => {
+                blob::intern(messages, self.blob_store(), caller.tenant_id()).await
+            }
+            ClientInput::Action { .. }
+            | ClientInput::InterruptResume { .. }
+            | ClientInput::ToolResult { .. }
+            | ClientInput::ToolError { .. } => {}
+        }
 
         let (agent_id, turn_id, payload, queue) = match input {
             ClientInput::Message {
@@ -854,6 +880,7 @@ pub fn start(deps: RuntimeDeps, config: RuntimeConfig) -> Arc<Runtime> {
         store.clone(),
         connections,
         plugins,
+        blobs.clone(),
         connector_task_queue,
         config.pool(config.connector_executor_workers),
         cancel.clone(),

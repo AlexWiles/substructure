@@ -261,6 +261,7 @@ pub enum ConnectorTarget {
         plugin: String,
         skill: String,
     },
+    Attachment,
 }
 
 impl ConnectorTarget {
@@ -270,6 +271,7 @@ impl ConnectorTarget {
             Self::Find => ConnectorToolKind::Find,
             Self::Call => ConnectorToolKind::Call,
             Self::Skill { .. } => ConnectorToolKind::Skill,
+            Self::Attachment => ConnectorToolKind::Attachment,
         }
     }
 }

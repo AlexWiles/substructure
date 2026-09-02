@@ -4,6 +4,16 @@
       "additionalProperties": false,
       "description": "A declared agent. The same shape whether a file writes it or a worker\nreturns it.\n\n`llm` names the `[llm.*]` block every call runs on. That block decides where\nthe call runs and what shape it takes. A config that names no block fails\nwhen the engine resolves a call.",
       "properties": {
+        "attachments": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Attachments"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "defer_tools": {
           "anyOf": [
             {
@@ -215,6 +225,72 @@
         }
       ],
       "title": "Approve"
+    },
+    "Attachment": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "mime",
+        "size",
+        "uri"
+      ],
+      "title": "Attachment",
+      "type": "object"
+    },
+    "AttachmentTool": {
+      "enum": [
+        "read",
+        "view"
+      ],
+      "title": "AttachmentTool",
+      "type": "string"
+    },
+    "Attachments": {
+      "additionalProperties": {
+        "not": {}
+      },
+      "properties": {
+        "max_inline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Wire"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rules": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Disposition"
+          },
+          "type": "object"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/AttachmentTool"
+          },
+          "type": "array"
+        }
+      },
+      "title": "Attachments",
+      "type": "object"
     },
     "AudioData": {
       "additionalProperties": false,
@@ -599,12 +675,11 @@
         },
         {
           "items": {
-            "$ref": "#/$defs/StoredContent"
+            "$ref": "#/$defs/ContentPartWire"
           },
           "type": "array"
         }
       ],
-      "description": "A plain string, or an array of typed parts. Untagged.",
       "title": "Content"
     },
     "ContentPart": {
@@ -696,6 +771,17 @@
         }
       ],
       "title": "ContentPart"
+    },
+    "ContentPartWire": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StoredContent"
+        },
+        {
+          "$ref": "#/$defs/ContentPart"
+        }
+      ],
+      "title": "ContentPartWire"
     },
     "DecisionAction": {
       "description": "The action a worker writes on the wire. A settle can leave out the effect\nid, because the `*.execute` trigger it answers already names it.",
@@ -1722,6 +1808,14 @@
       ],
       "description": "The two forms `defer_tools` accepts: `true` for the defaults, or a table.\n`false` reads the same as absent, so a config can turn off what it inherits.",
       "title": "DeferToolsWire"
+    },
+    "Disposition": {
+      "enum": [
+        "inline",
+        "attachment"
+      ],
+      "title": "Disposition",
+      "type": "string"
     },
     "DraftMessage": {
       "additionalProperties": false,
@@ -2937,6 +3031,20 @@
             "uri"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Attachment",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "attachment",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ],
       "title": "StoredContent"
@@ -3484,6 +3592,20 @@
         }
       ],
       "title": "Visibility"
+    },
+    "Wire": {
+      "anyOf": [
+        {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "A size on the wire: bytes, or a word a person writes.",
+      "title": "Size"
     },
     "WorkerIdentity": {
       "additionalProperties": false,

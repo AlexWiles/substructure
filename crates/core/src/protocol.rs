@@ -7,6 +7,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::attachments::{Attachment, Attachments};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthNeed {
@@ -286,6 +288,7 @@ pub enum StoredContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
     },
+    Attachment(Attachment),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default, PartialEq)]
@@ -322,6 +325,7 @@ impl StoredResult {
             .filter_map(|c| match c {
                 StoredContent::Text { text } => Some(text.clone()),
                 StoredContent::Link { uri, .. } => Some(uri.clone()),
+                StoredContent::Attachment(attachment) => Some(attachment.line()),
                 StoredContent::Blob { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -407,21 +411,132 @@ pub enum ContentPart {
     },
 }
 
-/// A plain string, or an array of typed parts. Untagged.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
+#[serde(untagged, from = "ContentWire")]
 #[schemars(title = "Content")]
 pub enum Content {
     Text(String),
     Parts(Vec<StoredContent>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(untagged)]
-#[schemars(title = "PromptContent")]
+#[schemars(title = "Content")]
+pub enum ContentWire {
+    Text(String),
+    Parts(Vec<ContentPartWire>),
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(title = "ContentPartWire")]
+pub enum ContentPartWire {
+    Stored(StoredContent),
+    Prompt(ContentPart),
+}
+
+impl From<ContentWire> for Content {
+    fn from(wire: ContentWire) -> Self {
+        match wire {
+            ContentWire::Text(text) => Self::Text(text),
+            ContentWire::Parts(parts) => Self::Parts(
+                parts
+                    .into_iter()
+                    .map(|p| match p {
+                        ContentPartWire::Stored(part) => part,
+                        ContentPartWire::Prompt(part) => part.into(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
 pub enum PromptContent {
     Text(String),
-    Parts(Vec<ContentPart>),
+    Parts(Vec<PromptPart>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PromptPart {
+    Text {
+        text: String,
+    },
+    Media {
+        mime: String,
+        name: Option<String>,
+        bytes: Vec<u8>,
+    },
+    Link {
+        uri: String,
+        name: Option<String>,
+        mime_type: Option<String>,
+    },
+}
+
+impl PromptPart {
+    pub fn link_text(uri: &str, name: Option<&str>) -> String {
+        match name {
+            Some(name) => format!("{name}: {uri}"),
+            None => uri.to_string(),
+        }
+    }
+}
+
+impl Serialize for PromptPart {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        ContentPart::from(self).serialize(s)
+    }
+}
+
+impl From<&PromptPart> for ContentPart {
+    fn from(part: &PromptPart) -> Self {
+        use crate::mime;
+        match part {
+            PromptPart::Text { text } => Self::Text { text: text.clone() },
+            PromptPart::Link {
+                uri,
+                name,
+                mime_type,
+            } => match mime_type.as_deref().map(mime::essence) {
+                Some("image") => Self::ImageUrl {
+                    image_url: ImageUrl { url: uri.clone() },
+                },
+                Some("video") => Self::VideoUrl {
+                    video_url: VideoUrl { url: uri.clone() },
+                },
+                _ => Self::Text {
+                    text: PromptPart::link_text(uri, name.as_deref()),
+                },
+            },
+            PromptPart::Media { mime, name, bytes } => match mime::essence(mime) {
+                "image" => Self::ImageUrl {
+                    image_url: ImageUrl {
+                        url: mime::data_uri(mime, bytes),
+                    },
+                },
+                "audio" => Self::InputAudio {
+                    input_audio: AudioData {
+                        data: mime::base64(bytes),
+                        format: mime::parts(mime).1.to_string(),
+                    },
+                },
+                "video" => Self::VideoUrl {
+                    video_url: VideoUrl {
+                        url: mime::data_uri(mime, bytes),
+                    },
+                },
+                _ => Self::File {
+                    file: FileData {
+                        filename: name.clone().unwrap_or_else(|| "file".to_string()),
+                        file_data: mime::data_uri(mime, bytes),
+                    },
+                },
+            },
+        }
+    }
 }
 
 impl PromptContent {
@@ -431,7 +546,7 @@ impl PromptContent {
             Self::Parts(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    PromptPart::Text { text } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -440,8 +555,7 @@ impl PromptContent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(title = "PromptMessage")]
+#[derive(Debug, Clone, Serialize)]
 pub struct PromptMessage {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -456,9 +570,8 @@ pub struct PromptMessage {
     pub reasoning: Option<Box<Reasoning>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[schemars(title = "PromptRequest")]
 pub struct PromptRequest {
     pub model: String,
     pub messages: Vec<PromptMessage>,
@@ -896,6 +1009,8 @@ pub struct AgentConfig {
     /// what that server says it is for.
     #[serde(default, skip_serializing_if = "McpAnnounce::is_default")]
     pub mcp_announce: McpAnnounce,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Attachments>,
 }
 
 /// Where an MCP announcement lands.
@@ -1167,6 +1282,7 @@ pub enum ConnectorToolKind {
     /// Load a skill's instructions from a plugin bundle.
     Skill,
     Subagent,
+    Attachment,
 }
 
 impl ConnectorToolKind {

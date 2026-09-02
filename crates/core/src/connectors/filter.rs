@@ -300,7 +300,7 @@ pub fn search_tools(search: DeferToolsStrategy) -> Vec<ConnectorTool> {
     }
 }
 
-fn engine_tool(
+pub(crate) fn engine_tool(
     name: &str,
     description: String,
     input: serde_json::Value,

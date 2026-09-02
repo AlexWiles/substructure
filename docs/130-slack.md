@@ -254,7 +254,7 @@ What the model receives depends on the type.
 | --- | --- | --- |
 | PNG, JPEG, GIF, WebP | 5 MB | An image |
 | PDF | 10 MB | A document |
-| Text: CSV, JSON, Markdown, code, logs | 1 MB | Inline text in the message |
+| Text: CSV, JSON, Markdown, code, logs | 1 MB | A file |
 | Audio | 10 MB | Audio |
 | Video | 20 MB | Video |
 | Anything else | none | A note naming the file |

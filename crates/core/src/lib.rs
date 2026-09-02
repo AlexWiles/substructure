@@ -1,7 +1,10 @@
+pub mod attachments;
 pub mod json;
+pub(crate) mod mime;
 pub mod protocol;
 pub mod runtime;
 mod shard;
+pub(crate) mod size;
 
 pub mod api;
 pub mod cli;

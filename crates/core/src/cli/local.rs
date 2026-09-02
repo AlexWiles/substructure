@@ -186,7 +186,8 @@ async fn start_server(args: ServeArgs) -> anyhow::Result<()> {
         mcp_auth::spawn_sweeper(deps, shutdown.clone());
     }
     routers.extend(start_channels(channels, channel_ctx));
-    let server = SubstructureServer::new(routers);
+    let server =
+        SubstructureServer::new(routers, server.max_body.unwrap_or(project_config::MAX_BODY));
 
     let addr = format!("{host}:{port}");
     if !authenticate {

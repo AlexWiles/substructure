@@ -144,6 +144,7 @@ tool = { max_attempts = 3 }
 | `subagent_tools` | table | `{ strategy = "per_agent" }` | What shape the subagents take as tools. `per_agent` offers one tool per agent; `single` offers one `subagent` tool for all of them. See [Subagents](./80-subagents.md#one-tool-for-every-subagent). |
 | `max_subagent_depth` | integer | `5` | How deep this agent's subagents may nest. A session that deep may not delegate; `0` never delegates. See [Subagents](./80-subagents.md#how-deep-subagents-nest). |
 | `tools` | list | none | Browser tools. Each needs `handler = "client"`. |
+| `attachments` | table | none | How files reach the model. See [`[agent.<id>.attachments]`](#agentidattachments). |
 | `worker` | url | none | Where decisions go. Leave it off and the engine decides. |
 | `signing_secret_env` | string | none | The variable holding the signing secret. For an engine you run. |
 | `retry` | table | engine defaults | Timeouts and attempts, per kind. See [Retries](./210-retries.md). |
@@ -188,6 +189,46 @@ or a connection overrides it with its own `defer`.
 | `max_matches` | number, at least 1 | `5` | How many matches one search answers with. |
 
 See [Deferred tools](./65-deferred-tools.md).
+
+## `[agent.<id>.attachments]`
+
+How each file the agent receives reaches the model. Without this section every
+file rides in the prompt as media, and the agent offers no attachment tool.
+
+```toml
+[agent.analyst.attachments]
+tools = ["read", "view"]
+max_inline = "20mb"
+
+[agent.analyst.attachments.rules]
+"image/*"         = "inline"
+"application/pdf" = "inline"
+"*/*"             = "attachment"
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `tools` | list | none | The attachment tools this agent offers: `read`, `view`, or both. |
+| `max_inline` | size | no limit | A file over this size becomes an `attachment`, whatever its rule says. `"20mb"`, or a number of bytes. |
+| `rules` | table | none | Mime pattern to `inline` or `attachment`. |
+
+A key in `rules` is a mime pattern: an exact type (`application/pdf`), a type
+wildcard (`image/*`), or `*/*`. The most specific match wins. A file no pattern matches rides as media, the way it does without
+this section.
+
+`inline` keeps the file in the prompt and adds one line naming it. `attachment`
+keeps the line alone. The line reads
+`[attachment sales.csv text/csv 2.1 MB]`. The id is the file name, with a
+counter when the name is already taken on this conversation. The bytes are
+stored in both cases, and the model reads them with `attachment_read` (text) or
+`attachment_view` (image, audio, and video).
+
+The decision is made once, when the file arrives, and never changes.
+
+The same table is `attachments` on the agent config, so a worker can set it
+at `session.start` like any other field. The rules are applied when a message
+is delivered to the worker, after `session.start` has settled the config, so
+they cover the first message of a session too.
 
 ## `[mcp.<id>]`
 
@@ -298,7 +339,13 @@ Defaults for `subs serve`.
 | `host` | string | `127.0.0.1` | The address to bind. |
 | `port` | number | `8080` | The port. |
 | `auth` | bool | `true` | Client and worker authentication. Set `false` only for a server nothing off this machine can reach. |
+| `max_body` | size | `8mb` | The largest request body the engine accepts. A file arrives base64, which is 4/3 its size, so this carries a file of about 6 MB. `"8mb"`, or a number of bytes. |
 | `public_url` | url | none | The HTTPS address a browser reaches this engine at. Setting it lets the engine mint MCP authorize links and host the callback. See [Self-hosting](./180-self-hosting.md#let-people-authorize-mcp-connections-from-a-link). |
+
+`max_body` covers what reaches the engine: a client message and a worker's
+decision answer. It does not cover what the engine sends a worker. A
+worker that hosts the model receives the media in the prompt, so its own
+server must accept a body that size.
 
 ## `[remote]`
 

@@ -413,6 +413,15 @@ type AgentConfig = {
         max_matches?: number    //   matches per search, >= 1. omitted: 5
     }
     mcp_announce?: "auto" | "never"  // tell the model a connection exists. omitted: "auto"
+    attachments?: Attachments   // how a file reaches the model. omitted: as media
+}
+
+type Attachments = {
+    tools?: ("read" | "view")[]  // the attachment tools the agent offers
+    max_inline?: number | string // bytes, or "20mb". an inline file over it becomes an attachment
+    rules?: {                    // mime pattern to disposition. most specific wins
+        [pattern: string]: "inline" | "attachment"
+    }
 }
 
 type AgentTool = {
@@ -508,8 +517,22 @@ type RetryConfig = {            // one override per kind. they stack
 ```typescript
 type Role = "system" | "user" | "assistant" | "tool"
 
-type Content = string | ContentPart[]
+type Content = string | (StoredContent | ContentPart)[]
 
+// What the log keeps. A client may send either shape. A `ContentPart` is
+// recorded as a stored part: a `data:<mime>;base64,…` URI, in any part or in
+// a `blob`, is stored and becomes a `blob://` ref, so nothing large enters
+// the log; a URL becomes a `link`. An image link reaches the model as an
+// image.
+type StoredContent =
+    | { type: "text"; text: string }
+    | { type: "blob"; uri: string }
+    | { type: "link"; uri: string; name?: string; mimeType?: string }
+    | { type: "attachment"; id: string; mime: string; size: number; uri: string }   // reaches the model as one line naming it
+
+// What a worker-hosted model receives: each `blob` inlined as the part its
+// mime names. A provider adapter maps the same media to what that provider
+// takes, and notes what it does not.
 type ContentPart =
     | { type: "text"; text: string }
     | { type: "image_url"; image_url: { url: string } }

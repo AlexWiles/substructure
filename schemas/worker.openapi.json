@@ -5,6 +5,16 @@
         "additionalProperties": false,
         "description": "A declared agent. The same shape whether a file writes it or a worker\nreturns it.\n\n`llm` names the `[llm.*]` block every call runs on. That block decides where\nthe call runs and what shape it takes. A config that names no block fails\nwhen the engine resolves a call.",
         "properties": {
+          "attachments": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Attachments"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "defer_tools": {
             "anyOf": [
               {
@@ -217,6 +227,89 @@
         ],
         "title": "Approve"
       },
+      "Attachment": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "mime",
+          "size",
+          "uri"
+        ],
+        "title": "Attachment",
+        "type": "object"
+      },
+      "AttachmentTool": {
+        "enum": [
+          "read",
+          "view"
+        ],
+        "title": "AttachmentTool",
+        "type": "string"
+      },
+      "Attachments": {
+        "additionalProperties": {
+          "not": {}
+        },
+        "properties": {
+          "max_inline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Wire"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rules": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Disposition"
+            },
+            "type": "object"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/AttachmentTool"
+            },
+            "type": "array"
+          }
+        },
+        "title": "Attachments",
+        "type": "object"
+      },
+      "AudioData": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "data",
+          "format"
+        ],
+        "title": "AudioData",
+        "type": "object"
+      },
       "ClientContext": {
         "additionalProperties": false,
         "description": "Inputs a client declares on its run, passed to the worker on the\n`client.messages` decision. `tools` are the browser's own tools, read as\nclient-handled [`AgentTool`]s. The engine adds them to the proposed config.\nA worker can override that by returning its own `agent`.",
@@ -248,13 +341,113 @@
           },
           {
             "items": {
-              "$ref": "#/components/schemas/StoredContent"
+              "$ref": "#/components/schemas/ContentPartWire"
             },
             "type": "array"
           }
         ],
-        "description": "A plain string, or an array of typed parts. Untagged.",
         "title": "Content"
+      },
+      "ContentPart": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "image_url": {
+                "$ref": "#/components/schemas/ImageUrl"
+              },
+              "type": {
+                "const": "image_url",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "image_url"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "file": {
+                "$ref": "#/components/schemas/FileData"
+              },
+              "type": {
+                "const": "file",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "file"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "input_audio": {
+                "$ref": "#/components/schemas/AudioData"
+              },
+              "type": {
+                "const": "input_audio",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "input_audio"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "video_url",
+                "type": "string"
+              },
+              "video_url": {
+                "$ref": "#/components/schemas/VideoUrl"
+              }
+            },
+            "required": [
+              "type",
+              "video_url"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "ContentPart"
+      },
+      "ContentPartWire": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/StoredContent"
+          },
+          {
+            "$ref": "#/components/schemas/ContentPart"
+          }
+        ],
+        "title": "ContentPartWire"
       },
       "DecisionAction": {
         "description": "The action a worker writes on the wire. A settle can leave out the effect\nid, because the `*.execute` trigger it answers already names it.",
@@ -1282,6 +1475,14 @@
         "description": "The two forms `defer_tools` accepts: `true` for the defaults, or a table.\n`false` reads the same as absent, so a config can turn off what it inherits.",
         "title": "DeferToolsWire"
       },
+      "Disposition": {
+        "enum": [
+          "inline",
+          "attachment"
+        ],
+        "title": "Disposition",
+        "type": "string"
+      },
       "DraftMessage": {
         "additionalProperties": false,
         "description": "The wire form of a [`Message`]. `id` is absent until the message is\nrecorded.",
@@ -1521,6 +1722,23 @@
         "title": "ErrorInfo",
         "type": "object"
       },
+      "FileData": {
+        "additionalProperties": false,
+        "properties": {
+          "file_data": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "file_data"
+        ],
+        "title": "FileData",
+        "type": "object"
+      },
       "Handler": {
         "description": "Where a call runs. A tool call takes `worker` (the default), `client`, or\n`server`. The engine sets `server` for connector tools; a worker cannot.\nAn LLM call has no handler. It runs where its `[llm.*]` block says.",
         "oneOf": [
@@ -1541,6 +1759,19 @@
           }
         ],
         "title": "Handler"
+      },
+      "ImageUrl": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "ImageUrl",
+        "type": "object"
       },
       "Issuer": {
         "description": "Where a person's name comes from: `slack`, `app`, `cli`, or another source\na deployment registers. Set by whatever authenticated the request, never\nread from the request.",
@@ -2139,6 +2370,20 @@
               "uri"
             ],
             "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/Attachment",
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "attachment",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
           }
         ],
         "title": "StoredContent"
@@ -2526,6 +2771,19 @@
         "title": "Usage",
         "type": "object"
       },
+      "VideoUrl": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "VideoUrl",
+        "type": "object"
+      },
       "Visibility": {
         "description": "Who can read what a session says. The transport sets it once, when the\nsession starts. Absent or unknown reads as `shared`. `shared` never selects\na personal credential.",
         "oneOf": [
@@ -2541,6 +2799,20 @@
           }
         ],
         "title": "Visibility"
+      },
+      "Wire": {
+        "anyOf": [
+          {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "description": "A size on the wire: bytes, or a word a person writes.",
+        "title": "Size"
       },
       "WorkerIdentity": {
         "additionalProperties": false,

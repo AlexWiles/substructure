@@ -9,6 +9,11 @@ together at the same version.
 
 ## [Unreleased]
 
+### Added
+
+- Add better multi-modal support via attachments..
+- Make max body size configurable.
+
 ## [0.9.3] - 2026-09-02
 
 ### Fixed

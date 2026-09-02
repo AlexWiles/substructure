@@ -177,6 +177,12 @@ pub(in crate::runtime::session) fn request(
         .filter(|t| t.kind != ConnectorToolKind::Subagent);
     let (name, arguments, handler, target) = match engine_tool {
         Some(tool) if tool.kind == ConnectorToolKind::Call => unwrap_call(state, name, arguments),
+        Some(tool) if tool.kind == ConnectorToolKind::Attachment => (
+            name,
+            arguments,
+            ToolHandler::Server,
+            Some(ConnectorTarget::Attachment),
+        ),
         Some(tool) if tool.kind == ConnectorToolKind::Skill => {
             let named = argument(&arguments, "name").unwrap_or_default();
             let (plugin, skill) = crate::runtime::session::engine_tools::split_skill(&named);

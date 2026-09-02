@@ -18,7 +18,8 @@ use serde_json::Value;
 use sse_stream::Sse;
 use tokio::sync::Mutex;
 
-use crate::runtime::blob::{text_like, BlobStore, NewBlob};
+use crate::mime::text_like;
+use crate::runtime::blob::{BlobStore, NewBlob};
 
 use crate::protocol::{StoredContent, StoredResult};
 
